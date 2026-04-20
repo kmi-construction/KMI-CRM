@@ -283,9 +283,16 @@ textarea{resize:vertical;min-height:72px}
       <div class="fgr"><label>Project type</label><input id="np-type-ro" readonly style="background:#fafafa;color:#888"></div>
     </div>
   </div>
-  <div class="card"><div class="ch"><span class="ct">General project inclusions</span></div><div id="np-inc"></div></div>
-  <div class="card"><div class="ch"><span class="ct">Project-specific clarifications</span></div><div id="np-pc"></div></div>
-  <div class="card"><div class="ch"><span class="ct">General project exclusions</span></div><div id="np-exc"></div></div>
+  <div class="card">
+    <div class="ch"><span class="ct">Project inclusions</span><button class="btn btn-sm btn-p" onclick="npAddCustomItem('inc')">+ Add item</button></div>
+    <div id="np-inc"></div>
+    <div id="np-custom-inc"></div>
+  </div>
+  <div class="card">
+    <div class="ch"><span class="ct">Project exclusions</span><button class="btn btn-sm btn-p" onclick="npAddCustomItem('exc')">+ Add item</button></div>
+    <div id="np-exc"></div>
+    <div id="np-custom-exc"></div>
+  </div>
   <div class="card">
     <div class="ch">
       <span class="ct">Cost breakdown</span>
@@ -374,7 +381,6 @@ textarea{resize:vertical;min-height:72px}
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
     <div class="card"><div class="ch"><span class="ct">Inclusions</span><button class="btn btn-sm btn-p" onclick="showAddClar('std')">+ Add</button></div><div id="t-std"></div></div>
-    <div class="card"><div class="ch"><span class="ct">Project clarifications</span><button class="btn btn-sm btn-p" onclick="showAddClar('proj')">+ Add</button></div><div id="t-proj"></div></div>
     <div class="card"><div class="ch"><span class="ct">Exclusions</span><button class="btn btn-sm btn-p" onclick="showAddClar('excl')">+ Add</button></div><div id="t-excl"></div></div>
   </div>
   <div class="card"><div class="ch"><span class="ct">Cost item templates</span><button class="btn btn-sm btn-p" onclick="showAddCostTmpl()">+ Add item</button></div><div id="t-cost"></div></div>
@@ -651,6 +657,42 @@ function showModal(html) { g('modal-body').innerHTML = html; g('overlay').classL
 function closeModal()    { g('overlay').classList.remove('show'); g('modal-body').innerHTML = ''; }
 
 
+
+
+// ── PROPOSAL CUSTOM INCLUSIONS / EXCLUSIONS ─────────────────────
+var _npCustomIdx = 0;
+
+function npAddCustomItem(type) {
+  _npCustomIdx++;
+  var cid  = 'ci-' + type + '-' + _npCustomIdx;
+  var cont = g('np-custom-' + type);
+  if (!cont) return;
+  var row  = document.createElement('div');
+  row.id   = cid;
+  row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px';
+  var inp = document.createElement('input');
+  inp.placeholder = type === 'inc' ? 'e.g. Furnish and install expansion joints' : 'e.g. Winter conditions costs';
+  inp.style.flex  = '1';
+  var del = document.createElement('button');
+  del.innerHTML   = '&#215;';
+  del.style.cssText = 'background:none;border:none;cursor:pointer;color:#E24B4A;font-size:18px;padding:0;line-height:1;flex-shrink:0';
+  del.onclick = function(){ row.remove(); };
+  row.appendChild(inp);
+  row.appendChild(del);
+  cont.appendChild(row);
+  inp.focus();
+}
+
+function getCustomItems(type) {
+  var cont = g('np-custom-' + type);
+  if (!cont) return [];
+  var items = [];
+  cont.querySelectorAll('input').forEach(function(inp){
+    var v = (inp.value || '').trim();
+    if (v) items.push(v);
+  });
+  return items;
+}
 
 // ── PROJECT TYPE CHECKBOX HELPERS ──────────────────────────────
 function renderProjectTypeChecks(selected) {
@@ -1042,8 +1084,16 @@ function renderOppDetail(id) {
         '<div style="display:flex;gap:8px;align-items:center">' + propBadge(prop.status) +
         '<button class="btn btn-sm" onclick="chgPropStatus(\'' + prop.id + '\')">Change status</button>' +
         '<button class="btn btn-sm btn-pdf" onclick="dlPDF(\'' + prop.id + '\')">&#x2193; Download PDF</button></div></div>' +
-        (ii.length || pi.length ? '<div class="sb3"><h4>General project inclusions</h4>' + ii.concat(pi).map(function(x){ return '<div class="cd inc">' + x.text + '</div>'; }).join('') + '</div>' : '') +
-        (ei.length ? '<div class="sb3"><h4>General project exclusions</h4>' + ei.map(function(x){ return '<div class="cd exc">' + x.text + '</div>'; }).join('') + '</div>' : '') +
+        (function(){
+          var allInc = ii.concat(pi).map(function(x){ return '<div class="cd inc">'+x.text+'</div>'; });
+          var custI  = (prop.customIncs||[]).map(function(t){ return '<div class="cd inc">'+t+'</div>'; });
+          var allIncs = allInc.concat(custI);
+          var allExc  = ei.map(function(x){ return '<div class="cd exc">'+x.text+'</div>'; });
+          var custE   = (prop.customExcs||[]).map(function(t){ return '<div class="cd exc">'+t+'</div>'; });
+          var allExcs = allExc.concat(custE);
+          return (allIncs.length ? '<div class="sb3"><h4>Project inclusions</h4>' + allIncs.join('') + '</div>' : '') +
+                 (allExcs.length ? '<div class="sb3"><h4>Project exclusions</h4>' + allExcs.join('') + '</div>' : '');
+        })() +
         '<div class="sb3"><h4>Cost breakdown</h4>' +
         '<table><thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Rate</th><th>Amount</th></tr></thead><tbody>' +
         prop.costs.map(function(r){ return '<tr><td>' + r.desc + '</td><td>' + r.qty + '</td><td>' + r.unit + '</td><td>' + fmtC(r.rate) + '</td><td style="font-weight:600">' + fmtC(r.qty*r.rate) + '</td></tr>'; }).join('') +
@@ -1276,7 +1326,6 @@ function openNewProposal(oppId) {
   g('np-cust-ro').value              = c.name;
   g('np-type-ro').value              = Array.isArray(o.types) ? o.types.join(', ') : (o.type || '');
   g('np-inc').innerHTML = db.stdClar.map(function(c){ return '<div class="ci"><input type="checkbox" id="nsc' + c.id + '" checked><label for="nsc' + c.id + '">' + c.text + '</label></div>'; }).join('');
-  g('np-pc').innerHTML  = db.projClar.map(function(c){ return '<div class="ci"><input type="checkbox" id="npc' + c.id + '"><label for="npc' + c.id + '">' + c.text + '</label></div>'; }).join('');
   g('np-exc').innerHTML = db.exclusions.map(function(c){ return '<div class="ci"><input type="checkbox" id="nex' + c.id + '"><label for="nex' + c.id + '">' + c.text + '</label></div>'; }).join('');
   g('np-rows').innerHTML = ''; g('np-total').textContent = '$0';
   g('np-back-btn').onclick   = function(){ openOppDetail(oppId); };
@@ -1326,8 +1375,9 @@ function npSave() {
   var o   = getOpp(_npOppId); if (!o) return;
   var pid = g('np-pid-display').dataset.pid;
   var incs = db.stdClar.filter(function(c){ var cb = g('nsc' + c.id); return cb && cb.checked; }).map(function(c){ return c.id; });
-  var pcs  = db.projClar.filter(function(c){ var cb = g('npc' + c.id); return cb && cb.checked; }).map(function(c){ return c.id; });
   var excs = db.exclusions.filter(function(c){ var cb = g('nex' + c.id); return cb && cb.checked; }).map(function(c){ return c.id; });
+  var customIncs = getCustomItems('inc');
+  var customExcs = getCustomItems('exc');
   var costs = [];
   document.querySelectorAll('#np-rows .cr').forEach(function(row){
     var d = row.querySelector('.rd').value || '';
@@ -1755,6 +1805,42 @@ function deleteType(kind, idx) {
 }
 
 
+
+// ── PROPOSAL CUSTOM INCLUSIONS / EXCLUSIONS ─────────────────────
+var _npCustomIdx = 0;
+
+function npAddCustomItem(type) {
+  _npCustomIdx++;
+  var cid  = 'ci-' + type + '-' + _npCustomIdx;
+  var cont = g('np-custom-' + type);
+  if (!cont) return;
+  var row  = document.createElement('div');
+  row.id   = cid;
+  row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px';
+  var inp = document.createElement('input');
+  inp.placeholder = type === 'inc' ? 'e.g. Furnish and install expansion joints' : 'e.g. Winter conditions costs';
+  inp.style.flex  = '1';
+  var del = document.createElement('button');
+  del.innerHTML   = '&#215;';
+  del.style.cssText = 'background:none;border:none;cursor:pointer;color:#E24B4A;font-size:18px;padding:0;line-height:1;flex-shrink:0';
+  del.onclick = function(){ row.remove(); };
+  row.appendChild(inp);
+  row.appendChild(del);
+  cont.appendChild(row);
+  inp.focus();
+}
+
+function getCustomItems(type) {
+  var cont = g('np-custom-' + type);
+  if (!cont) return [];
+  var items = [];
+  cont.querySelectorAll('input').forEach(function(inp){
+    var v = (inp.value || '').trim();
+    if (v) items.push(v);
+  });
+  return items;
+}
+
 // ── PROJECT TYPE CHECKBOX HELPERS ──────────────────────────────
 function renderProjectTypeChecks(selected) {
   var el = g('nop-type-checks'); if (!el) return;
@@ -2145,8 +2231,16 @@ function renderOppDetail(id) {
         '<div style="display:flex;gap:8px;align-items:center">' + propBadge(prop.status) +
         '<button class="btn btn-sm" onclick="chgPropStatus(\'' + prop.id + '\')">Change status</button>' +
         '<button class="btn btn-sm btn-pdf" onclick="dlPDF(\'' + prop.id + '\')">&#x2193; Download PDF</button></div></div>' +
-        (ii.length || pi.length ? '<div class="sb3"><h4>General project inclusions</h4>' + ii.concat(pi).map(function(x){ return '<div class="cd inc">' + x.text + '</div>'; }).join('') + '</div>' : '') +
-        (ei.length ? '<div class="sb3"><h4>General project exclusions</h4>' + ei.map(function(x){ return '<div class="cd exc">' + x.text + '</div>'; }).join('') + '</div>' : '') +
+        (function(){
+          var allInc = ii.concat(pi).map(function(x){ return '<div class="cd inc">'+x.text+'</div>'; });
+          var custI  = (prop.customIncs||[]).map(function(t){ return '<div class="cd inc">'+t+'</div>'; });
+          var allIncs = allInc.concat(custI);
+          var allExc  = ei.map(function(x){ return '<div class="cd exc">'+x.text+'</div>'; });
+          var custE   = (prop.customExcs||[]).map(function(t){ return '<div class="cd exc">'+t+'</div>'; });
+          var allExcs = allExc.concat(custE);
+          return (allIncs.length ? '<div class="sb3"><h4>Project inclusions</h4>' + allIncs.join('') + '</div>' : '') +
+                 (allExcs.length ? '<div class="sb3"><h4>Project exclusions</h4>' + allExcs.join('') + '</div>' : '');
+        })() +
         '<div class="sb3"><h4>Cost breakdown</h4>' +
         '<table><thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Rate</th><th>Amount</th></tr></thead><tbody>' +
         prop.costs.map(function(r){ return '<tr><td>' + r.desc + '</td><td>' + r.qty + '</td><td>' + r.unit + '</td><td>' + fmtC(r.rate) + '</td><td style="font-weight:600">' + fmtC(r.qty*r.rate) + '</td></tr>'; }).join('') +
@@ -2379,7 +2473,6 @@ function openNewProposal(oppId) {
   g('np-cust-ro').value              = c.name;
   g('np-type-ro').value              = Array.isArray(o.types) ? o.types.join(', ') : (o.type || '');
   g('np-inc').innerHTML = db.stdClar.map(function(c){ return '<div class="ci"><input type="checkbox" id="nsc' + c.id + '" checked><label for="nsc' + c.id + '">' + c.text + '</label></div>'; }).join('');
-  g('np-pc').innerHTML  = db.projClar.map(function(c){ return '<div class="ci"><input type="checkbox" id="npc' + c.id + '"><label for="npc' + c.id + '">' + c.text + '</label></div>'; }).join('');
   g('np-exc').innerHTML = db.exclusions.map(function(c){ return '<div class="ci"><input type="checkbox" id="nex' + c.id + '"><label for="nex' + c.id + '">' + c.text + '</label></div>'; }).join('');
   g('np-rows').innerHTML = ''; g('np-total').textContent = '$0';
   g('np-back-btn').onclick   = function(){ openOppDetail(oppId); };
@@ -2429,8 +2522,9 @@ function npSave() {
   var o   = getOpp(_npOppId); if (!o) return;
   var pid = g('np-pid-display').dataset.pid;
   var incs = db.stdClar.filter(function(c){ var cb = g('nsc' + c.id); return cb && cb.checked; }).map(function(c){ return c.id; });
-  var pcs  = db.projClar.filter(function(c){ var cb = g('npc' + c.id); return cb && cb.checked; }).map(function(c){ return c.id; });
   var excs = db.exclusions.filter(function(c){ var cb = g('nex' + c.id); return cb && cb.checked; }).map(function(c){ return c.id; });
+  var customIncs = getCustomItems('inc');
+  var customExcs = getCustomItems('exc');
   var costs = [];
   document.querySelectorAll('#np-rows .cr').forEach(function(row){
     var d = row.querySelector('.rd').value || '';
@@ -2815,7 +2909,6 @@ function renderTypeTable(kind) {
 function renderTemplates() {
   renderTypeTable('company'); renderTypeTable('project');
   g('t-std').innerHTML  = db.stdClar.map(function(c,i){  return '<div class="ci"><span style="font-size:10px;color:var(--kmi);font-weight:700;min-width:24px">I'+(i+1)+'</span><div style="flex:1;font-size:12px">'+c.text+'</div><button class="btn btn-sm" onclick="rmTmpl(\'std\',\''+c.id+'\')" style="color:#A32D2D">&#215;</button></div>'; }).join('');
-  g('t-proj').innerHTML = db.projClar.map(function(c,i){ return '<div class="ci"><span style="font-size:10px;color:var(--kmi);font-weight:700;min-width:24px">P'+(i+1)+'</span><div style="flex:1;font-size:12px">'+c.text+'</div><button class="btn btn-sm" onclick="rmTmpl(\'proj\',\''+c.id+'\')" style="color:#A32D2D">&#215;</button></div>'; }).join('');
   g('t-excl').innerHTML = db.exclusions.map(function(c,i){ return '<div class="ci"><span style="font-size:10px;color:#E24B4A;font-weight:700;min-width:24px">E'+(i+1)+'</span><div style="flex:1;font-size:12px">'+c.text+'</div><button class="btn btn-sm" onclick="rmTmpl(\'excl\',\''+c.id+'\')" style="color:#A32D2D">&#215;</button></div>'; }).join('');
   g('t-cost').innerHTML = '<table><thead><tr><th>Description</th><th>Unit</th><th>Default rate</th><th></th></tr></thead><tbody>' + db.costTmpls.map(function(t){ return '<tr><td>'+t.desc+'</td><td>'+t.unit+'</td><td>'+fmtC(t.rate)+'</td><td><button class="btn btn-sm" onclick="rmTmpl(\'cost\',\''+t.id+'\')" style="color:#A32D2D">Remove</button></td></tr>'; }).join('') + '</tbody></table>';
 }
@@ -2869,11 +2962,10 @@ function dlPDF(id) {
   var tot=p.costs.reduce(function(s,r){return s+r.qty*r.rate;},0);
   sf('normal',10);doc.text('Base Bid Proposal',LM,y);sf('bold',10);doc.text(fmtM(tot),RM-90,y);y+=8;ln(LM,y,RM,y);y+=14;doc.text(fmtM(tot),RM-90,y);
   doc.addPage();hdr();y=130;
-  var ii=db.stdClar.filter(function(x){return p.inc&&p.inc.indexOf(x.id)>-1;}).map(function(x){return x.text;});
-  var pi=db.projClar.filter(function(x){return p.pc&&p.pc.indexOf(x.id)>-1;}).map(function(x){return x.text;});
-  var ei=db.exclusions.filter(function(x){return p.exc&&p.exc.indexOf(x.id)>-1;}).map(function(x){return x.text;});
+  var ii=db.stdClar.filter(function(x){return p.inc&&p.inc.indexOf(x.id)>-1;}).map(function(x){return x.text;}).concat(p.customIncs||[]);
+  var ei=db.exclusions.filter(function(x){return p.exc&&p.exc.indexOf(x.id)>-1;}).map(function(x){return x.text;}).concat(p.customExcs||[]);
   function tbl(title,items){doc.setFillColor(lgray[0],lgray[1],lgray[2]);doc.rect(LM,y,RM-LM,16,'F');doc.setDrawColor(0,0,0);doc.setLineWidth(0.5);doc.rect(LM,y,RM-LM,16,'S');sf('bold',9.5,[0,0,0]);doc.text(title,LM+4,y+11);y+=16;sf('normal',8.5,[0,0,0]);items.forEach(function(item){var ls=doc.splitTextToSize(item,RM-LM-8),rh=Math.max(14,ls.length*11+4);if(y+rh>750){doc.addPage();hdr();y=130;sf('normal',8.5,[0,0,0]);}doc.setDrawColor(180,180,180);doc.setLineWidth(0.3);doc.rect(LM,y,RM-LM,rh,'S');doc.text(ls,LM+4,y+9);y+=rh;});y+=18;}
-  tbl('General Project Inclusions',ii.concat(pi));tbl('General Project Exclusions',ei);
+  tbl('Project Inclusions',ii);tbl('Project Exclusions',ei);
   sf('normal',10,[0,0,0]);doc.text('Respectfully Submitted,',LM,y);y+=14;doc.text('KMI Construction',LM,y);y+=36;doc.text('Michael Kinateder',LM,y);y+=14;doc.text('Project Manager',LM,y);
   doc.save(p.id+'_Proposal.pdf');
 }
