@@ -64,7 +64,7 @@ tr:hover td{background:#fafafa}
 .bd-bidding{background:#EAF3DE;color:#3B6D11}
 .bd-not-bidding{background:#FCEBEB;color:#A32D2D}
 .bd-draft{background:#f1efe8;color:#5F5E5A}.bd-sent{background:#e6f1fb;color:#185FA5}
-.bd-won{background:#eaf3de;color:#3B6D11}.bd-lost{background:#fcebeb;color:#A32D2D}
+.bd-won{background:#eaf3de;color:#3B6D11}.bd-lost{background:#fcebeb;color:#A32D2D}.bd-budget{background:#faf1d6;color:#9A7A2E}
 .bd-review{background:#FFF8E6;color:#9A7A2E}.bd-negotiation{background:#eeedfe;color:#534AB7}
 .tbdg{display:inline-block;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#EEF0F8;color:var(--kmi3);border:0.5px solid var(--stl)}
 .fg{display:grid;grid-template-columns:1fr 1fr;gap:16px}
@@ -104,7 +104,7 @@ textarea{resize:vertical;min-height:72px}
 .ai:last-child{border-bottom:none}
 .ad{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:4px}
 .ad.bidding{background:#639922}.ad.not-bidding{background:#E24B4A}.ad.pending{background:#aaa}
-.ad.won{background:#639922}.ad.sent{background:#378ADD}.ad.draft{background:#aaa}.ad.lost{background:#E24B4A}
+.ad.won{background:#639922}.ad.sent{background:#378ADD}.ad.draft{background:#aaa}.ad.lost{background:#E24B4A}.ad.budget{background:#C8A84B}
 .mini-chart{display:flex;align-items:flex-end;gap:3px;height:60px;margin-top:8px}
 .bc{flex:1;background:#C4C9DF;border-radius:2px 2px 0 0;cursor:pointer}
 .bc:hover{background:var(--kmi)}
@@ -195,11 +195,18 @@ textarea{resize:vertical;min-height:72px}
       <option value="bidding">Bidding</option>
       <option value="not-bidding">Not bidding</option>
     </select>
+    <select class="fs" onchange="filterOpp()" id="opp-fo">
+      <option value="">All outcomes</option>
+      <option value="none">Bidding — no outcome yet</option>
+      <option value="won">Won</option>
+      <option value="lost">Lost</option>
+      <option value="budget">Budget</option>
+    </select>
     <select class="fs" onchange="filterOpp()" id="opp-fc"><option value="">All customers</option></select>
     <button class="btn btn-p" style="margin-left:auto" onclick="nav('new-opportunity')">+ New opportunity</button>
   </div>
   <div class="card" style="padding:0;overflow:hidden">
-    <table><thead><tr><th>Opp #</th><th>Project</th><th>Customer</th><th>Estimator</th><th>Customer PM</th><th>Bid date</th><th>Est. value</th><th>Final bid</th><th>Decision</th><th>Proposal</th><th>Actions</th></tr></thead>
+    <table><thead><tr><th>Opp #</th><th>Project</th><th>Customer</th><th>Estimator</th><th>Customer PM</th><th>Bid date</th><th>Est. value</th><th>Final bid</th><th>Decision</th><th>Outcome</th><th>Proposal</th><th>Actions</th></tr></thead>
     <tbody id="opp-tbody"></tbody></table>
   </div>
 </div>
@@ -258,6 +265,7 @@ textarea{resize:vertical;min-height:72px}
       <button class="btn btn-sm" onclick="setDecision(currentOppId,'pending')">Reset to pending</button>
     </div>
   </div>
+  <div id="od-outcome-section"></div>
   <div class="card"><div class="pmg" id="od-meta"></div></div>
   <div id="od-final-bid-section"></div>
   <div id="od-prop-section"></div>
@@ -623,6 +631,11 @@ function propBadge(s) {
   var l = {draft:'Draft',sent:'Sent',won:'Won',lost:'Lost',review:'Under review',negotiation:'Negotiation'};
   return '<span class="bdg ' + (m[s]||'bd-draft') + '">' + (l[s]||s) + '</span>';
 }
+function outcomeBadge(s) {
+  var m = {won:'bd-won', lost:'bd-lost', budget:'bd-budget'};
+  var l = {won:'Won', lost:'Lost', budget:'Budget'};
+  return s ? '<span class="bdg ' + (m[s]||'bd-draft') + '">' + (l[s]||s) + '</span>' : '';
+}
 
 // ── NAV ─────────────────────────────────────────────────────────
 function setActivePage(page) {
@@ -896,7 +909,7 @@ function renderDash() {
   var bid   = opps.filter(function(o){ return o.decision === 'bidding'; });
   var nobid = opps.filter(function(o){ return o.decision === 'not-bidding'; });
   var pend  = opps.filter(function(o){ return !o.decision || o.decision === 'pending'; });
-  var won   = props.filter(function(p){ return p.status === 'won'; });
+  var won   = opps.filter(function(o){ return o.outcomeStatus === 'won'; });
 
   g('d-mets').innerHTML =
     '<div class="mc"><div class="ml">Total opportunities</div><div class="mv">' + opps.length + '</div><div class="ms">All time</div></div>' +
@@ -949,15 +962,21 @@ function renderOpportunities() {
 function filterOpp() {
   var s  = (g('opp-s').value || '').toLowerCase();
   var df = g('opp-fd').value;
+  var of = g('opp-fo') ? g('opp-fo').value : '';
   var cf = g('opp-fc').value;
   var f  = db.opportunities.filter(function(o){
     var c = getCust(o.customerId);
+    var outcomeMatch = !of
+      || (of === 'none'
+            ? (o.decision === 'bidding' && !o.outcomeStatus)
+            : (o.outcomeStatus === of));
     return (!s || o.id.toLowerCase().includes(s) || o.project.toLowerCase().includes(s) || c.name.toLowerCase().includes(s))
         && (!df || (o.decision || 'pending') === df)
+        && outcomeMatch
         && (!cf || o.customerId === parseInt(cf));
   });
   if (!f.length) {
-    g('opp-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;padding:30px;color:#888">No opportunities found \u2014 <a href="#" onclick="nav(\'new-opportunity\');return false" style="color:var(--kmi)">create one</a></td></tr>';
+    g('opp-tbody').innerHTML = '<tr><td colspan="12" style="text-align:center;padding:30px;color:#888">No opportunities found \u2014 <a href="#" onclick="nav(\'new-opportunity\');return false" style="color:var(--kmi)">create one</a></td></tr>';
     return;
   }
   g('opp-tbody').innerHTML = f.map(function(o){
@@ -981,6 +1000,9 @@ function filterOpp() {
       '<td>' + fmtC(o.estValue) + '</td>' +
       '<td style="font-weight:600;color:var(--kmi)">' + (o.finalBidAmount !== null && o.finalBidAmount !== undefined ? fmtC(o.finalBidAmount) : '<span style="color:#aaa;font-size:12px">—</span>') + '</td>' +
       '<td>' + decBadge(dec) + '</td>' +
+      '<td>' + (dec === 'bidding'
+                 ? (o.outcomeStatus ? outcomeBadge(o.outcomeStatus) : '<span style="color:#aaa;font-size:12px">—</span>')
+                 : '<span style="color:#aaa;font-size:12px">—</span>') + '</td>' +
       '<td>' + propCell + '</td>' +
       '<td><div style="display:flex;gap:4px">' +
         '<button class="btn btn-sm" onclick="openOppDetail(\'' + o.id + '\')">View</button>' +
@@ -1014,6 +1036,30 @@ function renderOppDetail(id) {
   var decLabels = {pending:'No decision yet', bidding:'We are bidding on this opportunity', 'not-bidding':'Not bidding on this opportunity'};
   g('od-dec-label').textContent  = decLabels[dec] || dec;
   g('od-noreason').textContent   = (dec === 'not-bidding' && o.noReason) ? 'Reason: ' + o.noReason : '';
+
+  // ── Outcome status (only when bidding) ────────────────────────────────────
+  var outSec = g('od-outcome-section');
+  if (dec === 'bidding') {
+    var cur = o.outcomeStatus || '';
+    outSec.innerHTML =
+      '<div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">' +
+        '<div>' +
+          '<div class="ct" style="margin-bottom:4px">Outcome status</div>' +
+          '<div style="font-size:12px;color:#888;font-weight:400">Set the final result for this opportunity</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          (cur ? outcomeBadge(cur) : '') +
+          '<select onchange="setOutcome(currentOppId, this.value)" style="padding:8px 12px;font-size:13px;font-family:inherit;background:#fff;border:1px solid var(--stl);border-radius:7px;cursor:pointer;min-width:150px;font-weight:600;color:#1a1a1a">' +
+            '<option value=""' + (cur === '' ? ' selected' : '') + '>— Not set —</option>' +
+            '<option value="won"' + (cur === 'won' ? ' selected' : '') + '>Won</option>' +
+            '<option value="lost"' + (cur === 'lost' ? ' selected' : '') + '>Lost</option>' +
+            '<option value="budget"' + (cur === 'budget' ? ' selected' : '') + '>Budget</option>' +
+          '</select>' +
+        '</div>' +
+      '</div>';
+  } else {
+    outSec.innerHTML = '';
+  }
 
   g('od-meta').innerHTML =
     '<div><div class="k">Opportunity ID</div><div class="v">' + o.id + '</div></div>' +
@@ -1111,9 +1157,22 @@ function setDecision(id, dec) {
   var o = getOpp(id); if (!o) return;
   o.decision = dec;
   if (dec !== 'not-bidding') o.noReason = '';
+  if (dec !== 'bidding') o.outcomeStatus = null;
   var ll = {pending:'reset to pending', bidding:'marked as Bidding', 'not-bidding':'marked as Not Bidding'};
   db.activity.unshift({text: o.id + ' ' + (ll[dec] || dec), type: dec, time: 'Just now'});
   saveDB(); renderOppDetail(id); closeModal();
+}
+function setOutcome(oppId, status) {
+  var o = getOpp(oppId); if (!o) return;
+  var prev = o.outcomeStatus || null;
+  o.outcomeStatus = status || null;
+  if (status && status !== prev) {
+    var ll = {won:'Won', lost:'Lost', budget:'Budget'};
+    db.activity.unshift({text: o.id + ' outcome set to ' + (ll[status] || status), type: status, time: 'Just now'});
+  } else if (!status && prev) {
+    db.activity.unshift({text: o.id + ' outcome cleared', type: 'pending', time: 'Just now'});
+  }
+  saveDB(); renderOppDetail(oppId); if (typeof renderOpportunities === 'function') renderOpportunities();
 }
 function promptNotBidding(id) {
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
@@ -1384,13 +1443,13 @@ function npSave() {
     if (d.trim()) costs.push({desc:d, qty:parseFloat(row.querySelector('.rq').value)||0, unit:row.querySelector('.ru').value, rate:parseFloat(row.querySelector('.rr').value)||0});
   });
   var total = costs.reduce(function(s,c){ return s + c.qty * c.rate; }, 0);
-  db.proposals.push({id:pid, opportunityId:_npOppId, project:project, customerId:o.customerId, value:Math.round(total), status:'draft', created:new Date().toISOString().slice(0,10), type:o.type||'', inc:incs, pc:pcs, exc:excs, costs:costs});
+  db.proposals.push({id:pid, opportunityId:_npOppId, project:project, customerId:o.customerId, value:Math.round(total), status:'draft', created:new Date().toISOString().slice(0,10), type:o.type||'', inc:incs, pc:[], exc:excs, customIncs:customIncs, customExcs:customExcs, costs:costs});
   o.proposalId = pid;
   db.activity.unshift({text: pid + ' proposal created for ' + o.id, type: 'draft', time: 'Just now'});
   saveDB(); openOppDetail(_npOppId);
 }
 function saveFinalBid(oppId) {
-  var o = getOpp(oppId); if (!o) return;
+  var o = getOpp(oppId || currentOppId); if (!o) return;
   var el = g('final-bid-input'); if (!el) return;
   var val = parseFloat(el.value);
   o.finalBidAmount = isNaN(val) ? null : val;
@@ -1577,10 +1636,10 @@ function renderAnalytics() {
   var pend  = opps.filter(function(o){ return !o.decision || o.decision === 'pending'; }).length;
   var bid   = biddingOpps.length;
 
-  // ── Won proposals (only from bidding opportunities) ──────────
-  // A "won" bid = proposal linked to a bidding opportunity with status 'won'
-  var wonProps = props.filter(function(p){ return p.status === 'won'; });
-  var wonCount = wonProps.length;
+  // ── Won opportunities ────────────────────────────────────────
+  // A "won" bid = bidding opportunity with outcomeStatus === 'won'
+  var wonOpps  = biddingOpps.filter(function(o){ return o.outcomeStatus === 'won'; });
+  var wonCount = wonOpps.length;
 
   // ── Success rate: bids won / total accepted (bidding) opps ───
   var successRate     = bid > 0 ? (wonCount / bid * 100) : null;
@@ -1593,12 +1652,9 @@ function renderAnalytics() {
     return s + amt;
   }, 0);
 
-  // Dollar amount of won bids — use finalBidAmount of the linked opportunity, else proposal value
-  var wonAmt = wonProps.reduce(function(s, p){
-    var linkedOpp = opps.find(function(o){ return o.proposalId === p.id; });
-    var amt = linkedOpp
-      ? ((linkedOpp.finalBidAmount !== null && linkedOpp.finalBidAmount !== undefined) ? linkedOpp.finalBidAmount : (linkedOpp.estValue || 0))
-      : (p.value || 0);
+  // Dollar amount of won bids — use finalBidAmount of the won opportunity, else estValue
+  var wonAmt = wonOpps.reduce(function(s, o){
+    var amt = (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue || 0);
     return s + amt;
   }, 0);
 
@@ -1662,14 +1718,11 @@ function renderAnalytics() {
     var co       = opps.filter(function(o){ return o.customerId === cust.id; });
     var biddingC = co.filter(function(o){ return o.decision === 'bidding'; });
     var nb       = co.filter(function(o){ return o.decision === 'not-bidding'; });
-    var wonC     = props.filter(function(p){
-      return p.status === 'won' && co.some(function(o){ return o.proposalId === p.id; });
-    });
+    var wonC     = co.filter(function(o){ return o.outcomeStatus === 'won'; });
     var sr     = biddingC.length ? (wonC.length / biddingC.length * 100) : null;
     var bAmt   = biddingC.reduce(function(s,o){ return s + ((o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue||0)); }, 0);
-    var wAmt   = wonC.reduce(function(s,p){
-      var lo = opps.find(function(o){ return o.proposalId === p.id; });
-      return s + (lo ? ((lo.finalBidAmount !== null && lo.finalBidAmount !== undefined) ? lo.finalBidAmount : (lo.estValue||0)) : (p.value||0));
+    var wAmt   = wonC.reduce(function(s,o){
+      return s + ((o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue||0));
     }, 0);
     var vsr    = bAmt > 0 ? (wAmt / bAmt * 100) : null;
     return {name:cust.name, total:co.length, bid:biddingC.length, nb:nb.length, won:wonC.length, sr:sr, vsr:vsr, wonAmt:wAmt, bidAmt:bAmt};
@@ -1701,10 +1754,7 @@ function renderAnalytics() {
         types[t].bid++;
         var amt = (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue||0);
         types[t].bidAmt += amt;
-        if (o.proposalId) {
-          var pr = getProp(o.proposalId);
-          if (pr && pr.status === 'won') { types[t].won++; types[t].wonAmt += amt; }
-        }
+        if (o.outcomeStatus === 'won') { types[t].won++; types[t].wonAmt += amt; }
       }
       if (o.decision === 'not-bidding') types[t].nb++;
     });
@@ -2043,7 +2093,7 @@ function renderDash() {
   var bid   = opps.filter(function(o){ return o.decision === 'bidding'; });
   var nobid = opps.filter(function(o){ return o.decision === 'not-bidding'; });
   var pend  = opps.filter(function(o){ return !o.decision || o.decision === 'pending'; });
-  var won   = props.filter(function(p){ return p.status === 'won'; });
+  var won   = opps.filter(function(o){ return o.outcomeStatus === 'won'; });
 
   g('d-mets').innerHTML =
     '<div class="mc"><div class="ml">Total opportunities</div><div class="mv">' + opps.length + '</div><div class="ms">All time</div></div>' +
@@ -2096,15 +2146,21 @@ function renderOpportunities() {
 function filterOpp() {
   var s  = (g('opp-s').value || '').toLowerCase();
   var df = g('opp-fd').value;
+  var of = g('opp-fo') ? g('opp-fo').value : '';
   var cf = g('opp-fc').value;
   var f  = db.opportunities.filter(function(o){
     var c = getCust(o.customerId);
+    var outcomeMatch = !of
+      || (of === 'none'
+            ? (o.decision === 'bidding' && !o.outcomeStatus)
+            : (o.outcomeStatus === of));
     return (!s || o.id.toLowerCase().includes(s) || o.project.toLowerCase().includes(s) || c.name.toLowerCase().includes(s))
         && (!df || (o.decision || 'pending') === df)
+        && outcomeMatch
         && (!cf || o.customerId === parseInt(cf));
   });
   if (!f.length) {
-    g('opp-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;padding:30px;color:#888">No opportunities found \u2014 <a href="#" onclick="nav(\'new-opportunity\');return false" style="color:var(--kmi)">create one</a></td></tr>';
+    g('opp-tbody').innerHTML = '<tr><td colspan="12" style="text-align:center;padding:30px;color:#888">No opportunities found \u2014 <a href="#" onclick="nav(\'new-opportunity\');return false" style="color:var(--kmi)">create one</a></td></tr>';
     return;
   }
   g('opp-tbody').innerHTML = f.map(function(o){
@@ -2128,6 +2184,9 @@ function filterOpp() {
       '<td>' + fmtC(o.estValue) + '</td>' +
       '<td style="font-weight:600;color:var(--kmi)">' + (o.finalBidAmount !== null && o.finalBidAmount !== undefined ? fmtC(o.finalBidAmount) : '<span style="color:#aaa;font-size:12px">—</span>') + '</td>' +
       '<td>' + decBadge(dec) + '</td>' +
+      '<td>' + (dec === 'bidding'
+                 ? (o.outcomeStatus ? outcomeBadge(o.outcomeStatus) : '<span style="color:#aaa;font-size:12px">—</span>')
+                 : '<span style="color:#aaa;font-size:12px">—</span>') + '</td>' +
       '<td>' + propCell + '</td>' +
       '<td><div style="display:flex;gap:4px">' +
         '<button class="btn btn-sm" onclick="openOppDetail(\'' + o.id + '\')">View</button>' +
@@ -2161,6 +2220,30 @@ function renderOppDetail(id) {
   var decLabels = {pending:'No decision yet', bidding:'We are bidding on this opportunity', 'not-bidding':'Not bidding on this opportunity'};
   g('od-dec-label').textContent  = decLabels[dec] || dec;
   g('od-noreason').textContent   = (dec === 'not-bidding' && o.noReason) ? 'Reason: ' + o.noReason : '';
+
+  // ── Outcome status (only when bidding) ────────────────────────────────────
+  var outSec = g('od-outcome-section');
+  if (dec === 'bidding') {
+    var cur = o.outcomeStatus || '';
+    outSec.innerHTML =
+      '<div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">' +
+        '<div>' +
+          '<div class="ct" style="margin-bottom:4px">Outcome status</div>' +
+          '<div style="font-size:12px;color:#888;font-weight:400">Set the final result for this opportunity</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          (cur ? outcomeBadge(cur) : '') +
+          '<select onchange="setOutcome(currentOppId, this.value)" style="padding:8px 12px;font-size:13px;font-family:inherit;background:#fff;border:1px solid var(--stl);border-radius:7px;cursor:pointer;min-width:150px;font-weight:600;color:#1a1a1a">' +
+            '<option value=""' + (cur === '' ? ' selected' : '') + '>— Not set —</option>' +
+            '<option value="won"' + (cur === 'won' ? ' selected' : '') + '>Won</option>' +
+            '<option value="lost"' + (cur === 'lost' ? ' selected' : '') + '>Lost</option>' +
+            '<option value="budget"' + (cur === 'budget' ? ' selected' : '') + '>Budget</option>' +
+          '</select>' +
+        '</div>' +
+      '</div>';
+  } else {
+    outSec.innerHTML = '';
+  }
 
   g('od-meta').innerHTML =
     '<div><div class="k">Opportunity ID</div><div class="v">' + o.id + '</div></div>' +
@@ -2258,9 +2341,22 @@ function setDecision(id, dec) {
   var o = getOpp(id); if (!o) return;
   o.decision = dec;
   if (dec !== 'not-bidding') o.noReason = '';
+  if (dec !== 'bidding') o.outcomeStatus = null;
   var ll = {pending:'reset to pending', bidding:'marked as Bidding', 'not-bidding':'marked as Not Bidding'};
   db.activity.unshift({text: o.id + ' ' + (ll[dec] || dec), type: dec, time: 'Just now'});
   saveDB(); renderOppDetail(id); closeModal();
+}
+function setOutcome(oppId, status) {
+  var o = getOpp(oppId); if (!o) return;
+  var prev = o.outcomeStatus || null;
+  o.outcomeStatus = status || null;
+  if (status && status !== prev) {
+    var ll = {won:'Won', lost:'Lost', budget:'Budget'};
+    db.activity.unshift({text: o.id + ' outcome set to ' + (ll[status] || status), type: status, time: 'Just now'});
+  } else if (!status && prev) {
+    db.activity.unshift({text: o.id + ' outcome cleared', type: 'pending', time: 'Just now'});
+  }
+  saveDB(); renderOppDetail(oppId); if (typeof renderOpportunities === 'function') renderOpportunities();
 }
 function promptNotBidding(id) {
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
@@ -2531,13 +2627,13 @@ function npSave() {
     if (d.trim()) costs.push({desc:d, qty:parseFloat(row.querySelector('.rq').value)||0, unit:row.querySelector('.ru').value, rate:parseFloat(row.querySelector('.rr').value)||0});
   });
   var total = costs.reduce(function(s,c){ return s + c.qty * c.rate; }, 0);
-  db.proposals.push({id:pid, opportunityId:_npOppId, project:project, customerId:o.customerId, value:Math.round(total), status:'draft', created:new Date().toISOString().slice(0,10), type:o.type||'', inc:incs, pc:pcs, exc:excs, costs:costs});
+  db.proposals.push({id:pid, opportunityId:_npOppId, project:project, customerId:o.customerId, value:Math.round(total), status:'draft', created:new Date().toISOString().slice(0,10), type:o.type||'', inc:incs, pc:[], exc:excs, customIncs:customIncs, customExcs:customExcs, costs:costs});
   o.proposalId = pid;
   db.activity.unshift({text: pid + ' proposal created for ' + o.id, type: 'draft', time: 'Just now'});
   saveDB(); openOppDetail(_npOppId);
 }
 function saveFinalBid(oppId) {
-  var o = getOpp(oppId); if (!o) return;
+  var o = getOpp(oppId || currentOppId); if (!o) return;
   var el = g('final-bid-input'); if (!el) return;
   var val = parseFloat(el.value);
   o.finalBidAmount = isNaN(val) ? null : val;
@@ -2724,10 +2820,10 @@ function renderAnalytics() {
   var pend  = opps.filter(function(o){ return !o.decision || o.decision === 'pending'; }).length;
   var bid   = biddingOpps.length;
 
-  // ── Won proposals (only from bidding opportunities) ──────────
-  // A "won" bid = proposal linked to a bidding opportunity with status 'won'
-  var wonProps = props.filter(function(p){ return p.status === 'won'; });
-  var wonCount = wonProps.length;
+  // ── Won opportunities ────────────────────────────────────────
+  // A "won" bid = bidding opportunity with outcomeStatus === 'won'
+  var wonOpps  = biddingOpps.filter(function(o){ return o.outcomeStatus === 'won'; });
+  var wonCount = wonOpps.length;
 
   // ── Success rate: bids won / total accepted (bidding) opps ───
   var successRate     = bid > 0 ? (wonCount / bid * 100) : null;
@@ -2740,12 +2836,9 @@ function renderAnalytics() {
     return s + amt;
   }, 0);
 
-  // Dollar amount of won bids — use finalBidAmount of the linked opportunity, else proposal value
-  var wonAmt = wonProps.reduce(function(s, p){
-    var linkedOpp = opps.find(function(o){ return o.proposalId === p.id; });
-    var amt = linkedOpp
-      ? ((linkedOpp.finalBidAmount !== null && linkedOpp.finalBidAmount !== undefined) ? linkedOpp.finalBidAmount : (linkedOpp.estValue || 0))
-      : (p.value || 0);
+  // Dollar amount of won bids — use finalBidAmount of the won opportunity, else estValue
+  var wonAmt = wonOpps.reduce(function(s, o){
+    var amt = (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue || 0);
     return s + amt;
   }, 0);
 
@@ -2809,14 +2902,11 @@ function renderAnalytics() {
     var co       = opps.filter(function(o){ return o.customerId === cust.id; });
     var biddingC = co.filter(function(o){ return o.decision === 'bidding'; });
     var nb       = co.filter(function(o){ return o.decision === 'not-bidding'; });
-    var wonC     = props.filter(function(p){
-      return p.status === 'won' && co.some(function(o){ return o.proposalId === p.id; });
-    });
+    var wonC     = co.filter(function(o){ return o.outcomeStatus === 'won'; });
     var sr     = biddingC.length ? (wonC.length / biddingC.length * 100) : null;
     var bAmt   = biddingC.reduce(function(s,o){ return s + ((o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue||0)); }, 0);
-    var wAmt   = wonC.reduce(function(s,p){
-      var lo = opps.find(function(o){ return o.proposalId === p.id; });
-      return s + (lo ? ((lo.finalBidAmount !== null && lo.finalBidAmount !== undefined) ? lo.finalBidAmount : (lo.estValue||0)) : (p.value||0));
+    var wAmt   = wonC.reduce(function(s,o){
+      return s + ((o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue||0));
     }, 0);
     var vsr    = bAmt > 0 ? (wAmt / bAmt * 100) : null;
     return {name:cust.name, total:co.length, bid:biddingC.length, nb:nb.length, won:wonC.length, sr:sr, vsr:vsr, wonAmt:wAmt, bidAmt:bAmt};
@@ -2848,10 +2938,7 @@ function renderAnalytics() {
         types[t].bid++;
         var amt = (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue||0);
         types[t].bidAmt += amt;
-        if (o.proposalId) {
-          var pr = getProp(o.proposalId);
-          if (pr && pr.status === 'won') { types[t].won++; types[t].wonAmt += amt; }
-        }
+        if (o.outcomeStatus === 'won') { types[t].won++; types[t].wonAmt += amt; }
       }
       if (o.decision === 'not-bidding') types[t].nb++;
     });
@@ -3034,6 +3121,7 @@ function toSBOpp(r) {
     notes:r.notes||'', decision:r.decision||'pending',
     no_reason:r.noReason||'', proposal_id:r.proposalId||null,
     final_bid_amount:(r.finalBidAmount !== undefined ? r.finalBidAmount : null),
+    outcome_status:r.outcomeStatus||null,
     created:r.created||''
   };
 }
@@ -3046,6 +3134,7 @@ function fromSBOpp(r) {
     notes:r.notes||'', decision:r.decision||'pending',
     noReason:r.no_reason||'', proposalId:r.proposal_id||null,
     finalBidAmount:r.final_bid_amount !== null ? r.final_bid_amount : null,
+    outcomeStatus:r.outcome_status||null,
     created:r.created||''
   };
 }
