@@ -276,6 +276,11 @@ textarea{resize:vertical;min-height:72px}
     <div class="fg">
       <div class="fgr full"><label>Project name *</label><input id="nop-project" placeholder="Describe the project..."></div>
       <div class="fgr"><label>Customer *</label><select id="nop-cust"><option value="">Select customer...</option></select></div>
+      <div class="fgr full"><label>Project address</label><input id="nop-addr" placeholder="Street address (e.g. 123 Main St)"></div>
+      <div class="fgr"><label>City</label><input id="nop-city" placeholder="City"></div>
+      <div class="fgr"><label>State</label><select id="nop-state"><option value="">— Select —</option></select></div>
+      <div class="fgr"><label>Zip code</label><input id="nop-zip" placeholder="e.g. 12345 or 12345-6789" maxlength="10" inputmode="numeric"></div>
+      <div class="fgr"></div>
       <div class="fgr full" id="nop-type-wrap">
         <label>Project types <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(select all that apply)</span></label>
         <div id="nop-type-checks" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px"></div>
@@ -512,7 +517,7 @@ textarea{resize:vertical;min-height:72px}
       <div class="ch"><span class="ct">Bid opportunities</span></div>
       <div style="font-size:12px;color:#888;margin-bottom:12px">Required: <strong>Project Name, Customer Company Name</strong>. Customer must already exist. Estimator matched by email. PM matched by first + last name.</div>
       <div style="margin-bottom:10px"><strong style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888">Columns:</strong>
-        <div style="font-size:11px;font-family:monospace;background:#fafafa;padding:6px 8px;border-radius:4px;margin-top:4px;color:#444">Opportunity ID, Project Name, Customer Company Name, Project Type, Bid Due Date, Estimated Value, Assigned Estimator Email, Customer PM First Name, Customer PM Last Name, Notes, Decision, No-Bid Reason</div>
+        <div style="font-size:11px;font-family:monospace;background:#fafafa;padding:6px 8px;border-radius:4px;margin-top:4px;color:#444">Opportunity ID, Project Name, Customer Company Name, Project Type, Bid Due Date, Estimated Value, Assigned Estimator Email, Customer PM First Name, Customer PM Last Name, Project Address, City, State, Zip Code, Notes, Decision, No-Bid Reason</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
@@ -589,6 +594,7 @@ textarea{resize:vertical;min-height:72px}
 
 <script>
 var PM_TITLES = ['Assistant Project Manager','Estimator','Project Engineer','Project Executive','Project Manager','Sr. Project Manager','Superintendent'];
+var US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','DC','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'];
 var USER_ROLES = ['Admin','Estimator','Other','Project Executive','Project Manager','Superintendent'];
 var DB_KEY = 'kmi_crm_v2';
 var _npIdx = 0, _editPMId = null, _editOppId = null, _editUserId = null, _npOppId = null, _editClarId = null;
@@ -921,6 +927,10 @@ function importCSV(evt, type) {
           customerId: cust.id,
           type: r['Project Type'] || '',
           bidDate: r['Bid Due Date'] || '',
+          address: r['Project Address'] || '',
+          city:    r['City'] || '',
+          state:   (r['State'] || '').toUpperCase().trim(),
+          zip:     r['Zip Code'] || r['Zip'] || '',
           estValue: parseFloat(r['Estimated Value']) || 0,
           estimatorId: estUser ? estUser.id : null,
           pmId: pmRec ? pmRec.id : null,
@@ -953,7 +963,7 @@ function downloadTemplate(type) {
     customers:     'Company Name,Contact Name,Company Type,Street Address,City State ZIP,Email,Phone\nAcme Construction,John Smith,General Contractor,123 Main St,Milwaukee WI 53201,jsmith@acme.com,(414) 555-0100\n',
     pms:           'First Name,Last Name,Title,Company Name,Email,Cell Phone,Office Phone\nJane,Doe,Sr. Project Manager,Acme Construction,j.doe@acme.com,(414) 555-0101,(414) 555-0200\n',
     users:         'First Name,Last Name,Email,Phone,Role\nMike,Kinateder,mike@kmi-construction.com,(414) 573-0694,Estimator\n',
-    opportunities: 'Opportunity ID,Project Name,Customer Company Name,Project Type,Bid Due Date,Estimated Value,Assigned Estimator Email,Customer PM First Name,Customer PM Last Name,Notes,Decision,No-Bid Reason\nOPP-2026-001,Downtown Office Renovation,Acme Construction,Masonry,2026-03-15,250000,mike@kmi-construction.com,Jane,Doe,Foundation and masonry scope,bidding,\n'
+    opportunities: 'Opportunity ID,Project Name,Customer Company Name,Project Type,Bid Due Date,Estimated Value,Assigned Estimator Email,Customer PM First Name,Customer PM Last Name,Project Address,City,State,Zip Code,Notes,Decision,No-Bid Reason\nOPP-2026-001,Downtown Office Renovation,Acme Construction,Masonry,2026-03-15,250000,mike@kmi-construction.com,Jane,Doe,400 E Wisconsin Ave,Milwaukee,WI,53202,Foundation and masonry scope,bidding,\n'
   };
   var csv  = templates[type];
   var name = 'kmi_crm_' + type + '_template.csv';
@@ -1301,6 +1311,7 @@ function renderOppDetail(id) {
     '<div><div class="k">Opportunity ID</div><div class="v">' + o.id + '</div></div>' +
     '<div><div class="k">Customer</div><div class="v">' + c.name + '</div></div>' +
     '<div><div class="k">Project type' + (Array.isArray(o.types)&&o.types.length>1?'s':'') + '</div><div class="v">' + (Array.isArray(o.types)&&o.types.length?o.types.map(function(t){return'<span class="tag" style="margin-right:4px">'+t+'</span>';}).join(''):(o.type||'\u2014')) + '</div></div>' +
+    '<div style="grid-column:1/-1"><div class="k">Project address</div><div class="v" style="font-weight:400;line-height:1.5">' + (formatOppAddress(o) || '<span style="color:#aaa">Not set</span>') + '</div></div>' +
     '<div><div class="k">Bid due date</div><div class="v">' + (o.bidDate || '\u2014') + '</div></div>' +
     '<div><div class="k">Estimated value</div><div class="v">' + fmtC(o.estValue) + '</div></div>' +
     '<div><div class="k">Final bid amount</div><div class="v"' + (o.finalBidAmount !== null && o.finalBidAmount !== undefined ? ' style="color:var(--kmi)"' : '') + '>' + (o.finalBidAmount !== null && o.finalBidAmount !== undefined ? fmtC(o.finalBidAmount) : '<span style="color:#aaa;font-weight:400">Not set</span>') + '</div></div>' +
@@ -1483,6 +1494,7 @@ function showEstimatorEmail(usr, o, cust) {
     'Customer:       ' + cust.name + (cust.contact ? ' (' + cust.contact + ')' : ''),
     'Project Type:   ' + (Array.isArray(o.types)&&o.types.length ? o.types.join(', ') : (o.type||'Not specified')),
     'Bid Due Date:   ' + (o.bidDate || 'Not specified'),
+    'Project Address:' + (formatOppAddress(o) || 'Not specified'),
     'Est. Value:     $' + Number(o.estValue || 0).toLocaleString(),
     (o.notes ? 'Notes:          ' + o.notes : ''),
     '',
@@ -1528,11 +1540,30 @@ function initNewOpp() {
   g('nop-cust').onchange = function(){ populatePMDropdown(parseInt(g('nop-cust').value)||null, null); };
   populateEstimatorDropdown(null);
   populatePMDropdown(null, null);
+  populateStateDropdown('');
   renderProjectTypeChecks([]);
   g('nop-project').value = ''; g('nop-date').value = '';
   g('nop-value').value   = ''; g('nop-notes').value = '';
+  g('nop-addr').value = ''; g('nop-city').value = ''; g('nop-zip').value = '';
 }
 
+function formatOppAddress(o) {
+  if (!o) return '';
+  var line1 = (o.address || '').trim();
+  var city  = (o.city || '').trim();
+  var state = (o.state || '').trim();
+  var zip   = (o.zip || '').trim();
+  var cityStateZip = [city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return [line1, cityStateZip].filter(Boolean).join(', ');
+}
+function populateStateDropdown(selected) {
+  var sel = g('nop-state'); if (!sel) return;
+  var opts = '<option value="">— Select —</option>';
+  US_STATES.forEach(function(st){
+    opts += '<option value="' + st + '"' + (selected === st ? ' selected' : '') + '>' + st + '</option>';
+  });
+  sel.innerHTML = opts;
+}
 function populatePMDropdown(custId, selectedId) {
   var source = custId ? db.pms.filter(function(pm){ return pm.customerId === custId; }) : db.pms.slice();
   var pms = source.sort(function(a, b){
@@ -1572,6 +1603,10 @@ function nopSave() {
     o.notes       = (g('nop-notes').value || '').trim();
     o.estimatorId = newEstimatorId;
     o.pmId        = parseInt(g('nop-pm').value) || null;
+    o.address     = (g('nop-addr').value || '').trim();
+    o.city        = (g('nop-city').value || '').trim();
+    o.state       = (g('nop-state').value || '').trim();
+    o.zip         = (g('nop-zip').value || '').trim();
     db.activity.unshift({text: o.id + ' updated', type: 'pending', time: 'Just now'});
     saveDB();
     maybeNotifyEstimator(o.id, prevEstimatorId);
@@ -1585,6 +1620,10 @@ function nopSave() {
       notes: (g('nop-notes').value || '').trim(),
       estimatorId: newEstimatorId,
       pmId: parseInt(g('nop-pm').value) || null,
+      address: (g('nop-addr').value || '').trim(),
+      city:    (g('nop-city').value || '').trim(),
+      state:   (g('nop-state').value || '').trim(),
+      zip:     (g('nop-zip').value || '').trim(),
       finalBidAmount: null,
       decision: 'pending', noReason: '', proposalId: null,
       created: new Date().toISOString().slice(0,10)
@@ -1615,6 +1654,10 @@ function editOpp(id) {
   g('nop-project').value = o.project || ''; g('nop-date').value = '';
   if (o.bidDate) g('nop-date').value = o.bidDate; g('nop-value').value = o.estValue || '';
   g('nop-notes').value   = o.notes   || '';
+  g('nop-addr').value    = o.address || '';
+  g('nop-city').value    = o.city    || '';
+  populateStateDropdown(o.state || '');
+  g('nop-zip').value     = o.zip     || '';
 }
 
 function deleteOpp(id) {
@@ -2308,6 +2351,10 @@ function importCSV(evt, type) {
           customerId: cust.id,
           type: r['Project Type'] || '',
           bidDate: r['Bid Due Date'] || '',
+          address: r['Project Address'] || '',
+          city:    r['City'] || '',
+          state:   (r['State'] || '').toUpperCase().trim(),
+          zip:     r['Zip Code'] || r['Zip'] || '',
           estValue: parseFloat(r['Estimated Value']) || 0,
           estimatorId: estUser ? estUser.id : null,
           pmId: pmRec ? pmRec.id : null,
@@ -2340,7 +2387,7 @@ function downloadTemplate(type) {
     customers:     'Company Name,Contact Name,Company Type,Street Address,City State ZIP,Email,Phone\nAcme Construction,John Smith,General Contractor,123 Main St,Milwaukee WI 53201,jsmith@acme.com,(414) 555-0100\n',
     pms:           'First Name,Last Name,Title,Company Name,Email,Cell Phone,Office Phone\nJane,Doe,Sr. Project Manager,Acme Construction,j.doe@acme.com,(414) 555-0101,(414) 555-0200\n',
     users:         'First Name,Last Name,Email,Phone,Role\nMike,Kinateder,mike@kmi-construction.com,(414) 573-0694,Estimator\n',
-    opportunities: 'Opportunity ID,Project Name,Customer Company Name,Project Type,Bid Due Date,Estimated Value,Assigned Estimator Email,Customer PM First Name,Customer PM Last Name,Notes,Decision,No-Bid Reason\nOPP-2026-001,Downtown Office Renovation,Acme Construction,Masonry,2026-03-15,250000,mike@kmi-construction.com,Jane,Doe,Foundation and masonry scope,bidding,\n'
+    opportunities: 'Opportunity ID,Project Name,Customer Company Name,Project Type,Bid Due Date,Estimated Value,Assigned Estimator Email,Customer PM First Name,Customer PM Last Name,Project Address,City,State,Zip Code,Notes,Decision,No-Bid Reason\nOPP-2026-001,Downtown Office Renovation,Acme Construction,Masonry,2026-03-15,250000,mike@kmi-construction.com,Jane,Doe,400 E Wisconsin Ave,Milwaukee,WI,53202,Foundation and masonry scope,bidding,\n'
   };
   var csv  = templates[type];
   var name = 'kmi_crm_' + type + '_template.csv';
@@ -2688,6 +2735,7 @@ function renderOppDetail(id) {
     '<div><div class="k">Opportunity ID</div><div class="v">' + o.id + '</div></div>' +
     '<div><div class="k">Customer</div><div class="v">' + c.name + '</div></div>' +
     '<div><div class="k">Project type' + (Array.isArray(o.types)&&o.types.length>1?'s':'') + '</div><div class="v">' + (Array.isArray(o.types)&&o.types.length?o.types.map(function(t){return'<span class="tag" style="margin-right:4px">'+t+'</span>';}).join(''):(o.type||'\u2014')) + '</div></div>' +
+    '<div style="grid-column:1/-1"><div class="k">Project address</div><div class="v" style="font-weight:400;line-height:1.5">' + (formatOppAddress(o) || '<span style="color:#aaa">Not set</span>') + '</div></div>' +
     '<div><div class="k">Bid due date</div><div class="v">' + (o.bidDate || '\u2014') + '</div></div>' +
     '<div><div class="k">Estimated value</div><div class="v">' + fmtC(o.estValue) + '</div></div>' +
     '<div><div class="k">Final bid amount</div><div class="v"' + (o.finalBidAmount !== null && o.finalBidAmount !== undefined ? ' style="color:var(--kmi)"' : '') + '>' + (o.finalBidAmount !== null && o.finalBidAmount !== undefined ? fmtC(o.finalBidAmount) : '<span style="color:#aaa;font-weight:400">Not set</span>') + '</div></div>' +
@@ -2870,6 +2918,7 @@ function showEstimatorEmail(usr, o, cust) {
     'Customer:       ' + cust.name + (cust.contact ? ' (' + cust.contact + ')' : ''),
     'Project Type:   ' + (Array.isArray(o.types)&&o.types.length ? o.types.join(', ') : (o.type||'Not specified')),
     'Bid Due Date:   ' + (o.bidDate || 'Not specified'),
+    'Project Address:' + (formatOppAddress(o) || 'Not specified'),
     'Est. Value:     $' + Number(o.estValue || 0).toLocaleString(),
     (o.notes ? 'Notes:          ' + o.notes : ''),
     '',
@@ -2915,11 +2964,30 @@ function initNewOpp() {
   g('nop-cust').onchange = function(){ populatePMDropdown(parseInt(g('nop-cust').value)||null, null); };
   populateEstimatorDropdown(null);
   populatePMDropdown(null, null);
+  populateStateDropdown('');
   renderProjectTypeChecks([]);
   g('nop-project').value = ''; g('nop-date').value = '';
   g('nop-value').value   = ''; g('nop-notes').value = '';
+  g('nop-addr').value = ''; g('nop-city').value = ''; g('nop-zip').value = '';
 }
 
+function formatOppAddress(o) {
+  if (!o) return '';
+  var line1 = (o.address || '').trim();
+  var city  = (o.city || '').trim();
+  var state = (o.state || '').trim();
+  var zip   = (o.zip || '').trim();
+  var cityStateZip = [city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return [line1, cityStateZip].filter(Boolean).join(', ');
+}
+function populateStateDropdown(selected) {
+  var sel = g('nop-state'); if (!sel) return;
+  var opts = '<option value="">— Select —</option>';
+  US_STATES.forEach(function(st){
+    opts += '<option value="' + st + '"' + (selected === st ? ' selected' : '') + '>' + st + '</option>';
+  });
+  sel.innerHTML = opts;
+}
 function populatePMDropdown(custId, selectedId) {
   var source = custId ? db.pms.filter(function(pm){ return pm.customerId === custId; }) : db.pms.slice();
   var pms = source.sort(function(a, b){
@@ -2959,6 +3027,10 @@ function nopSave() {
     o.notes       = (g('nop-notes').value || '').trim();
     o.estimatorId = newEstimatorId;
     o.pmId        = parseInt(g('nop-pm').value) || null;
+    o.address     = (g('nop-addr').value || '').trim();
+    o.city        = (g('nop-city').value || '').trim();
+    o.state       = (g('nop-state').value || '').trim();
+    o.zip         = (g('nop-zip').value || '').trim();
     db.activity.unshift({text: o.id + ' updated', type: 'pending', time: 'Just now'});
     saveDB();
     maybeNotifyEstimator(o.id, prevEstimatorId);
@@ -2972,6 +3044,10 @@ function nopSave() {
       notes: (g('nop-notes').value || '').trim(),
       estimatorId: newEstimatorId,
       pmId: parseInt(g('nop-pm').value) || null,
+      address: (g('nop-addr').value || '').trim(),
+      city:    (g('nop-city').value || '').trim(),
+      state:   (g('nop-state').value || '').trim(),
+      zip:     (g('nop-zip').value || '').trim(),
       finalBidAmount: null,
       decision: 'pending', noReason: '', proposalId: null,
       created: new Date().toISOString().slice(0,10)
@@ -3002,6 +3078,10 @@ function editOpp(id) {
   g('nop-project').value = o.project || ''; g('nop-date').value = '';
   if (o.bidDate) g('nop-date').value = o.bidDate; g('nop-value').value = o.estValue || '';
   g('nop-notes').value   = o.notes   || '';
+  g('nop-addr').value    = o.address || '';
+  g('nop-city').value    = o.city    || '';
+  populateStateDropdown(o.state || '');
+  g('nop-zip').value     = o.zip     || '';
 }
 
 function deleteOpp(id) {
@@ -3759,6 +3839,7 @@ function toSBOpp(r) {
     type:r.type||'', types:r.types||[],
     bid_date:r.bidDate||'', est_value:r.estValue||0,
     estimator_id:r.estimatorId||null, pm_id:r.pmId||null,
+    address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
     notes:r.notes||'', decision:r.decision||'pending',
     no_reason:r.noReason||'', proposal_id:r.proposalId||null,
     final_bid_amount:(r.finalBidAmount !== undefined ? r.finalBidAmount : null),
@@ -3772,6 +3853,7 @@ function fromSBOpp(r) {
     type:r.type||'', types:r.types||[],
     bidDate:r.bid_date||'', estValue:r.est_value||0,
     estimatorId:r.estimator_id||null, pmId:r.pm_id||null,
+    address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
     notes:r.notes||'', decision:r.decision||'pending',
     noReason:r.no_reason||'', proposalId:r.proposal_id||null,
     finalBidAmount:r.final_bid_amount !== null ? r.final_bid_amount : null,
