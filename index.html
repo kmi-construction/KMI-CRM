@@ -3785,6 +3785,10 @@ function dlPDF(id) {
 var supabaseClient = null;
 var SB_CRED_KEY = 'kmi_supabase_creds';
 var _syncing = false;
+// Baked-in defaults: used when the user has no saved creds in this browser.
+// New users opening the file will auto-connect to this project.
+var DEFAULT_SB_URL = 'https://kxwoaczmrocczmyihpbr.supabase.co';
+var DEFAULT_SB_KEY = 'sb_publishable_rd34BgN18pVir98jvP2Svg_Qm8ozarY';
 
 // ── Credential storage ───────────────────────────────────────────
 function getSBCreds() {
@@ -4096,6 +4100,11 @@ saveDB = function() {
 // ── Auto-connect on startup if creds saved ────────────────────────────────
 async function autoConnectSupabase() {
   var creds = getSBCreds();
+  // Fall back to baked-in defaults so new users auto-connect on first open.
+  // User-saved creds always win (lets individual users override if needed).
+  if ((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) {
+    creds = { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY };
+  }
   if (!creds || !creds.url || !creds.key) return;
   if (!window.supabase) { setTimeout(autoConnectSupabase, 500); return; }
   var ok = initSupabase(creds.url, creds.key);
