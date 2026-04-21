@@ -6,6 +6,8 @@
 <title>KMI Construction CRM</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>if(window['pdfjsLib']){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,sans-serif;background:#F5F5F3;height:100vh;overflow:hidden}
@@ -71,6 +73,20 @@ tr:hover td{background:#fafafa}
 .ed-sel.dec-bidding,.ed-sel.out-won{background-color:#eaf3de;color:#3B6D11;border-color:#C1DBAB}
 .ed-sel.dec-not-bidding,.ed-sel.out-lost{background-color:#fcebeb;color:#A32D2D;border-color:#E8C8C8}
 .ed-sel.out-budget{background-color:#faf1d6;color:#9A7A2E;border-color:#E6D59F}
+.scope-row{display:flex;gap:8px;align-items:flex-start;padding:10px;border-bottom:0.5px solid #eee;font-size:13px}
+.scope-row:last-child{border-bottom:none}
+.scope-row .scope-cb{margin-top:2px;accent-color:var(--kmi);flex-shrink:0;cursor:pointer}
+.scope-row.done .scope-txt{color:#888;text-decoration:line-through}
+.scope-txt{flex:1;line-height:1.5;word-wrap:break-word}
+.scope-actions{display:flex;gap:4px;flex-shrink:0;opacity:0;transition:opacity .15s}
+.scope-row:hover .scope-actions{opacity:1}
+.scope-actions button{background:none;border:none;color:#888;cursor:pointer;font-size:11px;padding:2px 6px;border-radius:4px;font-family:inherit}
+.scope-actions button:hover{background:#f1efe8;color:var(--kmi)}
+.scope-section-hdr{font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:14px 10px 6px;background:#fafafa;border-bottom:1px solid #eee}
+.scope-empty{padding:24px;text-align:center;color:#aaa;font-size:12px;border:1px dashed #e5e5e5;border-radius:8px}
+.scope-note{width:100%;margin-top:6px;padding:6px 8px;font-size:12px;border:1px solid #e5e5e5;border-radius:5px;font-family:inherit;display:none;resize:vertical;min-height:40px}
+.scope-row.has-note .scope-note{display:block}
+.scope-row.editing-note .scope-note{display:block}
 .view-toggle{display:inline-flex;background:#f1efe8;border-radius:8px;padding:3px;gap:2px}
 .view-toggle button{background:none;border:none;padding:6px 14px;font-size:12px;font-weight:600;color:#666;border-radius:6px;cursor:pointer;font-family:inherit;transition:all .15s}
 .view-toggle button.active{background:#fff;color:var(--kmi);box-shadow:0 1px 2px rgba(0,0,0,.08)}
@@ -325,6 +341,22 @@ textarea{resize:vertical;min-height:72px}
     </div>
   </div>
   <div id="od-outcome-section"></div>
+  <div class="card" id="od-scope-card">
+    <div class="ch" style="margin-bottom:12px"><span class="ct">Scope checklist</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm" onclick="scopeUploadPdf()" title="Extract items from an uploaded PDF (in-browser, no AI)">&uarr; Upload PDF</button>
+        <button class="btn btn-sm btn-p" onclick="scopeSmartExtract()" title="AI-assisted extraction (uses Anthropic API)">&#10024; Smart extract (AI)</button>
+        <button class="btn btn-sm" onclick="scopeAddManual()" title="Add a blank scope item manually">+ Add item</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <label style="font-size:11px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Source document URL</label>
+      <input id="od-scope-src" type="text" placeholder="Paste SharePoint link to original PDF..." onchange="scopeSaveSource()" style="flex:1;min-width:200px;font-size:12px;padding:6px 10px">
+      <a id="od-scope-src-link" href="#" target="_blank" style="font-size:11px;color:var(--kmi);display:none">&#8599; Open</a>
+    </div>
+    <input type="file" id="od-scope-file" accept="application/pdf,.pdf" style="display:none">
+    <div id="od-scope-items"></div>
+  </div>
   <div class="card"><div class="pmg" id="od-meta"></div></div>
   <div id="od-final-bid-section"></div>
   <div id="od-prop-section"></div>
@@ -1397,6 +1429,7 @@ function renderOppDetail(id) {
   } else {
     sec.innerHTML = '<div class="card" style="text-align:center;padding:24px;color:#888;font-size:13px">Use the <strong>Bidding</strong> or <strong>Not Bidding</strong> buttons above to set a decision for this opportunity.</div>';
   }
+  renderScopeChecklist(o);
 }
 
 // ── BID DECISION ────────────────────────────────────────────────
@@ -2821,6 +2854,7 @@ function renderOppDetail(id) {
   } else {
     sec.innerHTML = '<div class="card" style="text-align:center;padding:24px;color:#888;font-size:13px">Use the <strong>Bidding</strong> or <strong>Not Bidding</strong> buttons above to set a decision for this opportunity.</div>';
   }
+  renderScopeChecklist(o);
 }
 
 // ── BID DECISION ────────────────────────────────────────────────
@@ -3779,7 +3813,334 @@ function dlPDF(id) {
 }
 
 
-// ════════════════════════════════════════════════════════════════
+// ================================================================
+// SCOPE CHECKLIST
+// ================================================================
+var _scopeOppId = null;
+
+function renderScopeChecklist(o) {
+  if (!o) return;
+  _scopeOppId = o.id;
+  var items = Array.isArray(o.scopeItems) ? o.scopeItems : [];
+  var src = o.scopeSourceUrl || '';
+
+  g('od-scope-src').value = src;
+  var link = g('od-scope-src-link');
+  if (src) { link.href = src; link.style.display = ''; }
+  else { link.style.display = 'none'; }
+
+  var container = g('od-scope-items');
+  if (!items.length) {
+    container.innerHTML = '<div class="scope-empty">No scope items yet. Upload a PDF, use Smart extract, or add items manually.</div>';
+    return;
+  }
+
+  var sections = {};
+  var order = [];
+  items.forEach(function(it, idx){
+    var sec = (it.section || 'Scope').trim() || 'Scope';
+    if (!sections[sec]) { sections[sec] = []; order.push(sec); }
+    sections[sec].push({item:it, idx:idx});
+  });
+
+  container.innerHTML = order.map(function(sec){
+    return '<div class="scope-section-hdr">' + escapeHtml(sec) + ' \u00b7 ' + sections[sec].length + '</div>' +
+      sections[sec].map(function(entry){
+        var it = entry.item;
+        var cls = 'scope-row' + (it.done ? ' done' : '') + (it.note ? ' has-note' : '');
+        return '<div class="' + cls + '" data-scope-idx="' + entry.idx + '">' +
+          '<input type="checkbox" class="scope-cb"' + (it.done ? ' checked' : '') + ' onchange="scopeToggle(' + entry.idx + ', this.checked)">' +
+          '<div style="flex:1">' +
+            '<div class="scope-txt">' + escapeHtml(it.text || '') + '</div>' +
+            '<textarea class="scope-note" placeholder="Add note..." onblur="scopeSaveNote(' + entry.idx + ', this.value)">' + escapeHtml(it.note || '') + '</textarea>' +
+          '</div>' +
+          '<div class="scope-actions">' +
+            '<button onclick="scopeEditItem(' + entry.idx + ')" title="Edit text">\u270e</button>' +
+            '<button onclick="scopeToggleNote(' + entry.idx + ')" title="Add/edit note">Note</button>' +
+            '<button onclick="scopePromoteToProposal(' + entry.idx + ')" title="Add as inclusion on linked proposal">\u2192 Inc</button>' +
+            '<button onclick="scopeDeleteItem(' + entry.idx + ')" title="Delete" style="color:#A32D2D">\u00d7</button>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+  }).join('');
+}
+
+function escapeHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _scopeGetOpp() {
+  return _scopeOppId ? getOpp(_scopeOppId) : null;
+}
+
+function scopeSaveSource() {
+  var o = _scopeGetOpp(); if (!o) return;
+  o.scopeSourceUrl = (g('od-scope-src').value || '').trim();
+  saveDB();
+  var link = g('od-scope-src-link');
+  if (o.scopeSourceUrl) { link.href = o.scopeSourceUrl; link.style.display = ''; }
+  else { link.style.display = 'none'; }
+}
+
+function scopeToggle(idx, checked) {
+  var o = _scopeGetOpp(); if (!o || !o.scopeItems || !o.scopeItems[idx]) return;
+  o.scopeItems[idx].done = !!checked;
+  saveDB();
+  var row = document.querySelector('[data-scope-idx="' + idx + '"]');
+  if (row) row.classList.toggle('done', !!checked);
+}
+
+function scopeSaveNote(idx, text) {
+  var o = _scopeGetOpp(); if (!o || !o.scopeItems || !o.scopeItems[idx]) return;
+  var t = (text || '').trim();
+  o.scopeItems[idx].note = t;
+  saveDB();
+  var row = document.querySelector('[data-scope-idx="' + idx + '"]');
+  if (row) row.classList.toggle('has-note', !!t);
+}
+
+function scopeToggleNote(idx) {
+  var row = document.querySelector('[data-scope-idx="' + idx + '"]');
+  if (!row) return;
+  row.classList.toggle('editing-note');
+  var ta = row.querySelector('.scope-note');
+  if (ta && (row.classList.contains('editing-note') || row.classList.contains('has-note'))) ta.focus();
+}
+
+function scopeEditItem(idx) {
+  var o = _scopeGetOpp(); if (!o || !o.scopeItems || !o.scopeItems[idx]) return;
+  var cur = o.scopeItems[idx].text || '';
+  var v = prompt('Edit scope item text:', cur);
+  if (v === null) return;
+  var trimmed = v.trim();
+  if (!trimmed) return;
+  o.scopeItems[idx].text = trimmed;
+  saveDB(); renderScopeChecklist(o);
+}
+
+function scopeDeleteItem(idx) {
+  var o = _scopeGetOpp(); if (!o || !o.scopeItems) return;
+  if (!confirm('Delete this scope item?')) return;
+  o.scopeItems.splice(idx, 1);
+  saveDB(); renderScopeChecklist(o);
+}
+
+function scopeAddManual() {
+  var o = _scopeGetOpp(); if (!o) return;
+  var v = prompt('New scope item text:');
+  if (v === null) return;
+  var trimmed = v.trim();
+  if (!trimmed) return;
+  if (!Array.isArray(o.scopeItems)) o.scopeItems = [];
+  o.scopeItems.push({text: trimmed, done: false, note: '', section: 'Scope'});
+  saveDB(); renderScopeChecklist(o);
+}
+
+function scopePromoteToProposal(idx) {
+  var o = _scopeGetOpp(); if (!o || !o.scopeItems || !o.scopeItems[idx]) return;
+  var item = o.scopeItems[idx];
+  if (!o.proposalId) { alert('No proposal is linked to this opportunity yet. Create a proposal first, then promote scope items.'); return; }
+  var prop = getProp(o.proposalId);
+  if (!prop) { alert('The linked proposal could not be found.'); return; }
+  if (!Array.isArray(prop.customIncs)) prop.customIncs = [];
+  prop.customIncs.push(item.text);
+  saveDB();
+  alert('Added to proposal ' + prop.id + ' as a custom inclusion.');
+}
+
+function scopeUploadPdf() {
+  if (!_scopeGetOpp()) return;
+  var input = g('od-scope-file');
+  input.value = '';
+  input.onchange = function(e){
+    var file = e.target.files && e.target.files[0];
+    if (file) scopeHandlePdfFile(file, 'rule');
+  };
+  input.click();
+}
+
+async function scopeHandlePdfFile(file, mode) {
+  var o = _scopeGetOpp(); if (!o) return;
+  if (!window.pdfjsLib) { alert('PDF reader library failed to load. Check your internet connection and refresh.'); return; }
+
+  try {
+    var buffer = await file.arrayBuffer();
+    var pdf = await pdfjsLib.getDocument({data: buffer}).promise;
+    var fullText = '';
+    for (var i = 1; i <= pdf.numPages; i++) {
+      var page = await pdf.getPage(i);
+      var content = await page.getTextContent();
+      var pageText = content.items.map(function(it){ return it.str; }).join(' ');
+      fullText += pageText + '\n';
+    }
+
+    if (mode === 'rule') {
+      var items = scopeExtractRuleBased(fullText);
+      scopeApplyExtractedItems(items, 'rule-based');
+    } else if (mode === 'ai') {
+      await scopeExtractWithAI(fullText);
+    }
+  } catch(err) {
+    console.error('PDF read error:', err);
+    alert('Could not read the PDF: ' + err.message);
+  }
+}
+
+function scopeExtractRuleBased(text) {
+  var items = [];
+  var norm = text.replace(/\s+/g, ' ').trim();
+
+  var sectionRe = /([A-Z])\.\s+([A-Z][A-Z\s\-:]{3,60}?)(?=\s+\d+\.|\s+[A-Z]\.|$)/g;
+  var sectionMatches = [];
+  var m;
+  while ((m = sectionRe.exec(norm)) !== null) {
+    sectionMatches.push({letter: m[1], title: m[2].trim().replace(/[:\s]+$/, ''), start: m.index, end: m.index + m[0].length});
+  }
+
+  if (sectionMatches.length === 0) {
+    var numRe = /(?:^|\s)(\d{1,2})\.\s+([^0-9][^.]{15,400}?\.)/g;
+    while ((m = numRe.exec(norm)) !== null) {
+      items.push({text: m[2].trim(), done: false, note: '', section: 'Scope'});
+    }
+    return items;
+  }
+
+  for (var s = 0; s < sectionMatches.length; s++) {
+    var sec = sectionMatches[s];
+    var nextStart = (s + 1 < sectionMatches.length) ? sectionMatches[s+1].start : norm.length;
+    var body = norm.substring(sec.end, nextStart);
+    var sectionLabel = sec.title;
+
+    var itemRe = /(\d{1,2})\.\s+([^0-9].*?)(?=\s\d{1,2}\.\s|$)/g;
+    var im;
+    while ((im = itemRe.exec(body)) !== null) {
+      var itemText = im[2].trim().replace(/\s+/g, ' ');
+      if (itemText.length < 10) continue;
+      if (/^Hunzinger|^Project No\.|^Addendum/i.test(itemText)) continue;
+      if (itemText.length > 600) itemText = itemText.substring(0, 600) + '\u2026';
+      items.push({text: itemText, done: false, note: '', section: sectionLabel});
+    }
+  }
+
+  return items;
+}
+
+function scopeApplyExtractedItems(items, modeLabel) {
+  var o = _scopeGetOpp(); if (!o) return;
+  if (!items.length) {
+    alert('No scope items could be extracted from this document. Try the Smart extract button, or add items manually.');
+    return;
+  }
+  var existing = Array.isArray(o.scopeItems) ? o.scopeItems.length : 0;
+  if (existing) {
+    var msg = 'Extracted ' + items.length + ' item' + (items.length === 1 ? '' : 's') + ' using ' + modeLabel + ' extraction.\n\n' +
+              'You already have ' + existing + ' item' + (existing === 1 ? '' : 's') + ' in the checklist.\n' +
+              'OK = append new items\nCancel = replace everything';
+    if (confirm(msg)) {
+      o.scopeItems = (o.scopeItems || []).concat(items);
+    } else {
+      o.scopeItems = items;
+    }
+  } else {
+    o.scopeItems = items;
+  }
+  saveDB(); renderScopeChecklist(o);
+}
+
+function scopeSmartExtract() {
+  if (!_scopeGetOpp()) return;
+
+  if (location.protocol === 'file:') {
+    alert('Smart extract (AI) requires the app to be served from a web URL (e.g. GitHub Pages).\nWhen opened directly from a file, browser security rules block API calls.\n\nUse the Upload PDF button for rule-based extraction instead, or host the app online to enable this feature.');
+    return;
+  }
+
+  var apiKey = db.anthropic_api_key;
+  if (!apiKey) {
+    alert('No Anthropic API key is configured.\nAsk your admin to add one to the kmi_settings table in Supabase.');
+    return;
+  }
+
+  var input = g('od-scope-file');
+  input.value = '';
+  input.onchange = function(e){
+    var file = e.target.files && e.target.files[0];
+    if (file) scopeHandlePdfFile(file, 'ai');
+  };
+  input.click();
+}
+
+async function scopeExtractWithAI(text) {
+  var apiKey = db.anthropic_api_key;
+  if (!apiKey) { alert('Missing API key.'); return; }
+
+  var MAX_CHARS = 60000;
+  var truncated = text.length > MAX_CHARS;
+  var sendText = truncated ? text.substring(0, MAX_CHARS) : text;
+
+  var btns = document.querySelectorAll('#od-scope-card .ch button');
+  btns.forEach(function(b){ b.disabled = true; });
+
+  var prompt = 'You are helping a construction estimator extract a scope checklist from a bid category description document. ' +
+    'Extract each distinct scope item as a separate checklist entry. Preserve the original wording. ' +
+    'Group items by their section heading from the document (e.g. "Project Specific Inclusions", "Project Specific Exclusions", "Includes"). ' +
+    'Return STRICT JSON only, no markdown, no commentary. Schema:\n' +
+    '{"items":[{"text":"...","section":"..."}]}\n\n' +
+    'DOCUMENT TEXT:\n' + sendText;
+
+  try {
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 4000,
+        messages: [{role: 'user', content: prompt}]
+      })
+    });
+
+    if (!resp.ok) {
+      var errText = await resp.text();
+      throw new Error('API ' + resp.status + ': ' + errText.substring(0, 300));
+    }
+
+    var data = await resp.json();
+    var reply = (data.content && data.content[0] && data.content[0].text) || '';
+    reply = reply.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+
+    var parsed;
+    try { parsed = JSON.parse(reply); }
+    catch(e) { throw new Error('Could not parse AI response as JSON. Response was: ' + reply.substring(0, 300)); }
+
+    if (!parsed.items || !Array.isArray(parsed.items)) {
+      throw new Error('AI response missing "items" array.');
+    }
+
+    var cleanItems = parsed.items.map(function(it){
+      return {
+        text: String(it.text || '').trim(),
+        section: String(it.section || 'Scope').trim(),
+        done: false,
+        note: ''
+      };
+    }).filter(function(it){ return it.text.length > 0; });
+
+    var suffix = truncated ? ' (note: document was truncated to ' + MAX_CHARS + ' chars)' : '';
+    scopeApplyExtractedItems(cleanItems, 'AI' + suffix);
+  } catch(err) {
+    console.error('AI extract error:', err);
+    alert('AI extraction failed: ' + err.message + '\n\nYou can fall back to Upload PDF for rule-based extraction.');
+  } finally {
+    btns.forEach(function(b){ b.disabled = false; });
+  }
+}
+
+// ================================================================
 // SUPABASE INTEGRATION
 // ════════════════════════════════════════════════════════════════
 var supabaseClient = null;
@@ -3848,6 +4209,8 @@ function toSBOpp(r) {
     no_reason:r.noReason||'', proposal_id:r.proposalId||null,
     final_bid_amount:(r.finalBidAmount !== undefined ? r.finalBidAmount : null),
     outcome_status:r.outcomeStatus||null,
+    scope_items:r.scopeItems||[],
+    scope_source_url:r.scopeSourceUrl||'',
     created:r.created||''
   };
 }
@@ -3862,6 +4225,8 @@ function fromSBOpp(r) {
     noReason:r.no_reason||'', proposalId:r.proposal_id||null,
     finalBidAmount:r.final_bid_amount !== null ? r.final_bid_amount : null,
     outcomeStatus:r.outcome_status||null,
+    scopeItems:r.scope_items||[],
+    scopeSourceUrl:r.scope_source_url||'',
     created:r.created||''
   };
 }
