@@ -73,20 +73,20 @@ tr:hover td{background:#fafafa}
 .ed-sel.dec-bidding,.ed-sel.out-won{background-color:#eaf3de;color:#3B6D11;border-color:#C1DBAB}
 .ed-sel.dec-not-bidding,.ed-sel.out-lost{background-color:#fcebeb;color:#A32D2D;border-color:#E8C8C8}
 .ed-sel.out-budget{background-color:#faf1d6;color:#9A7A2E;border-color:#E6D59F}
-.scope-row{display:flex;gap:8px;align-items:flex-start;padding:10px;border-bottom:0.5px solid #eee;font-size:13px}
+.scope-row{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-bottom:0.5px solid #eee;font-size:13px;width:100%;box-sizing:border-box}
 .scope-row:last-child{border-bottom:none}
-.scope-row .scope-cb{margin-top:2px;accent-color:var(--kmi);flex-shrink:0;cursor:pointer}
+.scope-row .scope-cb{margin-top:3px;accent-color:var(--kmi);flex:0 0 auto;cursor:pointer;width:16px;height:16px}
 .scope-row.done .scope-txt{color:#888;text-decoration:line-through}
-.scope-txt{flex:1;line-height:1.5;word-wrap:break-word}
-.scope-actions{display:flex;gap:4px;flex-shrink:0;opacity:0;transition:opacity .15s}
-.scope-row:hover .scope-actions{opacity:1}
-.scope-actions button{background:none;border:none;color:#888;cursor:pointer;font-size:11px;padding:2px 6px;border-radius:4px;font-family:inherit}
-.scope-actions button:hover{background:#f1efe8;color:var(--kmi)}
-.scope-section-hdr{font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:14px 10px 6px;background:#fafafa;border-bottom:1px solid #eee}
+.scope-body{flex:1 1 auto;min-width:0}
+.scope-txt{line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere;white-space:normal}
+.scope-actions{display:flex;gap:2px;flex:0 0 auto;align-self:flex-start}
+.scope-actions button{background:none;border:1px solid transparent;color:#888;cursor:pointer;font-size:11px;padding:3px 7px;border-radius:4px;font-family:inherit;white-space:nowrap}
+.scope-actions button:hover{background:#f1efe8;color:var(--kmi);border-color:#e5e5e5}
+.scope-section-hdr{font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:14px 12px 6px;background:#fafafa;border-bottom:1px solid #eee}
 .scope-empty{padding:24px;text-align:center;color:#aaa;font-size:12px;border:1px dashed #e5e5e5;border-radius:8px}
-.scope-note{width:100%;margin-top:6px;padding:6px 8px;font-size:12px;border:1px solid #e5e5e5;border-radius:5px;font-family:inherit;display:none;resize:vertical;min-height:40px}
-.scope-row.has-note .scope-note{display:block}
-.scope-row.editing-note .scope-note{display:block}
+.scope-note{width:100%;margin-top:6px;padding:6px 8px;font-size:12px;border:1px solid #e5e5e5;border-radius:5px;font-family:inherit;display:none;resize:vertical;min-height:40px;box-sizing:border-box}
+.scope-row.has-note .scope-note,.scope-row.editing-note .scope-note{display:block}
+#od-scope-items{border:1px solid #eee;border-radius:8px;overflow:hidden}
 .view-toggle{display:inline-flex;background:#f1efe8;border-radius:8px;padding:3px;gap:2px}
 .view-toggle button{background:none;border:none;padding:6px 14px;font-size:12px;font-weight:600;color:#666;border-radius:6px;cursor:pointer;font-family:inherit;transition:all .15s}
 .view-toggle button.active{background:#fff;color:var(--kmi);box-shadow:0 1px 2px rgba(0,0,0,.08)}
@@ -3850,7 +3850,7 @@ function renderScopeChecklist(o) {
         var cls = 'scope-row' + (it.done ? ' done' : '') + (it.note ? ' has-note' : '');
         return '<div class="' + cls + '" data-scope-idx="' + entry.idx + '">' +
           '<input type="checkbox" class="scope-cb"' + (it.done ? ' checked' : '') + ' onchange="scopeToggle(' + entry.idx + ', this.checked)">' +
-          '<div style="flex:1">' +
+          '<div class="scope-body">' +
             '<div class="scope-txt">' + escapeHtml(it.text || '') + '</div>' +
             '<textarea class="scope-note" placeholder="Add note..." onblur="scopeSaveNote(' + entry.idx + ', this.value)">' + escapeHtml(it.note || '') + '</textarea>' +
           '</div>' +
@@ -3987,39 +3987,84 @@ async function scopeHandlePdfFile(file, mode) {
 }
 
 function scopeExtractRuleBased(text) {
-  var items = [];
+  // Normalize all whitespace to single spaces for predictable matching.
   var norm = text.replace(/\s+/g, ' ').trim();
 
-  var sectionRe = /([A-Z])\.\s+([A-Z][A-Z\s\-:]{3,60}?)(?=\s+\d+\.|\s+[A-Z]\.|$)/g;
-  var sectionMatches = [];
-  var m;
-  while ((m = sectionRe.exec(norm)) !== null) {
-    sectionMatches.push({letter: m[1], title: m[2].trim().replace(/[:\s]+$/, ''), start: m.index, end: m.index + m[0].length});
+  // ── Step 1: Find all section headers ────────────────────────────
+  // A section header is: letter + "." + space + 2+ ALL-CAPS WORDS + optional colon.
+  // We require a minimum uppercase run so we don't match "U. S." or initials.
+  var sectionHeaders = [];
+  var secRe = /\b([A-Z])\.\s+([A-Z][A-Z][A-Z\s&\-:/]{2,80})/g;
+  var sm;
+  while ((sm = secRe.exec(norm)) !== null) {
+    var title = sm[2].trim()
+      .replace(/[:\s]+$/, '')
+      .replace(/\s+/g, ' ');
+    // Skip if the "title" is mostly just a single word (false positive)
+    // or if it looks like a word that happens to start with a capital.
+    var words = title.split(' ').filter(function(w){ return w.length > 0; });
+    if (words.length < 2) continue;
+    // Title-case it for display (PROJECT SPECIFIC INCLUSIONS -> Project Specific Inclusions)
+    var displayTitle = title.toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); });
+    sectionHeaders.push({
+      letter: sm[1],
+      title: displayTitle,
+      start: sm.index,
+      end: sm.index + sm[0].length
+    });
   }
 
-  if (sectionMatches.length === 0) {
-    var numRe = /(?:^|\s)(\d{1,2})\.\s+([^0-9][^.]{15,400}?\.)/g;
-    while ((m = numRe.exec(norm)) !== null) {
-      items.push({text: m[2].trim(), done: false, note: '', section: 'Scope'});
-    }
-    return items;
+  // ── Step 2: Find all numbered items ──────────────────────────────
+  // Pattern: start-of-string or whitespace, then 1-2 digits, then ".",
+  // then whitespace, then a letter (not a digit — this avoids matching
+  // things like decimal numbers "04 22.00").
+  // We capture the start position so we can associate with sections.
+  var itemStarts = [];
+  var itRe = /(?:^|\s)(\d{1,2})\.\s+(?=[A-Za-z])/g;
+  var im;
+  while ((im = itRe.exec(norm)) !== null) {
+    // Where the item's text begins (after "N. ")
+    var textStart = im.index + im[0].length;
+    itemStarts.push({num: parseInt(im[1]), textStart: textStart, headerStart: im.index});
   }
 
-  for (var s = 0; s < sectionMatches.length; s++) {
-    var sec = sectionMatches[s];
-    var nextStart = (s + 1 < sectionMatches.length) ? sectionMatches[s+1].start : norm.length;
-    var body = norm.substring(sec.end, nextStart);
-    var sectionLabel = sec.title;
+  // ── Step 3: For each item, slice text up to the NEXT item start
+  //           (or the next section header, whichever comes first).
+  var items = [];
+  for (var i = 0; i < itemStarts.length; i++) {
+    var cur = itemStarts[i];
 
-    var itemRe = /(\d{1,2})\.\s+([^0-9].*?)(?=\s\d{1,2}\.\s|$)/g;
-    var im;
-    while ((im = itemRe.exec(body)) !== null) {
-      var itemText = im[2].trim().replace(/\s+/g, ' ');
-      if (itemText.length < 10) continue;
-      if (/^Hunzinger|^Project No\.|^Addendum/i.test(itemText)) continue;
-      if (itemText.length > 600) itemText = itemText.substring(0, 600) + '\u2026';
-      items.push({text: itemText, done: false, note: '', section: sectionLabel});
+    // Determine end boundary: min of (next item start, next section header start, eof)
+    var end = norm.length;
+    if (i + 1 < itemStarts.length) end = Math.min(end, itemStarts[i+1].headerStart);
+    for (var h = 0; h < sectionHeaders.length; h++) {
+      if (sectionHeaders[h].start > cur.textStart && sectionHeaders[h].start < end) {
+        end = sectionHeaders[h].start;
+      }
     }
+
+    var itemText = norm.substring(cur.textStart, end).trim().replace(/\s+/g, ' ');
+    if (itemText.length < 10) continue;
+
+    // Filter out obviously non-scope fragments (addendum headers, doc identifiers)
+    if (/^Hunzinger|^Project No\.|^Addendum|^Bid Category/i.test(itemText)) continue;
+
+    // Truncate overly long items (likely a run-on where regex didn't find a boundary)
+    if (itemText.length > 800) itemText = itemText.substring(0, 800) + '\u2026';
+
+    // Find which section this item belongs to: the last section header that
+    // started before this item.
+    var sectionLabel = 'Scope';
+    for (var h2 = sectionHeaders.length - 1; h2 >= 0; h2--) {
+      // "textStart" is where item content begins (after "N. "). If it's
+      // past the section header's end, the item belongs to that section.
+      if (sectionHeaders[h2].end < cur.textStart) {
+        sectionLabel = sectionHeaders[h2].title;
+        break;
+      }
+    }
+
+    items.push({text: itemText, done: false, note: '', section: sectionLabel});
   }
 
   return items;
