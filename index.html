@@ -4392,9 +4392,13 @@ async function pullFromSupabase() {
     db.proposals     = (props.data  || []).map(fromSBProposal);
     db.activity      = (acts.data   || []).map(function(a){ return {text:a.text, type:a.type, time:a.time}; });
 
-    // Settings
+    // Settings — copy known setting rows into db. Includes runtime-config
+    // keys like anthropic_api_key that aren't part of the default db shape.
+    var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
+                                'companyTypes','projectTypes','clarGroups',
+                                'anthropic_api_key'];
     (settings.data || []).forEach(function(row) {
-      if (db.hasOwnProperty(row.key)) db[row.key] = row.value;
+      if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
     });
 
     // Save to localStorage as cache
