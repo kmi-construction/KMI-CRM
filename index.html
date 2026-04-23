@@ -261,6 +261,7 @@ textarea{resize:vertical;min-height:72px}
   <div class="ni active" onclick="nav('dashboard')"><span class="nico">▦</span>Dashboard</div>
   <div class="ngl">Pipeline</div>
   <div class="ni" onclick="nav('opportunities')"><span class="nico">◈</span>Bid Opportunities</div>
+  <div class="ni" onclick="nav('projects')"><span class="nico">⬢</span>Projects</div>
   <div class="ngl">Contacts</div>
   <div class="ni" onclick="nav('customers')"><span class="nico">◎</span>Customers</div>
   <div class="ni" onclick="nav('pms')"><span class="nico">◉</span>Project Managers</div>
@@ -478,6 +479,58 @@ textarea{resize:vertical;min-height:72px}
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
     <button class="btn" id="np-cancel-btn">Cancel</button>
     <button class="btn btn-p" id="np-save-btn" onclick="npSave()" style="padding:10px 32px;font-size:14px;font-weight:700">Create proposal</button>
+  </div>
+</div>
+
+<!-- PROJECTS LIST -->
+<div class="pg" id="pg-projects">
+  <div class="ph">
+    <div><h1>Projects</h1><div class="sub">Awarded and active construction projects</div><div class="stripe"></div></div>
+  </div>
+  <div class="mets" id="prj-mets"></div>
+  <div class="ab">
+    <input class="si" placeholder="Search by number, name, address..." oninput="filterProj()" id="prj-s">
+    <select class="fs" onchange="filterProj()" id="prj-fc"><option value="">All customers</option></select>
+    <select class="fs" onchange="filterProj()" id="prj-ft"><option value="">All types</option></select>
+    <button class="btn btn-p" style="margin-left:auto" onclick="nav('new-project')">+ New project</button>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table><thead><tr>
+      <th>Project #</th><th>Name</th><th>Customer</th><th>Address</th><th>Type</th><th>Contract amount</th><th>Source</th><th>Actions</th>
+    </tr></thead><tbody id="prj-tbody"></tbody></table>
+  </div>
+</div>
+
+<!-- NEW / EDIT PROJECT -->
+<div class="pg" id="pg-new-project">
+  <div class="ph" style="margin-bottom:0">
+    <div><h1 id="nprj-heading">New project</h1><div class="sub" id="nprj-id-display" style="font-weight:600;color:var(--kmi)"></div><div class="stripe"></div></div>
+    <button class="btn" onclick="nav('projects')">← Cancel</button>
+  </div>
+  <div class="card">
+    <div class="ch"><span class="ct">Project details</span></div>
+    <div class="fg">
+      <div class="fgr"><label>Project number *</label><input id="nprj-num" placeholder="e.g. PRJ-2026-001"></div>
+      <div class="fgr"><label>Customer *</label><select id="nprj-cust"><option value="">Select customer...</option></select></div>
+      <div class="fgr full"><label>Project name *</label><input id="nprj-name" placeholder="Describe the project..."></div>
+      <div class="fgr full"><label>Project address</label><input id="nprj-addr" placeholder="Street address (e.g. 123 Main St)"></div>
+      <div class="fgr"><label>City</label><input id="nprj-city" placeholder="City"></div>
+      <div class="fgr"><label>State</label><select id="nprj-state"><option value="">— Select —</option></select></div>
+      <div class="fgr"><label>Zip code</label><input id="nprj-zip" placeholder="e.g. 12345 or 12345-6789" maxlength="10" inputmode="numeric"></div>
+      <div class="fgr"><label>Contract amount ($)</label><input type="number" id="nprj-amt" placeholder="0"></div>
+      <div class="fgr full">
+        <label>Project types <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(select all that apply)</span></label>
+        <div id="nprj-type-checks" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px"></div>
+      </div>
+      <div class="fgr full" id="nprj-source-wrap" style="display:none">
+        <label>Source opportunity</label>
+        <div style="font-size:12px;color:#888;padding:8px 12px;background:#fafafa;border-radius:7px" id="nprj-source-note"></div>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
+    <button class="btn" onclick="nav('projects')">Cancel</button>
+    <button class="btn btn-p" onclick="saveProject()" style="padding:10px 32px;font-size:14px;font-weight:700" id="nprj-save-btn">Create project</button>
   </div>
 </div>
 
@@ -701,7 +754,7 @@ var _oppSort = { col: 'bidDate', dir: 'desc' };  // default: newest bid date fir
 var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; })();
 
 var DB_DEFAULTS = {
-  customers: [], pms: [], users: [], opportunities: [], proposals: [], activity: [],
+  customers: [], pms: [], users: [], opportunities: [], proposals: [], projects: [], activity: [],
   companyTypes: ['General Contractor','Commercial','Developer','Civil Engineering','Industrial','Residential'],
   projectTypes: ['Foundation','Structural Steel','Structural Concrete','Masonry','Concrete','Earthwork','Site Utilities','Shoring & Excavation','Demolition','Other'],
   stdClar: [
@@ -745,6 +798,7 @@ function loadDB() {
         users:        p.users        || [],
         opportunities:p.opportunities|| [],
         proposals:    p.proposals    || [],
+        projects:     p.projects     || [],
         activity:     p.activity     || [],
         stdClar:      p.stdClar      || DB_DEFAULTS.stdClar,
         projClar:     p.projClar     || DB_DEFAULTS.projClar,
@@ -1143,7 +1197,9 @@ function nav(page) {
     analytics:        renderAnalytics,
     import:           renderImport,
     'supabase-setup': renderSupabaseSetup,
-    templates:        renderTemplates
+    templates:        renderTemplates,
+    projects:         renderProjects,
+    'new-project':    initNewProject
   };
   if (fns[page]) fns[page]();
 }
@@ -1717,7 +1773,31 @@ function renderOppDetail(id) {
             '<option value="budget"' + (cur === 'budget' ? ' selected' : '') + '>Budget</option>' +
           '</select>' +
         '</div>' +
-      '</div>';
+      '</div>' +
+      (function(){
+        // Linked project indicator (when outcome is won)
+        if (cur !== 'won') return '';
+        var linked = o.projectId ? getProj(o.projectId) : null;
+        if (linked) {
+          return '<div class="card" style="margin-top:10px;border-left:3px solid #3B6D11;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">' +
+            '<div>' +
+              '<div class="ct" style="margin-bottom:4px">Linked project</div>' +
+              '<div style="font-size:13px"><strong style="color:var(--kmi)">' + (linked.number || '—') + '</strong> — ' + (linked.name || '') + ' · <span style="color:#3B6D11;font-weight:600">' + fmtC(linked.contractAmount || 0) + '</span></div>' +
+            '</div>' +
+            '<div style="display:flex;gap:6px">' +
+              '<button class="btn btn-sm" onclick="viewProject(' + linked.id + ')">View project</button>' +
+              '<button class="btn btn-sm" onclick="editProject(' + linked.id + ')">✎ Edit</button>' +
+            '</div>' +
+          '</div>';
+        }
+        return '<div class="card" style="margin-top:10px;background:#faf1d6;border-left:3px solid var(--ac);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">' +
+          '<div>' +
+            '<div class="ct" style="margin-bottom:4px">No project linked yet</div>' +
+            '<div style="font-size:12px;color:#6a5a20">Create a project record to track the awarded work.</div>' +
+          '</div>' +
+          '<button class="btn btn-p btn-sm" onclick="promptCreateProjectFromOpp(currentOppId)">+ Create project</button>' +
+        '</div>';
+      })();
   } else {
     outSec.innerHTML = '';
   }
@@ -1843,6 +1923,10 @@ function setOutcome(oppId, status) {
     db.activity.unshift({text: o.id + ' outcome cleared', type: 'pending', time: 'Just now'});
   }
   saveDB(); renderOppDetail(oppId); if (typeof renderOpportunities === 'function') renderOpportunities();
+  // If the opportunity was just marked Won and has no project linked yet, offer to create one
+  if (status === 'won' && status !== prev && !o.projectId) {
+    promptCreateProjectFromOpp(oppId);
+  }
 }
 function promptNotBidding(id) {
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
@@ -2568,6 +2652,332 @@ async function adminSendTempPassword(id) {
   u.status = u.status || 'active';
   saveDB();
   showEmailSimulationModal(u, pw, 'Temporary password');
+}
+
+// ── PROJECTS ────────────────────────────────────────────────────
+var _editProjectId = null;
+var _newProjectFromOppId = null;
+
+function getProj(id) { return db.projects.find(function(p){ return p.id === id; }); }
+
+function generateProjectNumber() {
+  var year = new Date().getFullYear();
+  var prefix = 'PRJ-' + year + '-';
+  var max = 0;
+  db.projects.forEach(function(p){
+    if (p.number && p.number.indexOf(prefix) === 0) {
+      var n = parseInt(p.number.slice(prefix.length), 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return prefix + String(max + 1).padStart(3, '0');
+}
+
+function isProjectNumberUnique(num, excludeId) {
+  if (!num) return false;
+  var n = String(num).trim().toLowerCase();
+  return !db.projects.some(function(p){
+    return p.id !== excludeId && String(p.number || '').trim().toLowerCase() === n;
+  });
+}
+
+function formatProjAddress(p) {
+  if (!p) return '';
+  var line1 = (p.address || '').trim();
+  var city  = (p.city || '').trim();
+  var state = (p.state || '').trim();
+  var zip   = (p.zip || '').trim();
+  var cityStateZip = [city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return [line1, cityStateZip].filter(Boolean).join(', ');
+}
+
+function renderProjects() {
+  // Customer filter
+  g('prj-fc').innerHTML = '<option value="">All customers</option>' +
+    db.customers.slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); })
+      .map(function(c){ return '<option value="' + c.id + '">' + c.name + '</option>'; }).join('');
+  // Type filter
+  g('prj-ft').innerHTML = '<option value="">All types</option>' +
+    db.projectTypes.map(function(t){ return '<option value="' + t + '">' + t + '</option>'; }).join('');
+  filterProj();
+}
+
+function filterProj() {
+  var s  = (g('prj-s').value  || '').toLowerCase();
+  var fc = g('prj-fc').value;
+  var ft = g('prj-ft').value;
+  var list = db.projects.filter(function(p){
+    if (fc && String(p.customerId) !== String(fc)) return false;
+    if (ft) {
+      var tArr = Array.isArray(p.types) && p.types.length ? p.types : [p.type || ''];
+      if (tArr.indexOf(ft) === -1) return false;
+    }
+    if (!s) return true;
+    var cust = getCust(p.customerId);
+    var hay = [p.number, p.name, cust.name, formatProjAddress(p), (p.types||[]).join(' '), p.type].join(' ').toLowerCase();
+    return hay.indexOf(s) !== -1;
+  }).sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
+
+  // Metrics
+  var totalVal = list.reduce(function(s,p){ return s + (p.contractAmount || 0); }, 0);
+  var thisYear = new Date().getFullYear();
+  var ytd = list.filter(function(p){ return (p.created||'').slice(0,4) === String(thisYear); });
+  var ytdVal = ytd.reduce(function(s,p){ return s + (p.contractAmount || 0); }, 0);
+  g('prj-mets').innerHTML =
+    '<div class="mc"><div class="ml">Total projects</div><div class="mv">' + list.length + '</div></div>' +
+    '<div class="mc"><div class="ml">Total contract value</div><div class="mv gn">' + fmtC(totalVal) + '</div></div>' +
+    '<div class="mc"><div class="ml">New this year</div><div class="mv bl">' + ytd.length + '</div></div>' +
+    '<div class="mc"><div class="ml">Contract value YTD</div><div class="mv am">' + fmtC(ytdVal) + '</div></div>';
+
+  // Table
+  if (!list.length) {
+    g('prj-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;color:#aaa;padding:32px;font-size:13px">No projects yet. Create one manually, or mark a bid opportunity as <strong>Won</strong> to generate a project.</td></tr>';
+    return;
+  }
+  g('prj-tbody').innerHTML = list.map(function(p){
+    var c = getCust(p.customerId);
+    var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
+    var typeCell = types.length
+      ? types.map(function(t){ return '<span class="tag" style="margin-right:4px">' + t + '</span>'; }).join('')
+      : '<span style="color:#aaa;font-size:12px">—</span>';
+    var sourceCell = p.opportunityId
+      ? '<span class="tag" style="cursor:pointer;color:var(--kmi);border-color:var(--stl)" onclick="openOppDetail(\'' + p.opportunityId + '\')" title="View source opportunity">' + p.opportunityId + '</span>'
+      : '<span class="tag">Manual</span>';
+    return '<tr>' +
+      '<td style="font-weight:600;color:var(--kmi);cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.number || '—') + '</td>' +
+      '<td style="cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.name || '<span style="color:#aaa">—</span>') + '</td>' +
+      '<td>' + c.name + '</td>' +
+      '<td style="font-size:12px;color:#555">' + (formatProjAddress(p) || '<span style="color:#aaa">—</span>') + '</td>' +
+      '<td>' + typeCell + '</td>' +
+      '<td style="font-weight:600">' + fmtC(p.contractAmount || 0) + '</td>' +
+      '<td>' + sourceCell + '</td>' +
+      '<td>' +
+        '<button class="btn btn-sm" onclick="editProject(' + p.id + ')">✎ Edit</button>&nbsp;' +
+        '<button class="btn btn-sm" style="color:#A32D2D" onclick="deleteProject(' + p.id + ')">Delete</button>' +
+      '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function renderProjectTypeChecksForProject(selected) {
+  var wrap = g('nprj-type-checks'); if (!wrap) return;
+  var sel = selected || [];
+  wrap.innerHTML = db.projectTypes.map(function(t, i){
+    var chk = sel.indexOf(t) !== -1 ? ' checked' : '';
+    return '<label class="ci" style="margin-bottom:0"><input type="checkbox" value="' + t + '" class="nprj-type-cb"' + chk + '><span>' + t + '</span></label>';
+  }).join('');
+}
+
+function getCheckedProjectTypesForProject() {
+  return Array.prototype.slice.call(document.querySelectorAll('.nprj-type-cb'))
+    .filter(function(cb){ return cb.checked; }).map(function(cb){ return cb.value; });
+}
+
+function populateProjectCustDropdown(selectedId) {
+  g('nprj-cust').innerHTML = '<option value="">Select customer...</option>' +
+    db.customers.slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); })
+      .map(function(c){
+        return '<option value="' + c.id + '"' + (String(selectedId) === String(c.id) ? ' selected' : '') + '>' + c.name + (c.contact ? ' — ' + c.contact : '') + '</option>';
+      }).join('');
+}
+
+function populateProjectStateDropdown(selected) {
+  var sel = g('nprj-state'); if (!sel) return;
+  sel.innerHTML = '<option value="">— Select —</option>' +
+    US_STATES.map(function(st){ return '<option value="' + st + '"' + (selected === st ? ' selected' : '') + '>' + st + '</option>'; }).join('');
+}
+
+function initNewProject() {
+  _editProjectId = null;
+  g('nprj-heading').textContent    = 'New project';
+  g('nprj-save-btn').textContent   = 'Create project';
+  g('nprj-id-display').textContent = '';
+
+  var prefill = null;
+  if (_newProjectFromOppId) {
+    var o = getOpp(_newProjectFromOppId);
+    if (o) {
+      prefill = {
+        name: o.project || '',
+        customerId: o.customerId || '',
+        address: o.address || '',
+        city: o.city || '',
+        state: o.state || '',
+        zip: o.zip || '',
+        contractAmount: (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue || 0),
+        types: (Array.isArray(o.types) && o.types.length) ? o.types.slice() : (o.type ? [o.type] : []),
+        opportunityId: o.id
+      };
+      g('nprj-source-wrap').style.display = '';
+      g('nprj-source-note').innerHTML = 'Pre-filled from opportunity <strong style="color:var(--kmi)">' + o.id + '</strong> — ' + (o.project || '');
+    }
+  } else {
+    g('nprj-source-wrap').style.display = 'none';
+    g('nprj-source-note').textContent = '';
+  }
+
+  g('nprj-num').value   = generateProjectNumber();
+  g('nprj-name').value  = prefill ? prefill.name : '';
+  g('nprj-addr').value  = prefill ? prefill.address : '';
+  g('nprj-city').value  = prefill ? prefill.city : '';
+  g('nprj-zip').value   = prefill ? prefill.zip : '';
+  g('nprj-amt').value   = prefill ? (prefill.contractAmount || '') : '';
+  populateProjectCustDropdown(prefill ? prefill.customerId : '');
+  populateProjectStateDropdown(prefill ? prefill.state : '');
+  renderProjectTypeChecksForProject(prefill ? prefill.types : []);
+
+  // Stash the source opp id on the form for saveProject() to read, then clear the module-level var
+  g('nprj-save-btn').dataset.oppId = _newProjectFromOppId || '';
+  _newProjectFromOppId = null;
+}
+
+function saveProject() {
+  var number = (g('nprj-num').value  || '').trim();
+  var name   = (g('nprj-name').value || '').trim();
+  var custId = parseInt(g('nprj-cust').value);
+  if (!number) { alert('Please enter a project number.'); return; }
+  if (!name)   { alert('Please enter a project name.'); return; }
+  if (!custId) { alert('Please select a customer.'); return; }
+  if (!isProjectNumberUnique(number, _editProjectId)) {
+    alert('Project number "' + number + '" is already in use. Please choose a unique number.'); return;
+  }
+
+  var types = getCheckedProjectTypesForProject();
+  var amt   = parseFloat(g('nprj-amt').value) || 0;
+  var payload = {
+    number: number,
+    name: name,
+    customerId: custId,
+    address: (g('nprj-addr').value  || '').trim(),
+    city:    (g('nprj-city').value  || '').trim(),
+    state:   (g('nprj-state').value || '').trim(),
+    zip:     (g('nprj-zip').value   || '').trim(),
+    contractAmount: amt,
+    types: types,
+    type:  types[0] || ''
+  };
+
+  if (_editProjectId) {
+    var p = getProj(_editProjectId); if (!p) return;
+    Object.keys(payload).forEach(function(k){ p[k] = payload[k]; });
+    db.activity.unshift({text: 'Project ' + p.number + ' updated', type: 'won', time: 'Just now'});
+    saveDB(); _editProjectId = null; nav('projects');
+    return;
+  }
+
+  // Create
+  var newId = Date.now();
+  var oppId = g('nprj-save-btn').dataset.oppId || '';
+  payload.id         = newId;
+  payload.created    = new Date().toISOString().slice(0,10);
+  payload.opportunityId = oppId || null;
+  db.projects.push(payload);
+
+  if (oppId) {
+    var o = getOpp(oppId);
+    if (o) { o.projectId = newId; }
+    db.activity.unshift({text: 'Project ' + number + ' created from ' + oppId, type: 'won', time: 'Just now'});
+  } else {
+    db.activity.unshift({text: 'Project ' + number + ' created', type: 'won', time: 'Just now'});
+  }
+  g('nprj-save-btn').dataset.oppId = '';
+  saveDB(); nav('projects');
+}
+
+function editProject(id) {
+  var p = getProj(id); if (!p) { alert('Project not found.'); return; }
+  _editProjectId = id;
+  _newProjectFromOppId = null;
+  setActivePage('projects');
+  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+  g('pg-new-project').classList.add('active');
+  closeModal();
+
+  g('nprj-heading').textContent    = 'Edit project';
+  g('nprj-save-btn').textContent   = 'Save changes';
+  g('nprj-id-display').textContent = p.number || '';
+
+  g('nprj-num').value  = p.number || '';
+  g('nprj-name').value = p.name   || '';
+  g('nprj-addr').value = p.address|| '';
+  g('nprj-city').value = p.city   || '';
+  g('nprj-zip').value  = p.zip    || '';
+  g('nprj-amt').value  = p.contractAmount || '';
+  populateProjectCustDropdown(p.customerId);
+  populateProjectStateDropdown(p.state || '');
+  var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
+  renderProjectTypeChecksForProject(types);
+
+  if (p.opportunityId) {
+    g('nprj-source-wrap').style.display = '';
+    g('nprj-source-note').innerHTML = 'Linked to opportunity <strong style="color:var(--kmi)">' + p.opportunityId + '</strong>';
+  } else {
+    g('nprj-source-wrap').style.display = 'none';
+  }
+  g('nprj-save-btn').dataset.oppId = '';
+}
+
+function deleteProject(id) {
+  var p = getProj(id); if (!p) return;
+  if (!confirm('Delete project ' + (p.number || '') + (p.name ? ' (' + p.name + ')' : '') + '?\n\nThis cannot be undone.')) return;
+  if (p.opportunityId) {
+    var o = getOpp(p.opportunityId);
+    if (o && o.projectId === p.id) o.projectId = null;
+  }
+  db.projects = db.projects.filter(function(x){ return x.id !== id; });
+  db.activity.unshift({text: 'Project ' + (p.number || id) + ' deleted', type: 'lost', time: 'Just now'});
+  saveDB(); renderProjects();
+}
+
+function viewProject(id) {
+  var p = getProj(id); if (!p) return;
+  var c = getCust(p.customerId);
+  var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
+  var addr = formatProjAddress(p) || '<span style="color:#aaa">—</span>';
+  var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">' + (p.number || 'Project') + '</div>' +
+    '<div class="msb">' + (p.name || '') + '</div>' +
+    '<div class="pmg">' +
+      '<div><div class="k">Customer</div><div class="v">' + c.name + '</div></div>' +
+      '<div><div class="k">Contract amount</div><div class="v" style="color:var(--kmi)">' + fmtC(p.contractAmount || 0) + '</div></div>' +
+      '<div><div class="k">Created</div><div class="v">' + (p.created || '—') + '</div></div>' +
+    '</div>' +
+    '<div class="sb3"><h4>Project address</h4><div style="font-size:13px">' + addr + '</div></div>' +
+    '<div class="sb3"><h4>Project types</h4>' + (types.length ? types.map(function(t){ return '<span class="tag" style="margin-right:4px">' + t + '</span>'; }).join('') : '<span style="color:#aaa;font-size:12px">—</span>') + '</div>' +
+    (p.opportunityId ? '<div class="sb3"><h4>Source opportunity</h4><span class="tag" style="cursor:pointer;color:var(--kmi)" onclick="closeModal();openOppDetail(\'' + p.opportunityId + '\')">' + p.opportunityId + ' ↗</span></div>' : '') +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Close</button>' +
+      '<button class="btn" onclick="closeModal();editProject(' + p.id + ')">✎ Edit</button>' +
+      '<button class="btn" style="color:#A32D2D" onclick="closeModal();deleteProject(' + p.id + ')">Delete</button>' +
+    '</div>';
+  showModal(html);
+}
+
+// Fires when an opportunity outcome is set to "won" — offers to spin up a linked project
+function promptCreateProjectFromOpp(oppId) {
+  var o = getOpp(oppId); if (!o) return;
+  var c = getCust(o.customerId);
+  var suggested = generateProjectNumber();
+  var amt = (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue || 0);
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">🎉 Opportunity won — create project?</div>' +
+    '<div class="msb">' + o.id + ' · ' + (o.project || '') + ' · ' + c.name + '</div>' +
+    '<div class="sb3" style="margin-bottom:14px">' +
+      '<h4>This will create a new project pre-filled with</h4>' +
+      '<div style="font-size:13px;line-height:1.8">' +
+        '<div><strong>Project number:</strong> ' + suggested + ' <span style="color:#888;font-size:11px">(editable on next screen)</span></div>' +
+        '<div><strong>Name:</strong> ' + (o.project || '—') + '</div>' +
+        '<div><strong>Customer:</strong> ' + c.name + '</div>' +
+        '<div><strong>Address:</strong> ' + (formatOppAddress(o) || '—') + '</div>' +
+        '<div><strong>Contract amount:</strong> ' + fmtC(amt) + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Skip for now</button>' +
+      '<button class="btn btn-p" onclick="closeModal();_newProjectFromOppId=\'' + o.id + '\';nav(\'new-project\')">Create project →</button>' +
+    '</div>'
+  );
 }
 
 // ── ANALYTICS ───────────────────────────────────────────────────
@@ -3761,6 +4171,29 @@ function fromSBProposal(r) {
   };
 }
 
+function toSBProject(r) {
+  return {
+    id:r.id, number:r.number||'', name:r.name||'',
+    customer_id:r.customerId||null,
+    address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
+    contract_amount:r.contractAmount||0,
+    type:r.type||'', types:r.types||[],
+    opportunity_id:r.opportunityId||null,
+    created:r.created||''
+  };
+}
+function fromSBProject(r) {
+  return {
+    id:r.id, number:r.number||'', name:r.name||'',
+    customerId:r.customer_id||null,
+    address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
+    contractAmount:r.contract_amount||0,
+    type:r.type||'', types:r.types||[],
+    opportunityId:r.opportunity_id||null,
+    created:r.created||''
+  };
+}
+
 // ── Push all data to Supabase ────────────────────────────────────
 async function pushToSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
@@ -3793,6 +4226,11 @@ async function pushToSupabase() {
     if (db.proposals.length) {
       var r = await supabaseClient.from('kmi_proposals').upsert(db.proposals.map(toSBProposal));
       if (r.error) errs.push('proposals: ' + r.error.message);
+    }
+    // Projects
+    if (db.projects.length) {
+      var r = await supabaseClient.from('kmi_projects').upsert(db.projects.map(toSBProject));
+      if (r.error) errs.push('projects: ' + r.error.message);
     }
     // Activity (insert new ones — get current max id first)
     if (db.activity.length) {
@@ -3836,18 +4274,19 @@ async function pullFromSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
   setSyncStatus('syncing', 'Loading\u2026');
   try {
-    var [custs, pms, users, opps, props, acts, settings] = await Promise.all([
+    var [custs, pms, users, opps, props, projs, acts, settings] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_users').select('*'),
       supabaseClient.from('kmi_opportunities').select('*'),
       supabaseClient.from('kmi_proposals').select('*'),
+      supabaseClient.from('kmi_projects').select('*'),
       supabaseClient.from('kmi_activity').select('*').order('created_at', {ascending:false}).limit(50),
       supabaseClient.from('kmi_settings').select('*')
     ]);
 
-    if (custs.error || pms.error || users.error || opps.error || props.error) {
-      var e = (custs.error||pms.error||users.error||opps.error||props.error).message;
+    if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
+      var e = (custs.error||pms.error||users.error||opps.error||props.error||projs.error).message;
       setSyncStatus('error', 'Load error');
       showSBResult('Error loading data: ' + e, false);
       return;
@@ -3873,6 +4312,7 @@ async function pullFromSupabase() {
     });
     db.opportunities = (opps.data   || []).map(fromSBOpp);
     db.proposals     = (props.data  || []).map(fromSBProposal);
+    db.projects      = (projs.data  || []).map(fromSBProject);
     db.activity      = (acts.data   || []).map(function(a){ return {text:a.text, type:a.type, time:a.time}; });
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
 
@@ -3895,7 +4335,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
