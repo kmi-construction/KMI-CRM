@@ -261,7 +261,6 @@ textarea{resize:vertical;min-height:72px}
   <div class="ni active" onclick="nav('dashboard')"><span class="nico">▦</span>Dashboard</div>
   <div class="ngl">Pipeline</div>
   <div class="ni" onclick="nav('opportunities')"><span class="nico">◈</span>Bid Opportunities</div>
-  <div class="ni" onclick="nav('projects')"><span class="nico">⬢</span>Projects</div>
   <div class="ngl">Contacts</div>
   <div class="ni" onclick="nav('customers')"><span class="nico">◎</span>Customers</div>
   <div class="ni" onclick="nav('pms')"><span class="nico">◉</span>Project Managers</div>
@@ -482,58 +481,6 @@ textarea{resize:vertical;min-height:72px}
   </div>
 </div>
 
-<!-- PROJECTS LIST -->
-<div class="pg" id="pg-projects">
-  <div class="ph">
-    <div><h1>Projects</h1><div class="sub">Awarded and active construction projects</div><div class="stripe"></div></div>
-  </div>
-  <div class="mets" id="prj-mets"></div>
-  <div class="ab">
-    <input class="si" placeholder="Search by number, name, address..." oninput="filterProj()" id="prj-s">
-    <select class="fs" onchange="filterProj()" id="prj-fc"><option value="">All customers</option></select>
-    <select class="fs" onchange="filterProj()" id="prj-ft"><option value="">All types</option></select>
-    <button class="btn btn-p" style="margin-left:auto" onclick="nav('new-project')">+ New project</button>
-  </div>
-  <div class="card" style="padding:0;overflow:hidden">
-    <table><thead><tr>
-      <th>Project #</th><th>Name</th><th>Customer</th><th>Address</th><th>Type</th><th>Contract amount</th><th>Source</th><th>Actions</th>
-    </tr></thead><tbody id="prj-tbody"></tbody></table>
-  </div>
-</div>
-
-<!-- NEW / EDIT PROJECT -->
-<div class="pg" id="pg-new-project">
-  <div class="ph" style="margin-bottom:0">
-    <div><h1 id="nprj-heading">New project</h1><div class="sub" id="nprj-id-display" style="font-weight:600;color:var(--kmi)"></div><div class="stripe"></div></div>
-    <button class="btn" onclick="nav('projects')">← Cancel</button>
-  </div>
-  <div class="card">
-    <div class="ch"><span class="ct">Project details</span></div>
-    <div class="fg">
-      <div class="fgr"><label>Project number *</label><input id="nprj-num" placeholder="e.g. PRJ-2026-001"></div>
-      <div class="fgr"><label>Customer *</label><select id="nprj-cust"><option value="">Select customer...</option></select></div>
-      <div class="fgr full"><label>Project name *</label><input id="nprj-name" placeholder="Describe the project..."></div>
-      <div class="fgr full"><label>Project address</label><input id="nprj-addr" placeholder="Street address (e.g. 123 Main St)"></div>
-      <div class="fgr"><label>City</label><input id="nprj-city" placeholder="City"></div>
-      <div class="fgr"><label>State</label><select id="nprj-state"><option value="">— Select —</option></select></div>
-      <div class="fgr"><label>Zip code</label><input id="nprj-zip" placeholder="e.g. 12345 or 12345-6789" maxlength="10" inputmode="numeric"></div>
-      <div class="fgr"><label>Contract amount ($)</label><input type="number" id="nprj-amt" placeholder="0"></div>
-      <div class="fgr full">
-        <label>Project types <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(select all that apply)</span></label>
-        <div id="nprj-type-checks" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px"></div>
-      </div>
-      <div class="fgr full" id="nprj-source-wrap" style="display:none">
-        <label>Source opportunity</label>
-        <div style="font-size:12px;color:#888;padding:8px 12px;background:#fafafa;border-radius:7px" id="nprj-source-note"></div>
-      </div>
-    </div>
-  </div>
-  <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
-    <button class="btn" onclick="nav('projects')">Cancel</button>
-    <button class="btn btn-p" onclick="saveProject()" style="padding:10px 32px;font-size:14px;font-weight:700" id="nprj-save-btn">Create project</button>
-  </div>
-</div>
-
 <!-- CUSTOMERS -->
 <div class="pg" id="pg-customers">
   <div class="ph"><div><h1>Customers</h1><div class="sub">Construction companies and organizations</div><div class="stripe"></div></div></div>
@@ -602,6 +549,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="card"><div class="ch"><span class="ct">Clarification groups</span><button class="btn btn-sm btn-p" onclick="showAddGroup()">+ Add group</button></div><div id="t-groups"></div></div>
   </div>
   <div class="card"><div class="ch"><span class="ct">Cost item templates</span><button class="btn btn-sm btn-p" onclick="showAddCostTmpl()">+ Add item</button></div><div id="t-cost"></div></div>
+  <div class="card"><div class="ch"><span class="ct">Labor rates</span><button class="btn btn-sm btn-p" onclick="showAddLaborSet()">+ Add rate set</button></div><div id="t-labor"></div></div>
 </div>
 
 <!-- IMPORT DATA -->
@@ -754,7 +702,7 @@ var _oppSort = { col: 'bidDate', dir: 'desc' };  // default: newest bid date fir
 var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; })();
 
 var DB_DEFAULTS = {
-  customers: [], pms: [], users: [], opportunities: [], proposals: [], projects: [], activity: [],
+  customers: [], pms: [], users: [], opportunities: [], proposals: [], activity: [],
   companyTypes: ['General Contractor','Commercial','Developer','Civil Engineering','Industrial','Residential'],
   projectTypes: ['Foundation','Structural Steel','Structural Concrete','Masonry','Concrete','Earthwork','Site Utilities','Shoring & Excavation','Demolition','Other'],
   stdClar: [
@@ -784,6 +732,18 @@ var DB_DEFAULTS = {
     {id:'ct4', desc:'Labor \u2013 general', unit:'hr', rate:85},
     {id:'ct5', desc:'Equipment mobilization', unit:'lot', rate:15000}
   ],
+  laborRateSets: [
+    {
+      id:'lrs1',
+      label:'25-26 Rates',
+      rates: [
+        {id:'lr1', classification:'Foreman',  stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0},
+        {id:'lr2', classification:'Mason',    stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0},
+        {id:'lr3', classification:'Laborer',  stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0},
+        {id:'lr4', classification:'Trucking', stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0}
+      ]
+    }
+  ],
   clarGroups: ['brick veneer','stone veneer','precast','CMU','demolition','patching','granite','cladding support','terracotta']
 };
 
@@ -792,18 +752,23 @@ function loadDB() {
     var s = localStorage.getItem(DB_KEY);
     if (s) {
       var p = JSON.parse(s);
+      // Migrate legacy flat laborRates into a single rate set
+      var labSets = p.laborRateSets;
+      if (!labSets && Array.isArray(p.laborRates) && p.laborRates.length) {
+        labSets = [{id:'lrs1', label:'Current Rates', rates:p.laborRates}];
+      }
       return {
         customers:    p.customers    || [],
         pms:          p.pms          || [],
         users:        p.users        || [],
         opportunities:p.opportunities|| [],
         proposals:    p.proposals    || [],
-        projects:     p.projects     || [],
         activity:     p.activity     || [],
         stdClar:      p.stdClar      || DB_DEFAULTS.stdClar,
         projClar:     p.projClar     || DB_DEFAULTS.projClar,
         exclusions:   p.exclusions   || DB_DEFAULTS.exclusions,
         costTmpls:    p.costTmpls    || DB_DEFAULTS.costTmpls,
+        laborRateSets: labSets       || DB_DEFAULTS.laborRateSets,
         clarGroups:   p.clarGroups   || DB_DEFAULTS.clarGroups,
         companyTypes: p.companyTypes  || DB_DEFAULTS.companyTypes,
         projectTypes: p.projectTypes  || DB_DEFAULTS.projectTypes
@@ -1197,9 +1162,7 @@ function nav(page) {
     analytics:        renderAnalytics,
     import:           renderImport,
     'supabase-setup': renderSupabaseSetup,
-    templates:        renderTemplates,
-    projects:         renderProjects,
-    'new-project':    initNewProject
+    templates:        renderTemplates
   };
   if (fns[page]) fns[page]();
 }
@@ -1773,31 +1736,7 @@ function renderOppDetail(id) {
             '<option value="budget"' + (cur === 'budget' ? ' selected' : '') + '>Budget</option>' +
           '</select>' +
         '</div>' +
-      '</div>' +
-      (function(){
-        // Linked project indicator (when outcome is won)
-        if (cur !== 'won') return '';
-        var linked = o.projectId ? getProj(o.projectId) : null;
-        if (linked) {
-          return '<div class="card" style="margin-top:10px;border-left:3px solid #3B6D11;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">' +
-            '<div>' +
-              '<div class="ct" style="margin-bottom:4px">Linked project</div>' +
-              '<div style="font-size:13px"><strong style="color:var(--kmi)">' + (linked.number || '—') + '</strong> — ' + (linked.name || '') + ' · <span style="color:#3B6D11;font-weight:600">' + fmtC(linked.contractAmount || 0) + '</span></div>' +
-            '</div>' +
-            '<div style="display:flex;gap:6px">' +
-              '<button class="btn btn-sm" onclick="viewProject(' + linked.id + ')">View project</button>' +
-              '<button class="btn btn-sm" onclick="editProject(' + linked.id + ')">✎ Edit</button>' +
-            '</div>' +
-          '</div>';
-        }
-        return '<div class="card" style="margin-top:10px;background:#faf1d6;border-left:3px solid var(--ac);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">' +
-          '<div>' +
-            '<div class="ct" style="margin-bottom:4px">No project linked yet</div>' +
-            '<div style="font-size:12px;color:#6a5a20">Create a project record to track the awarded work.</div>' +
-          '</div>' +
-          '<button class="btn btn-p btn-sm" onclick="promptCreateProjectFromOpp(currentOppId)">+ Create project</button>' +
-        '</div>';
-      })();
+      '</div>';
   } else {
     outSec.innerHTML = '';
   }
@@ -1923,10 +1862,6 @@ function setOutcome(oppId, status) {
     db.activity.unshift({text: o.id + ' outcome cleared', type: 'pending', time: 'Just now'});
   }
   saveDB(); renderOppDetail(oppId); if (typeof renderOpportunities === 'function') renderOpportunities();
-  // If the opportunity was just marked Won and has no project linked yet, offer to create one
-  if (status === 'won' && status !== prev && !o.projectId) {
-    promptCreateProjectFromOpp(oppId);
-  }
 }
 function promptNotBidding(id) {
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
@@ -2654,332 +2589,6 @@ async function adminSendTempPassword(id) {
   showEmailSimulationModal(u, pw, 'Temporary password');
 }
 
-// ── PROJECTS ────────────────────────────────────────────────────
-var _editProjectId = null;
-var _newProjectFromOppId = null;
-
-function getProj(id) { return db.projects.find(function(p){ return p.id === id; }); }
-
-function generateProjectNumber() {
-  var year = new Date().getFullYear();
-  var prefix = 'PRJ-' + year + '-';
-  var max = 0;
-  db.projects.forEach(function(p){
-    if (p.number && p.number.indexOf(prefix) === 0) {
-      var n = parseInt(p.number.slice(prefix.length), 10);
-      if (!isNaN(n) && n > max) max = n;
-    }
-  });
-  return prefix + String(max + 1).padStart(3, '0');
-}
-
-function isProjectNumberUnique(num, excludeId) {
-  if (!num) return false;
-  var n = String(num).trim().toLowerCase();
-  return !db.projects.some(function(p){
-    return p.id !== excludeId && String(p.number || '').trim().toLowerCase() === n;
-  });
-}
-
-function formatProjAddress(p) {
-  if (!p) return '';
-  var line1 = (p.address || '').trim();
-  var city  = (p.city || '').trim();
-  var state = (p.state || '').trim();
-  var zip   = (p.zip || '').trim();
-  var cityStateZip = [city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-  return [line1, cityStateZip].filter(Boolean).join(', ');
-}
-
-function renderProjects() {
-  // Customer filter
-  g('prj-fc').innerHTML = '<option value="">All customers</option>' +
-    db.customers.slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); })
-      .map(function(c){ return '<option value="' + c.id + '">' + c.name + '</option>'; }).join('');
-  // Type filter
-  g('prj-ft').innerHTML = '<option value="">All types</option>' +
-    db.projectTypes.map(function(t){ return '<option value="' + t + '">' + t + '</option>'; }).join('');
-  filterProj();
-}
-
-function filterProj() {
-  var s  = (g('prj-s').value  || '').toLowerCase();
-  var fc = g('prj-fc').value;
-  var ft = g('prj-ft').value;
-  var list = db.projects.filter(function(p){
-    if (fc && String(p.customerId) !== String(fc)) return false;
-    if (ft) {
-      var tArr = Array.isArray(p.types) && p.types.length ? p.types : [p.type || ''];
-      if (tArr.indexOf(ft) === -1) return false;
-    }
-    if (!s) return true;
-    var cust = getCust(p.customerId);
-    var hay = [p.number, p.name, cust.name, formatProjAddress(p), (p.types||[]).join(' '), p.type].join(' ').toLowerCase();
-    return hay.indexOf(s) !== -1;
-  }).sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
-
-  // Metrics
-  var totalVal = list.reduce(function(s,p){ return s + (p.contractAmount || 0); }, 0);
-  var thisYear = new Date().getFullYear();
-  var ytd = list.filter(function(p){ return (p.created||'').slice(0,4) === String(thisYear); });
-  var ytdVal = ytd.reduce(function(s,p){ return s + (p.contractAmount || 0); }, 0);
-  g('prj-mets').innerHTML =
-    '<div class="mc"><div class="ml">Total projects</div><div class="mv">' + list.length + '</div></div>' +
-    '<div class="mc"><div class="ml">Total contract value</div><div class="mv gn">' + fmtC(totalVal) + '</div></div>' +
-    '<div class="mc"><div class="ml">New this year</div><div class="mv bl">' + ytd.length + '</div></div>' +
-    '<div class="mc"><div class="ml">Contract value YTD</div><div class="mv am">' + fmtC(ytdVal) + '</div></div>';
-
-  // Table
-  if (!list.length) {
-    g('prj-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;color:#aaa;padding:32px;font-size:13px">No projects yet. Create one manually, or mark a bid opportunity as <strong>Won</strong> to generate a project.</td></tr>';
-    return;
-  }
-  g('prj-tbody').innerHTML = list.map(function(p){
-    var c = getCust(p.customerId);
-    var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
-    var typeCell = types.length
-      ? types.map(function(t){ return '<span class="tag" style="margin-right:4px">' + t + '</span>'; }).join('')
-      : '<span style="color:#aaa;font-size:12px">—</span>';
-    var sourceCell = p.opportunityId
-      ? '<span class="tag" style="cursor:pointer;color:var(--kmi);border-color:var(--stl)" onclick="openOppDetail(\'' + p.opportunityId + '\')" title="View source opportunity">' + p.opportunityId + '</span>'
-      : '<span class="tag">Manual</span>';
-    return '<tr>' +
-      '<td style="font-weight:600;color:var(--kmi);cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.number || '—') + '</td>' +
-      '<td style="cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.name || '<span style="color:#aaa">—</span>') + '</td>' +
-      '<td>' + c.name + '</td>' +
-      '<td style="font-size:12px;color:#555">' + (formatProjAddress(p) || '<span style="color:#aaa">—</span>') + '</td>' +
-      '<td>' + typeCell + '</td>' +
-      '<td style="font-weight:600">' + fmtC(p.contractAmount || 0) + '</td>' +
-      '<td>' + sourceCell + '</td>' +
-      '<td>' +
-        '<button class="btn btn-sm" onclick="editProject(' + p.id + ')">✎ Edit</button>&nbsp;' +
-        '<button class="btn btn-sm" style="color:#A32D2D" onclick="deleteProject(' + p.id + ')">Delete</button>' +
-      '</td>' +
-      '</tr>';
-  }).join('');
-}
-
-function renderProjectTypeChecksForProject(selected) {
-  var wrap = g('nprj-type-checks'); if (!wrap) return;
-  var sel = selected || [];
-  wrap.innerHTML = db.projectTypes.map(function(t, i){
-    var chk = sel.indexOf(t) !== -1 ? ' checked' : '';
-    return '<label class="ci" style="margin-bottom:0"><input type="checkbox" value="' + t + '" class="nprj-type-cb"' + chk + '><span>' + t + '</span></label>';
-  }).join('');
-}
-
-function getCheckedProjectTypesForProject() {
-  return Array.prototype.slice.call(document.querySelectorAll('.nprj-type-cb'))
-    .filter(function(cb){ return cb.checked; }).map(function(cb){ return cb.value; });
-}
-
-function populateProjectCustDropdown(selectedId) {
-  g('nprj-cust').innerHTML = '<option value="">Select customer...</option>' +
-    db.customers.slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); })
-      .map(function(c){
-        return '<option value="' + c.id + '"' + (String(selectedId) === String(c.id) ? ' selected' : '') + '>' + c.name + (c.contact ? ' — ' + c.contact : '') + '</option>';
-      }).join('');
-}
-
-function populateProjectStateDropdown(selected) {
-  var sel = g('nprj-state'); if (!sel) return;
-  sel.innerHTML = '<option value="">— Select —</option>' +
-    US_STATES.map(function(st){ return '<option value="' + st + '"' + (selected === st ? ' selected' : '') + '>' + st + '</option>'; }).join('');
-}
-
-function initNewProject() {
-  _editProjectId = null;
-  g('nprj-heading').textContent    = 'New project';
-  g('nprj-save-btn').textContent   = 'Create project';
-  g('nprj-id-display').textContent = '';
-
-  var prefill = null;
-  if (_newProjectFromOppId) {
-    var o = getOpp(_newProjectFromOppId);
-    if (o) {
-      prefill = {
-        name: o.project || '',
-        customerId: o.customerId || '',
-        address: o.address || '',
-        city: o.city || '',
-        state: o.state || '',
-        zip: o.zip || '',
-        contractAmount: (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue || 0),
-        types: (Array.isArray(o.types) && o.types.length) ? o.types.slice() : (o.type ? [o.type] : []),
-        opportunityId: o.id
-      };
-      g('nprj-source-wrap').style.display = '';
-      g('nprj-source-note').innerHTML = 'Pre-filled from opportunity <strong style="color:var(--kmi)">' + o.id + '</strong> — ' + (o.project || '');
-    }
-  } else {
-    g('nprj-source-wrap').style.display = 'none';
-    g('nprj-source-note').textContent = '';
-  }
-
-  g('nprj-num').value   = generateProjectNumber();
-  g('nprj-name').value  = prefill ? prefill.name : '';
-  g('nprj-addr').value  = prefill ? prefill.address : '';
-  g('nprj-city').value  = prefill ? prefill.city : '';
-  g('nprj-zip').value   = prefill ? prefill.zip : '';
-  g('nprj-amt').value   = prefill ? (prefill.contractAmount || '') : '';
-  populateProjectCustDropdown(prefill ? prefill.customerId : '');
-  populateProjectStateDropdown(prefill ? prefill.state : '');
-  renderProjectTypeChecksForProject(prefill ? prefill.types : []);
-
-  // Stash the source opp id on the form for saveProject() to read, then clear the module-level var
-  g('nprj-save-btn').dataset.oppId = _newProjectFromOppId || '';
-  _newProjectFromOppId = null;
-}
-
-function saveProject() {
-  var number = (g('nprj-num').value  || '').trim();
-  var name   = (g('nprj-name').value || '').trim();
-  var custId = parseInt(g('nprj-cust').value);
-  if (!number) { alert('Please enter a project number.'); return; }
-  if (!name)   { alert('Please enter a project name.'); return; }
-  if (!custId) { alert('Please select a customer.'); return; }
-  if (!isProjectNumberUnique(number, _editProjectId)) {
-    alert('Project number "' + number + '" is already in use. Please choose a unique number.'); return;
-  }
-
-  var types = getCheckedProjectTypesForProject();
-  var amt   = parseFloat(g('nprj-amt').value) || 0;
-  var payload = {
-    number: number,
-    name: name,
-    customerId: custId,
-    address: (g('nprj-addr').value  || '').trim(),
-    city:    (g('nprj-city').value  || '').trim(),
-    state:   (g('nprj-state').value || '').trim(),
-    zip:     (g('nprj-zip').value   || '').trim(),
-    contractAmount: amt,
-    types: types,
-    type:  types[0] || ''
-  };
-
-  if (_editProjectId) {
-    var p = getProj(_editProjectId); if (!p) return;
-    Object.keys(payload).forEach(function(k){ p[k] = payload[k]; });
-    db.activity.unshift({text: 'Project ' + p.number + ' updated', type: 'won', time: 'Just now'});
-    saveDB(); _editProjectId = null; nav('projects');
-    return;
-  }
-
-  // Create
-  var newId = Date.now();
-  var oppId = g('nprj-save-btn').dataset.oppId || '';
-  payload.id         = newId;
-  payload.created    = new Date().toISOString().slice(0,10);
-  payload.opportunityId = oppId || null;
-  db.projects.push(payload);
-
-  if (oppId) {
-    var o = getOpp(oppId);
-    if (o) { o.projectId = newId; }
-    db.activity.unshift({text: 'Project ' + number + ' created from ' + oppId, type: 'won', time: 'Just now'});
-  } else {
-    db.activity.unshift({text: 'Project ' + number + ' created', type: 'won', time: 'Just now'});
-  }
-  g('nprj-save-btn').dataset.oppId = '';
-  saveDB(); nav('projects');
-}
-
-function editProject(id) {
-  var p = getProj(id); if (!p) { alert('Project not found.'); return; }
-  _editProjectId = id;
-  _newProjectFromOppId = null;
-  setActivePage('projects');
-  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
-  g('pg-new-project').classList.add('active');
-  closeModal();
-
-  g('nprj-heading').textContent    = 'Edit project';
-  g('nprj-save-btn').textContent   = 'Save changes';
-  g('nprj-id-display').textContent = p.number || '';
-
-  g('nprj-num').value  = p.number || '';
-  g('nprj-name').value = p.name   || '';
-  g('nprj-addr').value = p.address|| '';
-  g('nprj-city').value = p.city   || '';
-  g('nprj-zip').value  = p.zip    || '';
-  g('nprj-amt').value  = p.contractAmount || '';
-  populateProjectCustDropdown(p.customerId);
-  populateProjectStateDropdown(p.state || '');
-  var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
-  renderProjectTypeChecksForProject(types);
-
-  if (p.opportunityId) {
-    g('nprj-source-wrap').style.display = '';
-    g('nprj-source-note').innerHTML = 'Linked to opportunity <strong style="color:var(--kmi)">' + p.opportunityId + '</strong>';
-  } else {
-    g('nprj-source-wrap').style.display = 'none';
-  }
-  g('nprj-save-btn').dataset.oppId = '';
-}
-
-function deleteProject(id) {
-  var p = getProj(id); if (!p) return;
-  if (!confirm('Delete project ' + (p.number || '') + (p.name ? ' (' + p.name + ')' : '') + '?\n\nThis cannot be undone.')) return;
-  if (p.opportunityId) {
-    var o = getOpp(p.opportunityId);
-    if (o && o.projectId === p.id) o.projectId = null;
-  }
-  db.projects = db.projects.filter(function(x){ return x.id !== id; });
-  db.activity.unshift({text: 'Project ' + (p.number || id) + ' deleted', type: 'lost', time: 'Just now'});
-  saveDB(); renderProjects();
-}
-
-function viewProject(id) {
-  var p = getProj(id); if (!p) return;
-  var c = getCust(p.customerId);
-  var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
-  var addr = formatProjAddress(p) || '<span style="color:#aaa">—</span>';
-  var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
-    '<div class="mt">' + (p.number || 'Project') + '</div>' +
-    '<div class="msb">' + (p.name || '') + '</div>' +
-    '<div class="pmg">' +
-      '<div><div class="k">Customer</div><div class="v">' + c.name + '</div></div>' +
-      '<div><div class="k">Contract amount</div><div class="v" style="color:var(--kmi)">' + fmtC(p.contractAmount || 0) + '</div></div>' +
-      '<div><div class="k">Created</div><div class="v">' + (p.created || '—') + '</div></div>' +
-    '</div>' +
-    '<div class="sb3"><h4>Project address</h4><div style="font-size:13px">' + addr + '</div></div>' +
-    '<div class="sb3"><h4>Project types</h4>' + (types.length ? types.map(function(t){ return '<span class="tag" style="margin-right:4px">' + t + '</span>'; }).join('') : '<span style="color:#aaa;font-size:12px">—</span>') + '</div>' +
-    (p.opportunityId ? '<div class="sb3"><h4>Source opportunity</h4><span class="tag" style="cursor:pointer;color:var(--kmi)" onclick="closeModal();openOppDetail(\'' + p.opportunityId + '\')">' + p.opportunityId + ' ↗</span></div>' : '') +
-    '<div class="mf">' +
-      '<button class="btn" onclick="closeModal()">Close</button>' +
-      '<button class="btn" onclick="closeModal();editProject(' + p.id + ')">✎ Edit</button>' +
-      '<button class="btn" style="color:#A32D2D" onclick="closeModal();deleteProject(' + p.id + ')">Delete</button>' +
-    '</div>';
-  showModal(html);
-}
-
-// Fires when an opportunity outcome is set to "won" — offers to spin up a linked project
-function promptCreateProjectFromOpp(oppId) {
-  var o = getOpp(oppId); if (!o) return;
-  var c = getCust(o.customerId);
-  var suggested = generateProjectNumber();
-  var amt = (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue || 0);
-  showModal(
-    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
-    '<div class="mt">🎉 Opportunity won — create project?</div>' +
-    '<div class="msb">' + o.id + ' · ' + (o.project || '') + ' · ' + c.name + '</div>' +
-    '<div class="sb3" style="margin-bottom:14px">' +
-      '<h4>This will create a new project pre-filled with</h4>' +
-      '<div style="font-size:13px;line-height:1.8">' +
-        '<div><strong>Project number:</strong> ' + suggested + ' <span style="color:#888;font-size:11px">(editable on next screen)</span></div>' +
-        '<div><strong>Name:</strong> ' + (o.project || '—') + '</div>' +
-        '<div><strong>Customer:</strong> ' + c.name + '</div>' +
-        '<div><strong>Address:</strong> ' + (formatOppAddress(o) || '—') + '</div>' +
-        '<div><strong>Contract amount:</strong> ' + fmtC(amt) + '</div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="mf">' +
-      '<button class="btn" onclick="closeModal()">Skip for now</button>' +
-      '<button class="btn btn-p" onclick="closeModal();_newProjectFromOppId=\'' + o.id + '\';nav(\'new-project\')">Create project →</button>' +
-    '</div>'
-  );
-}
-
 // ── ANALYTICS ───────────────────────────────────────────────────
 function renderAnalytics() {
   var opps  = db.opportunities, props = db.proposals;
@@ -3331,6 +2940,7 @@ function renderTemplates() {
   g('t-excl').innerHTML = renderGroupedClars(db.exclusions, 'excl', 'E', '#E24B4A');
   renderGroupList();
   g('t-cost').innerHTML = '<table><thead><tr><th>Description</th><th>Unit</th><th>Default rate</th><th></th></tr></thead><tbody>' + db.costTmpls.map(function(t){ return '<tr><td>'+t.desc+'</td><td>'+t.unit+'</td><td>'+fmtC(t.rate)+'</td><td><button class="btn btn-sm" onclick="rmTmpl(\'cost\',\''+t.id+'\')" style="color:#A32D2D">Remove</button></td></tr>'; }).join('') + '</tbody></table>';
+  renderLaborRates();
 }
 function renderGroupList() {
   var groups = db.clarGroups || [];
@@ -3455,6 +3065,333 @@ function saveCostTmpl() {
   if (!d) return;
   db.costTmpls.push({id:'ct'+Date.now(), desc:d, unit:u, rate:r});
   saveDB(); closeModal(); renderTemplates();
+}
+
+// ── LABOR RATES (grouped into named rate sets) ─────────────────
+// Data shape:
+//   db.laborRateSets = [
+//     { id, label, rates:[
+//         { id, classification,
+//           stdCostRate, stdCoRate,   // straight time
+//           otCostRate,  otCoRate,    // 1.5 time
+//           dtCostRate,  dtCoRate }   // double time
+//       , ... ] },
+//     ...
+//   ]
+// Rate sets will later be assignable to projects.
+var _activeLaborSetId = null;
+var _editLaborId      = null;
+var _editLaborSetId   = null;
+
+// Normalize a rate row so it has all 6 rate fields (and migrate any legacy
+// {costRate, coRate} pair into the standard-time fields).
+function _normalizeLaborRate(r) {
+  if (!r) return r;
+  if (r.costRate !== undefined && r.stdCostRate === undefined) {
+    r.stdCostRate = Number(r.costRate) || 0;
+    r.stdCoRate   = Number(r.coRate)   || 0;
+    delete r.costRate; delete r.coRate;
+  }
+  ['stdCostRate','stdCoRate','otCostRate','otCoRate','dtCostRate','dtCoRate']
+    .forEach(function(k){ if (typeof r[k] !== 'number') r[k] = Number(r[k]) || 0; });
+  return r;
+}
+function _normalizeLaborRateSets() {
+  (db.laborRateSets || []).forEach(function(set){
+    (set.rates || []).forEach(_normalizeLaborRate);
+  });
+}
+
+function _getActiveLaborSet() {
+  db.laborRateSets = db.laborRateSets || [];
+  if (!db.laborRateSets.length) return null;
+  var s = db.laborRateSets.find(function(x){ return x.id === _activeLaborSetId; });
+  if (!s) { s = db.laborRateSets[0]; _activeLaborSetId = s.id; }
+  return s;
+}
+
+function renderLaborRates() {
+  var el = g('t-labor'); if (!el) return;
+  db.laborRateSets = db.laborRateSets || [];
+
+  // Empty state — no rate sets at all
+  if (!db.laborRateSets.length) {
+    el.innerHTML = '<div style="padding:12px;color:#aaa;font-size:12px;text-align:center">' +
+      'No rate sets yet \u2014 click + Add rate set to create one (e.g. "25-26 Rates")</div>';
+    return;
+  }
+
+  var active = _getActiveLaborSet();
+
+  // Tabs for each rate set
+  var tabs = '<div style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 0 12px;border-bottom:0.5px solid #eee;margin-bottom:12px">' +
+    db.laborRateSets.map(function(set){
+      var isActive = set.id === active.id;
+      var lblEsc = String(set.label || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      var style  = isActive
+        ? 'background:var(--kmi);color:#fff;border-color:var(--kmi)'
+        : 'background:#fff;color:#333';
+      return '<button class="btn btn-sm" onclick="selectLaborSet(\'' + set.id + '\')" ' +
+        'style="' + style + '">' + lblEsc + '</button>';
+    }).join('') + '</div>';
+
+  // Toolbar for active set
+  var activeLblEsc = String(active.label || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  var toolbar = '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">' +
+    '<div style="font-size:12px;color:#666">Editing: <strong style="color:#333">' + activeLblEsc + '</strong></div>' +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+      '<button class="btn btn-sm" onclick="showRenameLaborSet(\'' + active.id + '\')">Rename</button>' +
+      '<button class="btn btn-sm" onclick="duplicateLaborSet(\'' + active.id + '\')">Duplicate</button>' +
+      '<button class="btn btn-sm" onclick="rmLaborSet(\'' + active.id + '\')" style="color:#A32D2D">Delete set</button>' +
+      '<button class="btn btn-sm btn-p" onclick="showAddLaborRate()">+ Add classification</button>' +
+    '</div>' +
+  '</div>';
+
+  // Rates table for active set
+  _normalizeLaborRateSets();
+  var rates = active.rates || [];
+  var table;
+  if (!rates.length) {
+    table = '<div style="padding:12px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No classifications in this set yet \u2014 click + Add classification</div>';
+  } else {
+    // Two-row header: Standard / 1.5 Time / Double Time, each split into Cost + CO
+    var grpBrd = 'border-left:1px solid #e5e5e5';
+    var subTh  = 'text-align:right;font-weight:500;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px';
+    table = '<div style="overflow-x:auto"><table style="min-width:720px">' +
+      '<thead>' +
+        '<tr>' +
+          '<th rowspan="2" style="vertical-align:bottom">Classification</th>' +
+          '<th colspan="2" style="text-align:center;' + grpBrd + '">Standard</th>' +
+          '<th colspan="2" style="text-align:center;' + grpBrd + '">1.5 Time</th>' +
+          '<th colspan="2" style="text-align:center;' + grpBrd + '">Double Time</th>' +
+          '<th rowspan="2" style="' + grpBrd + '"></th>' +
+        '</tr>' +
+        '<tr>' +
+          '<th style="' + subTh + ';' + grpBrd + '">Cost</th>' +
+          '<th style="' + subTh + '">CO</th>' +
+          '<th style="' + subTh + ';' + grpBrd + '">Cost</th>' +
+          '<th style="' + subTh + '">CO</th>' +
+          '<th style="' + subTh + ';' + grpBrd + '">Cost</th>' +
+          '<th style="' + subTh + '">CO</th>' +
+        '</tr>' +
+      '</thead><tbody>' +
+      rates.map(function(l){
+        var cls = String(l.classification || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        var td  = 'text-align:right';
+        var tdG = 'text-align:right;' + grpBrd;
+        return '<tr>' +
+          '<td>' + cls + '</td>' +
+          '<td style="' + tdG + '">' + fmtC(l.stdCostRate) + '</td>' +
+          '<td style="' + td  + '">' + fmtC(l.stdCoRate)   + '</td>' +
+          '<td style="' + tdG + '">' + fmtC(l.otCostRate)  + '</td>' +
+          '<td style="' + td  + '">' + fmtC(l.otCoRate)    + '</td>' +
+          '<td style="' + tdG + '">' + fmtC(l.dtCostRate)  + '</td>' +
+          '<td style="' + td  + '">' + fmtC(l.dtCoRate)    + '</td>' +
+          '<td style="white-space:nowrap;' + grpBrd + '">' +
+            '<button class="btn btn-sm" onclick="showEditLaborRate(\'' + l.id + '\')">Edit</button> ' +
+            '<button class="btn btn-sm" onclick="rmLaborRate(\'' + l.id + '\')" style="color:#A32D2D">Remove</button>' +
+          '</td>' +
+        '</tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  el.innerHTML = tabs + toolbar + table;
+}
+
+function selectLaborSet(id) {
+  _activeLaborSetId = id;
+  renderLaborRates();
+}
+
+// ── Rate-set (label) management ─────────────────────────────────
+function showAddLaborSet() {
+  _editLaborSetId = null;
+  showModal('<button class="xbtn" onclick="closeModal();_editLaborSetId=null;">&#215;</button>' +
+    '<div class="mt">Add rate set</div>' +
+    '<div class="msb">Give this set a label (e.g. "26-27 Rates"). You can add classifications after creating it.</div>' +
+    '<div class="fgr" style="margin:12px 0"><label>Label</label>' +
+      '<input id="ls-label" placeholder="e.g. 26-27 Rates"></div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal();_editLaborSetId=null;">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveLaborSet()">Add</button>' +
+    '</div>');
+  setTimeout(function(){ var el = g('ls-label'); if (el) el.focus(); }, 50);
+}
+
+function showRenameLaborSet(id) {
+  var set = (db.laborRateSets || []).find(function(x){ return x.id === id; });
+  if (!set) return;
+  _editLaborSetId = id;
+  var lblEsc = String(set.label || '').replace(/"/g,'&quot;');
+  showModal('<button class="xbtn" onclick="closeModal();_editLaborSetId=null;">&#215;</button>' +
+    '<div class="mt">Rename rate set</div>' +
+    '<div class="fgr" style="margin:12px 0"><label>Label</label>' +
+      '<input id="ls-label" value="' + lblEsc + '"></div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal();_editLaborSetId=null;">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveLaborSet()">Save</button>' +
+    '</div>');
+  setTimeout(function(){ var el = g('ls-label'); if (el) { el.focus(); el.select && el.select(); } }, 50);
+}
+
+function saveLaborSet() {
+  var lbl = (g('ls-label').value || '').trim();
+  if (!lbl) { alert('Please enter a label.'); return; }
+  db.laborRateSets = db.laborRateSets || [];
+  var dup = db.laborRateSets.some(function(x){
+    return x.id !== _editLaborSetId && String(x.label || '').toLowerCase() === lbl.toLowerCase();
+  });
+  if (dup) { alert('A rate set with that label already exists.'); return; }
+  if (_editLaborSetId) {
+    var set = db.laborRateSets.find(function(x){ return x.id === _editLaborSetId; });
+    if (set) set.label = lbl;
+    _editLaborSetId = null;
+  } else {
+    var newSet = {id:'lrs'+Date.now(), label:lbl, rates:[]};
+    db.laborRateSets.push(newSet);
+    _activeLaborSetId = newSet.id;
+  }
+  saveDB(); closeModal(); renderTemplates();
+}
+
+function duplicateLaborSet(id) {
+  var src = (db.laborRateSets || []).find(function(x){ return x.id === id; });
+  if (!src) return;
+  // Generate a unique default label like "25-26 Rates (copy)", then "(copy 2)", etc.
+  var base = (src.label || 'Rate set') + ' (copy)';
+  var label = base, n = 2;
+  while (db.laborRateSets.some(function(x){ return String(x.label || '').toLowerCase() === label.toLowerCase(); })) {
+    label = base + ' ' + n; n++;
+  }
+  var stamp = Date.now();
+  var clonedRates = (src.rates || []).map(function(r, i){
+    r = _normalizeLaborRate(r);
+    return {
+      id:             'lr' + stamp + '_' + i,
+      classification: r.classification,
+      stdCostRate:    r.stdCostRate, stdCoRate: r.stdCoRate,
+      otCostRate:     r.otCostRate,  otCoRate:  r.otCoRate,
+      dtCostRate:     r.dtCostRate,  dtCoRate:  r.dtCoRate
+    };
+  });
+  var newSet = {id:'lrs'+stamp, label:label, rates:clonedRates};
+  db.laborRateSets.push(newSet);
+  _activeLaborSetId = newSet.id;
+  saveDB(); renderTemplates();
+}
+
+function rmLaborSet(id) {
+  db.laborRateSets = db.laborRateSets || [];
+  if (db.laborRateSets.length <= 1) {
+    alert('You must keep at least one rate set. Rename this one or add another first.');
+    return;
+  }
+  var set = db.laborRateSets.find(function(x){ return x.id === id; });
+  if (!set) return;
+  var n = (set.rates || []).length;
+  var msg = 'Delete rate set "' + set.label + '"?';
+  if (n) msg += '\n\nThis will also remove ' + n + ' classification' + (n === 1 ? '' : 's') + ' within it.';
+  if (!confirm(msg)) return;
+  db.laborRateSets = db.laborRateSets.filter(function(x){ return x.id !== id; });
+  if (_activeLaborSetId === id) _activeLaborSetId = db.laborRateSets[0] ? db.laborRateSets[0].id : null;
+  saveDB(); renderTemplates();
+}
+
+// ── Individual classification (row) management ──────────────────
+function laborRateModalHtml(editing, current) {
+  var c = _normalizeLaborRate(current || {});
+  var clsEsc = String(c.classification || '').replace(/"/g,'&quot;');
+  // 3x2 grid: row label + Cost input + Change-order input
+  function rateRow(lbl, costId, coId, costVal, coVal) {
+    return '<div style="display:grid;grid-template-columns:110px 1fr 1fr;gap:10px;align-items:center;margin-top:8px">' +
+      '<div style="font-size:12px;font-weight:600;color:#333">' + lbl + '</div>' +
+      '<input type="number" step="0.01" id="' + costId + '" placeholder="0.00" value="' + (costVal || '') + '" style="text-align:right">' +
+      '<input type="number" step="0.01" id="' + coId   + '" placeholder="0.00" value="' + (coVal   || '') + '" style="text-align:right">' +
+    '</div>';
+  }
+  return '<button class="xbtn" onclick="closeModal();_editLaborId=null;">&#215;</button>' +
+    '<div class="mt">' + (editing ? 'Edit' : 'Add') + ' labor classification</div>' +
+    '<div class="fg" style="margin-top:12px">' +
+      '<div class="fgr full"><label>Classification</label>' +
+        '<input id="lr-cls" placeholder="e.g. Foreman, Mason, Laborer, Trucking" value="' + clsEsc + '"></div>' +
+    '</div>' +
+    '<div style="margin-top:16px">' +
+      '<div style="display:grid;grid-template-columns:110px 1fr 1fr;gap:10px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;padding-bottom:4px;border-bottom:0.5px solid #eee">' +
+        '<div></div>' +
+        '<div style="text-align:right">Cost rate ($/hr)</div>' +
+        '<div style="text-align:right">Change order rate ($/hr)</div>' +
+      '</div>' +
+      rateRow('Standard',    'lr-std-cost', 'lr-std-co', c.stdCostRate, c.stdCoRate) +
+      rateRow('1.5 Time',    'lr-ot-cost',  'lr-ot-co',  c.otCostRate,  c.otCoRate) +
+      rateRow('Double Time', 'lr-dt-cost',  'lr-dt-co',  c.dtCostRate,  c.dtCoRate) +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal();_editLaborId=null;">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveLaborRate()">' + (editing ? 'Save' : 'Add') + '</button>' +
+    '</div>';
+}
+function showAddLaborRate() {
+  var set = _getActiveLaborSet();
+  if (!set) { alert('Please add a rate set first.'); return; }
+  _editLaborId = null;
+  showModal(laborRateModalHtml(false, null));
+  setTimeout(function(){ var el = g('lr-cls'); if (el) el.focus(); }, 50);
+}
+function showEditLaborRate(id) {
+  var set = _getActiveLaborSet(); if (!set) return;
+  var l = (set.rates || []).find(function(x){ return x.id === id; });
+  if (!l) return;
+  _editLaborId = id;
+  showModal(laborRateModalHtml(true, l));
+}
+function saveLaborRate() {
+  var set = _getActiveLaborSet(); if (!set) return;
+  set.rates = set.rates || [];
+  var cls = (g('lr-cls').value || '').trim();
+  if (!cls) { alert('Please enter a classification name.'); return; }
+  var vals = {
+    stdCostRate: parseFloat(g('lr-std-cost').value) || 0,
+    stdCoRate:   parseFloat(g('lr-std-co').value)   || 0,
+    otCostRate:  parseFloat(g('lr-ot-cost').value)  || 0,
+    otCoRate:    parseFloat(g('lr-ot-co').value)    || 0,
+    dtCostRate:  parseFloat(g('lr-dt-cost').value)  || 0,
+    dtCoRate:    parseFloat(g('lr-dt-co').value)    || 0
+  };
+  // Case-insensitive dup check within this set only (same classification can
+  // exist in different rate sets, since each set reflects a different period)
+  var dup = set.rates.some(function(x){
+    return x.id !== _editLaborId && String(x.classification || '').toLowerCase() === cls.toLowerCase();
+  });
+  if (dup) { alert('A classification with that name already exists in this rate set.'); return; }
+  if (_editLaborId) {
+    var idx = set.rates.findIndex(function(x){ return x.id === _editLaborId; });
+    if (idx > -1) {
+      var r = set.rates[idx];
+      r.classification = cls;
+      r.stdCostRate = vals.stdCostRate; r.stdCoRate = vals.stdCoRate;
+      r.otCostRate  = vals.otCostRate;  r.otCoRate  = vals.otCoRate;
+      r.dtCostRate  = vals.dtCostRate;  r.dtCoRate  = vals.dtCoRate;
+    }
+    _editLaborId = null;
+  } else {
+    set.rates.push({
+      id:'lr'+Date.now(), classification:cls,
+      stdCostRate: vals.stdCostRate, stdCoRate: vals.stdCoRate,
+      otCostRate:  vals.otCostRate,  otCoRate:  vals.otCoRate,
+      dtCostRate:  vals.dtCostRate,  dtCoRate:  vals.dtCoRate
+    });
+  }
+  saveDB(); closeModal(); renderTemplates();
+}
+function rmLaborRate(id) {
+  var set = _getActiveLaborSet(); if (!set) return;
+  set.rates = set.rates || [];
+  var l = set.rates.find(function(x){ return x.id === id; });
+  if (!l) return;
+  if (!confirm('Remove "' + l.classification + '" from "' + set.label + '"?')) return;
+  set.rates = set.rates.filter(function(x){ return x.id !== id; });
+  saveDB(); renderTemplates();
 }
 
 // ── PDF ─────────────────────────────────────────────────────────
@@ -4171,29 +4108,6 @@ function fromSBProposal(r) {
   };
 }
 
-function toSBProject(r) {
-  return {
-    id:r.id, number:r.number||'', name:r.name||'',
-    customer_id:r.customerId||null,
-    address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
-    contract_amount:r.contractAmount||0,
-    type:r.type||'', types:r.types||[],
-    opportunity_id:r.opportunityId||null,
-    created:r.created||''
-  };
-}
-function fromSBProject(r) {
-  return {
-    id:r.id, number:r.number||'', name:r.name||'',
-    customerId:r.customer_id||null,
-    address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
-    contractAmount:r.contract_amount||0,
-    type:r.type||'', types:r.types||[],
-    opportunityId:r.opportunity_id||null,
-    created:r.created||''
-  };
-}
-
 // ── Push all data to Supabase ────────────────────────────────────
 async function pushToSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
@@ -4227,11 +4141,6 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_proposals').upsert(db.proposals.map(toSBProposal));
       if (r.error) errs.push('proposals: ' + r.error.message);
     }
-    // Projects
-    if (db.projects.length) {
-      var r = await supabaseClient.from('kmi_projects').upsert(db.projects.map(toSBProject));
-      if (r.error) errs.push('projects: ' + r.error.message);
-    }
     // Activity (insert new ones — get current max id first)
     if (db.activity.length) {
       var actRows = db.activity.slice(0, 50).map(function(a) { return {text:a.text||'', type:a.type||'', time:a.time||''}; });
@@ -4246,6 +4155,7 @@ async function pushToSupabase() {
       {key:'projClar',     value:db.projClar},
       {key:'exclusions',   value:db.exclusions},
       {key:'costTmpls',    value:db.costTmpls},
+      {key:'laborRateSets',value:db.laborRateSets},
       {key:'companyTypes', value:db.companyTypes},
       {key:'projectTypes', value:db.projectTypes},
       {key:'clarGroups',   value:db.clarGroups}
@@ -4274,19 +4184,18 @@ async function pullFromSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
   setSyncStatus('syncing', 'Loading\u2026');
   try {
-    var [custs, pms, users, opps, props, projs, acts, settings] = await Promise.all([
+    var [custs, pms, users, opps, props, acts, settings] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_users').select('*'),
       supabaseClient.from('kmi_opportunities').select('*'),
       supabaseClient.from('kmi_proposals').select('*'),
-      supabaseClient.from('kmi_projects').select('*'),
       supabaseClient.from('kmi_activity').select('*').order('created_at', {ascending:false}).limit(50),
       supabaseClient.from('kmi_settings').select('*')
     ]);
 
-    if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
-      var e = (custs.error||pms.error||users.error||opps.error||props.error||projs.error).message;
+    if (custs.error || pms.error || users.error || opps.error || props.error) {
+      var e = (custs.error||pms.error||users.error||opps.error||props.error).message;
       setSyncStatus('error', 'Load error');
       showSBResult('Error loading data: ' + e, false);
       return;
@@ -4312,18 +4221,23 @@ async function pullFromSupabase() {
     });
     db.opportunities = (opps.data   || []).map(fromSBOpp);
     db.proposals     = (props.data  || []).map(fromSBProposal);
-    db.projects      = (projs.data  || []).map(fromSBProject);
     db.activity      = (acts.data   || []).map(function(a){ return {text:a.text, type:a.type, time:a.time}; });
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
 
     // Settings — copy known setting rows into db. Includes runtime-config
     // keys like anthropic_api_key that aren't part of the default db shape.
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
+                                'laborRates','laborRateSets',
                                 'companyTypes','projectTypes','clarGroups',
                                 'anthropic_api_key'];
     (settings.data || []).forEach(function(row) {
       if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
     });
+    // Migrate legacy laborRates → laborRateSets if the cloud only has the old key
+    if (!db.laborRateSets && Array.isArray(db.laborRates) && db.laborRates.length) {
+      db.laborRateSets = [{id:'lrs1', label:'Current Rates', rates:db.laborRates}];
+    }
+    delete db.laborRates;
 
     // Save to localStorage as cache
     try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch(e) {}
@@ -4335,7 +4249,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
