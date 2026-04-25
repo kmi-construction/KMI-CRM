@@ -2764,6 +2764,19 @@ function saveUser() {
   if (!first||!last) { alert('Please enter first and last name.'); return; }
   if (!email)        { alert('Please enter an email address.'); return; }
   if (!role)         { alert('Please select a role.'); return; }
+  // Duplicate-email guard. Compare case-insensitively and ignore the row
+  // we're currently editing so renaming/role changes don't trip the check.
+  var emailLc = email.toLowerCase();
+  var clash = db.users.find(function(x){
+    return x.id !== _editUserId && (x.email || '').toLowerCase() === emailLc;
+  });
+  if (clash) {
+    alert('A user has already been created with this email address.\n\n' +
+          'Existing user: ' + clash.firstName + ' ' + clash.lastName +
+          ' (' + (clash.role || 'no role') + ')\n\n' +
+          'Use a different email or edit the existing user instead.');
+    return;
+  }
   var data = {firstName:first, lastName:last, email:email, phone:(g('uf-phone').value||'').trim(), role:role};
   if (_editUserId) { var u=db.users.find(function(x){return x.id===_editUserId}); if(u)Object.assign(u,data); }
   else { data.id=Date.now(); db.users.push(data); }
