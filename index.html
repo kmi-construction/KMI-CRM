@@ -75,6 +75,7 @@ tr:hover td{background:#fafafa}
 .ed-sel{padding:3px 20px 3px 8px;font-size:11px;font-weight:600;border:1px solid #ddd;border-radius:100px;cursor:pointer;font-family:inherit;appearance:none;-webkit-appearance:none;background-repeat:no-repeat;background-position:right 6px center;background-size:8px;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23666' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>")}
 .ed-sel:hover{filter:brightness(.96)}
 .ed-sel.dec-pending,.ed-sel.out-pending{background-color:#f5f5f5;color:#666;border-color:#ccc}
+.ed-sel.out-bid-sent{background-color:#e6f1fb;color:#185FA5;border-color:#B5D2EC}
 .ed-sel.dec-bidding,.ed-sel.out-won{background-color:#eaf3de;color:#3B6D11;border-color:#C1DBAB}
 .ed-sel.dec-not-bidding,.ed-sel.out-lost{background-color:#fcebeb;color:#A32D2D;border-color:#E8C8C8}
 .ed-sel.out-budget{background-color:#faf1d6;color:#9A7A2E;border-color:#E6D59F}
@@ -345,6 +346,7 @@ textarea{resize:vertical;min-height:72px}
     <select class="fs" onchange="filterOpp()" id="opp-fo">
       <option value="">All outcomes</option>
       <option value="pending">Pending</option>
+      <option value="bid-sent">Bid Sent</option>
       <option value="won">Won</option>
       <option value="lost">Lost</option>
       <option value="budget">Budget</option>
@@ -550,7 +552,7 @@ textarea{resize:vertical;min-height:72px}
   <div class="card">
     <div class="ch"><span class="ct">Project details</span></div>
     <div class="fg">
-      <div class="fgr"><label>Project number *</label><input id="nprj-num" placeholder="e.g. PRJ-2026-001"></div>
+      <div class="fgr"><label>Project number *</label><input id="nprj-num" placeholder="e.g. 26111"></div>
       <div class="fgr"><label>Customer *</label><select id="nprj-cust"><option value="">Select customer...</option></select></div>
       <div class="fgr full"><label>Project name *</label><input id="nprj-name" placeholder="Describe the project..."></div>
       <div class="fgr full"><label>Project address</label><input id="nprj-addr" placeholder="Street address (e.g. 123 Main St)"></div>
@@ -1161,7 +1163,15 @@ function applyUserPermissions() {
   if (box)    box.style.display  = 'flex';
 }
 
-async function ensureInitialUsers() {
+// True if this device had no app data in localStorage before this page load.
+// Captured at module-init time — DO NOT compute later (loadDB will populate db).
+var _wasFreshDevice = !localStorage.getItem(DB_KEY);
+
+async function ensureInitialUsersIfEmpty() {
+  // Only seeds the three baked-in admin accounts if the LOCAL list is empty
+  // AND no user with a password hash exists yet. Caller is responsible for
+  // gating this so we don't seed on devices that should be authenticating
+  // against Supabase.
   if (db.users.some(function(u){ return u.passwordHash; })) return null;
   var seeds = [
     {firstName:'Fred', lastName:'Kinateder', email:'fred@kmi-construction.com',     phone:'', role:'Admin'},
@@ -1190,21 +1200,184 @@ async function ensureInitialUsers() {
   return created;
 }
 
-async function bootApp() {
+// Backward-compatible alias — older code paths still call ensureInitialUsers.
+async function ensureInitialUsers() { return ensureInitialUsersIfEmpty(); }
+
+// ── Login form gating ─────────────────────────────────────────────
+function setLoginFormState(state, message) {
+  // state: 'connecting' | 'ready' | 'blocked' | 'offline'
+  var emailEl  = g('login-email');
+  var pwEl     = g('login-pw');
+  var btn      = document.querySelector('#login-overlay .login-btn');
+  var forgot   = document.querySelector('#login-overlay .login-forgot');
+  var statusEl = g('login-status');
+  // Lazy-create a status row above the email field if it doesn't exist
+  if (!statusEl) {
+    var label = document.querySelector('#login-overlay label');
+    if (label) {
+      statusEl = document.createElement('div');
+      statusEl.id = 'login-status';
+      statusEl.style.cssText = 'font-size:12px;padding:9px 12px;border-radius:6px;margin-bottom:14px;display:none;line-height:1.4';
+      label.parentNode.insertBefore(statusEl, label);
+    }
+  }
+  function setStatus(bg, color, text) {
+    if (!statusEl) return;
+    statusEl.style.background = bg;
+    statusEl.style.color = color;
+    statusEl.textContent = text;
+    statusEl.style.display = text ? 'block' : 'none';
+  }
+  function setRetryButton(visible) {
+    var existing = g('login-retry-btn');
+    if (visible && !existing) {
+      var b = document.createElement('button');
+      b.id = 'login-retry-btn';
+      b.type = 'button';
+      b.className = 'login-btn';
+      b.textContent = 'Retry connection';
+      b.onclick = function(){ bootSequence(); };
+      if (btn && btn.parentNode) btn.parentNode.insertBefore(b, btn.nextSibling);
+    } else if (!visible && existing) {
+      existing.remove();
+    }
+  }
+  var disabled = (state === 'connecting' || state === 'blocked');
+  if (emailEl) emailEl.disabled = disabled;
+  if (pwEl)    pwEl.disabled    = disabled;
+  if (btn)     btn.disabled     = disabled;
+  if (btn) {
+    btn.style.opacity      = disabled ? '0.55' : '1';
+    btn.style.cursor       = disabled ? 'not-allowed' : 'pointer';
+    btn.style.display      = state === 'blocked' ? 'none' : 'block';
+  }
+  if (forgot) forgot.style.display = (state === 'blocked') ? 'none' : 'block';
+
+  if (state === 'connecting') {
+    setStatus('#FFF8DC', '#6B5A2E', message || 'Connecting to database\u2026');
+    setRetryButton(false);
+  } else if (state === 'ready') {
+    setStatus('', '', '');
+    setRetryButton(false);
+  } else if (state === 'offline') {
+    setStatus('#FFE8D6', '#A05A1F', message || 'Working offline \u2014 changes won\u2019t sync until reconnected.');
+    setRetryButton(true);
+  } else if (state === 'blocked') {
+    setStatus('#FBE5E5', '#A32D2D', message || 'Cannot reach database. Please check your connection and try again.');
+    setRetryButton(true);
+  }
+}
+
+// ── Sequential boot ──────────────────────────────────────────────
+async function bootSequence() {
   applySbGroupState();
-  await ensureInitialUsers();
-  enforceSeedRoles();
+
+  // 1. If we already have a valid session, skip the connect-gate entirely —
+  //    the user already authenticated successfully on this device once. The
+  //    Supabase connection still gets attempted in the background so push/pull
+  //    work, but session persistence trumps connectivity for return visits.
   var session = loadSession();
   if (session) {
     _currentUser = session;
-    if (_currentUser.mustResetPassword) { hideLogin(); applyUserPermissions(); nav('dashboard'); showForceResetModal(); return; }
-    hideLogin();
-    applyUserPermissions();
-    nav('dashboard');
+    if (_currentUser.mustResetPassword) {
+      hideLogin(); applyUserPermissions(); nav('dashboard'); showForceResetModal();
+    } else {
+      hideLogin(); applyUserPermissions(); nav('dashboard');
+    }
+    // Background Supabase connect — don't block the user
+    autoConnectSupabase().catch(function(){ /* logged elsewhere */ });
     return;
   }
+
+  // 2. No session. Show login but DISABLE the form until Supabase responds.
   showLogin();
+  setLoginFormState('connecting', 'Connecting to database\u2026');
+
+  // 3. Try Supabase. Returns one of: 'pulled' | 'connected_no_pull' | 'no_creds' | 'init_failed' | 'pull_failed'
+  var outcome = await attemptSupabaseConnect();
+
+  // 4. Branch based on outcome AND fresh-device state
+  if (outcome === 'pulled') {
+    // Cloud is the source of truth. If cloud has zero users AND this device
+    // is fresh, seed defaults so the very first install of the system can
+    // bootstrap. Otherwise, never seed.
+    enforceSeedRoles();
+    if (_wasFreshDevice && db.users.length === 0) {
+      await ensureInitialUsersIfEmpty();
+    }
+    setLoginFormState('ready');
+    return;
+  }
+
+  // Anything that's NOT a successful pull...
+  if (_wasFreshDevice) {
+    // Fresh device + no cloud answer = block login. No seeding, no fallback.
+    var why = (outcome === 'no_creds')      ? 'No Supabase credentials configured for this site.'
+            : (outcome === 'init_failed')   ? 'Could not initialize the database client.'
+            : (outcome === 'pull_failed')   ? 'Connected to the database, but could not load data.'
+                                            : 'Could not reach the database.';
+    setLoginFormState('blocked',
+      'Cannot reach database. ' + why + '\n\nThis device has no offline data, so login requires a working connection.');
+    return;
+  }
+
+  // Returning device — local data exists. Allow login but warn it's offline.
+  enforceSeedRoles();
+  setLoginFormState('offline');
 }
+
+// Wrapper that runs autoConnectSupabase and reports a categorized outcome.
+async function attemptSupabaseConnect() {
+  var creds = getSBCreds();
+  if ((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) {
+    creds = { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY };
+  }
+  if (!creds || !creds.url || !creds.key) {
+    setSyncStatus('offline', 'Not connected');
+    return 'no_creds';
+  }
+  var cleanUrl = normalizeSBUrl(creds.url);
+  if (cleanUrl !== creds.url) {
+    creds.url = cleanUrl;
+    saveSBCreds(cleanUrl, creds.key);
+  }
+  // Wait for the Supabase SDK script to finish loading
+  var waitedMs = 0;
+  while (!window.supabase && waitedMs < 5000) {
+    await new Promise(function(r){ setTimeout(r, 100); });
+    waitedMs += 100;
+  }
+  if (!window.supabase) {
+    setSyncStatus('error', 'Database client unavailable');
+    return 'init_failed';
+  }
+  var ok = initSupabase(creds.url, creds.key);
+  if (!ok) {
+    setSyncStatus('error', 'Connection error \u2014 check Supabase config');
+    return 'init_failed';
+  }
+  var pb = g('btn-push'), pullb = g('btn-pull');
+  if (pb)    pb.style.display    = 'inline-block';
+  if (pullb) pullb.style.display = 'inline-block';
+  setSyncStatus('syncing', 'Connecting\u2026');
+  try {
+    // 8-second timeout so a hung pull doesn't trap the user forever
+    await Promise.race([
+      pullFromSupabase(),
+      new Promise(function(_, reject){
+        setTimeout(function(){ reject(new Error('Database pull timed out after 8s')); }, 8000);
+      })
+    ]);
+    return 'pulled';
+  } catch (e) {
+    setSyncStatus('error', 'Connected, but data load failed');
+    console.error('[Supabase auto-pull failed]', e);
+    return 'pull_failed';
+  }
+}
+
+// Legacy alias — anything that previously called bootApp() still works.
+async function bootApp() { return bootSequence(); }
 
 
 
@@ -1228,8 +1401,8 @@ function propBadge(s) {
 }
 function outcomeBadge(s) {
   var v = s || 'pending';
-  var m = {pending:'bd-pending', won:'bd-won', lost:'bd-lost', budget:'bd-budget'};
-  var l = {pending:'Pending', won:'Won', lost:'Lost', budget:'Budget'};
+  var m = {pending:'bd-pending', 'bid-sent':'bd-sent', won:'bd-won', lost:'bd-lost', budget:'bd-budget'};
+  var l = {pending:'Pending', 'bid-sent':'Bid Sent', won:'Won', lost:'Lost', budget:'Budget'};
   return '<span class="bdg ' + (m[v]||'bd-draft') + '">' + (l[v]||v) + '</span>';
 }
 
@@ -1544,9 +1717,19 @@ function renderDash() {
     '<div class="mc" style="border-left-color:#A32D2D"><div class="ml">Not bidding</div><div class="mv rd">' + nobid.length + '</div><div class="ms">Passed</div></div>' +
     '<div class="mc" style="border-left-color:#9A7A2E"><div class="ml">Proposals won</div><div class="mv am">' + won.length + '</div><div class="ms">Confirmed</div></div>';
 
-  g('d-recent').innerHTML = opps.length
+  // Sort by bidDate descending so most-recent bid dates surface first.
+  // Opportunities without a bid date sink to the bottom but still appear if
+  // there aren't enough dated entries to fill 5 rows.
+  var recent = opps.slice().sort(function(a, b){
+    var ad = a.bidDate || '', bd = b.bidDate || '';
+    if (!ad && !bd) return 0;
+    if (!ad) return 1;       // null bid dates last
+    if (!bd) return -1;
+    return bd.localeCompare(ad); // desc
+  }).slice(0, 5);
+  g('d-recent').innerHTML = recent.length
     ? '<table><thead><tr><th>ID</th><th>Project</th><th>Customer</th><th>Bid date</th><th>Decision</th></tr></thead><tbody>' +
-      opps.slice(-5).reverse().map(function(o){
+      recent.map(function(o){
         var c = getCust(o.customerId);
         return '<tr style="cursor:pointer" onclick="openOppDetail(\'' + o.id + '\')">' +
           '<td style="font-weight:600;color:var(--kmi)">' + o.id + '</td>' +
@@ -1555,15 +1738,31 @@ function renderDash() {
       }).join('') + '</tbody></table>'
     : '<div style="text-align:center;padding:24px;color:#aaa;font-size:13px">No opportunities yet</div>';
 
+  // Dashboard "Bid decisions" panel — covers both decision phase
+  // (Bidding/Not bidding/Pending decision) AND outcome phase (Bid Sent/Won/
+  // Lost) so admins get a one-glance summary of where everything stands.
+  var bidSent  = opps.filter(function(o){ return o.decision === 'bidding' && o.outcomeStatus === 'bid-sent'; });
+  var lost     = opps.filter(function(o){ return o.decision === 'bidding' && o.outcomeStatus === 'lost'; });
   var tot = opps.length || 1;
   g('d-decisions').innerHTML =
     '<div class="sb2"><div class="sb2-l" style="color:#3B6D11">Bidding</div><div class="sb2-t"><div class="sb2-f" style="width:' + Math.round(bid.length/tot*100) + '%;background:#3B6D11"></div></div><div class="sb2-p">' + bid.length + '</div></div>' +
     '<div class="sb2"><div class="sb2-l" style="color:#A32D2D">Not bidding</div><div class="sb2-t"><div class="sb2-f" style="width:' + Math.round(nobid.length/tot*100) + '%;background:#E24B4A"></div></div><div class="sb2-p">' + nobid.length + '</div></div>' +
-    '<div class="sb2"><div class="sb2-l" style="color:#888">Pending</div><div class="sb2-t"><div class="sb2-f" style="width:' + Math.round(pend.length/tot*100) + '%;background:#aaa"></div></div><div class="sb2-p">' + pend.length + '</div></div>';
+    '<div class="sb2"><div class="sb2-l" style="color:#888">Pending decision</div><div class="sb2-t"><div class="sb2-f" style="width:' + Math.round(pend.length/tot*100) + '%;background:#aaa"></div></div><div class="sb2-p">' + pend.length + '</div></div>' +
+    '<div class="sb2"><div class="sb2-l" style="color:#185FA5">Bid Sent</div><div class="sb2-t"><div class="sb2-f" style="width:' + Math.round(bidSent.length/tot*100) + '%;background:#185FA5"></div></div><div class="sb2-p">' + bidSent.length + '</div></div>' +
+    '<div class="sb2"><div class="sb2-l" style="color:#9A7A2E">Won</div><div class="sb2-t"><div class="sb2-f" style="width:' + Math.round(won.length/tot*100) + '%;background:#9A7A2E"></div></div><div class="sb2-p">' + won.length + '</div></div>' +
+    '<div class="sb2"><div class="sb2-l" style="color:#A32D2D">Lost</div><div class="sb2-t"><div class="sb2-f" style="width:' + Math.round(lost.length/tot*100) + '%;background:#A32D2D"></div></div><div class="sb2-p">' + lost.length + '</div></div>';
 
+  // Monthly opportunities chart — counts by BID DATE so the chart reflects
+  // when bids are due/were submitted, not when records were entered.
+  // Opportunities without a bid date are excluded from this chart.
   var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   var counts = [0,0,0,0,0,0,0,0,0,0,0,0];
-  opps.forEach(function(o){ if (o.created) counts[new Date(o.created).getMonth()]++; });
+  opps.forEach(function(o){
+    if (!o.bidDate) return;
+    var d = new Date(o.bidDate);
+    if (isNaN(d.getTime())) return;
+    counts[d.getMonth()]++;
+  });
   var now = new Date().getMonth();
   var sl = months.slice(Math.max(0,now-5), now+1);
   var sc = counts.slice(Math.max(0,now-5), now+1);
@@ -1644,10 +1843,11 @@ function renderOppList(f) {
                  ? (function(){
                      var ov = o.outcomeStatus || 'pending';
                      return '<select class="ed-sel out-' + ov + '" onchange="setOutcome(\'' + o.id + '\', this.value)">' +
-                       '<option value="pending"' + (ov === 'pending' ? ' selected' : '') + '>Pending</option>' +
-                       '<option value="won"'     + (ov === 'won'     ? ' selected' : '') + '>Won</option>' +
-                       '<option value="lost"'    + (ov === 'lost'    ? ' selected' : '') + '>Lost</option>' +
-                       '<option value="budget"'  + (ov === 'budget'  ? ' selected' : '') + '>Budget</option>' +
+                       '<option value="pending"'  + (ov === 'pending'  ? ' selected' : '') + '>Pending</option>' +
+                       '<option value="bid-sent"' + (ov === 'bid-sent' ? ' selected' : '') + '>Bid Sent</option>' +
+                       '<option value="won"'      + (ov === 'won'      ? ' selected' : '') + '>Won</option>' +
+                       '<option value="lost"'     + (ov === 'lost'     ? ' selected' : '') + '>Lost</option>' +
+                       '<option value="budget"'   + (ov === 'budget'   ? ' selected' : '') + '>Budget</option>' +
                      '</select>';
                    })()
                  : '<span style="color:#aaa;font-size:12px">—</span>') + '</td>' +
@@ -1852,10 +2052,11 @@ function renderOppDetail(id) {
         '<div style="display:flex;align-items:center;gap:10px">' +
           outcomeBadge(cur) +
           '<select onchange="setOutcome(currentOppId, this.value)" style="padding:8px 12px;font-size:13px;font-family:inherit;background:#fff;border:1px solid var(--stl);border-radius:7px;cursor:pointer;min-width:150px;font-weight:600;color:#1a1a1a">' +
-            '<option value="pending"' + (!cur || cur === 'pending' ? ' selected' : '') + '>Pending</option>' +
-            '<option value="won"' + (cur === 'won' ? ' selected' : '') + '>Won</option>' +
-            '<option value="lost"' + (cur === 'lost' ? ' selected' : '') + '>Lost</option>' +
-            '<option value="budget"' + (cur === 'budget' ? ' selected' : '') + '>Budget</option>' +
+            '<option value="pending"'  + (!cur || cur === 'pending' ? ' selected' : '') + '>Pending</option>' +
+            '<option value="bid-sent"' + (cur === 'bid-sent' ? ' selected' : '') + '>Bid Sent</option>' +
+            '<option value="won"'      + (cur === 'won'      ? ' selected' : '') + '>Won</option>' +
+            '<option value="lost"'     + (cur === 'lost'     ? ' selected' : '') + '>Lost</option>' +
+            '<option value="budget"'   + (cur === 'budget'   ? ' selected' : '') + '>Budget</option>' +
           '</select>' +
         '</div>' +
       '</div>' +
@@ -2015,7 +2216,7 @@ function setOutcome(oppId, status) {
   var prev = o.outcomeStatus || null;
   o.outcomeStatus = status || null;
   if (status && status !== prev) {
-    var ll = {pending:'Pending', won:'Won', lost:'Lost', budget:'Budget'};
+    var ll = {pending:'Pending', 'bid-sent':'Bid Sent', won:'Won', lost:'Lost', budget:'Budget'};
     db.activity.unshift({text: o.id + ' outcome set to ' + (ll[status] || status), type: status, time: 'Just now'});
   } else if (!status && prev) {
     db.activity.unshift({text: o.id + ' outcome cleared', type: 'pending', time: 'Just now'});
@@ -2644,9 +2845,32 @@ function showAddCust() {
     '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveCust()">Add customer</button></div>');
 }
 function saveCust() {
-  var n = (g('nc-n').value || '').trim();
+  var n     = (g('nc-n').value || '').trim();
+  var email = (g('nc-e').value || '').trim();
   if (!n) { alert('Please enter a company name.'); return; }
-  db.customers.push({id:Date.now(), name:n, contact:(g('nc-c').value||'').trim(), email:g('nc-e').value, phone:g('nc-p').value, type:g('nc-t').value, address:g('nc-a').value, cityState:g('nc-cs').value, city:g('nc-cs').value});
+  // Duplicate-customer guard. Block on either matching company name OR matching
+  // non-empty email (case-insensitive). Empty emails don't trigger the email
+  // check because many customers legitimately share generic addresses or
+  // simply don't supply one.
+  var nLc       = n.toLowerCase();
+  var emailLc   = email.toLowerCase();
+  var nameClash = db.customers.find(function(x){ return (x.name  || '').toLowerCase() === nLc; });
+  var emailClash = email
+    ? db.customers.find(function(x){ return (x.email || '').toLowerCase() === emailLc; })
+    : null;
+  if (nameClash) {
+    alert('A customer has already been created with this company name.\n\n' +
+          'Existing customer: ' + nameClash.name + (nameClash.contact ? ' \u2014 ' + nameClash.contact : '') + '\n\n' +
+          'Use a different name or edit the existing customer instead.');
+    return;
+  }
+  if (emailClash) {
+    alert('A customer has already been created with this email address.\n\n' +
+          'Existing customer: ' + emailClash.name + (emailClash.contact ? ' \u2014 ' + emailClash.contact : '') + '\n\n' +
+          'Use a different email or edit the existing customer instead.');
+    return;
+  }
+  db.customers.push({id:Date.now(), name:n, contact:(g('nc-c').value||'').trim(), email:email, phone:g('nc-p').value, type:g('nc-t').value, address:g('nc-a').value, cityState:g('nc-cs').value, city:g('nc-cs').value});
   saveDB(); closeModal(); renderCusts();
 }
 function showEditCust(id) {
@@ -2668,15 +2892,35 @@ function showEditCust(id) {
 function saveEditCust(id) {
   if (!requireFull('edit-customers', 'edit customers')) return;
   var c = db.customers.find(function(x){ return x.id === id; }); if (!c) return;
-  var n = (g('ec-n').value || '').trim();
+  var n     = (g('ec-n').value || '').trim();
+  var email = (g('ec-e').value || '').trim();
   if (!n) { alert('Please enter a company name.'); return; }
+  // Duplicate guard — ignore the row we're editing
+  var nLc     = n.toLowerCase();
+  var emailLc = email.toLowerCase();
+  var nameClash = db.customers.find(function(x){ return x.id !== id && (x.name  || '').toLowerCase() === nLc; });
+  var emailClash = email
+    ? db.customers.find(function(x){ return x.id !== id && (x.email || '').toLowerCase() === emailLc; })
+    : null;
+  if (nameClash) {
+    alert('Another customer already exists with this company name.\n\n' +
+          'Existing customer: ' + nameClash.name + (nameClash.contact ? ' \u2014 ' + nameClash.contact : '') + '\n\n' +
+          'Use a different name or merge with the existing customer instead.');
+    return;
+  }
+  if (emailClash) {
+    alert('Another customer already exists with this email address.\n\n' +
+          'Existing customer: ' + emailClash.name + (emailClash.contact ? ' \u2014 ' + emailClash.contact : '') + '\n\n' +
+          'Use a different email or merge with the existing customer instead.');
+    return;
+  }
   c.name      = n;
   c.contact   = (g('ec-c').value  || '').trim();
   c.type      = g('ec-t').value;
   c.address   = (g('ec-a').value  || '').trim();
   c.cityState = (g('ec-cs').value || '').trim();
   c.city      = c.cityState;
-  c.email     = (g('ec-e').value  || '').trim();
+  c.email     = email;
   c.phone     = (g('ec-p').value  || '').trim();
   saveDB(); closeModal(); renderCusts();
 }
@@ -2708,8 +2952,41 @@ function showAddPM()  { _editPMId=null; showModal('<button class="xbtn" onclick=
 function showEditPM(id) { _editPMId=id; var pm=db.pms.find(function(x){ return x.id===id; }); if(!pm)return; showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Edit project manager</div><div class="msb">' + pm.firstName + ' ' + pm.lastName + '</div>' + pmForm(pm) + '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="savePM()">Save changes</button></div>'); }
 function savePM() {
   var f=(g('pm-f').value||'').trim(), l=(g('pm-l').value||'').trim(), t=g('pm-t').value, cid=parseInt(g('pm-c').value);
+  var email=(g('pm-e').value||'').trim();
   if(!f||!l||!t||!cid){alert('Please fill in all required fields.');return}
-  var data={firstName:f,lastName:l,title:t,customerId:cid,email:g('pm-e').value.trim(),cell:g('pm-cell').value.trim(),office:g('pm-off').value.trim()};
+  // Duplicate-PM guard:
+  //  (a) Email match across the whole table — same person, two records.
+  //  (b) Same first+last name within the same customer company — almost
+  //      certainly a duplicate even without an email. Two "Mike Smith" rows
+  //      at the same GC is rarely intentional; allowing it across companies
+  //      is fine because they really are different people.
+  var emailLc = email.toLowerCase();
+  var fLc = f.toLowerCase(), lLc = l.toLowerCase();
+  var emailClash = email
+    ? db.pms.find(function(x){ return x.id !== _editPMId && (x.email || '').toLowerCase() === emailLc; })
+    : null;
+  var nameClash = db.pms.find(function(x){
+    return x.id !== _editPMId &&
+           x.customerId === cid &&
+           (x.firstName || '').toLowerCase() === fLc &&
+           (x.lastName  || '').toLowerCase() === lLc;
+  });
+  function _custName(c) { return (c && c.name) || 'this customer'; }
+  if (emailClash) {
+    var ec = db.customers.find(function(x){ return x.id === emailClash.customerId; });
+    alert('A project manager has already been created with this email address.\n\n' +
+          'Existing PM: ' + emailClash.firstName + ' ' + emailClash.lastName +
+          ' at ' + _custName(ec) + '\n\n' +
+          'Use a different email or edit the existing PM instead.');
+    return;
+  }
+  if (nameClash) {
+    var nc = db.customers.find(function(x){ return x.id === nameClash.customerId; });
+    alert('A project manager named ' + f + ' ' + l + ' already exists at ' + _custName(nc) + '.\n\n' +
+          'If this is the same person, edit the existing record. If they\u2019re a different person with the same name, add a unique email to differentiate them.');
+    return;
+  }
+  var data={firstName:f,lastName:l,title:t,customerId:cid,email:email,cell:g('pm-cell').value.trim(),office:g('pm-off').value.trim()};
   if(_editPMId){var pm=db.pms.find(function(x){return x.id===_editPMId});if(pm)Object.assign(pm,data)}else{data.id=Date.now();db.pms.push(data)}
   saveDB(); closeModal(); renderPMs();
 }
@@ -2812,17 +3089,37 @@ var _newProjectFromOppId = null;
 
 function getProj(id) { return db.projects.find(function(p){ return p.id === id; }); }
 
+// Project numbering scheme: YYNNN
+//   YY  = last two digits of the current calendar year (browser clock)
+//   NNN = sequential counter starting at 100, incrementing per number issued
+//         within that year. Examples: first project of 2026 is 26100, second
+//         is 26101, etc. The counter resets to 100 on Jan 1 of each new year.
+//
+// Numbers from prior years (e.g. 25xxx, or any older free-text format) are
+// left alone — this generator only counts current-year matches when finding
+// the next available number, so legacy entries don't affect the sequence.
+//
+// Cap: 100-999 = 900 numbers per year. KMI's volume is well under this.
 function generateProjectNumber() {
-  var year = new Date().getFullYear();
-  var prefix = 'PRJ-' + year + '-';
-  var max = 0;
+  var yy = String(new Date().getFullYear()).slice(-2);  // "26" for 2026
+  var pattern = new RegExp('^' + yy + '(\\d{3})$');
+  var max = 99;  // so the first match becomes 100
   db.projects.forEach(function(p){
-    if (p.number && p.number.indexOf(prefix) === 0) {
-      var n = parseInt(p.number.slice(prefix.length), 10);
+    var m = String(p.number || '').match(pattern);
+    if (m) {
+      var n = parseInt(m[1], 10);
       if (!isNaN(n) && n > max) max = n;
     }
   });
-  return prefix + String(max + 1).padStart(3, '0');
+  return yy + String(max + 1);
+}
+
+// Validate a project number against the YYNNN format. Used to give a clearer
+// error when admins type a number that doesn't match the scheme. We don't
+// hard-block off-format numbers (legacy entries from before the scheme exist
+// and the user may need to enter one) — just warn in the format we expect.
+function isValidProjectNumberFormat(num) {
+  return /^\d{2}\d{3}$/.test(String(num || '').trim());
 }
 
 function isProjectNumberUnique(num, excludeId) {
@@ -3406,16 +3703,18 @@ function renderAnalytics() {
   var wonOpps  = biddingOpps.filter(function(o){ return o.outcomeStatus === 'won'; });
   var wonCount = wonOpps.length;
 
-  // ── Eligible opps for success rate: Won + Lost + Pending (Budget excluded) ─
-  // Null outcomeStatus is treated as Pending for backward compatibility
-  var eligibleOpps  = biddingOpps.filter(function(o){ return o.outcomeStatus !== 'budget'; });
+  // ── Eligible opps for success rate: Won + Lost + Bid Sent ────
+  // Excludes Pending (haven't bid yet) and Budget (not a real bid).
+  var eligibleOpps  = biddingOpps.filter(function(o){
+    return o.outcomeStatus === 'won' || o.outcomeStatus === 'lost' || o.outcomeStatus === 'bid-sent';
+  });
   var eligibleCount = eligibleOpps.length;
 
-  // ── Success rate: bids won / (won + lost + pending) ──────────
+  // ── Success rate: bids won / (won + lost + bid sent) ─────────
   var successRate     = eligibleCount > 0 ? (wonCount / eligibleCount * 100) : null;
   var successRateStr  = successRate !== null ? successRate.toFixed(1) + '%' : '\u2014';
 
-  // ── Dollar amount of eligible (won+lost+pending) bids ────────
+  // ── Dollar amount of eligible (won+lost+bid sent) bids ───────
   var eligibleAmt = eligibleOpps.reduce(function(s, o){
     var amt = (o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue || 0);
     return s + amt;
@@ -3447,7 +3746,7 @@ function renderAnalytics() {
         (successRate !== null ? '<div style="font-size:13px;color:#888;padding-bottom:6px">' + wonCount + ' won / ' + eligibleCount + ' bids</div>' : '<div style="font-size:13px;color:#aaa;padding-bottom:6px">No competitive bids yet</div>') +
       '</div>' +
       '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-bottom:6px">Formula</div>' +
-      '<div style="font-size:12px;color:#666;background:#fafafa;border-radius:6px;padding:8px 10px;font-family:monospace">Bids Won \u00f7 (Won + Lost + Pending)</div>' +
+      '<div style="font-size:12px;color:#666;background:#fafafa;border-radius:6px;padding:8px 10px;font-family:monospace">Bids Won \u00f7 (Won + Lost + Bid Sent)</div>' +
       (successRate !== null ?
         '<div style="margin-top:12px"><div style="height:10px;background:#eee;border-radius:5px;overflow:hidden"><div style="height:100%;width:' + Math.min(successRate,100).toFixed(1) + '%;background:' + (successRate >= 50 ? '#3B6D11' : successRate >= 25 ? '#C8A84B' : '#E24B4A') + ';border-radius:5px;transition:width .4s"></div></div></div>'
         : '') +
@@ -3460,7 +3759,7 @@ function renderAnalytics() {
         (volSuccessRate !== null ? '<div style="font-size:13px;color:#888;padding-bottom:6px">' + fmtC(wonAmt) + ' won / ' + fmtC(eligibleAmt) + ' bids</div>' : '<div style="font-size:13px;color:#aaa;padding-bottom:6px">No competitive bids with amounts yet</div>') +
       '</div>' +
       '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-bottom:6px">Formula</div>' +
-      '<div style="font-size:12px;color:#666;background:#fafafa;border-radius:6px;padding:8px 10px;font-family:monospace">$ Won \u00f7 $ (Won + Lost + Pending)</div>' +
+      '<div style="font-size:12px;color:#666;background:#fafafa;border-radius:6px;padding:8px 10px;font-family:monospace">$ Won \u00f7 $ (Won + Lost + Bid Sent)</div>' +
       (volSuccessRate !== null ?
         '<div style="margin-top:12px"><div style="height:10px;background:#eee;border-radius:5px;overflow:hidden"><div style="height:100%;width:' + Math.min(volSuccessRate,100).toFixed(1) + '%;background:' + (volSuccessRate >= 50 ? '#3B6D11' : volSuccessRate >= 25 ? '#C8A84B' : '#E24B4A') + ';border-radius:5px;transition:width .4s"></div></div></div>'
         : '') +
@@ -3474,9 +3773,9 @@ function renderAnalytics() {
     '<div class="sb2"><div class="sb2-l" style="color:#888">Pending</div><div class="sb2-t"><div class="sb2-f" style="width:'+Math.round(pend/tot*100)+'%;background:#aaa"></div></div><div class="sb2-p">'+pend+'</div></div>';
 
   // ── Outcome pipeline (bidding opportunities by outcomeStatus) ────
-  var oss     = ['pending','won','lost','budget'];
-  var oll     = {pending:'Pending', won:'Won', lost:'Lost', budget:'Budget'};
-  var ocolors = {pending:'#aaa',    won:'#3B6D11', lost:'#E24B4A', budget:'#C8A84B'};
+  var oss     = ['pending','bid-sent','won','lost','budget'];
+  var oll     = {pending:'Pending', 'bid-sent':'Bid Sent', won:'Won', lost:'Lost', budget:'Budget'};
+  var ocolors = {pending:'#aaa',    'bid-sent':'#185FA5', won:'#3B6D11', lost:'#E24B4A', budget:'#C8A84B'};
   var otot    = biddingOpps.length || 1;
   g('a-rev').innerHTML = oss.map(function(s){
     var cnt = biddingOpps.filter(function(o){
@@ -3494,7 +3793,9 @@ function renderAnalytics() {
     var biddingC = co.filter(function(o){ return o.decision === 'bidding'; });
     var nb       = co.filter(function(o){ return o.decision === 'not-bidding'; });
     var wonC       = co.filter(function(o){ return o.outcomeStatus === 'won'; });
-    var eligibleCo = biddingC.filter(function(o){ return o.outcomeStatus !== 'budget'; });
+    var eligibleCo = biddingC.filter(function(o){
+      return o.outcomeStatus === 'won' || o.outcomeStatus === 'lost' || o.outcomeStatus === 'bid-sent';
+    });
     var sr     = eligibleCo.length ? (wonC.length / eligibleCo.length * 100) : null;
     var bAmt   = eligibleCo.reduce(function(s,o){ return s + ((o.finalBidAmount !== null && o.finalBidAmount !== undefined) ? o.finalBidAmount : (o.estValue||0)); }, 0);
     var wAmt   = wonC.reduce(function(s,o){
@@ -5359,8 +5660,15 @@ async function autoConnectSupabase() {
 }
 
 
-autoConnectSupabase();
-bootApp();
+// ── Boot ────────────────────────────────────────────────────────
+// On every page load we run a single sequential boot:
+//   1. Show the login screen with the form disabled
+//   2. Try to connect + pull from Supabase
+//   3. Decide what to do based on (a) connection outcome and (b) whether
+//      this device already had local data
+// This eliminates a race condition where a fresh device could log in
+// against locally-seeded stub accounts before Supabase had answered.
+bootSequence();
 </script>
 </body>
 </html>
