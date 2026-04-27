@@ -276,6 +276,8 @@ textarea{resize:vertical;min-height:72px}
     <div class="sb-group-items">
       <div class="ni" onclick="nav('customers')"><span class="nico">◎</span>Customers</div>
       <div class="ni" onclick="nav('pms')"><span class="nico">◉</span>Project Managers</div>
+      <div class="ni" onclick="nav('vendors')"><span class="nico">◈</span>Vendors</div>
+      <div class="ni" onclick="nav('vendor-contacts')"><span class="nico">◇</span>Vendor Contacts</div>
     </div>
   </div>
   <div class="sb-group" data-group="maintenance">
@@ -389,6 +391,14 @@ textarea{resize:vertical;min-height:72px}
       <div class="fgr"><label>Customer project manager</label><select id="nop-pm"><option value="">Unassigned</option></select></div>
       <div class="fgr full"><label>Notes</label><textarea id="nop-notes" placeholder="Any notes about this opportunity..."></textarea></div>
     </div>
+  </div>
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Vendor assignments</span>
+      <button class="btn btn-sm" onclick="addOppVendorAssignmentRow()">+ Add vendor</button>
+    </div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Assign vendors and (optionally) a vendor contact to this bid. Pick a vendor first; the contact dropdown then filters to that vendor's contacts. Multiple vendors and contacts allowed.</div>
+    <div id="nop-vendor-rows"></div>
   </div>
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
     <button class="btn" onclick="nav('opportunities')">Cancel</button>
@@ -613,6 +623,28 @@ textarea{resize:vertical;min-height:72px}
   <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th>Name</th><th>Title</th><th>Company</th><th>Email</th><th>Cell</th><th>Office</th><th>Actions</th></tr></thead><tbody id="pm-tbody"></tbody></table></div>
 </div>
 
+<!-- VENDORS -->
+<div class="pg" id="pg-vendors">
+  <div class="ph"><div><h1>Vendors</h1><div class="sub">Subcontractors, suppliers, and other vendor companies</div><div class="stripe"></div></div></div>
+  <div class="ab">
+    <input class="si" placeholder="Search vendors..." oninput="filterV()" id="v-s">
+    <select class="fs" onchange="filterV()" id="v-ft"><option value="">All vendor types</option></select>
+    <button class="btn btn-p" style="margin-left:auto" onclick="showAddVendor()">+ Add vendor</button>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px" id="v-grid"></div>
+</div>
+
+<!-- VENDOR CONTACTS -->
+<div class="pg" id="pg-vendor-contacts">
+  <div class="ph" style="margin-bottom:0"><div><h1>Vendor Contacts</h1><div class="sub">People at vendor companies</div><div class="stripe"></div></div><button class="btn btn-p" onclick="showAddVendorContact()">+ Add contact</button></div>
+  <div class="ab">
+    <input class="si" placeholder="Search by name, title, email, department..." oninput="filterVC()" id="vc-s">
+    <select class="fs" onchange="filterVC()" id="vc-fv"><option value="">All vendors</option></select>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th>Name</th><th>Title</th><th>Department</th><th>Vendor</th><th>Email</th><th>Cell</th><th>Office</th><th>Actions</th></tr></thead><tbody id="vc-tbody"></tbody></table></div>
+</div>
+
+
 <!-- ANALYTICS -->
 <div class="pg" id="pg-analytics">
   <div class="ph"><div><h1>Analytics</h1><div class="sub">Bid pipeline and proposal performance</div><div class="stripe"></div></div></div>
@@ -653,10 +685,11 @@ textarea{resize:vertical;min-height:72px}
 <!-- TEMPLATES -->
 <div class="pg" id="pg-templates">
   <div class="ph"><div><h1>Templates</h1><div class="sub">Manage clarifications, exclusions, and cost templates</div><div class="stripe"></div></div></div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:16px">
     <div class="card"><div class="ch"><span class="ct">Company types</span><button class="btn btn-sm btn-p" onclick="showAddType('company')">+ Add</button></div><div id="t-company-types"></div></div>
     <div class="card"><div class="ch"><span class="ct">Project types</span><button class="btn btn-sm btn-p" onclick="showAddType('project')">+ Add</button></div><div id="t-project-types"></div></div>
     <div class="card"><div class="ch"><span class="ct">Project roles</span><button class="btn btn-sm btn-p" onclick="showAddType('projectRole')">+ Add</button></div><div id="t-project-roles"></div></div>
+    <div class="card"><div class="ch"><span class="ct">Vendor types</span><button class="btn btn-sm btn-p" onclick="showAddType('vendor')">+ Add</button></div><div id="t-vendor-types"></div></div>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
     <div class="card"><div class="ch"><span class="ct">Inclusions</span><button class="btn btn-sm btn-p" onclick="showAddClar('std')">+ Add</button></div><div id="t-std"></div></div>
@@ -818,9 +851,11 @@ var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,
 
 var DB_DEFAULTS = {
   customers: [], pms: [], users: [], opportunities: [], proposals: [], projects: [], activity: [],
+  vendors: [], vendorContacts: [],
   companyTypes: ['General Contractor','Commercial','Developer','Civil Engineering','Industrial','Residential'],
   projectTypes: ['Foundation','Structural Steel','Structural Concrete','Masonry','Concrete','Earthwork','Site Utilities','Shoring & Excavation','Demolition','Other'],
   projectRoles: ['Assistant Project Manager','Project Engineer','Project Coordinator','Superintendent','Project Foreman','Project Manager','Sr. Project Manager','Project Executive'],
+  vendorTypes:  ['Subcontractor','Supplier','Equipment Rental','Manufacturer','Consultant','Other'],
   stdClar: [
     {id:'sc1', text:'Furnish and install per project specifications and drawings.'},
     {id:'sc2', text:'Work performed during standard business hours, 7:00AM to 3:30PM, Monday \u2013 Friday.'},
@@ -881,6 +916,8 @@ function loadDB() {
         proposals:    p.proposals    || [],
         projects:     p.projects     || [],
         activity:     p.activity     || [],
+        vendors:        p.vendors        || [],
+        vendorContacts: p.vendorContacts || [],
         stdClar:      p.stdClar      || DB_DEFAULTS.stdClar,
         projClar:     p.projClar     || DB_DEFAULTS.projClar,
         exclusions:   p.exclusions   || DB_DEFAULTS.exclusions,
@@ -889,7 +926,8 @@ function loadDB() {
         clarGroups:   p.clarGroups   || DB_DEFAULTS.clarGroups,
         companyTypes: p.companyTypes  || DB_DEFAULTS.companyTypes,
         projectTypes: p.projectTypes  || DB_DEFAULTS.projectTypes,
-        projectRoles: p.projectRoles  || DB_DEFAULTS.projectRoles
+        projectRoles: p.projectRoles  || DB_DEFAULTS.projectRoles,
+        vendorTypes:  p.vendorTypes   || DB_DEFAULTS.vendorTypes
       };
     }
   } catch(e) { console.warn('KMI CRM load error', e); }
@@ -938,6 +976,10 @@ var PERMISSIONS = {
   'edit-customers':     ['full','read','read','read','none','none'],
   'add-pm':             ['full','full','full','read','none','none'],
   'edit-pm':            ['full','read','read','read','none','none'],
+  'add-vendors':        ['full','full','full','full','read','read'],
+  'edit-vendors':       ['full','full','full','full','none','none'],
+  'add-vendor-contacts':  ['full','full','full','full','read','read'],
+  'edit-vendor-contacts': ['full','full','full','full','none','none'],
   'analytics':          ['full','read','read','read','none','none'],
   'users':              ['full','none','none','none','none','none'],
   'templates':          ['full','read','none','none','none','none']
@@ -985,6 +1027,8 @@ var PAGE_ACTION_MAP = {
   'opportunities':  'bid-opportunities',
   'customers':      'add-customers',
   'pms':            'add-pm',
+  'vendors':           'add-vendors',
+  'vendor-contacts':   'add-vendor-contacts',
   'analytics':      'analytics',
   'users':          'users',
   'templates':      'templates'
@@ -1387,6 +1431,8 @@ function fmtC(v) { return '$' + Number(v || 0).toLocaleString(); }
 function getCust(id) { return db.customers.find(function(c){ return c.id === id; }) || {name:'Unknown', contact:'', address:'', cityState:''}; }
 function getOpp(id)  { return db.opportunities.find(function(o){ return o.id === id; }); }
 function getProp(id) { return db.proposals.find(function(p){ return p.id === id; }); }
+function getVendor(id)        { return (db.vendors        || []).find(function(v){ return v.id === id; }); }
+function getVendorContact(id) { return (db.vendorContacts || []).find(function(c){ return c.id === id; }); }
 function getUser(id) { return db.users.find(function(u){ return u.id === id; }); }
 
 function decBadge(d) {
@@ -1426,6 +1472,8 @@ function nav(page) {
     'new-opportunity':initNewOpp,
     customers:        renderCusts,
     pms:              renderPMs,
+    vendors:           renderVendors,
+    'vendor-contacts': renderVendorContacts,
     users:            renderUsers,
     analytics:        renderAnalytics,
     import:           renderImport,
@@ -2099,6 +2147,25 @@ function renderOppDetail(id) {
     '<div><div class="k">Assigned estimator</div><div class="v">' + (usr ? usr.firstName + ' ' + usr.lastName + '<span style="font-size:11px;color:#888;font-weight:400"> (' + usr.role + ')</span>' : '<span style="color:#aaa;font-weight:400">Unassigned</span>') + '</div></div>' +
     (function(){ var pm = o.pmId ? db.pms.find(function(p){ return p.id === o.pmId; }) : null; return '<div><div class="k">Customer PM</div><div class="v">' + (pm ? pm.firstName + ' ' + pm.lastName + '<span style="font-size:11px;color:#888;font-weight:400"> — ' + pm.title + '</span>' : '<span style="color:#aaa;font-weight:400">Unassigned</span>') + '</div></div>'; })() +
     '<div><div class="k">Created</div><div class="v">' + (o.created || '\u2014') + '</div></div>' +
+    (function(){
+      var assigns = Array.isArray(o.vendorAssignments) ? o.vendorAssignments : [];
+      if (!assigns.length) return '';
+      var rows = assigns.map(function(a){
+        var v = getVendor(a.vendorId);
+        if (!v) return ''; // orphan; skip
+        var c = a.contactId ? getVendorContact(a.contactId) : null;
+        var cName = c
+          ? (c.firstName + ' ' + c.lastName + (c.title ? ' \u2014 ' + c.title : ''))
+          : '<span style="color:#aaa">No specific contact</span>';
+        return '<div style="display:flex;gap:10px;align-items:baseline;font-size:12px;padding:5px 0;border-bottom:0.5px solid #f2f2f2">' +
+          '<strong style="min-width:160px">' + v.name + '</strong>' +
+          '<span style="color:#444">' + cName + '</span>' +
+          (v.vendorType ? '<span class="tag" style="margin-left:auto;font-size:10px">' + v.vendorType + '</span>' : '') +
+          '</div>';
+      }).filter(Boolean).join('');
+      if (!rows) return '';
+      return '<div style="grid-column:1/-1"><div class="k">Vendor assignments</div><div class="v" style="font-weight:400">' + rows + '</div></div>';
+    })() +
     (o.notes ? '<div style="grid-column:1/-1"><div class="k">Notes</div><div class="v" style="font-weight:400;line-height:1.5">' + o.notes + '</div></div>' : '');
 
   // ── Final bid amount section ──────────────────────────────────────────────
@@ -2348,6 +2415,7 @@ function initNewOpp() {
   g('nop-project').value = ''; g('nop-date').value = '';
   g('nop-value').value   = ''; g('nop-notes').value = '';
   g('nop-addr').value = ''; g('nop-city').value = ''; g('nop-zip').value = '';
+  renderOppVendorAssignmentRows([]);
 }
 
 function formatOppAddress(o) {
@@ -2393,6 +2461,7 @@ function nopSave() {
   if (!project) { alert('Please enter a project name.'); return; }
   if (!custId)  { alert('Please select a customer.'); return; }
   var newEstimatorId = parseInt(g('nop-estimator').value) || null;
+  var vendorAssignments = readOppVendorAssignments();
 
   if (_editOppId) {
     var o = getOpp(_editOppId); if (!o) return;
@@ -2410,6 +2479,7 @@ function nopSave() {
     o.city        = (g('nop-city').value || '').trim();
     o.state       = (g('nop-state').value || '').trim();
     o.zip         = (g('nop-zip').value || '').trim();
+    o.vendorAssignments = vendorAssignments;
     db.activity.unshift({text: o.id + ' updated', type: 'pending', time: 'Just now'});
     saveDB();
     maybeNotifyEstimator(o.id, prevEstimatorId);
@@ -2429,6 +2499,7 @@ function nopSave() {
       zip:     (g('nop-zip').value || '').trim(),
       finalBidAmount: null,
       decision: 'pending', noReason: '', proposalId: null,
+      vendorAssignments: vendorAssignments,
       created: new Date().toISOString().slice(0,10)
     });
     db.activity.unshift({text: id + ' created \u2014 ' + project, type: 'pending', time: 'Just now'});
@@ -2461,6 +2532,7 @@ function editOpp(id) {
   g('nop-city').value    = o.city    || '';
   populateStateDropdown(o.state || '');
   g('nop-zip').value     = o.zip     || '';
+  renderOppVendorAssignmentRows(Array.isArray(o.vendorAssignments) ? o.vendorAssignments : []);
 }
 
 function deleteOpp(id) {
@@ -2993,6 +3065,346 @@ function savePM() {
 function delPM(id) {
   var pm=db.pms.find(function(x){return x.id===id}); if(!pm)return;
   if(confirm('Remove '+pm.firstName+' '+pm.lastName+'?')){db.pms=db.pms.filter(function(x){return x.id!==id});saveDB();renderPMs();}
+}
+
+// ── VENDORS ─────────────────────────────────────────────────────
+var _editVendorId = null;
+function _vendorEsc(v){ return (v == null ? '' : String(v)).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function renderVendors() {
+  // Populate filter dropdown options from current vendor types
+  var vt = (db.vendorTypes && db.vendorTypes.length) ? db.vendorTypes : DB_DEFAULTS.vendorTypes;
+  g('v-ft').innerHTML = '<option value="">All vendor types</option>' + vt.map(function(t){ return '<option>' + _vendorEsc(t) + '</option>'; }).join('');
+  filterV();
+}
+
+function filterV() {
+  var s  = (g('v-s').value || '').toLowerCase();
+  var tf = g('v-ft').value;
+  var f = (db.vendors || []).filter(function(v){
+    var hay = (v.name || '') + ' ' + (v.primaryContact || '') + ' ' + (v.email || '') + ' ' + (v.cityState || '') + ' ' + (v.vendorType || '');
+    return (!s || hay.toLowerCase().includes(s)) && (!tf || (v.vendorType || '') === tf);
+  });
+  g('v-grid').innerHTML = f.length ? f.map(function(v){
+    var ini    = v.primaryContact ? v.primaryContact.split(' ').map(function(x){ return x[0]; }).join('').slice(0,2) : (v.name||'?')[0].toUpperCase();
+    var ctCount = (db.vendorContacts || []).filter(function(c){ return c.vendorId === v.id; }).length;
+    var oppCount = (db.opportunities || []).filter(function(o){
+      var arr = Array.isArray(o.vendorAssignments) ? o.vendorAssignments : [];
+      return arr.some(function(a){ return a.vendorId === v.id; });
+    }).length;
+    return '<div class="card" style="cursor:pointer;position:relative" onclick="viewVendor(' + v.id + ')">' +
+      '<button class="btn btn-sm" title="Edit vendor" onclick="event.stopPropagation();showEditVendor(' + v.id + ')" style="position:absolute;top:10px;right:10px;padding:4px 8px;font-size:12px">✎ Edit</button>' +
+      '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">' +
+        '<div style="width:42px;height:42px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;color:#fff">' + _vendorEsc(ini) + '</div>' +
+        '<div><div style="font-weight:600;font-size:14px">' + _vendorEsc(v.name) + '</div><div style="font-size:12px;color:#888">' + _vendorEsc(v.cityState || '') + (v.vendorType ? ' \u00b7 ' + _vendorEsc(v.vendorType) : '') + '</div></div></div>' +
+      '<div style="display:flex;gap:12px;font-size:12px">' +
+        '<div><span style="color:#888">Contacts: </span><strong>' + ctCount + '</strong></div>' +
+        '<div><span style="color:#888">On bids: </span><strong>' + oppCount + '</strong></div>' +
+      '</div></div>';
+  }).join('') : '<div style="grid-column:1/-1;text-align:center;padding:40px;color:#aaa;font-size:13px">No vendors yet \u2014 <button class="btn btn-sm btn-p" onclick="showAddVendor()">Add your first vendor</button></div>';
+}
+
+function viewVendor(id) {
+  var v = getVendor(id); if (!v) { alert('Vendor not found.'); return; }
+  var contacts = (db.vendorContacts || []).filter(function(c){ return c.vendorId === id; });
+  var opps = (db.opportunities || []).filter(function(o){
+    var arr = Array.isArray(o.vendorAssignments) ? o.vendorAssignments : [];
+    return arr.some(function(a){ return a.vendorId === id; });
+  });
+  var ini  = v.primaryContact ? v.primaryContact.split(' ').map(function(x){ return x[0]; }).join('').slice(0,2) : (v.name||'?')[0].toUpperCase();
+  var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">' +
+      '<div style="width:50px;height:50px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#fff">' + _vendorEsc(ini) + '</div>' +
+      '<div><div class="mt" style="margin-bottom:2px">' + _vendorEsc(v.name) + '</div><div style="font-size:13px;color:#888">' + _vendorEsc(v.vendorType || '') + (v.cityState ? ' \u00b7 ' + _vendorEsc(v.cityState) : '') + '</div></div></div>' +
+    '<div class="pmg">' +
+      '<div><div class="k">Contacts</div><div class="v">' + contacts.length + '</div></div>' +
+      '<div><div class="k">On bids</div><div class="v">' + opps.length + '</div></div>' +
+      '<div><div class="k">Phone</div><div class="v" style="font-size:13px;font-weight:500">' + (_vendorEsc(v.phone) || '\u2014') + '</div></div>' +
+    '</div>';
+  if (v.email || v.website) {
+    html += '<div class="sb3"><h4>Contact info</h4>' +
+      (v.email   ? '<div style="font-size:13px"><strong>Email:</strong> ' + _vendorEsc(v.email) + '</div>' : '') +
+      (v.website ? '<div style="font-size:13px"><strong>Website:</strong> <a href="' + _vendorEsc(v.website) + '" target="_blank" style="color:var(--kmi)">' + _vendorEsc(v.website) + '</a></div>' : '') +
+      (v.address ? '<div style="font-size:13px;margin-top:4px">' + _vendorEsc(v.address) + (v.cityState ? ', ' + _vendorEsc(v.cityState) : '') + '</div>' : '') +
+    '</div>';
+  }
+  if (v.notes) html += '<div class="sb3"><h4>Notes</h4><div style="font-size:13px;line-height:1.5">' + _vendorEsc(v.notes) + '</div></div>';
+  if (contacts.length) {
+    html += '<div class="stl-div">Vendor contacts</div><table><thead><tr><th>Name</th><th>Title</th><th>Department</th><th>Email</th><th>Cell</th></tr></thead><tbody>' +
+      contacts.map(function(c){
+        return '<tr><td style="font-weight:600">' + _vendorEsc(c.firstName + ' ' + c.lastName) + '</td><td><span class="tbdg">' + _vendorEsc(c.title || '') + '</span></td><td style="font-size:12px">' + _vendorEsc(c.department || '') + '</td><td style="font-size:12px">' + _vendorEsc(c.email || '') + '</td><td style="font-size:12px">' + _vendorEsc(c.cell || '') + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+  if (opps.length) {
+    html += '<div class="stl-div">Bid opportunities</div><table><thead><tr><th>ID</th><th>Project</th><th>Bid date</th><th>Decision</th></tr></thead><tbody>' +
+      opps.map(function(o){
+        return '<tr style="cursor:pointer" onclick="closeModal();openOppDetail(\'' + o.id + '\')"><td style="color:var(--kmi);font-weight:600">' + o.id + '</td><td>' + _vendorEsc(o.project || '') + '</td><td>' + (o.bidDate || '\u2014') + '</td><td>' + decBadge(o.decision || 'pending') + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+  html += '<div class="mf"><button class="btn" onclick="closeModal()">Close</button>' +
+    '<button class="btn" onclick="closeModal();showEditVendor(' + v.id + ')">✎ Edit</button>' +
+    '<button class="btn" style="color:#A32D2D" onclick="closeModal();delVendor(' + v.id + ')">Delete</button>' +
+    '</div>';
+  showModal(html);
+}
+
+function _vendorFormHtml(v) {
+  v = v || {};
+  var typeOpts = ((db.vendorTypes && db.vendorTypes.length) ? db.vendorTypes : DB_DEFAULTS.vendorTypes).map(function(t){
+    return '<option' + ((v.vendorType || '') === t ? ' selected' : '') + '>' + _vendorEsc(t) + '</option>';
+  }).join('');
+  return '<div class="fg">' +
+      '<div class="fgr full"><label>Company name *</label><input id="vd-n" value="' + _vendorEsc(v.name || '') + '" placeholder="Vendor company name"></div>' +
+      '<div class="fgr"><label>Primary contact <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional)</span></label><input id="vd-pc" value="' + _vendorEsc(v.primaryContact || '') + '" placeholder="Full name"></div>' +
+      '<div class="fgr"><label>Vendor type</label><select id="vd-t"><option value="">— Select —</option>' + typeOpts + '</select></div>' +
+      '<div class="fgr"><label>Email</label><input id="vd-e" type="email" value="' + _vendorEsc(v.email || '') + '" placeholder="email@vendor.com"></div>' +
+      '<div class="fgr"><label>Phone</label><input id="vd-p" value="' + _vendorEsc(v.phone || '') + '" placeholder="(555) 555-0000"></div>' +
+      '<div class="fgr full"><label>Street address</label><input id="vd-a" value="' + _vendorEsc(v.address || '') + '" placeholder="Street address"></div>' +
+      '<div class="fgr"><label>City, State ZIP</label><input id="vd-cs" value="' + _vendorEsc(v.cityState || '') + '" placeholder="Chicago, IL 60631"></div>' +
+      '<div class="fgr"><label>Website</label><input id="vd-w" value="' + _vendorEsc(v.website || '') + '" placeholder="https://..."></div>' +
+      '<div class="fgr full"><label>Notes</label><textarea id="vd-notes" placeholder="Any notes about this vendor...">' + _vendorEsc(v.notes || '') + '</textarea></div>' +
+    '</div>';
+}
+
+function showAddVendor() {
+  if (!requireFull('add-vendors', 'add vendors')) return;
+  _editVendorId = null;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Add vendor</div><div class="msb">Add a new vendor company</div>' +
+    _vendorFormHtml(null) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveVendor()">Add vendor</button></div>');
+}
+
+function showEditVendor(id) {
+  if (!requireFull('edit-vendors', 'edit vendors')) return;
+  var v = getVendor(id); if (!v) { alert('Vendor not found.'); return; }
+  _editVendorId = id;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Edit vendor</div><div class="msb">' + _vendorEsc(v.name) + '</div>' +
+    _vendorFormHtml(v) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveVendor()">Save changes</button></div>');
+}
+
+function saveVendor() {
+  var n     = (g('vd-n').value || '').trim();
+  var email = (g('vd-e').value || '').trim();
+  if (!n) { alert('Please enter a company name.'); return; }
+  // Duplicate-vendor guard. Block on matching company name OR matching non-empty email
+  // (case-insensitive). Mirrors the customer dedup pattern.
+  var nLc     = n.toLowerCase();
+  var emailLc = email.toLowerCase();
+  var nameClash  = (db.vendors || []).find(function(x){ return x.id !== _editVendorId && (x.name  || '').toLowerCase() === nLc; });
+  var emailClash = email
+    ? (db.vendors || []).find(function(x){ return x.id !== _editVendorId && (x.email || '').toLowerCase() === emailLc; })
+    : null;
+  if (nameClash)  { alert('A vendor has already been created with this company name.\n\nExisting vendor: ' + nameClash.name + '\n\nUse a different name or edit the existing vendor instead.'); return; }
+  if (emailClash) { alert('A vendor has already been created with this email address.\n\nExisting vendor: ' + emailClash.name + '\n\nUse a different email or edit the existing vendor instead.'); return; }
+
+  var data = {
+    name:           n,
+    primaryContact: (g('vd-pc').value    || '').trim(),
+    vendorType:     (g('vd-t').value     || '').trim(),
+    email:          email,
+    phone:          (g('vd-p').value     || '').trim(),
+    address:        (g('vd-a').value     || '').trim(),
+    cityState:      (g('vd-cs').value    || '').trim(),
+    website:        (g('vd-w').value     || '').trim(),
+    notes:          (g('vd-notes').value || '').trim()
+  };
+  if (!Array.isArray(db.vendors)) db.vendors = [];
+  if (_editVendorId) {
+    var existing = getVendor(_editVendorId);
+    if (existing) Object.assign(existing, data);
+  } else {
+    data.id = Date.now();
+    db.vendors.push(data);
+  }
+  saveDB(); closeModal(); _editVendorId = null;
+  // Refresh whichever vendor view is currently active
+  var activePg = document.querySelector('.pg.active');
+  if (activePg && activePg.id === 'pg-vendors') renderVendors();
+  if (activePg && activePg.id === 'pg-vendor-contacts') renderVendorContacts();
+}
+
+function delVendor(id) {
+  if (!requireFull('edit-vendors', 'delete vendors')) return;
+  var v = getVendor(id); if (!v) return;
+  var contactCount = (db.vendorContacts || []).filter(function(c){ return c.vendorId === id; }).length;
+  var oppHits      = (db.opportunities  || []).filter(function(o){
+    var arr = Array.isArray(o.vendorAssignments) ? o.vendorAssignments : [];
+    return arr.some(function(a){ return a.vendorId === id; });
+  }).length;
+  var msg = 'Delete vendor "' + v.name + '"?';
+  if (contactCount) msg += '\n\nThis will also delete ' + contactCount + ' vendor contact' + (contactCount === 1 ? '' : 's') + ' linked to this vendor.';
+  if (oppHits)      msg += '\nIt will also be removed from ' + oppHits + ' bid opportunit' + (oppHits === 1 ? 'y' : 'ies') + '.';
+  if (!confirm(msg)) return;
+  // Cascade: drop all contacts at this vendor
+  db.vendorContacts = (db.vendorContacts || []).filter(function(c){ return c.vendorId !== id; });
+  // Cascade: clean up opportunity assignments
+  (db.opportunities || []).forEach(function(o){
+    if (Array.isArray(o.vendorAssignments)) {
+      o.vendorAssignments = o.vendorAssignments.filter(function(a){ return a.vendorId !== id; });
+    }
+  });
+  db.vendors = (db.vendors || []).filter(function(x){ return x.id !== id; });
+  saveDB();
+  var activePg = document.querySelector('.pg.active');
+  if (activePg && activePg.id === 'pg-vendors') renderVendors();
+  if (activePg && activePg.id === 'pg-vendor-contacts') renderVendorContacts();
+}
+
+// ── VENDOR CONTACTS ─────────────────────────────────────────────
+var _editVendorContactId = null;
+
+function renderVendorContacts() {
+  // Vendor filter dropdown
+  var sorted = (db.vendors || []).slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); });
+  g('vc-fv').innerHTML = '<option value="">All vendors</option>' + sorted.map(function(v){ return '<option value="' + v.id + '">' + _vendorEsc(v.name) + '</option>'; }).join('');
+  filterVC();
+}
+
+function filterVC() {
+  var s = (g('vc-s').value || '').toLowerCase();
+  var vf = g('vc-fv').value;
+  var f = (db.vendorContacts || []).filter(function(c){
+    var v   = getVendor(c.vendorId);
+    var hay = ((c.firstName || '') + ' ' + (c.lastName || '') + ' ' + (c.email || '') + ' ' + (c.title || '') + ' ' + (c.department || '') + ' ' + (v ? v.name : '')).toLowerCase();
+    return (!s || hay.includes(s)) && (!vf || String(c.vendorId) === String(vf));
+  });
+  g('vc-tbody').innerHTML = f.length ? f.map(function(c){
+    var v   = getVendor(c.vendorId);
+    var ini = ((c.firstName || '')[0] || '').toUpperCase() + ((c.lastName || '')[0] || '').toUpperCase();
+    return '<tr>' +
+      '<td><div style="display:flex;align-items:center;gap:10px"><div style="width:32px;height:32px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff;flex-shrink:0">' + _vendorEsc(ini) + '</div><div style="font-weight:600">' + _vendorEsc((c.firstName || '') + ' ' + (c.lastName || '')) + '</div></div></td>' +
+      '<td><span class="tbdg">' + _vendorEsc(c.title || '') + '</span></td>' +
+      '<td style="font-size:12px">' + _vendorEsc(c.department || '') + '</td>' +
+      '<td style="font-size:12px;color:#888">' + _vendorEsc(v ? v.name : '\u2014') + '</td>' +
+      '<td style="font-size:12px">' + _vendorEsc(c.email || '') + '</td>' +
+      '<td style="font-size:12px">' + _vendorEsc(c.cell || '') + '</td>' +
+      '<td style="font-size:12px">' + _vendorEsc(c.office || '') + '</td>' +
+      '<td><div style="display:flex;gap:4px"><button class="btn btn-sm" onclick="showEditVendorContact(' + c.id + ')">Edit</button><button class="btn btn-sm" style="color:#A32D2D" onclick="delVendorContact(' + c.id + ')">Delete</button></div></td>' +
+      '</tr>';
+  }).join('') : '<tr><td colspan="8" style="text-align:center;padding:30px;color:#888">No vendor contacts found</td></tr>';
+}
+
+function _vendorContactFormHtml(c) {
+  c = c || {};
+  var sortedV = (db.vendors || []).slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); });
+  var venOpts = '<option value="">Select vendor...</option>' + sortedV.map(function(v){
+    return '<option value="' + v.id + '"' + (c.vendorId === v.id ? ' selected' : '') + '>' + _vendorEsc(v.name) + '</option>';
+  }).join('');
+  return '<div class="fg">' +
+      '<div class="fgr"><label>First name *</label><input id="vc-f" value="' + _vendorEsc(c.firstName || '') + '" placeholder="First name"></div>' +
+      '<div class="fgr"><label>Last name *</label><input id="vc-l" value="' + _vendorEsc(c.lastName || '') + '" placeholder="Last name"></div>' +
+      '<div class="fgr full"><label>Vendor *</label><select id="vc-v">' + venOpts + '</select></div>' +
+      '<div class="fgr"><label>Title</label><input id="vc-t" value="' + _vendorEsc(c.title || '') + '" placeholder="e.g. Sales Manager"></div>' +
+      '<div class="fgr"><label>Department <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional)</span></label><input id="vc-d" value="' + _vendorEsc(c.department || '') + '" placeholder="e.g. Sales, Estimating, Dispatch"></div>' +
+      '<div class="fgr full"><label>Email *</label><input id="vc-e" type="email" value="' + _vendorEsc(c.email || '') + '" placeholder="email@vendor.com"></div>' +
+      '<div class="fgr"><label>Cell phone</label><input id="vc-cell" value="' + _vendorEsc(c.cell || '') + '" placeholder="(555) 555-0000"></div>' +
+      '<div class="fgr"><label>Office phone</label><input id="vc-off" value="' + _vendorEsc(c.office || '') + '" placeholder="(555) 555-0000"></div>' +
+      '<div class="fgr full"><label>Notes</label><textarea id="vc-notes" placeholder="Notes about this contact...">' + _vendorEsc(c.notes || '') + '</textarea></div>' +
+    '</div>';
+}
+
+function showAddVendorContact() {
+  if (!requireFull('add-vendor-contacts', 'add vendor contacts')) return;
+  _editVendorContactId = null;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Add vendor contact</div><div class="msb">Add a new contact at a vendor company</div>' +
+    _vendorContactFormHtml(null) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveVendorContact()">Add</button></div>');
+}
+
+function showEditVendorContact(id) {
+  if (!requireFull('edit-vendor-contacts', 'edit vendor contacts')) return;
+  var c = getVendorContact(id); if (!c) { alert('Contact not found.'); return; }
+  _editVendorContactId = id;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Edit vendor contact</div><div class="msb">' + _vendorEsc((c.firstName || '') + ' ' + (c.lastName || '')) + '</div>' +
+    _vendorContactFormHtml(c) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveVendorContact()">Save changes</button></div>');
+}
+
+function saveVendorContact() {
+  var f     = (g('vc-f').value     || '').trim();
+  var l     = (g('vc-l').value     || '').trim();
+  var vid   = parseInt(g('vc-v').value);
+  var email = (g('vc-e').value     || '').trim();
+  if (!f || !l) { alert('Please enter first and last name.'); return; }
+  if (!vid)     { alert('Please select a vendor.'); return; }
+  if (!email)   { alert('Email is required (must be unique across vendor contacts).'); return; }
+
+  // Email uniqueness: globally unique across vendor contacts (matches PM/user pattern).
+  var emailLc    = email.toLowerCase();
+  var emailClash = (db.vendorContacts || []).find(function(x){
+    return x.id !== _editVendorContactId && (x.email || '').toLowerCase() === emailLc;
+  });
+  if (emailClash) {
+    var ev = getVendor(emailClash.vendorId);
+    alert('A vendor contact already exists with this email address.\n\n' +
+          'Existing contact: ' + emailClash.firstName + ' ' + emailClash.lastName +
+          (ev ? ' at ' + ev.name : '') + '\n\n' +
+          'Use a different email or edit the existing contact instead.');
+    return;
+  }
+  // Same first+last at the same vendor — almost certainly a duplicate.
+  var fLc = f.toLowerCase(), lLc = l.toLowerCase();
+  var nameClash = (db.vendorContacts || []).find(function(x){
+    return x.id !== _editVendorContactId &&
+           x.vendorId === vid &&
+           (x.firstName || '').toLowerCase() === fLc &&
+           (x.lastName  || '').toLowerCase() === lLc;
+  });
+  if (nameClash) {
+    var nv = getVendor(vid);
+    alert('A contact named ' + f + ' ' + l + ' already exists at ' + (nv ? nv.name : 'this vendor') + '.\n\n' +
+          'If this is the same person, edit the existing record instead.');
+    return;
+  }
+
+  var data = {
+    firstName:  f,
+    lastName:   l,
+    vendorId:   vid,
+    title:      (g('vc-t').value     || '').trim(),
+    department: (g('vc-d').value     || '').trim(),
+    email:      email,
+    cell:       (g('vc-cell').value  || '').trim(),
+    office:     (g('vc-off').value   || '').trim(),
+    notes:      (g('vc-notes').value || '').trim()
+  };
+  if (!Array.isArray(db.vendorContacts)) db.vendorContacts = [];
+  if (_editVendorContactId) {
+    var existing = getVendorContact(_editVendorContactId);
+    if (existing) Object.assign(existing, data);
+  } else {
+    data.id = Date.now();
+    db.vendorContacts.push(data);
+  }
+  saveDB(); closeModal(); _editVendorContactId = null;
+  var activePg = document.querySelector('.pg.active');
+  if (activePg && activePg.id === 'pg-vendor-contacts') renderVendorContacts();
+  if (activePg && activePg.id === 'pg-vendors')         renderVendors();
+}
+
+function delVendorContact(id) {
+  if (!requireFull('edit-vendor-contacts', 'delete vendor contacts')) return;
+  var c = getVendorContact(id); if (!c) return;
+  // Find which opps reference this contact (so we can clean those up)
+  var oppHits = (db.opportunities || []).filter(function(o){
+    var arr = Array.isArray(o.vendorAssignments) ? o.vendorAssignments : [];
+    return arr.some(function(a){ return a.contactId === id; });
+  }).length;
+  var msg = 'Remove ' + c.firstName + ' ' + c.lastName + '?';
+  if (oppHits) msg += '\n\nThis contact is referenced on ' + oppHits + ' bid opportunit' + (oppHits === 1 ? 'y' : 'ies') + '. The vendor will remain assigned but the specific contact will be cleared.';
+  if (!confirm(msg)) return;
+  // Clear contactId on any opp assignments that reference this contact (keep vendor)
+  (db.opportunities || []).forEach(function(o){
+    if (Array.isArray(o.vendorAssignments)) {
+      o.vendorAssignments.forEach(function(a){ if (a.contactId === id) a.contactId = null; });
+    }
+  });
+  db.vendorContacts = (db.vendorContacts || []).filter(function(x){ return x.id !== id; });
+  saveDB();
+  var activePg = document.querySelector('.pg.active');
+  if (activePg && activePg.id === 'pg-vendor-contacts') renderVendorContacts();
+  if (activePg && activePg.id === 'pg-vendors')         renderVendors();
 }
 
 // ── USERS ───────────────────────────────────────────────────────
@@ -3538,7 +3950,100 @@ function removeRow(btn, rowClass) {
   if (parent && !parent.querySelector('.' + rowClass)) {
     if (rowClass === 'kmi-asgn-row') renderKmiAssignmentRows([]);
     else if (rowClass === 'contact-asgn-row') renderContactAssignmentRows([]);
+    else if (rowClass === 'opp-vendor-row')   renderOppVendorAssignmentRows([]);
   }
+}
+
+// ── OPPORTUNITY VENDOR ASSIGNMENTS ──────────────────────────────
+// Render order on the opp form: a single "Vendor assignments" section. Each row
+// picks a vendor first; the contact dropdown then shows ONLY contacts at that
+// vendor (per design: forces vendor-first ordering). Rows without a contact are
+// allowed (vendor-only assignment).
+
+function oppVendorOptions(selectedId) {
+  var sorted = (db.vendors || []).slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); });
+  var opts = '<option value="">Select vendor...</option>';
+  sorted.forEach(function(v){
+    var sel = String(v.id) === String(selectedId) ? ' selected' : '';
+    opts += '<option value="' + v.id + '"' + sel + '>' + escapeAttr(v.name) + (v.vendorType ? ' \u2014 ' + escapeAttr(v.vendorType) : '') + '</option>';
+  });
+  if (!sorted.length) opts = '<option value="">No vendors on file \u2014 add vendors first</option>';
+  return opts;
+}
+
+function oppVendorContactOptions(selectedId, vendorId) {
+  if (!vendorId) {
+    return '<option value="">Pick a vendor first</option>';
+  }
+  var pool = (db.vendorContacts || []).filter(function(c){ return String(c.vendorId) === String(vendorId); });
+  // Always include the currently-selected contact even if its vendor changed (don't silently lose data)
+  if (selectedId && !pool.some(function(c){ return String(c.id) === String(selectedId); })) {
+    var extra = getVendorContact(parseInt(selectedId));
+    if (extra) pool = pool.concat([extra]);
+  }
+  pool.sort(function(a,b){
+    var an = ((a.firstName||'') + ' ' + (a.lastName||'')).toLowerCase();
+    var bn = ((b.firstName||'') + ' ' + (b.lastName||'')).toLowerCase();
+    return an.localeCompare(bn);
+  });
+  var opts = '<option value="">No specific contact</option>';
+  pool.forEach(function(c){
+    var sel = String(c.id) === String(selectedId) ? ' selected' : '';
+    opts += '<option value="' + c.id + '"' + sel + '>' + escapeAttr((c.firstName||'') + ' ' + (c.lastName||'')) + (c.title ? ' \u2014 ' + escapeAttr(c.title) : '') + '</option>';
+  });
+  if (!pool.length) opts = '<option value="">No contacts on file for this vendor</option>';
+  return opts;
+}
+
+function oppVendorAssignmentRowHtml(row) {
+  row = row || { vendorId: '', contactId: '' };
+  return '<div class="opp-vendor-row" style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;margin-bottom:8px">' +
+    '<select class="opp-vendor-sel" onchange="onOppVendorChange(this)">' + oppVendorOptions(row.vendorId) + '</select>' +
+    '<select class="opp-vendor-contact-sel">' + oppVendorContactOptions(row.contactId, row.vendorId) + '</select>' +
+    '<button class="btn btn-sm" style="color:#A32D2D" onclick="removeRow(this, \'opp-vendor-row\')" title="Remove">✕</button>' +
+    '</div>';
+}
+
+function renderOppVendorAssignmentRows(rows) {
+  var wrap = g('nop-vendor-rows'); if (!wrap) return;
+  if (!rows || !rows.length) {
+    wrap.innerHTML = '<div style="font-size:12px;color:#aaa;padding:10px 0;font-style:italic">No vendors assigned yet. Click "+ Add vendor" to assign.</div>';
+    return;
+  }
+  wrap.innerHTML = rows.map(function(r){ return oppVendorAssignmentRowHtml(r); }).join('');
+}
+
+function addOppVendorAssignmentRow() {
+  var wrap = g('nop-vendor-rows'); if (!wrap) return;
+  if (!wrap.querySelector('.opp-vendor-row')) wrap.innerHTML = '';
+  wrap.insertAdjacentHTML('beforeend', oppVendorAssignmentRowHtml(null));
+}
+
+// Vendor change → reset & re-populate this row's contact dropdown to that vendor's contacts
+function onOppVendorChange(selectEl) {
+  var row = selectEl.closest('.opp-vendor-row'); if (!row) return;
+  var contactSel = row.querySelector('.opp-vendor-contact-sel');
+  if (!contactSel) return;
+  var newVendorId = parseInt(selectEl.value) || null;
+  // Vendor changed → drop the old contactId selection (the contact may not belong to the new vendor)
+  contactSel.innerHTML = oppVendorContactOptions(null, newVendorId);
+}
+
+function readOppVendorAssignments() {
+  var rows = document.querySelectorAll('#nop-vendor-rows .opp-vendor-row');
+  var out = [];
+  var seen = {};
+  Array.prototype.forEach.call(rows, function(row){
+    var vendorId = parseInt(row.querySelector('.opp-vendor-sel').value) || null;
+    if (!vendorId) return; // skip incomplete rows
+    var contactId = parseInt(row.querySelector('.opp-vendor-contact-sel').value) || null;
+    // Composite dedupe key: same vendor + same (or no) contact = same row
+    var key = vendorId + ':' + (contactId || '');
+    if (seen[key]) return;
+    seen[key] = true;
+    out.push({ vendorId: vendorId, contactId: contactId });
+  });
+  return out;
 }
 
 // When the user changes in a KMI row, auto-fill the role field from their profile (but only if it's blank or matches a previous auto-fill)
@@ -3867,8 +4372,8 @@ var _typeIdx  = -1;
 
 function showAddType(kind) {
   _typeKind = kind;
-  var labels    = {company:'company type', project:'project type', projectRole:'project role'};
-  var examples  = {company:'Subcontractor', project:'MEP', projectRole:'Safety Manager'};
+  var labels    = {company:'company type', project:'project type', projectRole:'project role', vendor:'vendor type'};
+  var examples  = {company:'Subcontractor', project:'MEP', projectRole:'Safety Manager', vendor:'Tool & Equipment'};
   var label     = labels[kind] || 'item';
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
@@ -3885,6 +4390,7 @@ function showAddType(kind) {
 function _getTypeArr(kind) {
   if (kind === 'company')     return db.companyTypes;
   if (kind === 'projectRole') return db.projectRoles;
+  if (kind === 'vendor')      return (db.vendorTypes = db.vendorTypes || DB_DEFAULTS.vendorTypes.slice());
   return db.projectTypes;
 }
 
@@ -3892,7 +4398,7 @@ function showEditType(kind, idx) {
   _typeKind = kind;
   _typeIdx  = idx;
   var arr    = _getTypeArr(kind);
-  var labels = {company:'company type', project:'project type', projectRole:'project role'};
+  var labels = {company:'company type', project:'project type', projectRole:'project role', vendor:'vendor type'};
   var label  = labels[kind] || 'item';
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
@@ -3935,6 +4441,9 @@ function saveEditType() {
       if (!Array.isArray(p.kmiAssignments)) return;
       p.kmiAssignments.forEach(function(a){ if (a.role === oldVal) a.role = val; });
     });
+  } else if (_typeKind === 'vendor') {
+    // Rename this vendor type wherever it's stored on a vendor
+    (db.vendors || []).forEach(function(v){ if (v.vendorType === oldVal) v.vendorType = val; });
   }
   saveDB(); closeModal(); renderTemplates();
 }
@@ -3953,8 +4462,9 @@ function deleteType(kind, idx) {
 
 function renderTypeTable(kind) {
   var arr = _getTypeArr(kind);
-  var tid = kind === 'company' ? 't-company-types'
+  var tid = kind === 'company'     ? 't-company-types'
           : kind === 'projectRole' ? 't-project-roles'
+          : kind === 'vendor'      ? 't-vendor-types'
           : 't-project-types';
   var el  = g(tid); if (!el) return;
   if (!arr.length) { el.innerHTML = '<div style="font-size:13px;color:#aaa;padding:8px 0">No entries yet</div>'; return; }
@@ -4055,7 +4565,7 @@ function cgToggleAll(pfx, grp, checked) {
 
 // ── TEMPLATES PAGE ──────────────────────────────────────────────
 function renderTemplates() {
-  renderTypeTable('company'); renderTypeTable('project'); renderTypeTable('projectRole');
+  renderTypeTable('company'); renderTypeTable('project'); renderTypeTable('projectRole'); renderTypeTable('vendor');
   g('t-std').innerHTML  = renderGroupedClars(db.stdClar,    'std',  'I', 'var(--kmi)');
   g('t-excl').innerHTML = renderGroupedClars(db.exclusions, 'excl', 'E', '#E24B4A');
   renderGroupList();
@@ -5233,6 +5743,46 @@ function fromSBCustomer(r)  { return {id:r.id, name:r.name, contact:r.contact||'
 function toSBPM(r)    { return {id:r.id, first_name:r.firstName||'', last_name:r.lastName||'', email:r.email||'', cell:r.cell||'', office:r.office||'', title:r.title||'', customer_id:r.customerId||null}; }
 function fromSBPM(r)  { return {id:r.id, firstName:r.first_name||'', lastName:r.last_name||'', email:r.email||'', cell:r.cell||'', office:r.office||'', title:r.title||'', customerId:r.customer_id||null}; }
 
+function toSBVendor(r) {
+  return {
+    id:r.id, name:r.name||'',
+    primary_contact:r.primaryContact||'',
+    vendor_type:r.vendorType||'',
+    email:r.email||'', phone:r.phone||'',
+    address:r.address||'', city_state:r.cityState||'',
+    website:r.website||'', notes:r.notes||''
+  };
+}
+function fromSBVendor(r) {
+  return {
+    id:r.id, name:r.name||'',
+    primaryContact:r.primary_contact||'',
+    vendorType:r.vendor_type||'',
+    email:r.email||'', phone:r.phone||'',
+    address:r.address||'', cityState:r.city_state||'',
+    website:r.website||'', notes:r.notes||''
+  };
+}
+
+function toSBVendorContact(r) {
+  return {
+    id:r.id, vendor_id:r.vendorId||null,
+    first_name:r.firstName||'', last_name:r.lastName||'',
+    title:r.title||'', department:r.department||'',
+    email:r.email||'', cell:r.cell||'', office:r.office||'',
+    notes:r.notes||''
+  };
+}
+function fromSBVendorContact(r) {
+  return {
+    id:r.id, vendorId:r.vendor_id||null,
+    firstName:r.first_name||'', lastName:r.last_name||'',
+    title:r.title||'', department:r.department||'',
+    email:r.email||'', cell:r.cell||'', office:r.office||'',
+    notes:r.notes||''
+  };
+}
+
 function toSBUser(r)    {
   return {
     id:r.id, first_name:r.firstName||'', last_name:r.lastName||'',
@@ -5267,6 +5817,7 @@ function toSBOpp(r) {
     outcome_status:r.outcomeStatus||null,
     scope_items:r.scopeItems||[],
     scope_source_url:r.scopeSourceUrl||'',
+    vendor_assignments:r.vendorAssignments||[],
     created:r.created||''
   };
 }
@@ -5283,6 +5834,7 @@ function fromSBOpp(r) {
     outcomeStatus:r.outcome_status||null,
     scopeItems:r.scope_items||[],
     scopeSourceUrl:r.scope_source_url||'',
+    vendorAssignments:r.vendor_assignments||[],
     created:r.created||''
   };
 }
@@ -5351,6 +5903,16 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_project_managers').upsert(db.pms.map(toSBPM));
       if (r.error) errs.push('pms: ' + r.error.message);
     }
+    // Vendors
+    if ((db.vendors || []).length) {
+      var r = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
+      if (r.error) errs.push('vendors: ' + r.error.message);
+    }
+    // Vendor contacts
+    if ((db.vendorContacts || []).length) {
+      var r = await supabaseClient.from('kmi_vendor_contacts').upsert(db.vendorContacts.map(toSBVendorContact));
+      if (r.error) errs.push('vendor_contacts: ' + r.error.message);
+    }
     // Users
     if (db.users.length) {
       var r = await supabaseClient.from('kmi_users').upsert(db.users.map(toSBUser));
@@ -5389,6 +5951,7 @@ async function pushToSupabase() {
       {key:'companyTypes', value:db.companyTypes},
       {key:'projectTypes', value:db.projectTypes},
       {key:'projectRoles', value:db.projectRoles},
+      {key:'vendorTypes',  value:db.vendorTypes},
       {key:'clarGroups',   value:db.clarGroups}
     ];
     var r = await supabaseClient.from('kmi_settings').upsert(settingsRows);
@@ -5415,9 +5978,11 @@ async function pullFromSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
   setSyncStatus('syncing', 'Loading\u2026');
   try {
-    var [custs, pms, users, opps, props, projs, acts, settings] = await Promise.all([
+    var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
+      supabaseClient.from('kmi_vendors').select('*'),
+      supabaseClient.from('kmi_vendor_contacts').select('*'),
       supabaseClient.from('kmi_users').select('*'),
       supabaseClient.from('kmi_opportunities').select('*'),
       supabaseClient.from('kmi_proposals').select('*'),
@@ -5432,9 +5997,25 @@ async function pullFromSupabase() {
       showSBResult('Error loading data: ' + e, false);
       return;
     }
+    // Vendor table errors are non-fatal — they may not exist yet on older
+    // Supabase projects. If the tables aren't there or returned an error,
+    // PRESERVE the local vendor data instead of wiping it (the user may have
+    // added vendors locally before running the SQL migration).
+    if (vens && vens.error)  console.warn('kmi_vendors load error (table missing?):', vens.error.message);
+    if (vcons && vcons.error) console.warn('kmi_vendor_contacts load error (table missing?):', vcons.error.message);
 
-    db.customers     = (custs.data  || []).map(fromSBCustomer);
-    db.pms           = (pms.data    || []).map(fromSBPM);
+    db.customers      = (custs.data  || []).map(fromSBCustomer);
+    db.pms            = (pms.data    || []).map(fromSBPM);
+    if (vens && !vens.error) {
+      db.vendors        = (vens.data  || []).map(fromSBVendor);
+    } else if (!Array.isArray(db.vendors)) {
+      db.vendors        = [];
+    } // else: keep local db.vendors as-is
+    if (vcons && !vcons.error) {
+      db.vendorContacts = (vcons.data || []).map(fromSBVendorContact);
+    } else if (!Array.isArray(db.vendorContacts)) {
+      db.vendorContacts = [];
+    } // else: keep local db.vendorContacts as-is
     // Merge pulled users with local auth state. After the password-sync migration,
     // the cloud is the source of truth for passwordHash/Salt/status/mustReset, but
     // we still fall back to local values for any row whose cloud columns are blank
@@ -5465,7 +6046,7 @@ async function pullFromSupabase() {
     // keys like anthropic_api_key that aren't part of the default db shape.
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
                                 'laborRates','laborRateSets',
-                                'companyTypes','projectTypes','projectRoles','clarGroups',
+                                'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
                                 'anthropic_api_key'];
     (settings.data || []).forEach(function(row) {
       if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
@@ -5486,7 +6067,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
