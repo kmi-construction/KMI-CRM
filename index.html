@@ -1141,28 +1141,96 @@ async function forgotPassword() {
   u.mustResetPassword = true;
   u.status = u.status || 'active';
   saveDB();
-  showEmailSimulationModal(u, tempPw, 'Password reset');
+  await sendTempPasswordEmail(u, tempPw, 'Password reset');
 }
 
-function showEmailSimulationModal(u, tempPw, title) {
-  var safePw = String(tempPw).replace(/\'/g,"\\'");
+// ── Send temporary-password email (real send via Edge Function) ─
+// Used by:
+//   1) forgotPassword()       — public, called from login screen (no _currentUser)
+//   2) adminSendTempPassword() — Users page, admin-initiated
+//
+// Always shows a modal at the end:
+//   • on success: "email sent" confirmation, password NOT displayed
+//   • on failure: temp password is displayed inline so the admin/user
+//     isn't locked out if the email service is down
+async function sendTempPasswordEmail(u, tempPw, title) {
+  // Show "sending" state immediately so the UI doesn't appear frozen
   showModal(
-    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
-    '<div class="mt">' + (title || 'Temporary password') + ' email sent</div>' +
-    '<div class="msb">A password reset email has been sent to <strong>' + u.email + '</strong>.</div>' +
-    '<div style="background:#FFF8DC;border:1px solid #E8D08A;border-radius:7px;padding:11px 13px;margin-bottom:14px;font-size:12px;color:#6B5A2E;line-height:1.5">' +
-      '<strong>Prototype note:</strong> This single-file app cannot send real email. In production, this password would be delivered to ' + u.email + ' via your mail server and would not be displayed here.' +
-    '</div>' +
-    '<div style="background:#F5F5F3;border-radius:8px;padding:16px">' +
-      '<div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.7px;margin-bottom:8px">Temporary password for ' + u.firstName + ' ' + u.lastName + '</div>' +
-      '<div style="display:flex;align-items:center;gap:10px">' +
-        '<code style="font-size:18px;background:#fff;padding:9px 14px;border:1px solid #ddd;border-radius:6px;letter-spacing:2.5px;font-weight:700;color:var(--kmi);flex:1">' + tempPw + '</code>' +
-        "<button class=\"btn btn-sm\" onclick=\"navigator.clipboard.writeText('" + safePw + "').then(function(){this.textContent='✓ Copied';}.bind(this))\">Copy</button>" +
-      '</div>' +
-      '<div style="font-size:11px;color:#888;margin-top:11px">The user will be prompted to set a new password on their next sign in.</div>' +
-    '</div>' +
-    '<div class="mf"><button class="btn btn-p" onclick="closeModal()">Done</button></div>'
+    '<div class="mt">Sending email\u2026</div>' +
+    '<div class="msb">Delivering temporary password to <strong>' + _vendorEsc(u.email) + '</strong></div>'
   );
+
+  var subject = (title === 'Password reset')
+    ? 'KMI CRM \u2014 Password reset'
+    : 'KMI CRM \u2014 Temporary password';
+
+  var body = [
+    'Hi ' + (u.firstName || ''),
+    '',
+    (title === 'Password reset'
+      ? 'A password reset was requested for your KMI CRM account.'
+      : 'A temporary password has been issued for your KMI CRM account.'),
+    '',
+    'Temporary password:  ' + tempPw,
+    '',
+    'You will be prompted to set a new password the next time you sign in.',
+    '',
+    'If you did not request this, contact your administrator.',
+    '',
+    '\u2014 KMI Construction'
+  ].join('\r\n');
+
+  var result = await sendEmail({
+    to:                u.email,
+    subject:           subject,
+    text:              body,
+    flowType:          'password_reset',
+    sentBy:            (_currentUser ? _currentUser.id    : null),
+    sentByEmail:       (_currentUser ? _currentUser.email : null),
+    relatedEntityType: 'user',
+    relatedEntityId:   String(u.id)
+  });
+
+  if (result.success) {
+    var testNote = result.testMode
+      ? '<div style="background:#FFF8DC;border:1px solid #E8D08A;border-radius:7px;padding:11px 13px;margin:0 0 14px;font-size:12px;color:#6B5A2E;line-height:1.5">' +
+          '<strong>Test mode is on.</strong> The email was redirected to the test recipient instead of ' +
+          _vendorEsc(result.intendedRecipient || u.email) + '.' +
+        '</div>'
+      : '';
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt">' + (title || 'Temporary password') + ' email sent</div>' +
+      '<div class="msb">An email with the temporary password has been sent to <strong>' + _vendorEsc(u.email) + '</strong>.</div>' +
+      testNote +
+      '<div style="background:#F5F5F3;border-radius:8px;padding:14px;font-size:13px;color:#444;line-height:1.5">' +
+        u.firstName + ' will be prompted to set a new password on the next sign in.' +
+      '</div>' +
+      '<div class="mf"><button class="btn btn-p" onclick="closeModal()">Done</button></div>'
+    );
+  } else {
+    // Email failed — temp password is already saved on the user record, so
+    // we MUST give the admin a way to communicate it manually. Show it inline.
+    var safePw = String(tempPw).replace(/\'/g,"\\'");
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt" style="color:#7A2E2E">Email send failed</div>' +
+      '<div class="msb">The temporary password was saved, but it could not be emailed to <strong>' + _vendorEsc(u.email) + '</strong>.</div>' +
+      '<div style="background:#FBE9E9;border:1px solid #E8B8B8;border-radius:7px;padding:11px 13px;margin-bottom:14px;font-size:12px;color:#7A2E2E;line-height:1.5">' +
+        '<strong>Error:</strong> ' + _vendorEsc(result.error || 'Unknown error') + '<br>' +
+        'Share the password below with ' + _vendorEsc(u.firstName || 'the user') + ' another way so they can sign in.' +
+      '</div>' +
+      '<div style="background:#F5F5F3;border-radius:8px;padding:16px">' +
+        '<div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.7px;margin-bottom:8px">Temporary password for ' + _vendorEsc((u.firstName || '') + ' ' + (u.lastName || '')) + '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<code style="font-size:18px;background:#fff;padding:9px 14px;border:1px solid #ddd;border-radius:6px;letter-spacing:2.5px;font-weight:700;color:var(--kmi);flex:1">' + tempPw + '</code>' +
+          "<button class=\"btn btn-sm\" onclick=\"navigator.clipboard.writeText('" + safePw + "').then(function(){this.textContent='\u2713 Copied';}.bind(this))\">Copy</button>" +
+        '</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:11px">The user will be prompted to set a new password on their next sign in.</div>' +
+      '</div>' +
+      '<div class="mf"><button class="btn btn-p" onclick="closeModal()">Done</button></div>'
+    );
+  }
 }
 
 function showForceResetModal() {
@@ -3683,7 +3751,7 @@ async function adminSendTempPassword(id) {
   u.mustResetPassword = true;
   u.status = u.status || 'active';
   saveDB();
-  showEmailSimulationModal(u, pw, 'Temporary password');
+  await sendTempPasswordEmail(u, pw, 'Temporary password');
 }
 
 // ── PROJECTS ────────────────────────────────────────────────────
@@ -5967,6 +6035,64 @@ function initSupabase(url, key) {
     console.error('Supabase init error:', e);
     supabaseClient = null;
     return false;
+  }
+}
+
+// ── Email send (calls Supabase Edge Function `send-email`) ──────
+// Returns { success, status, resendId, testMode, intendedRecipient } on success
+// or     { success:false, error, httpStatus }                       on failure.
+// Does NOT throw — callers should branch on result.success.
+//
+// Payload shape (matches the Edge Function):
+//   { to, from?, fromName?, replyTo?, cc?, bcc?, subject, text?, html?,
+//     attachments?: [{filename, content (base64)}],
+//     sentBy?, sentByEmail?,
+//     flowType: 'password_reset' | 'assignment_alert' | 'proposal' | 'welcome',
+//     relatedEntityType?, relatedEntityId? }
+async function sendEmail(payload) {
+  // Resolve Supabase creds: saved → defaults baked into the file
+  var creds = getSBCreds();
+  if ((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) {
+    creds = { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY };
+  }
+  if (!creds || !creds.url || !creds.key) {
+    return { success: false, error: 'Supabase not configured \u2014 cannot reach the email service.' };
+  }
+  var fnUrl = normalizeSBUrl(creds.url) + '/functions/v1/send-email';
+
+  try {
+    var resp = await fetch(fnUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'apikey':        creds.key,
+        'Authorization': 'Bearer ' + creds.key
+      },
+      body: JSON.stringify(payload)
+    });
+    // Try to parse JSON either way; failures may still return JSON with `error`
+    var data = {};
+    try { data = await resp.json(); } catch(_) { /* non-JSON response */ }
+
+    if (resp.ok && data && data.success) {
+      return {
+        success:           true,
+        status:            data.status,
+        resendId:          data.resendId  || null,
+        testMode:          !!data.testMode,
+        intendedRecipient: data.intendedRecipient || null
+      };
+    }
+    return {
+      success:    false,
+      error:      (data && data.error) || ('HTTP ' + resp.status),
+      httpStatus: resp.status
+    };
+  } catch (e) {
+    return {
+      success: false,
+      error: 'Network error: ' + (e && e.message ? e.message : String(e))
+    };
   }
 }
 
