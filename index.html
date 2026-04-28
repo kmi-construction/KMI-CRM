@@ -228,6 +228,19 @@ textarea{resize:vertical;min-height:72px}
 .email-field{margin-bottom:6px}
 .email-label{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;display:inline-block;width:60px}
 .email-body{border-top:0.5px solid #eee;margin-top:10px;padding-top:10px;color:#555;font-size:12px;white-space:pre-wrap}
+/* ── Toast / snackbar ─────────────────────────────────────────── */
+.toast-container{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:calc(100vw - 48px)}
+.toast{background:#fff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.04);padding:12px 14px;display:flex;align-items:center;gap:10px;font-size:13px;min-width:240px;max-width:380px;cursor:pointer;pointer-events:auto;border-left:4px solid #639922;animation:toast-in .25s ease-out}
+.toast.error{border-left-color:#E24B4A}
+.toast.info{border-left-color:#888}
+.toast-icon{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.toast.success .toast-icon{background:#EAF3DE;color:#3B6D11}
+.toast.error .toast-icon{background:#FBE9E9;color:#7A2E2E}
+.toast.info .toast-icon{background:#F0F0F0;color:#666}
+.toast-msg{flex:1;line-height:1.4;color:#333}
+.toast.dismissing{animation:toast-out .2s ease-in forwards}
+@keyframes toast-in{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes toast-out{to{transform:translateX(20px);opacity:0}}
 </style>
 </head>
 <body>
@@ -2420,59 +2433,139 @@ function populateEstimatorDropdown(selectedId) {
   g('nop-estimator').innerHTML = opts;
 }
 
-// ── EMAIL NOTIFICATION ──────────────────────────────────────────
-function maybeNotifyEstimator(oppId, prevEstimatorId) {
-  var o   = getOpp(oppId);      if (!o) return;
-  var newId = o.estimatorId || null;
-  if (!newId || newId === prevEstimatorId) return;
-  var usr = getUser(newId);      if (!usr || !usr.email) return;
-  var cust = getCust(o.customerId);
-  setTimeout(function(){ showEstimatorEmail(usr, o, cust); }, 350);
+// ── Toast / snackbar helper ─────────────────────────────────────
+// Used for non-blocking confirmations (assignment alerts, etc.).
+// type: 'success' | 'error' | 'info'   (default 'success')
+function showToast(message, type) {
+  type = (type === 'error' || type === 'info') ? type : 'success';
+  var c = document.getElementById('toast-container');
+  if (!c) {
+    c = document.createElement('div');
+    c.id = 'toast-container';
+    c.className = 'toast-container';
+    document.body.appendChild(c);
+  }
+  var el = document.createElement('div');
+  el.className = 'toast ' + type;
+  var icon = (type === 'success') ? '\u2713' : (type === 'error' ? '\u2715' : '\u2022');
+  // Icon and msg are in separate divs; build with textContent to avoid HTML injection
+  var iconEl = document.createElement('div'); iconEl.className = 'toast-icon'; iconEl.textContent = icon;
+  var msgEl  = document.createElement('div'); msgEl.className  = 'toast-msg';  msgEl.textContent  = String(message || '');
+  el.appendChild(iconEl); el.appendChild(msgEl);
+  var dismiss = function() {
+    if (el._dismissed) return;
+    el._dismissed = true;
+    el.classList.add('dismissing');
+    setTimeout(function(){ if (el.parentNode) el.parentNode.removeChild(el); }, 220);
+  };
+  el.addEventListener('click', dismiss);
+  c.appendChild(el);
+  // Errors stick around longer so the user can read the message
+  setTimeout(dismiss, type === 'error' ? 7000 : 4000);
 }
 
-function showEstimatorEmail(usr, o, cust) {
-  var subjectText = 'Bid Opportunity Assigned: ' + o.id + ' \u2014 ' + o.project;
-  var bodyLines = [
-    'Hi ' + usr.firstName + ',',
-    '',
-    'You have been assigned as estimator for the following bid opportunity:',
-    '',
-    'Opportunity:    ' + o.id,
-    'Project:        ' + o.project,
-    'Customer:       ' + cust.name + (cust.contact ? ' (' + cust.contact + ')' : ''),
-    'Project Type:   ' + (Array.isArray(o.types)&&o.types.length ? o.types.join(', ') : (o.type||'Not specified')),
-    'Bid Due Date:   ' + (o.bidDate || 'Not specified'),
-    'Project Address:' + (formatOppAddress(o) || 'Not specified'),
-    'Est. Value:     $' + Number(o.estValue || 0).toLocaleString(),
-    (o.notes ? 'Notes:          ' + o.notes : ''),
-    '',
-    'Please log in to the KMI CRM for full details.',
-    '',
-    'KMI Construction',
-    '2880 S. 171st Street, New Berlin, WI 53151',
-    'T 262-548-0632 | KMI-Construction.com'
-  ].filter(function(l){ return l !== false; }).join('\n');
+// ── EMAIL NOTIFICATION ──────────────────────────────────────────
+// Fires when an opportunity's estimator changes. Notifies:
+//   - the previous estimator (if one was assigned) that they were removed
+//   - the new estimator      (if one is now assigned)   that they were assigned
+// Both branches can fire on a reassignment. Dedupes when the estimator id
+// hasn't actually changed (e.g. user clicked Save without touching the field).
+function maybeNotifyEstimator(oppId, prevEstimatorId) {
+  var o = getOpp(oppId); if (!o) return;
+  var newId = o.estimatorId || null;
+  if (newId === prevEstimatorId) return; // no actual change
 
-  var mailto = 'mailto:' + encodeURIComponent(usr.email) +
-    '?subject=' + encodeURIComponent(subjectText) +
-    '&body='    + encodeURIComponent(bodyLines);
+  var cust       = getCust(o.customerId);
+  var assignedBy = _currentUser || null;
 
-  showModal(
-    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
-    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">' +
-      '<div style="width:44px;height:44px;border-radius:50%;background:#EAF3DE;display:flex;align-items:center;justify-content:center;font-size:20px">\u2709</div>' +
-      '<div><div class="mt" style="margin:0">Notify estimator</div>' +
-      '<div style="font-size:13px;color:#888">Ready to send to ' + usr.firstName + ' ' + usr.lastName + '</div></div></div>' +
-    '<div class="email-preview">' +
-      '<div class="email-field"><span class="email-label">To</span>' + usr.email + '</div>' +
-      '<div class="email-field"><span class="email-label">Subject</span>' + subjectText + '</div>' +
-      '<div class="email-body">' + bodyLines.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>' +
-    '</div>' +
-    '<div class="mf">' +
-      '<button class="btn" onclick="closeModal()">Skip</button>' +
-      '<a href="' + mailto + '" class="btn btn-p" onclick="setTimeout(closeModal,200)" style="text-decoration:none;display:inline-block;line-height:1.4">Open in email client</a>' +
-    '</div>'
-  );
+  if (prevEstimatorId) {
+    var prevUsr = getUser(prevEstimatorId);
+    if (prevUsr && prevUsr.email) {
+      sendEstimatorNotification(prevUsr, o, cust, assignedBy, 'unassigned');
+    }
+  }
+  if (newId) {
+    var newUsr = getUser(newId);
+    if (newUsr && newUsr.email) {
+      sendEstimatorNotification(newUsr, o, cust, assignedBy, 'assigned');
+    }
+  }
+}
+
+// Build the email body and call the Edge Function.
+// action: 'assigned' | 'unassigned'
+async function sendEstimatorNotification(usr, o, cust, assignedBy, action) {
+  var isAssigned = (action === 'assigned');
+  var subject = isAssigned
+    ? 'Bid Opportunity Assigned: ' + o.id + ' \u2014 ' + (o.project || '')
+    : 'Bid Opportunity Removed: ' + o.id + ' \u2014 ' + (o.project || '');
+
+  var typeStr = (Array.isArray(o.types) && o.types.length)
+    ? o.types.join(', ')
+    : (o.type || 'Not specified');
+  var addr = (typeof formatOppAddress === 'function') ? formatOppAddress(o) : '';
+
+  var lines = [];
+  lines.push('Hi ' + (usr.firstName || '') + ',');
+  lines.push('');
+  lines.push(isAssigned
+    ? 'You have been assigned as estimator for the following bid opportunity:'
+    : 'You have been removed as estimator from the following bid opportunity:');
+  lines.push('');
+  lines.push('Opportunity:     ' + o.id);
+  lines.push('Project:         ' + (o.project || ''));
+  if (cust) lines.push('Customer:        ' + cust.name + (cust.contact ? ' (' + cust.contact + ')' : ''));
+  lines.push('Project Type:    ' + typeStr);
+  if (isAssigned) {
+    lines.push('Bid Due Date:    ' + (o.bidDate || 'Not specified'));
+    lines.push('Project Address: ' + (addr || 'Not specified'));
+    lines.push('Est. Value:      $' + Number(o.estValue || 0).toLocaleString());
+    if (o.notes) lines.push('Notes:           ' + o.notes);
+  }
+  lines.push('');
+  if (isAssigned) {
+    lines.push('Please log in to the KMI CRM for full details.');
+  } else if (assignedBy) {
+    lines.push('If you have questions, please contact ' +
+               (assignedBy.firstName || '') + ' ' + (assignedBy.lastName || '') + '.');
+  } else {
+    lines.push('If you have questions, please contact your administrator.');
+  }
+  lines.push('');
+  lines.push('\u2014 KMI Construction');
+  lines.push('  2880 S. 171st Street, New Berlin, WI 53151');
+  lines.push('  T 262-548-0632 | KMI-Construction.com');
+
+  var payload = {
+    to:                usr.email,
+    subject:           subject,
+    text:              lines.join('\r\n'),
+    flowType:          'assignment_alert',
+    sentBy:            assignedBy ? assignedBy.id    : null,
+    sentByEmail:       assignedBy ? assignedBy.email : null,
+    relatedEntityType: 'opportunity',
+    relatedEntityId:   o.id
+  };
+  // Reply-To: the assigner — so estimator can reply with questions
+  if (assignedBy && assignedBy.email) {
+    payload.replyTo = assignedBy.email;
+  }
+
+  var result = await sendEmail(payload);
+
+  var name = ((usr.firstName || '') + ' ' + (usr.lastName || '')).trim() || usr.email;
+  if (result.success) {
+    showToast(
+      (isAssigned ? 'Assignment notification sent to ' : 'Removal notification sent to ') + name,
+      'success'
+    );
+  } else {
+    showToast(
+      'Could not notify ' + name + ' \u2014 ' + (result.error || 'Unknown error'),
+      'error'
+    );
+    console.warn('[assignment_alert] send failed', { user: usr.email, opp: o.id, error: result.error });
+  }
 }
 
 // ── NEW / EDIT OPPORTUNITY ──────────────────────────────────────
