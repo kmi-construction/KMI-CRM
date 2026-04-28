@@ -977,6 +977,7 @@ var PERMISSIONS = {
   'input-source-doc':   ['full','full','full','read','none','none'],
   'enter-bid-amount':   ['full','full','read','read','none','none'],
   'edit-proposal':      ['full','full','read','read','none','none'],
+  'delete-proposal':    ['full','full','read','read','none','none'],
   'download-proposal':  ['full','full','full','read','none','none'],
   'email-pm-proposal':  ['full','full','read','read','none','none'],
   'delete-opportunity': ['full','read','read','read','none','none'],
@@ -2235,6 +2236,7 @@ function renderOppDetail(id) {
         '<button class="btn btn-sm" onclick="editProposal(\'' + prop.id + '\')">\u270e Edit</button>' +
         '<button class="btn btn-sm btn-pdf" onclick="dlPDF(\'' + prop.id + '\')">&#x2193; Download PDF</button>' +
         '<button class="btn btn-sm btn-pdf" onclick="emailProposalToPM(\'' + prop.id + '\')" title="Open a draft email to the Customer PM with the proposal summary">\u2709 Email PM</button>' +
+        '<button class="btn btn-sm btn-nobid" onclick="deleteProposal(\'' + prop.id + '\')" title="Delete this proposal — cannot be undone">\u00d7 Delete</button>' +
         '</div></div>' +
         (function(){
           var allInc = ii.concat(pi).map(function(x){ return '<div class="cd inc">'+x.text+'</div>'; });
@@ -2635,6 +2637,74 @@ function editProposal(propId) {
   setActivePage('opportunities');
   document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
   g('pg-new-proposal').classList.add('active');
+}
+
+async function deleteProposal(propId) {
+  // Permission check — same tier as edit-proposal (Admin + PM only have full).
+  if (!requireFull('delete-proposal', 'delete proposals')) return;
+  var prop = db.proposals.find(function(p){ return p.id === propId; });
+  if (!prop) { alert('Proposal not found.'); return; }
+  var o = getOpp(prop.opportunityId);
+
+  // Hard block: if the opportunity has been marked Won (or already promoted to a
+  // project), we don't allow proposal deletion. The project record references
+  // this opportunity and removing the proposal underneath it would leave the
+  // record inconsistent. User can change the outcome first if they really need
+  // to start over.
+  if (o && (o.outcomeStatus === 'won' || o.projectId)) {
+    alert('Cannot delete this proposal.\n\n' +
+          'This opportunity has been marked as Won' +
+          (o.projectId ? ' and a project has been created from it.' : '.') +
+          '\n\nTo delete the proposal, first change the opportunity outcome away from Won ' +
+          '(and remove the linked project if one exists).');
+    return;
+  }
+
+  var projName = (o && o.project) || prop.project || '';
+  if (!confirm('Delete proposal ' + prop.id + ' for ' + (projName || 'this opportunity') + '?\n\n' +
+               'This cannot be undone. The opportunity will remain and you can create a new proposal for it.')) return;
+
+  // Local removal first so the UI reflects the change immediately.
+  db.proposals = db.proposals.filter(function(x){ return x.id !== propId; });
+  if (o) o.proposalId = null;
+
+  // CRITICAL: explicit Supabase delete. The standard saveDB() pipeline is
+  // upsert-only — without this, the deleted proposal would resurrect on the
+  // next cloud pull from this or any other device. Best-effort: if the cloud
+  // delete fails we keep the local change but alert the user.
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_proposals').delete().eq('id', propId);
+      if (r && r.error) {
+        console.error('Supabase delete error:', r.error);
+        alert('Proposal removed locally, but the cloud delete failed:\n' +
+              (r.error.message || 'unknown error') +
+              '\n\nThe proposal may reappear on next sync. Try again in a moment, ' +
+              'or contact support if the problem persists.');
+      }
+    } catch (e) {
+      console.error('Supabase delete threw:', e);
+      alert('Proposal removed locally, but the cloud delete failed.\n\n' +
+            'The proposal may reappear on next sync. Try again in a moment, ' +
+            'or contact support if the problem persists.');
+    }
+  }
+
+  // Activity log entry, mirroring the "Project ... created" pattern used elsewhere.
+  if (Array.isArray(db.activity)) {
+    db.activity.unshift({
+      text: 'Proposal ' + propId + ' deleted' + (projName ? (' (' + projName + ')') : ''),
+      type: 'lost',
+      time: 'Just now'
+    });
+  }
+
+  saveDB();
+  // Re-render the opportunity detail so the user sees the empty-proposal state
+  // and can create a fresh one.
+  if (o && typeof openOppDetail === 'function') {
+    try { openOppDetail(o.id); } catch (_) {}
+  }
 }
 
 function emailProposalToPM(propId) {
