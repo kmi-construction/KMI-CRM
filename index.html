@@ -282,6 +282,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="sb-group-hdr" onclick="toggleSbGroup('projects')"><span>Projects</span><span class="sb-chev">▾</span></div>
     <div class="sb-group-items">
       <div class="ni" onclick="nav('projects')"><span class="nico">⬢</span>Projects</div>
+      <div class="ni" onclick="nav('budget')"><span class="nico">$</span>Budget</div>
     </div>
   </div>
   <div class="sb-group" data-group="directory">
@@ -615,6 +616,15 @@ textarea{resize:vertical;min-height:72px}
     <div id="nprj-contact-rows"></div>
   </div>
 
+  <div class="card">
+    <div class="ch"><span class="ct">Foundation setup</span></div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Fields used when exporting this project's Job File CSV to Foundation Software. Additional fields (geographical area, project class, retainage, etc.) will be added here as needed.</div>
+    <div class="fg">
+      <div class="fgr"><label>Payroll department</label><input id="nprj-payroll-dept" value="field" placeholder="field"></div>
+      <div class="fgr"><label>Customer job number</label><input id="nprj-cust-job-num" placeholder="Customer's PO or internal reference"></div>
+    </div>
+  </div>
+
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
     <button class="btn" onclick="nav('projects')">Cancel</button>
     <button class="btn btn-p" onclick="saveProject()" style="padding:10px 32px;font-size:14px;font-weight:700" id="nprj-save-btn">Create project</button>
@@ -714,6 +724,95 @@ textarea{resize:vertical;min-height:72px}
   </div>
   <div class="card"><div class="ch"><span class="ct">Cost item templates</span><button class="btn btn-sm btn-p" onclick="showAddCostTmpl()">+ Add item</button></div><div id="t-cost"></div></div>
   <div class="card"><div class="ch"><span class="ct">Labor rates</span><button class="btn btn-sm btn-p" onclick="showAddLaborSet()">+ Add rate set</button></div><div id="t-labor"></div></div>
+
+  <!-- ── Foundation master data (Chunk 1: budget feature) ─────────── -->
+  <div class="card" style="border:1px solid var(--ac);background:#FFFCF3">
+    <div class="ch"><span class="ct">Foundation master data</span><span style="font-size:11px;color:#888;font-weight:400">Used by the budget feature for CSV exports back to Foundation Software</span></div>
+    <div style="font-size:12px;color:#666;margin-bottom:12px;line-height:1.5">
+      Upload exports from Foundation to keep cost codes, cost classes, and the customer master in sync.
+      Each upload <strong>replaces</strong> the corresponding table after a confirmation prompt.
+      The <em>budgetable</em> flag on cost codes — which controls whether a code is selectable in the budget UI — is preserved when re-importing.
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+      <!-- Cost codes -->
+      <div style="background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
+        <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:6px">Cost codes</div>
+        <div style="font-size:11px;color:#888;margin-bottom:8px;min-height:30px">
+          Required columns: <code>cost_code_no</code>, <code>description</code>. Other columns are ignored.
+        </div>
+        <div id="t-fnd-codes-status" style="font-size:11px;color:#555;margin-bottom:8px"></div>
+        <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
+          Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'costCodes')">
+        </label>
+      </div>
+      <!-- Cost classes -->
+      <div style="background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
+        <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:6px">Cost classes</div>
+        <div style="font-size:11px;color:#888;margin-bottom:8px;min-height:30px">
+          Required columns: <code>cost_class_no</code>, <code>description</code>. Other columns are ignored.
+        </div>
+        <div id="t-fnd-classes-status" style="font-size:11px;color:#555;margin-bottom:8px"></div>
+        <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
+          Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'costClasses')">
+        </label>
+      </div>
+      <!-- Foundation customers -->
+      <div style="background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
+        <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:6px">Customer list</div>
+        <div style="font-size:11px;color:#888;margin-bottom:8px;min-height:30px">
+          Required: <code>customer_no</code>, <code>name</code>. Optional: <code>address_1</code>, <code>address_2</code>, <code>city</code>, <code>state</code>, <code>zip_code</code>, <code>sort_name</code>.
+        </div>
+        <div id="t-fnd-custs-status" style="font-size:11px;color:#555;margin-bottom:8px"></div>
+        <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
+          Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'customersFoundation')">
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Budget template lines (Chunk 1: read-only view; editing in later chunk) ─ -->
+  <div class="card">
+    <div class="ch"><span class="ct">Budget template lines</span><span style="font-size:11px;color:#888;font-weight:400">The default 31-row skeleton populated when extracting a bid price report</span></div>
+    <div style="font-size:12px;color:#666;margin-bottom:10px">
+      Each line maps a Foundation cost-code/class to a source on the bid price report.
+      <code style="font-size:11px">manual</code> lines start at zero and stay there unless the user enters a value.
+      <span style="color:#888">Inline editing of source mappings will be added in a follow-on chunk.</span>
+    </div>
+    <div id="t-budget-tmpl"></div>
+  </div>
+
+  <!-- ── Equipment-split percentages and quantity-conversion factors ─ -->
+  <div class="card">
+    <div class="ch"><span class="ct">Budget settings</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-weight:600;font-size:12px;color:var(--kmi);margin-bottom:8px">Equipment cost split (%)</div>
+        <div style="font-size:11px;color:#888;margin-bottom:10px">PDF equipment total is divided into these four cost classes. Should sum to 100. Class 4 (Small tools) defaults to zero per current procedure.</div>
+        <div class="fg" id="t-eq-split"></div>
+      </div>
+      <div>
+        <div style="font-weight:600;font-size:12px;color:var(--kmi);margin-bottom:8px">Quantity conversions</div>
+        <div style="font-size:11px;color:#888;margin-bottom:10px">Convert PDF raw units into Foundation budget quantities.</div>
+        <div class="fg" id="t-qty-conv"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- BUDGET (Chunk 1: placeholder. Full UI lands in Chunks 2 & 3.) -->
+<div class="pg" id="pg-budget">
+  <div class="ph"><div><h1>Budget</h1><div class="sub">Project budgets — upload bid price reports, generate Foundation CSV exports</div><div class="stripe"></div></div></div>
+  <div class="card" style="text-align:center;padding:40px 20px">
+    <div style="font-size:48px;margin-bottom:12px;color:#ccc">$</div>
+    <div style="font-size:15px;font-weight:600;color:var(--kmi);margin-bottom:6px">Budget feature coming soon</div>
+    <div style="font-size:13px;color:#888;max-width:520px;margin:0 auto;line-height:1.5">
+      Chunk 1 of the budget feature has been deployed: database schema, master data import on the Templates page, and Foundation setup fields on projects.
+      The PDF extraction (Chunk 2) and CSV exports (Chunk 3) will populate this page next.
+    </div>
+    <div style="margin-top:20px;font-size:12px;color:#aaa">Master data status:
+      <span id="bg-md-status" style="color:#555">checking…</span>
+    </div>
+  </div>
 </div>
 
 <!-- EMAIL LOG -->
@@ -887,6 +986,14 @@ var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,
 var DB_DEFAULTS = {
   customers: [], pms: [], users: [], opportunities: [], proposals: [], projects: [], activity: [],
   vendors: [], vendorContacts: [],
+  // Foundation master data (imported from CSV on Templates page)
+  costCodes:           [],   // { id, code, description, isBudgetable, active }
+  costClasses:         [],   // { id, classNo, description, active }
+  customersFoundation: [],   // { id, customerNo, name, sortName, address1, address2, city, state, zip, active }
+  budgetTemplate:      [],   // { id, sortOrder, description, costCode, costClass, sourceType, sourceKey, defaultAmount }
+  projectBudgets:      [],   // { id, projectId, version, createdAt, createdBy, sourcePdfPath, taxRate, lines, totals, notes }
+  budgetEquipmentSplit: { class_5: 46, class_6: 20, class_10: 30, class_11: 4 },
+  budgetQtyConversions: { mortar_cuft_per_bag: 28, wire_lf_per_bundle: 500, grout_cuft_per_bag: 22 },
   companyTypes: ['General Contractor','Commercial','Developer','Civil Engineering','Industrial','Residential'],
   projectTypes: ['Foundation','Structural Steel','Structural Concrete','Masonry','Concrete','Earthwork','Site Utilities','Shoring & Excavation','Demolition','Other'],
   projectRoles: ['Assistant Project Manager','Project Engineer','Project Coordinator','Superintendent','Project Foreman','Project Manager','Sr. Project Manager','Project Executive'],
@@ -953,6 +1060,13 @@ function loadDB() {
         activity:     p.activity     || [],
         vendors:        p.vendors        || [],
         vendorContacts: p.vendorContacts || [],
+        costCodes:           p.costCodes           || [],
+        costClasses:         p.costClasses         || [],
+        customersFoundation: p.customersFoundation || [],
+        budgetTemplate:      p.budgetTemplate      || [],
+        projectBudgets:      p.projectBudgets      || [],
+        budgetEquipmentSplit: p.budgetEquipmentSplit || JSON.parse(JSON.stringify(DB_DEFAULTS.budgetEquipmentSplit)),
+        budgetQtyConversions: p.budgetQtyConversions || JSON.parse(JSON.stringify(DB_DEFAULTS.budgetQtyConversions)),
         stdClar:      p.stdClar      || DB_DEFAULTS.stdClar,
         projClar:     p.projClar     || DB_DEFAULTS.projClar,
         exclusions:   p.exclusions   || DB_DEFAULTS.exclusions,
@@ -1020,7 +1134,13 @@ var PERMISSIONS = {
   'users':              ['full','none','none','none','none','none'],
   'templates':          ['full','read','none','none','none','none'],
   'email-log':          ['full','none','none','none','none','none'],
-  'email-settings':     ['full','none','none','none','none','none']
+  'email-settings':     ['full','none','none','none','none','none'],
+  // Budget feature: viewable by all roles, editable by Admin/PM/Accounting,
+  // exportable by Admin/PM/Accounting (Accounting drives the actual
+  // Foundation upload, so they need both edit and export).
+  'view_project_budget':   ['full','full','full','full','read','read'],
+  'edit_project_budget':   ['full','full','none','full','none','none'],
+  'export_project_budget': ['full','full','none','full','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -1070,6 +1190,7 @@ var PAGE_ACTION_MAP = {
   'analytics':      'analytics',
   'users':          'users',
   'templates':      'templates',
+  'budget':         'view_project_budget',
   'email-log':      'email-log',
   'email-settings': 'email-settings'
 };
@@ -1664,10 +1785,27 @@ function nav(page) {
     templates:        renderTemplates,
     projects:         renderProjects,
     'new-project':    initNewProject,
+    budget:           renderBudgetPlaceholder,
     'email-log':      renderEmailLog,
     'email-settings': renderEmailSettings
   };
   if (fns[page]) fns[page]();
+}
+
+// Chunk 1 placeholder — surfaces the master-data import status so users know
+// what's wired up before the upload UI lands. Replaced in Chunk 2.
+function renderBudgetPlaceholder() {
+  var el = g('bg-md-status');
+  if (!el) return;
+  var cc = (db.costCodes || []).length;
+  var cl = (db.costClasses || []).length;
+  var cf = (db.customersFoundation || []).length;
+  var bt = (db.budgetTemplate || []).length;
+  el.innerHTML =
+    '<strong>' + cc + '</strong> cost codes · ' +
+    '<strong>' + cl + '</strong> cost classes · ' +
+    '<strong>' + cf + '</strong> Foundation customers · ' +
+    '<strong>' + bt + '</strong> budget template lines';
 }
 
 function showModal(html) { g('modal-body').innerHTML = html; g('overlay').classList.add('show'); }
@@ -3939,6 +4077,9 @@ function userForm(u, opts) {
     emailField +
     '<div class="fgr"><label>Phone</label><input id="uf-phone" value="' + (u?u.phone:'') + '" placeholder="(555) 555-0000"></div>' +
     roleField +
+    (selfEdit
+      ? ''
+      : '<div class="fgr"><label>Foundation PM code</label><input id="uf-fnd-pm" value="' + (u && u.foundationPmCode ? u.foundationPmCode : '') + '" placeholder="e.g. MJK" maxlength="10"><div style="font-size:11px;color:#888;margin-top:4px">Used on Foundation budget exports when this user is the assigned Project Manager.</div></div>') +
     '<div class="fgr full"><label>Signature image (optional, PNG, max 200 KB)</label>' +
       '<input type="file" id="uf-sig-input" accept="image/png" onchange="onSignatureFileChosen(event)" style="font-size:13px;margin-top:4px">' +
       '<div id="uf-sig-preview" style="' + sigPreviewStyle + '">' + sigPreviewHtml + '</div>' +
@@ -3984,6 +4125,13 @@ async function saveUser() {
   // undefined = untouched, null = explicit removal, object = new upload.
   if (_pendingSignatureImage !== undefined) {
     data.signatureImage = _pendingSignatureImage;  // may be null
+  }
+  // Foundation PM code — only on the admin form (not self-edit, where the
+  // input doesn't render). On self-edit, fall through and preserve the
+  // existing value already on the user record.
+  if (!_selfEditMode) {
+    var fpmEl = g('uf-fnd-pm');
+    if (fpmEl) data.foundationPmCode = (fpmEl.value || '').trim();
   }
 
   // Populated only on a new-user create, used to fire the welcome email
@@ -4318,6 +4466,9 @@ function initNewProject() {
   g('nprj-city').value  = prefill ? prefill.city : '';
   g('nprj-zip').value   = prefill ? prefill.zip : '';
   g('nprj-amt').value   = prefill ? (prefill.contractAmount || '') : '';
+  // Foundation setup defaults — payroll dept defaults to 'field'.
+  if (g('nprj-payroll-dept'))  g('nprj-payroll-dept').value  = 'field';
+  if (g('nprj-cust-job-num'))  g('nprj-cust-job-num').value  = '';
   populateProjectCustDropdown(prefill ? prefill.customerId : '');
   populateProjectStateDropdown(prefill ? prefill.state : '');
   renderProjectTypeChecksForProject(prefill ? prefill.types : []);
@@ -4352,6 +4503,8 @@ function saveProject() {
   var amt   = parseFloat(g('nprj-amt').value) || 0;
   var kmiAssignments     = readKmiAssignments();
   var contactAssignments = readContactAssignments();
+  var payrollDeptEl = g('nprj-payroll-dept');
+  var custJobNumEl  = g('nprj-cust-job-num');
   var payload = {
     number: number,
     name: name,
@@ -4364,7 +4517,9 @@ function saveProject() {
     types: types,
     type:  types[0] || '',
     kmiAssignments:     kmiAssignments,
-    contactAssignments: contactAssignments
+    contactAssignments: contactAssignments,
+    payrollDepartment: payrollDeptEl ? (payrollDeptEl.value || '').trim() : 'field',
+    customerJobNumber: custJobNumEl  ? (custJobNumEl.value  || '').trim() : ''
   };
 
   if (_editProjectId) {
@@ -4413,6 +4568,8 @@ function editProject(id) {
   g('nprj-city').value = p.city   || '';
   g('nprj-zip').value  = p.zip    || '';
   g('nprj-amt').value  = p.contractAmount || '';
+  if (g('nprj-payroll-dept')) g('nprj-payroll-dept').value = p.payrollDepartment || 'field';
+  if (g('nprj-cust-job-num')) g('nprj-cust-job-num').value = p.customerJobNumber || '';
   populateProjectCustDropdown(p.customerId);
   populateProjectStateDropdown(p.state || '');
   var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
@@ -5186,6 +5343,306 @@ function renderTemplates() {
   renderGroupList();
   g('t-cost').innerHTML = '<table><thead><tr><th>Description</th><th>Unit</th><th>Default rate</th><th></th></tr></thead><tbody>' + db.costTmpls.map(function(t){ return '<tr><td>'+t.desc+'</td><td>'+t.unit+'</td><td>'+fmtC(t.rate)+'</td><td><button class="btn btn-sm" onclick="rmTmpl(\'cost\',\''+t.id+'\')" style="color:#A32D2D">Remove</button></td></tr>'; }).join('') + '</tbody></table>';
   renderLaborRates();
+  renderFoundationMasterStatus();
+  renderBudgetTemplateTable();
+  renderBudgetSettingsForms();
+}
+
+// ── Foundation master data status indicators on Templates page ──────────
+function renderFoundationMasterStatus() {
+  var ccEl = g('t-fnd-codes-status');
+  var clEl = g('t-fnd-classes-status');
+  var cfEl = g('t-fnd-custs-status');
+  if (!ccEl || !clEl || !cfEl) return;  // page not loaded yet
+  var cc = (db.costCodes || []).length;
+  var cl = (db.costClasses || []).length;
+  var cf = (db.customersFoundation || []).length;
+  var ccBudget = (db.costCodes || []).filter(function(c){ return c.isBudgetable; }).length;
+  ccEl.innerHTML = cc
+    ? '<span style="color:#3B6D11">&#10003; ' + cc + ' loaded</span> (' + ccBudget + ' marked budgetable)'
+    : '<span style="color:#A32D2D">No data — upload required</span>';
+  clEl.innerHTML = cl
+    ? '<span style="color:#3B6D11">&#10003; ' + cl + ' loaded</span>'
+    : '<span style="color:#A32D2D">No data — upload required</span>';
+  cfEl.innerHTML = cf
+    ? '<span style="color:#3B6D11">&#10003; ' + cf + ' loaded</span>'
+    : '<span style="color:#A32D2D">No data — upload required</span>';
+}
+
+// ── Budget template table (Chunk 1: read-only display) ─────────────────
+function renderBudgetTemplateTable() {
+  var el = g('t-budget-tmpl');
+  if (!el) return;
+  var lines = (db.budgetTemplate || []).slice().sort(function(a,b){ return (a.sortOrder||0) - (b.sortOrder||0); });
+  if (!lines.length) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:#aaa;font-size:12px">' +
+      'No template lines loaded. Run the SQL migration in Supabase, then click <strong>Sync &rarr; Pull from Supabase</strong> on the connection screen to fetch them.' +
+      '</div>';
+    return;
+  }
+  var stMap = {
+    pdf_class_total:    '<span style="color:var(--kmi)">PDF class total</span>',
+    pdf_misc_breakdown: '<span style="color:var(--kmi)">Misc breakdown</span>',
+    pdf_project_notes:  '<span style="color:var(--kmi)">Project notes</span>',
+    equipment_split:    '<span style="color:#9A7A2E">Equipment split</span>',
+    labor_sum:          '<span style="color:#9A7A2E">Labor sum</span>',
+    tax_calc:           '<span style="color:#9A7A2E">Tax calc</span>',
+    manual:             '<span style="color:#888">Manual</span>'
+  };
+  el.innerHTML = '<table style="font-size:12px"><thead><tr>' +
+    '<th style="width:32px">#</th><th>Description</th><th>Cost code</th><th>Cost class</th>' +
+    '<th>Source</th><th>Source key</th>' +
+    '</tr></thead><tbody>' +
+    lines.map(function(t){
+      var cc = (db.costCodes || []).find(function(x){ return x.code === t.costCode; });
+      var cl = (db.costClasses || []).find(function(x){ return x.classNo === t.costClass; });
+      var ccTxt = cc ? (t.costCode + ' <span style="color:#888;font-size:11px">' + cc.description + '</span>') : t.costCode;
+      var clTxt = cl ? (t.costClass + ' <span style="color:#888;font-size:11px">' + cl.description + '</span>') : t.costClass;
+      return '<tr>' +
+        '<td style="color:#888">' + (t.sortOrder || '') + '</td>' +
+        '<td style="font-weight:600">' + (t.description || '') + '</td>' +
+        '<td>' + ccTxt + '</td>' +
+        '<td>' + clTxt + '</td>' +
+        '<td style="font-size:11px">' + (stMap[t.sourceType] || t.sourceType) + '</td>' +
+        '<td style="font-family:monospace;font-size:11px;color:#666">' + (t.sourceKey || '') + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table>';
+}
+
+// ── Budget settings forms (equipment split %, qty conversions) ─────────
+function renderBudgetSettingsForms() {
+  var sp = g('t-eq-split');
+  var cv = g('t-qty-conv');
+  if (!sp || !cv) return;
+  var split = db.budgetEquipmentSplit || {};
+  var conv  = db.budgetQtyConversions || {};
+  var splitKeys = [
+    {key:'class_5',  label:'Class 5 — Rented Equipment'},
+    {key:'class_6',  label:'Class 6 — Other Job Expense (Dumpsters)'},
+    {key:'class_10', label:'Class 10 — Truck Fuel'},
+    {key:'class_11', label:'Class 11 — Safety'}
+  ];
+  var sum = splitKeys.reduce(function(a,k){ return a + (Number(split[k.key]) || 0); }, 0);
+  sp.innerHTML = splitKeys.map(function(k){
+    return '<div class="fgr full" style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
+      '<label style="flex:1;margin:0;font-size:12px">' + k.label + '</label>' +
+      '<input type="number" min="0" max="100" step="0.01" style="width:90px" value="' + (split[k.key] || 0) + '" data-eq-split="' + k.key + '" onchange="saveEquipmentSplit()">' +
+      '<span style="color:#888">%</span>' +
+    '</div>';
+  }).join('') +
+  '<div style="font-size:11px;color:' + (Math.abs(sum - 100) < 0.01 ? '#3B6D11' : '#A32D2D') + ';margin-top:6px">Sum: ' + sum.toFixed(2) + '%' +
+    (Math.abs(sum - 100) < 0.01 ? ' &#10003;' : ' (should be 100%)') +
+  '</div>';
+
+  var convKeys = [
+    {key:'mortar_cuft_per_bag', label:'Mortar — CuFt per bag', unit:'CuFt/bag'},
+    {key:'wire_lf_per_bundle',  label:'Wire — Linear feet per bundle', unit:'LF/bundle'},
+    {key:'grout_cuft_per_bag',  label:'Grout — CuFt per bag', unit:'CuFt/bag'}
+  ];
+  cv.innerHTML = convKeys.map(function(k){
+    return '<div class="fgr full" style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
+      '<label style="flex:1;margin:0;font-size:12px">' + k.label + '</label>' +
+      '<input type="number" min="0" step="0.1" style="width:90px" value="' + (conv[k.key] || 0) + '" data-qty-conv="' + k.key + '" onchange="saveQtyConversions()">' +
+      '<span style="color:#888;font-size:11px">' + k.unit + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+function saveEquipmentSplit() {
+  if (!requireFull('templates', 'edit budget settings')) return;
+  var inputs = document.querySelectorAll('[data-eq-split]');
+  var next = {};
+  inputs.forEach(function(inp){ next[inp.getAttribute('data-eq-split')] = parseFloat(inp.value) || 0; });
+  db.budgetEquipmentSplit = next;
+  saveDB();
+  // Persist to Supabase as a settings row (if connected)
+  if (supabaseClient) {
+    supabaseClient.from('kmi_settings')
+      .upsert({key:'budgetEquipmentSplit', value:next})
+      .then(function(r){ if (r && r.error) console.warn('budgetEquipmentSplit sync error:', r.error.message); });
+  }
+  renderBudgetSettingsForms();  // refresh sum indicator
+}
+
+function saveQtyConversions() {
+  if (!requireFull('templates', 'edit budget settings')) return;
+  var inputs = document.querySelectorAll('[data-qty-conv]');
+  var next = {};
+  inputs.forEach(function(inp){ next[inp.getAttribute('data-qty-conv')] = parseFloat(inp.value) || 0; });
+  db.budgetQtyConversions = next;
+  saveDB();
+  if (supabaseClient) {
+    supabaseClient.from('kmi_settings')
+      .upsert({key:'budgetQtyConversions', value:next})
+      .then(function(r){ if (r && r.error) console.warn('budgetQtyConversions sync error:', r.error.message); });
+  }
+}
+
+// ── Foundation CSV import ───────────────────────────────────────────────
+// Replaces the corresponding lookup table after a confirmation prompt.
+// For costCodes, preserves the isBudgetable flag on codes that match an
+// existing entry (so re-imports don't reset which codes are budgetable).
+function importFoundationCSV(evt, type) {
+  if (!requireFull('templates', 'import Foundation master data')) {
+    evt.target.value = '';
+    return;
+  }
+  var file = evt.target.files && evt.target.files[0];
+  if (!file) return;
+  var inputEl = evt.target;
+  inputEl.value = '';
+
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var rows = parseCSV(e.target.result);
+    if (!rows.length) { alert('No data rows found in the CSV.'); return; }
+
+    if (type === 'costCodes') {
+      importFoundationCostCodes(rows);
+    } else if (type === 'costClasses') {
+      importFoundationCostClasses(rows);
+    } else if (type === 'customersFoundation') {
+      importFoundationCustomers(rows);
+    }
+  };
+  reader.onerror = function() { alert('Error reading file.'); };
+  reader.readAsText(file);
+}
+
+function importFoundationCostCodes(rows) {
+  // Map each row → cost code, preserving isBudgetable if the code already exists.
+  var existing = {};
+  (db.costCodes || []).forEach(function(c){ existing[(c.code || '').trim()] = c; });
+
+  var parsed = [];
+  var skipped = 0;
+  rows.forEach(function(r){
+    // Tolerant column lookup — Foundation export may have header variants.
+    var code = (r.cost_code_no || r.code || r.no || r['Cost Code No'] || r['Cost Code'] || '').trim();
+    var desc = (r.description || r.desc || r.name || r['Description'] || '').trim();
+    if (!code) { skipped++; return; }
+    var prev = existing[code];
+    parsed.push({
+      id: prev ? prev.id : Date.now() + parsed.length,
+      code: code,
+      description: desc,
+      isBudgetable: prev ? !!prev.isBudgetable : false,
+      active: true
+    });
+  });
+
+  if (!parsed.length) {
+    alert('No valid rows found.\n\nExpected columns include "cost_code_no" and "description".');
+    return;
+  }
+  if (!confirm('Replace the cost code list with ' + parsed.length + ' row' + (parsed.length === 1 ? '' : 's') + ' from this CSV?\n\n' +
+               (skipped ? skipped + ' row(s) were skipped (missing code).\n\n' : '') +
+               'The "is budgetable" flag will be preserved on codes that match existing entries. New codes default to not budgetable.')) {
+    return;
+  }
+  db.costCodes = parsed;
+  saveDB();
+  // Push to cloud — replace strategy: delete all then insert (so codes
+  // removed in the new CSV go away on the cloud too).
+  if (supabaseClient) {
+    (async function(){
+      try {
+        var del = await supabaseClient.from('kmi_cost_codes').delete().gte('id', 0);
+        if (del && del.error) console.warn('cost_codes delete error:', del.error.message);
+        var ins = await supabaseClient.from('kmi_cost_codes').insert(parsed.map(toSBCostCode));
+        if (ins && ins.error) console.warn('cost_codes insert error:', ins.error.message);
+      } catch (e) { console.warn('cost_codes sync exception:', e); }
+    })();
+  }
+  renderTemplates();
+  alert('\u2714 Imported ' + parsed.length + ' cost code' + (parsed.length === 1 ? '' : 's') + '.');
+}
+
+function importFoundationCostClasses(rows) {
+  var parsed = [];
+  var skipped = 0;
+  rows.forEach(function(r){
+    var no   = (r.cost_class_no || r.class_no || r.no || r['Cost Class No'] || '').trim();
+    var desc = (r.description || r.desc || r.name || r['Description'] || '').trim();
+    if (!no) { skipped++; return; }
+    parsed.push({
+      id: Date.now() + parsed.length,
+      classNo: no,
+      description: desc,
+      active: true
+    });
+  });
+  if (!parsed.length) {
+    alert('No valid rows found.\n\nExpected columns include "cost_class_no" and "description".');
+    return;
+  }
+  if (!confirm('Replace the cost class list with ' + parsed.length + ' row' + (parsed.length === 1 ? '' : 's') + ' from this CSV?' +
+               (skipped ? '\n\n' + skipped + ' row(s) were skipped (missing class number).' : ''))) {
+    return;
+  }
+  db.costClasses = parsed;
+  saveDB();
+  if (supabaseClient) {
+    (async function(){
+      try {
+        var del = await supabaseClient.from('kmi_cost_classes').delete().gte('id', 0);
+        if (del && del.error) console.warn('cost_classes delete error:', del.error.message);
+        var ins = await supabaseClient.from('kmi_cost_classes').insert(parsed.map(toSBCostClass));
+        if (ins && ins.error) console.warn('cost_classes insert error:', ins.error.message);
+      } catch (e) { console.warn('cost_classes sync exception:', e); }
+    })();
+  }
+  renderTemplates();
+  alert('\u2714 Imported ' + parsed.length + ' cost class' + (parsed.length === 1 ? '' : 'es') + '.');
+}
+
+function importFoundationCustomers(rows) {
+  var parsed = [];
+  var skipped = 0;
+  rows.forEach(function(r){
+    var no = (r.customer_no || r.no || r['Customer No'] || '').trim();
+    var nm = (r.name || r['Name'] || '').trim();
+    if (!no || !nm) { skipped++; return; }
+    parsed.push({
+      id: Date.now() + parsed.length,
+      customerNo: no,
+      name: nm,
+      sortName: (r.sort_name || r['Sort Name'] || nm).trim(),
+      address1:  (r.address_1 || r['Address 1'] || r['Address Line 1'] || '').trim(),
+      address2:  (r.address_2 || r['Address 2'] || r['Address Line 2'] || '').trim(),
+      city:      (r.city || r['City'] || '').trim(),
+      state:     (r.state || r['State'] || r['State/Prov'] || '').trim(),
+      zip:       (r.zip_code || r.zip || r['Zip Code'] || r['ZIP'] || '').trim(),
+      active: true
+    });
+  });
+  if (!parsed.length) {
+    alert('No valid rows found.\n\nExpected columns include "customer_no" and "name".');
+    return;
+  }
+  if (!confirm('Replace the Foundation customer list with ' + parsed.length + ' row' + (parsed.length === 1 ? '' : 's') + ' from this CSV?' +
+               (skipped ? '\n\n' + skipped + ' row(s) were skipped (missing customer number or name).' : ''))) {
+    return;
+  }
+  db.customersFoundation = parsed;
+  saveDB();
+  if (supabaseClient) {
+    (async function(){
+      try {
+        var del = await supabaseClient.from('kmi_customers_foundation').delete().gte('id', 0);
+        if (del && del.error) console.warn('customers_foundation delete error:', del.error.message);
+        // Insert in chunks of 200 to avoid hitting any single-payload limits
+        var CHUNK = 200;
+        for (var i = 0; i < parsed.length; i += CHUNK) {
+          var slice = parsed.slice(i, i + CHUNK).map(toSBCustFnd);
+          var ins = await supabaseClient.from('kmi_customers_foundation').insert(slice);
+          if (ins && ins.error) { console.warn('customers_foundation insert error:', ins.error.message); break; }
+        }
+      } catch (e) { console.warn('customers_foundation sync exception:', e); }
+    })();
+  }
+  renderTemplates();
+  alert('\u2714 Imported ' + parsed.length + ' customer' + (parsed.length === 1 ? '' : 's') + '.');
 }
 function renderGroupList() {
   var groups = db.clarGroups || [];
@@ -6533,7 +6990,8 @@ function toSBUser(r)    {
     must_reset_password: !!r.mustResetPassword,
     status:              r.status || 'active',
     // JSONB column. Stores either { data: '<dataURL>', w: <px>, h: <px> } or null.
-    signature_image:     r.signatureImage || null
+    signature_image:     r.signatureImage || null,
+    foundation_pm_code:  r.foundationPmCode || null
   };
 }
 function fromSBUser(r)  {
@@ -6544,7 +7002,8 @@ function fromSBUser(r)  {
     passwordSalt:       r.password_salt || '',
     mustResetPassword:  !!r.must_reset_password,
     status:             r.status || 'active',
-    signatureImage:     r.signature_image || null
+    signatureImage:     r.signature_image || null,
+    foundationPmCode:   r.foundation_pm_code || ''
   };
 }
 
@@ -6614,7 +7073,22 @@ function toSBProject(r) {
     opportunity_id:r.opportunityId||null,
     kmi_assignments:r.kmiAssignments||[],
     contact_assignments:r.contactAssignments||[],
-    created:r.created||''
+    created:r.created||'',
+    // Foundation setup fields (Chunk 1: only payroll_department + customer_job_number
+    // are surfaced on the Project Edit form. Others remain nullable for later.)
+    payroll_department:            r.payrollDepartment            || null,
+    geographical_area:             r.geographicalArea             || null,
+    project_class:                 r.projectClass                 || null,
+    payroll_local_tax:             r.payrollLocalTax              || null,
+    certified_payroll:             r.certifiedPayroll             || null,
+    ap_tax_exempt:                 r.apTaxExempt                  || null,
+    attention:                     r.attention                    || null,
+    retainage_pct:                 (r.retainagePct  !== undefined && r.retainagePct  !== '') ? r.retainagePct  : null,
+    ar_tax_type:                   r.arTaxType                    || null,
+    sales_tax_ar:                  (r.salesTaxAr    !== undefined && r.salesTaxAr    !== '') ? r.salesTaxAr    : null,
+    stored_material_retainage_pct: (r.storedMaterialRetainagePct !== undefined && r.storedMaterialRetainagePct !== '') ? r.storedMaterialRetainagePct : null,
+    customer_job_number:           r.customerJobNumber            || null,
+    foundation_customer_no:        r.foundationCustomerNo         || null
   };
 }
 function fromSBProject(r) {
@@ -6627,7 +7101,100 @@ function fromSBProject(r) {
     opportunityId:r.opportunity_id||null,
     kmiAssignments:r.kmi_assignments||[],
     contactAssignments:r.contact_assignments||[],
-    created:r.created||''
+    created:r.created||'',
+    payrollDepartment:           r.payroll_department            || '',
+    geographicalArea:            r.geographical_area             || '',
+    projectClass:                r.project_class                 || '',
+    payrollLocalTax:             r.payroll_local_tax             || '',
+    certifiedPayroll:            r.certified_payroll             || '',
+    apTaxExempt:                 r.ap_tax_exempt                 || '',
+    attention:                   r.attention                     || '',
+    retainagePct:                (r.retainage_pct  !== null && r.retainage_pct  !== undefined) ? r.retainage_pct  : '',
+    arTaxType:                   r.ar_tax_type                   || '',
+    salesTaxAr:                  (r.sales_tax_ar   !== null && r.sales_tax_ar   !== undefined) ? r.sales_tax_ar   : '',
+    storedMaterialRetainagePct:  (r.stored_material_retainage_pct !== null && r.stored_material_retainage_pct !== undefined) ? r.stored_material_retainage_pct : '',
+    customerJobNumber:           r.customer_job_number           || '',
+    foundationCustomerNo:        r.foundation_customer_no        || ''
+  };
+}
+
+// ── Foundation master-data mappers (cost codes / classes / customers) ──
+function toSBCostCode(r) {
+  return {
+    id:r.id, code:r.code||'', description:r.description||'',
+    is_budgetable:!!r.isBudgetable, active:r.active!==false
+  };
+}
+function fromSBCostCode(r) {
+  return {
+    id:r.id, code:r.code||'', description:r.description||'',
+    isBudgetable:!!r.is_budgetable, active:r.active!==false
+  };
+}
+function toSBCostClass(r) {
+  return {
+    id:r.id, class_no:r.classNo||'', description:r.description||'',
+    active:r.active!==false
+  };
+}
+function fromSBCostClass(r) {
+  return {
+    id:r.id, classNo:r.class_no||'', description:r.description||'',
+    active:r.active!==false
+  };
+}
+function toSBCustFnd(r) {
+  return {
+    id:r.id, customer_no:r.customerNo||'', name:r.name||'',
+    sort_name:r.sortName||'',
+    address_1:r.address1||'', address_2:r.address2||'',
+    city:r.city||'', state:r.state||'', zip:r.zip||'',
+    active:r.active!==false
+  };
+}
+function fromSBCustFnd(r) {
+  return {
+    id:r.id, customerNo:r.customer_no||'', name:r.name||'',
+    sortName:r.sort_name||'',
+    address1:r.address_1||'', address2:r.address_2||'',
+    city:r.city||'', state:r.state||'', zip:r.zip||'',
+    active:r.active!==false
+  };
+}
+function toSBBudgetTmpl(r) {
+  return {
+    id:r.id, sort_order:r.sortOrder||0,
+    description:r.description||'', cost_code:r.costCode||'',
+    cost_class:r.costClass||'', source_type:r.sourceType||'manual',
+    source_key:r.sourceKey||'',
+    default_amount:r.defaultAmount||0
+  };
+}
+function fromSBBudgetTmpl(r) {
+  return {
+    id:r.id, sortOrder:r.sort_order||0,
+    description:r.description||'', costCode:r.cost_code||'',
+    costClass:r.cost_class||'', sourceType:r.source_type||'manual',
+    sourceKey:r.source_key||'',
+    defaultAmount:r.default_amount||0
+  };
+}
+function toSBProjBudget(r) {
+  return {
+    id:r.id, project_id:r.projectId||null, version:r.version||1,
+    created_at:r.createdAt||null, created_by:r.createdBy||null,
+    source_pdf_path:r.sourcePdfPath||null,
+    tax_rate:r.taxRate||0,
+    lines:r.lines||[], totals:r.totals||{}, notes:r.notes||null
+  };
+}
+function fromSBProjBudget(r) {
+  return {
+    id:r.id, projectId:r.project_id||null, version:r.version||1,
+    createdAt:r.created_at||null, createdBy:r.created_by||null,
+    sourcePdfPath:r.source_pdf_path||null,
+    taxRate:r.tax_rate||0,
+    lines:r.lines||[], totals:r.totals||{}, notes:r.notes||null
   };
 }
 
@@ -6679,6 +7246,30 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_projects').upsert(db.projects.map(toSBProject));
       if (r.error) errs.push('projects: ' + r.error.message);
     }
+    // Foundation master data — cost codes / classes / customers (Chunk 1).
+    // These are populated by CSV import on the Templates page; if local is
+    // empty we don't push (avoids wiping a populated cloud copy on a fresh
+    // device that hasn't pulled yet).
+    if ((db.costCodes || []).length) {
+      var r = await supabaseClient.from('kmi_cost_codes').upsert(db.costCodes.map(toSBCostCode));
+      if (r && r.error) errs.push('cost_codes: ' + r.error.message);
+    }
+    if ((db.costClasses || []).length) {
+      var r = await supabaseClient.from('kmi_cost_classes').upsert(db.costClasses.map(toSBCostClass));
+      if (r && r.error) errs.push('cost_classes: ' + r.error.message);
+    }
+    if ((db.customersFoundation || []).length) {
+      var r = await supabaseClient.from('kmi_customers_foundation').upsert(db.customersFoundation.map(toSBCustFnd));
+      if (r && r.error) errs.push('customers_foundation: ' + r.error.message);
+    }
+    if ((db.budgetTemplate || []).length) {
+      var r = await supabaseClient.from('kmi_budget_template_lines').upsert(db.budgetTemplate.map(toSBBudgetTmpl));
+      if (r && r.error) errs.push('budget_template: ' + r.error.message);
+    }
+    if ((db.projectBudgets || []).length) {
+      var r = await supabaseClient.from('kmi_project_budgets').upsert(db.projectBudgets.map(toSBProjBudget));
+      if (r && r.error) errs.push('project_budgets: ' + r.error.message);
+    }
     // Activity (insert new ones — get current max id first)
     if (db.activity.length) {
       var actRows = db.activity.slice(0, 50).map(function(a) { return {text:a.text||'', type:a.type||'', time:a.time||''}; });
@@ -6698,7 +7289,9 @@ async function pushToSupabase() {
       {key:'projectTypes', value:db.projectTypes},
       {key:'projectRoles', value:db.projectRoles},
       {key:'vendorTypes',  value:db.vendorTypes},
-      {key:'clarGroups',   value:db.clarGroups}
+      {key:'clarGroups',   value:db.clarGroups},
+      {key:'budgetEquipmentSplit', value:db.budgetEquipmentSplit},
+      {key:'budgetQtyConversions', value:db.budgetQtyConversions}
     ];
     var r = await supabaseClient.from('kmi_settings').upsert(settingsRows);
     if (r.error) errs.push('settings: ' + r.error.message);
@@ -6724,7 +7317,8 @@ async function pullFromSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
   setSyncStatus('syncing', 'Loading\u2026');
   try {
-    var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings] = await Promise.all([
+    var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
+         ccodes, cclasses, custFnd, budgetTmpl, projBudgets] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -6734,7 +7328,12 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_proposals').select('*'),
       supabaseClient.from('kmi_projects').select('*'),
       supabaseClient.from('kmi_activity').select('*').order('created_at', {ascending:false}).limit(50),
-      supabaseClient.from('kmi_settings').select('*')
+      supabaseClient.from('kmi_settings').select('*'),
+      supabaseClient.from('kmi_cost_codes').select('*'),
+      supabaseClient.from('kmi_cost_classes').select('*'),
+      supabaseClient.from('kmi_customers_foundation').select('*'),
+      supabaseClient.from('kmi_budget_template_lines').select('*').order('sort_order', {ascending:true}),
+      supabaseClient.from('kmi_project_budgets').select('*').order('created_at', {ascending:false})
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -6789,6 +7388,41 @@ async function pullFromSupabase() {
     db.proposals     = (props.data  || []).map(fromSBProposal);
     db.projects      = (projs.data  || []).map(fromSBProject);
     db.activity      = (acts.data   || []).map(function(a){ return {text:a.text, type:a.type, time:a.time}; });
+
+    // Budget feature tables — non-fatal if missing (pre-Chunk-1 cloud).
+    // Preserve local data on missing tables so a fresh device that hasn't
+    // run the migration yet doesn't get its CSV-imported codes wiped.
+    if (ccodes && !ccodes.error) {
+      db.costCodes = (ccodes.data || []).map(fromSBCostCode);
+    } else if (ccodes && ccodes.error) {
+      console.warn('kmi_cost_codes load error (table missing?):', ccodes.error.message);
+      if (!Array.isArray(db.costCodes)) db.costCodes = [];
+    }
+    if (cclasses && !cclasses.error) {
+      db.costClasses = (cclasses.data || []).map(fromSBCostClass);
+    } else if (cclasses && cclasses.error) {
+      console.warn('kmi_cost_classes load error (table missing?):', cclasses.error.message);
+      if (!Array.isArray(db.costClasses)) db.costClasses = [];
+    }
+    if (custFnd && !custFnd.error) {
+      db.customersFoundation = (custFnd.data || []).map(fromSBCustFnd);
+    } else if (custFnd && custFnd.error) {
+      console.warn('kmi_customers_foundation load error (table missing?):', custFnd.error.message);
+      if (!Array.isArray(db.customersFoundation)) db.customersFoundation = [];
+    }
+    if (budgetTmpl && !budgetTmpl.error) {
+      db.budgetTemplate = (budgetTmpl.data || []).map(fromSBBudgetTmpl);
+    } else if (budgetTmpl && budgetTmpl.error) {
+      console.warn('kmi_budget_template_lines load error (table missing?):', budgetTmpl.error.message);
+      if (!Array.isArray(db.budgetTemplate)) db.budgetTemplate = [];
+    }
+    if (projBudgets && !projBudgets.error) {
+      db.projectBudgets = (projBudgets.data || []).map(fromSBProjBudget);
+    } else if (projBudgets && projBudgets.error) {
+      console.warn('kmi_project_budgets load error (table missing?):', projBudgets.error.message);
+      if (!Array.isArray(db.projectBudgets)) db.projectBudgets = [];
+    }
+
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
 
     // Settings — copy known setting rows into db. Includes runtime-config
@@ -6796,6 +7430,7 @@ async function pullFromSupabase() {
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
                                 'laborRates','laborRateSets',
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
+                                'budgetEquipmentSplit','budgetQtyConversions',
                                 'anthropic_api_key'];
     (settings.data || []).forEach(function(row) {
       if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
@@ -6816,7 +7451,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudgetPlaceholder};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
