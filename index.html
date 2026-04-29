@@ -1881,6 +1881,10 @@ function bgShowPicker() {
   g('bg-detail').style.display = 'none';
   g('bg-title').textContent = 'Budget';
   g('bg-sub').textContent = 'Project budgets — upload bid price reports, generate Foundation CSV exports';
+  // The unmapped-items panel is dynamically inserted into the detail view;
+  // remove it when returning to the picker so it doesn't linger across projects.
+  var stale = document.getElementById('bg-unmapped-panel');
+  if (stale) stale.remove();
 
   var projects = (db.projects || []).slice().sort(function(a,b){
     return String(b.number || '').localeCompare(String(a.number || ''));
@@ -1979,12 +1983,22 @@ function bgClose() {
 // Build a working copy from a saved version (for editing without mutating
 // the saved row in db.projectBudgets).
 function bgCloneVersionAsWorking(version) {
+  var lines = (version.lines || []).map(function(l, i){
+    var copy = JSON.parse(JSON.stringify(l));
+    // Backfill fields added in chunk 2.5 — older saved versions won't have these.
+    if (!copy.id) copy.id = bgNewLineId(i);
+    if (typeof copy.taxable !== 'boolean') {
+      copy.taxable = String(copy.costClass) === '2';
+    }
+    return copy;
+  });
   return {
     versionId:        version.id,
     sourcePdfPath:    version.sourcePdfPath || '',
     taxRate:          Number(version.taxRate) || 0,
     totalSquareFeet:  (version.totals && version.totals.total_square_feet) || 0,
-    lines:            JSON.parse(JSON.stringify(version.lines || [])),
+    lines:            lines,
+    unmapped:         [],
     dirty:            false
   };
 }
@@ -2000,9 +2014,10 @@ function bgBuildWorkingFromTemplate() {
     sourcePdfPath:    '',
     taxRate:          0,
     totalSquareFeet:  0,
-    lines: tmpl.map(function(t){
+    lines: tmpl.map(function(t, i){
       return {
-        sortOrder:       t.sortOrder || 0,
+        id:              bgNewLineId(i),
+        sortOrder:       t.sortOrder || (i+1),
         description:     t.description || '',
         costCode:        t.costCode || '',
         costClass:       t.costClass || '',
@@ -2010,12 +2025,25 @@ function bgBuildWorkingFromTemplate() {
         sourceKey:       t.sourceKey || '',
         amountNet:       0,
         quantity:        0,
+        // class 2 (Materials) defaults taxable; everything else defaults non-taxable.
+        // User can flip per line.
+        taxable:         String(t.costClass) === '2',
         wasExtracted:    false,
         manuallyEdited:  false
       };
     }),
+    unmapped: [],   // populated post-extraction with PDF data that didn't match a template line
     dirty: false
   };
+}
+
+// Generate a stable id for a new line. Just an incrementing counter combined
+// with timestamp — order matters for stability across rerenders, uniqueness
+// matters for reordering and edit handlers.
+var _bgLineIdCounter = 0;
+function bgNewLineId(seed) {
+  _bgLineIdCounter++;
+  return 'L' + Date.now().toString(36) + '_' + _bgLineIdCounter + (seed !== undefined ? '_' + seed : '');
 }
 
 // ── Detail view: budget table + toolbar ────────────────────────────────
@@ -2100,7 +2128,12 @@ function bgRefreshButtons() {
   g('bg-tax-rate').disabled = !canEdit;
   g('bg-sqft').value = _bgWorking.totalSquareFeet || 0;
   g('bg-sqft').disabled = !canEdit;
-  g('bg-save-btn').disabled = !canEdit || !_bgWorking.dirty;
+  var saveBtn = g('bg-save-btn');
+  saveBtn.disabled = !canEdit || !_bgWorking.dirty;
+  // Always reset label — bgSaveBudget sets it to "Saving…" during the
+  // async save, and the refresh that runs after save needs to put it back
+  // (otherwise the button stays stuck on "Saving…" even after success).
+  saveBtn.textContent = 'Save budget';
   g('bg-discard-btn').style.display = (canEdit && _bgWorking.dirty) ? '' : 'none';
   g('bg-upload-btn').style.display = canEdit ? '' : 'none';
 }
@@ -2146,15 +2179,51 @@ function bgRefreshTable() {
   var canEdit = hasFull('edit_project_budget');
   var tax = (Number(_bgWorking.taxRate) || 0) / 100;
 
-  // Tax computed only on class 2 (Materials) lines
+  // Sort once for display; preserve original sortOrder field on each line.
+  var sorted = _bgWorking.lines.slice().sort(function(a,b){
+    return (a.sortOrder||0) - (b.sortOrder||0);
+  });
+
   var totals = bgComputeTotals(_bgWorking.lines, tax);
 
-  var rows = _bgWorking.lines.slice().sort(function(a,b){
-    return (a.sortOrder||0) - (b.sortOrder||0);
-  }).map(function(l){
-    var idx = _bgWorking.lines.indexOf(l);
-    var isMat = String(l.costClass) === '2';
-    var taxAmt = isMat ? (Number(l.amountNet) || 0) * tax : 0;
+  // Build cost code / class dropdown option HTML once, reused per row.
+  var budgetableCodes = (db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+    .sort(function(a,b){ return String(a.code).localeCompare(String(b.code)); });
+  var allClasses = (db.costClasses || []).filter(function(c){ return c.active !== false; })
+    .sort(function(a,b){ return Number(a.classNo) - Number(b.classNo); });
+
+  function codeOptions(selected) {
+    var opts = '<option value="">—</option>';
+    var found = false;
+    budgetableCodes.forEach(function(c){
+      var sel = String(c.code) === String(selected);
+      if (sel) found = true;
+      opts += '<option value="' + bgEsc(c.code) + '"' + (sel ? ' selected' : '') + '>' + bgEsc(c.code) + ' — ' + bgEsc(c.description || '') + '</option>';
+    });
+    // If the line's current code isn't in the budgetable list, surface it
+    // anyway so we don't silently lose it (e.g. a code that was budgetable
+    // when the budget was saved but has since been unmarked).
+    if (selected && !found) {
+      opts += '<option value="' + bgEsc(selected) + '" selected>' + bgEsc(selected) + ' (custom)</option>';
+    }
+    return opts;
+  }
+  function classOptions(selected) {
+    var opts = '<option value="">—</option>';
+    var found = false;
+    allClasses.forEach(function(c){
+      var sel = String(c.classNo) === String(selected);
+      if (sel) found = true;
+      opts += '<option value="' + bgEsc(c.classNo) + '"' + (sel ? ' selected' : '') + '>' + bgEsc(c.classNo) + ' — ' + bgEsc(c.description || '') + '</option>';
+    });
+    if (selected && !found) {
+      opts += '<option value="' + bgEsc(selected) + '" selected>' + bgEsc(selected) + ' (custom)</option>';
+    }
+    return opts;
+  }
+
+  var rows = sorted.map(function(l, idx){
+    var taxAmt = (l.taxable ? (Number(l.amountNet) || 0) * tax : 0);
     var lineTotal = (Number(l.amountNet) || 0) + taxAmt;
     var marker = '';
     if (l.wasExtracted && l.manuallyEdited) {
@@ -2164,57 +2233,309 @@ function bgRefreshTable() {
     } else if (l.manuallyEdited) {
       marker = '<span title="Manually entered" style="color:#666;margin-left:6px">&#9998;</span>';
     }
-    var ccDesc = bgCostCodeDesc(l.costCode);
-    var clDesc = bgCostClassDesc(l.costClass);
-    return '<tr>' +
-      '<td style="color:#888;font-size:11px;text-align:right">' + (l.sortOrder || '') + '</td>' +
-      '<td style="font-weight:600">' + (l.description || '') + marker + '</td>' +
-      '<td><span title="' + (ccDesc || '') + '" style="font-family:monospace;font-size:12px">' + l.costCode + '</span></td>' +
-      '<td><span title="' + (clDesc || '') + '" style="font-family:monospace;font-size:12px">' + l.costClass + '</span></td>' +
-      '<td style="text-align:right"><input type="number" step="0.01" min="0" value="' + (Number(l.quantity) || 0) + '" style="width:80px;text-align:right;padding:3px;font-size:12px" ' + (canEdit ? '' : 'disabled') + ' onchange="bgEditLine(' + idx + ',\'quantity\',this.value)"></td>' +
-      '<td style="text-align:right"><input type="number" step="0.01" min="0" value="' + (Number(l.amountNet) || 0).toFixed(2) + '" style="width:120px;text-align:right;padding:3px;font-size:12px" ' + (canEdit ? '' : 'disabled') + ' onchange="bgEditLine(' + idx + ',\'amountNet\',this.value)"></td>' +
-      '<td style="text-align:right;font-size:12px;color:' + (isMat ? '#666' : '#ccc') + '">' + (isMat ? bgFmtMoney(taxAmt) : '—') + '</td>' +
+    var lid = bgEsc(l.id);
+    var disabled = canEdit ? '' : 'disabled';
+    var canMoveUp   = idx > 0;
+    var canMoveDown = idx < sorted.length - 1;
+    return '<tr data-line-id="' + lid + '">' +
+      '<td style="text-align:center;white-space:nowrap;width:54px;color:#888;font-size:11px">' +
+        (canEdit && canMoveUp   ? '<a href="#" onclick="bgMoveLine(\'' + lid + '\',-1);return false" title="Move up" style="text-decoration:none;color:var(--kmi);font-size:14px">&uarr;</a>' : '<span style="color:#ddd">&uarr;</span>') +
+        ' ' +
+        (canEdit && canMoveDown ? '<a href="#" onclick="bgMoveLine(\'' + lid + '\', 1);return false" title="Move down" style="text-decoration:none;color:var(--kmi);font-size:14px">&darr;</a>' : '<span style="color:#ddd">&darr;</span>') +
+      '</td>' +
+      '<td>' +
+        '<input type="text" value="' + bgEsc(l.description || '') + '" style="width:100%;padding:3px;font-size:12px;border:1px solid #DDD;font-weight:600" ' + disabled + ' onchange="bgEditLineById(\'' + lid + '\',\'description\',this.value)">' +
+        marker +
+      '</td>' +
+      '<td>' +
+        '<select style="width:100%;padding:3px;font-size:11px" ' + disabled + ' onchange="bgEditLineById(\'' + lid + '\',\'costCode\',this.value)">' +
+          codeOptions(l.costCode) +
+        '</select>' +
+      '</td>' +
+      '<td>' +
+        '<select style="width:100%;padding:3px;font-size:11px" ' + disabled + ' onchange="bgEditLineById(\'' + lid + '\',\'costClass\',this.value)">' +
+          classOptions(l.costClass) +
+        '</select>' +
+      '</td>' +
+      '<td style="text-align:center;width:50px"><input type="checkbox"' + (l.taxable ? ' checked' : '') + ' ' + disabled + ' onchange="bgEditLineById(\'' + lid + '\',\'taxable\',this.checked)" title="Apply sales tax to this line"></td>' +
+      '<td style="text-align:right"><input type="number" step="0.01" min="0" value="' + (Number(l.quantity) || 0) + '" style="width:80px;text-align:right;padding:3px;font-size:12px" ' + disabled + ' onchange="bgEditLineById(\'' + lid + '\',\'quantity\',this.value)"></td>' +
+      '<td style="text-align:right"><input type="number" step="0.01" min="0" value="' + (Number(l.amountNet) || 0).toFixed(2) + '" style="width:120px;text-align:right;padding:3px;font-size:12px" ' + disabled + ' onchange="bgEditLineById(\'' + lid + '\',\'amountNet\',this.value)"></td>' +
+      '<td style="text-align:right;font-size:12px;color:' + (l.taxable ? '#666' : '#ccc') + '">' + (l.taxable ? bgFmtMoney(taxAmt) : '—') + '</td>' +
       '<td style="text-align:right;font-weight:600;font-size:12px">' + bgFmtMoney(lineTotal) + '</td>' +
+      '<td style="text-align:center;width:30px">' +
+        (canEdit ? '<a href="#" onclick="bgRemoveLine(\'' + lid + '\');return false" title="Remove this line" style="color:#A32D2D;text-decoration:none;font-weight:bold">&#215;</a>' : '') +
+      '</td>' +
     '</tr>';
   }).join('');
 
-  el.innerHTML = '<table style="font-size:12px"><thead><tr>' +
-      '<th style="width:32px;text-align:right">#</th>' +
+  var addRowHtml = canEdit ? (
+    '<tr style="background:#F8F8F8;border-top:1px dashed #CCC">' +
+      '<td colspan="9" style="padding:8px;text-align:center">' +
+        '<button class="btn btn-sm" onclick="bgAddLine()" style="font-size:11px">+ Add line</button>' +
+        '<span style="font-size:11px;color:#888;margin-left:8px">Adds a manual line at the bottom (cost code/class, description, and amount fully editable).</span>' +
+      '</td>' +
+      '<td></td>' +
+    '</tr>'
+  ) : '';
+
+  el.innerHTML = '<table style="font-size:12px;table-layout:auto;width:100%"><thead><tr>' +
+      '<th style="width:54px;text-align:center;font-size:10px">Order</th>' +
       '<th>Description</th>' +
-      '<th style="width:60px">Code</th>' +
-      '<th style="width:50px">Class</th>' +
-      '<th style="width:90px;text-align:right">Quantity</th>' +
-      '<th style="width:130px;text-align:right">Net amount</th>' +
+      '<th style="width:160px">Cost code</th>' +
+      '<th style="width:160px">Class</th>' +
+      '<th style="width:50px;text-align:center" title="Taxable">Tax?</th>' +
+      '<th style="width:90px;text-align:right">Qty</th>' +
+      '<th style="width:130px;text-align:right">Net</th>' +
       '<th style="width:90px;text-align:right">Tax</th>' +
       '<th style="width:110px;text-align:right">Total</th>' +
-    '</tr></thead><tbody>' + rows + '</tbody><tfoot>' +
-      '<tr style="border-top:2px solid var(--kmi);background:#F8F6E6"><td colspan="5" style="text-align:right;font-weight:700">Net total</td><td style="text-align:right;font-weight:700">$' + bgFmtMoney(totals.net) + '</td><td style="text-align:right;font-weight:700">$' + bgFmtMoney(totals.tax) + '</td><td style="text-align:right;font-weight:700;color:var(--kmi);font-size:14px">$' + bgFmtMoney(totals.grand_total) + '</td></tr>' +
+      '<th style="width:30px"></th>' +
+    '</tr></thead><tbody>' + rows + addRowHtml + '</tbody><tfoot>' +
+      '<tr style="border-top:2px solid var(--kmi);background:#F8F6E6"><td colspan="6" style="text-align:right;font-weight:700">Net total</td><td style="text-align:right;font-weight:700">$' + bgFmtMoney(totals.net) + '</td><td style="text-align:right;font-weight:700">$' + bgFmtMoney(totals.tax) + '</td><td style="text-align:right;font-weight:700;color:var(--kmi);font-size:14px">$' + bgFmtMoney(totals.grand_total) + '</td><td></td></tr>' +
     '</tfoot></table>';
+
+  // Render the unmapped items panel above the table (managed separately)
+  bgRefreshUnmappedPanel();
 }
 
-function bgEditLine(idx, field, value) {
+// Edit a line by stable id, not array index. Index can shift after add/remove/reorder.
+function bgEditLineById(lid, field, value) {
   if (!_bgWorking) return;
   if (!hasFull('edit_project_budget')) return;
-  var l = _bgWorking.lines[idx];
+  var l = _bgWorking.lines.find(function(x){ return x.id === lid; });
   if (!l) return;
-  var num = parseFloat(value) || 0;
-  if (l[field] !== num) {
-    l[field] = num;
+
+  // Coerce types depending on field
+  var newVal = value;
+  if (field === 'amountNet' || field === 'quantity') newVal = parseFloat(value) || 0;
+  else if (field === 'taxable') newVal = !!value;
+  else newVal = String(value);
+
+  if (l[field] === newVal) return;
+  l[field] = newVal;
+
+  // Description / code / class / taxable changes are user edits but don't
+  // make the line "auto-extracted then edited" in the marker-icon sense.
+  // Only amount/quantity edits flip the manuallyEdited marker (those are
+  // the values that actually came from extraction).
+  if (field === 'amountNet' || field === 'quantity') {
     l.manuallyEdited = true;
-    _bgWorking.dirty = true;
-    bgRefreshTable();
-    bgRefreshButtons();
   }
+  _bgWorking.dirty = true;
+  bgRefreshTable();
+  bgRefreshButtons();
+}
+
+// HTML escape for safe interpolation
+function bgEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// Move a line up (-1) or down (+1) within the sorted list. Reassigns
+// sortOrder values on adjacent lines so the order persists across saves.
+function bgMoveLine(lid, dir) {
+  if (!_bgWorking) return;
+  if (!hasFull('edit_project_budget')) return;
+  var sorted = _bgWorking.lines.slice().sort(function(a,b){ return (a.sortOrder||0) - (b.sortOrder||0); });
+  var idx = sorted.findIndex(function(x){ return x.id === lid; });
+  if (idx < 0) return;
+  var swapIdx = idx + dir;
+  if (swapIdx < 0 || swapIdx >= sorted.length) return;
+  var a = sorted[idx], b = sorted[swapIdx];
+  var ao = a.sortOrder, bo = b.sortOrder;
+  // Guard against equal sortOrders (would cause no-op swap)
+  if (ao === bo) {
+    a.sortOrder = ao;
+    b.sortOrder = ao + (dir > 0 ? 1 : -1);
+  } else {
+    a.sortOrder = bo;
+    b.sortOrder = ao;
+  }
+  _bgWorking.dirty = true;
+  bgRefreshTable();
+  bgRefreshButtons();
+}
+
+// Add a new manual line at the bottom of the budget.
+function bgAddLine(prefill) {
+  if (!_bgWorking) return;
+  if (!hasFull('edit_project_budget')) return;
+  prefill = prefill || {};
+  var maxSort = 0;
+  _bgWorking.lines.forEach(function(l){ if ((l.sortOrder||0) > maxSort) maxSort = l.sortOrder; });
+  var newLine = {
+    id:              bgNewLineId(maxSort + 1),
+    sortOrder:       maxSort + 1,
+    description:     prefill.description || 'New line',
+    costCode:        prefill.costCode    || '',
+    costClass:       prefill.costClass   || '',
+    sourceType:      prefill.sourceType  || 'manual',
+    sourceKey:       prefill.sourceKey   || '',
+    amountNet:       Number(prefill.amountNet) || 0,
+    quantity:        Number(prefill.quantity)  || 0,
+    taxable:         (typeof prefill.taxable === 'boolean')
+                       ? prefill.taxable
+                       : (String(prefill.costClass || '') === '2'),
+    wasExtracted:    !!prefill.wasExtracted,
+    manuallyEdited:  !prefill.wasExtracted   // a manually-added line is always "manually entered" unless it came from unmapped extraction
+  };
+  _bgWorking.lines.push(newLine);
+  _bgWorking.dirty = true;
+  bgRefreshTable();
+  bgRefreshButtons();
+}
+
+// Remove a line from the budget. Confirms first.
+function bgRemoveLine(lid) {
+  if (!_bgWorking) return;
+  if (!hasFull('edit_project_budget')) return;
+  var l = _bgWorking.lines.find(function(x){ return x.id === lid; });
+  if (!l) return;
+  if (!confirm('Remove this line?\n\n  ' + (l.description || '(no description)') + '\n\nThis cannot be undone (until the budget is reverted via version history).')) return;
+  _bgWorking.lines = _bgWorking.lines.filter(function(x){ return x.id !== lid; });
+  _bgWorking.dirty = true;
+  bgRefreshTable();
+  bgRefreshButtons();
+}
+
+// ── Unmapped items panel ───────────────────────────────────────────────
+// After extraction, anything from the PDF that didn't land on a template
+// line surfaces here so the user can add it to the budget rather than
+// silently dropping it.
+function bgRefreshUnmappedPanel() {
+  // Render above the table if unmapped items exist; otherwise hide.
+  var existing = document.getElementById('bg-unmapped-panel');
+  var unmapped = (_bgWorking && _bgWorking.unmapped) ? _bgWorking.unmapped : [];
+  if (!unmapped.length) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (!existing) {
+    existing = document.createElement('div');
+    existing.id = 'bg-unmapped-panel';
+    existing.className = 'card';
+    existing.style.background = '#FFF8E1';
+    existing.style.border = '1px solid #C8A84B';
+    g('bg-table-card').parentNode.insertBefore(existing, g('bg-table-card'));
+  }
+  var canEdit = hasFull('edit_project_budget');
+  var rows = unmapped.map(function(u, i){
+    var amt = bgFmtMoney(u.amount || 0);
+    return '<tr>' +
+      '<td><strong>' + bgEsc(u.label) + '</strong>' +
+        (u.detail ? '<div style="font-size:11px;color:#666">' + bgEsc(u.detail) + '</div>' : '') +
+      '</td>' +
+      '<td style="text-align:right;font-weight:600">$' + amt + '</td>' +
+      '<td style="text-align:right;white-space:nowrap">' +
+        (canEdit ? '<button class="btn btn-sm btn-p" onclick="bgAddUnmappedToLines(' + i + ')" style="margin-right:4px">+ Add line</button>' : '') +
+        (canEdit ? '<button class="btn btn-sm" onclick="bgDismissUnmapped(' + i + ')" style="color:#888">Dismiss</button>' : '') +
+      '</td>' +
+    '</tr>';
+  }).join('');
+  existing.innerHTML =
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+      '<span style="font-size:18px;color:#9A7A2E">&#9888;</span>' +
+      '<span style="font-weight:600;color:#9A7A2E;font-size:13px">' + unmapped.length + ' item' + (unmapped.length===1?'':'s') + ' from the PDF didn\'t map to any budget line</span>' +
+    '</div>' +
+    '<div style="font-size:12px;color:#666;margin-bottom:8px;line-height:1.5">' +
+      'These appeared on the bid price report but no template line was configured to receive them. Add each to the budget as its own line, or dismiss to ignore. ' +
+      '<em style="color:#9A7A2E">Mappings will be remembered across projects in a future update; for now, decide per-budget.</em>' +
+    '</div>' +
+    '<table style="font-size:12px"><tbody>' + rows + '</tbody></table>';
+}
+
+// User clicked "+ Add line" on an unmapped item: open a small picker
+// for cost code / class, then create the line.
+function bgAddUnmappedToLines(idx) {
+  if (!_bgWorking) return;
+  if (!hasFull('edit_project_budget')) return;
+  var u = (_bgWorking.unmapped || [])[idx];
+  if (!u) return;
+
+  var budgetableCodes = (db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+    .sort(function(a,b){ return String(a.code).localeCompare(String(b.code)); });
+  var allClasses = (db.costClasses || []).filter(function(c){ return c.active !== false; })
+    .sort(function(a,b){ return Number(a.classNo) - Number(b.classNo); });
+
+  var codeOpts = '<option value="">— choose —</option>' + budgetableCodes.map(function(c){
+    return '<option value="' + bgEsc(c.code) + '">' + bgEsc(c.code) + ' — ' + bgEsc(c.description || '') + '</option>';
+  }).join('');
+  var classOpts = '<option value="">— choose —</option>' + allClasses.map(function(c){
+    var pre = (String(c.classNo) === '2') ? ' selected' : '';
+    return '<option value="' + bgEsc(c.classNo) + '"' + pre + '>' + bgEsc(c.classNo) + ' — ' + bgEsc(c.description || '') + '</option>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add unmapped item to budget</div>' +
+    '<div class="msb">' + bgEsc(u.label) + '</div>' +
+    '<div class="sb3" style="margin-bottom:14px">' +
+      '<div style="font-size:12px;color:#666;margin-bottom:8px">' +
+        'Source: <strong>' + bgEsc(u.sourceLabel || '') + '</strong> &middot; Amount: <strong>$' + bgFmtMoney(u.amount || 0) + '</strong>' +
+        (u.detail ? '<br>' + bgEsc(u.detail) : '') +
+      '</div>' +
+    '</div>' +
+    '<div class="fg">' +
+      '<div class="fgr"><label>Description for this budget line</label><input id="bg-um-desc" value="' + bgEsc(u.label) + '"></div>' +
+      '<div class="fgr"><label>Cost code</label><select id="bg-um-code">' + codeOpts + '</select></div>' +
+      '<div class="fgr"><label>Cost class</label><select id="bg-um-class">' + classOpts + '</select></div>' +
+      '<div class="fgr full" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="bg-um-taxable" checked><label for="bg-um-taxable" style="margin:0;cursor:pointer">Apply sales tax to this line</label></div>' +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="bgConfirmAddUnmapped(' + idx + ')">Add to budget</button>' +
+    '</div>'
+  );
+}
+
+function bgConfirmAddUnmapped(idx) {
+  var u = (_bgWorking.unmapped || [])[idx];
+  if (!u) { closeModal(); return; }
+  var desc  = (g('bg-um-desc').value || u.label || 'Unmapped item').trim();
+  var code  = g('bg-um-code').value;
+  var cls   = g('bg-um-class').value;
+  var tax   = !!g('bg-um-taxable').checked;
+  if (!code || !cls) {
+    alert('Please choose a cost code and cost class.');
+    return;
+  }
+  bgAddLine({
+    description:    desc,
+    costCode:       code,
+    costClass:      cls,
+    taxable:        tax,
+    amountNet:      Number(u.amount) || 0,
+    quantity:       Number(u.quantity) || 0,
+    sourceType:     u.sourceType || 'manual',  // record where it came from
+    sourceKey:      u.sourceKey  || '',
+    wasExtracted:   true   // it DID come from the PDF, just not pre-mapped
+  });
+  // Remove from unmapped list now that it's been added
+  _bgWorking.unmapped.splice(idx, 1);
+  closeModal();
+  bgRefreshTable();
+  bgRefreshButtons();
+}
+
+function bgDismissUnmapped(idx) {
+  if (!_bgWorking) return;
+  if (!confirm('Dismiss this item? It will not be added to the budget.')) return;
+  _bgWorking.unmapped.splice(idx, 1);
+  _bgWorking.dirty = true;
+  bgRefreshTable();
 }
 
 // Compute net / tax / grand total for the current working copy.
+// Tax is summed only on lines marked taxable (per-line override; the
+// default at line creation is taxable=true for class-2 lines).
 function bgComputeTotals(lines, taxFraction) {
   var net = 0;
   var tax = 0;
   (lines || []).forEach(function(l){
     var amt = Number(l.amountNet) || 0;
     net += amt;
-    if (String(l.costClass) === '2') tax += amt * (Number(taxFraction) || 0);
+    if (l.taxable) tax += amt * (Number(taxFraction) || 0);
   });
   return { net: net, tax: tax, grand_total: net + tax };
 }
@@ -2357,9 +2678,13 @@ async function bgBeginExtraction(file, isAppend) {
   }
   _bgWorking.dirty = true;
   var warn = data.data.warning ? '<div style="margin-top:6px;color:#9A7A2E"><strong>PDF warning:</strong> ' + data.data.warning + '</div>' : '';
+  var unmappedCount = (_bgWorking.unmapped || []).length;
+  var unmappedNote = unmappedCount > 0
+    ? ' <strong style="color:#9A7A2E">' + unmappedCount + ' unmapped item' + (unmappedCount===1?'':'s') + '</strong> need(s) attention — see the panel above the table.'
+    : '';
   bgSetBanner('success',
-    'Extraction complete. ' + (_bgExtractionResult.classifications || []).length + ' classification(s) extracted. ' +
-    'Review the values below and click <strong>Save budget</strong> to commit.' + warn);
+    'Extraction complete. ' + (_bgExtractionResult.classifications || []).length + ' classification(s) extracted.' + unmappedNote +
+    ' Review the values below and click <strong>Save budget</strong> to commit.' + warn);
   bgShowDetail();
 }
 
@@ -2391,6 +2716,10 @@ function bgSetBanner(kind, html) {
 // This is the heart of the auto-population logic. Each template line has a
 // sourceType + sourceKey that tells us where to look in the extraction
 // payload.
+//
+// Items in the extraction that don't match any template line are placed
+// on working.unmapped[] so the user can decide what to do with them
+// (the unmapped items panel surfaces these in the UI).
 function bgApplyExtractionToWorking(working, extr, append) {
   var split = db.budgetEquipmentSplit || {};
   var conv  = db.budgetQtyConversions || {};
@@ -2398,6 +2727,12 @@ function bgApplyExtractionToWorking(working, extr, append) {
   // Index extraction classifications by code for fast lookup
   var classByCode = {};
   (extr.classifications || []).forEach(function(c){ classByCode[String(c.code).toUpperCase()] = c; });
+
+  // Track which classification codes were CONSUMED by a template line so
+  // we know which ones to surface as unmapped.
+  var consumedClassCodes = {};
+  // Misc breakdown keys we recognize via template:
+  var consumedMiscKeys   = {};
 
   // For append: index existing working lines by costCode+costClass to merge.
   var byCk = {};
@@ -2415,6 +2750,7 @@ function bgApplyExtractionToWorking(working, extr, append) {
       case 'pdf_class_total': {
         var cls = classByCode[String(line.sourceKey).toUpperCase()];
         if (cls) {
+          consumedClassCodes[String(line.sourceKey).toUpperCase()] = true;
           newAmount = (Number(cls.mat_cost) || 0);
           // Apply quantity conversions for Mortar / Wire / Grout
           var rawQty = Number(cls.qty) || 0;
@@ -2425,14 +2761,6 @@ function bgApplyExtractionToWorking(working, extr, append) {
             newQty = (conv.wire_lf_per_bundle && conv.wire_lf_per_bundle > 0) ? rawQty / conv.wire_lf_per_bundle : rawQty;
           } else if (key === 'GRO') {
             newQty = (conv.grout_cuft_per_bag && conv.grout_cuft_per_bag > 0) ? rawQty / conv.grout_cuft_per_bag : rawQty;
-          } else if (key === 'SCA') {
-            // Scaffolding maps to lay_cost (labor-side scaffold rental), not material
-            newAmount = (Number(cls.lay_cost) || 0);
-            newQty = rawQty;
-          } else if (key === 'CLE') {
-            // Veneer cleaning: also use lay_cost (subcontracted cleaning)
-            newAmount = (Number(cls.lay_cost) || 0);
-            newQty = rawQty;
           } else {
             newQty = rawQty;
           }
@@ -2445,9 +2773,9 @@ function bgApplyExtractionToWorking(working, extr, append) {
       case 'pdf_misc_breakdown': {
         var k = line.sourceKey;
         var mb = extr.misc_breakdown || {};
-        if (k === 'mobilization')   newAmount = Number(mb.mobilization)   || 0;
-        else if (k === 'caulking')  newAmount = Number(mb.caulking)       || 0;
-        else if (k === 'misc_materials') newAmount = Number(mb.misc_materials) || 0;
+        if (k === 'mobilization')   { newAmount = Number(mb.mobilization)   || 0; consumedMiscKeys.mobilization = true; }
+        else if (k === 'caulking')  { newAmount = Number(mb.caulking)       || 0; consumedMiscKeys.caulking = true; }
+        else if (k === 'misc_materials') { newAmount = Number(mb.misc_materials) || 0; consumedMiscKeys.misc_materials = true; }
         else newAmount = 0;
         break;
       }
@@ -2457,8 +2785,10 @@ function bgApplyExtractionToWorking(working, extr, append) {
         if (line.sourceKey === 'granite_materials') {
           // Prefer Project Notes when present, fall back to Misc Sub-Total
           newAmount = (Number(pn.granite_materials) > 0) ? Number(pn.granite_materials) : (Number(mb2.granite_pc) || 0);
+          consumedMiscKeys.granite_pc = true;
         } else if (line.sourceKey === 'precast_materials') {
           newAmount = (Number(pn.precast_materials) > 0) ? Number(pn.precast_materials) : (Number(mb2.precast) || 0);
+          consumedMiscKeys.precast = true;
         } else {
           newAmount = 0;
         }
@@ -2506,6 +2836,61 @@ function bgApplyExtractionToWorking(working, extr, append) {
     }
   });
 
+  // ── Detect unmapped items ────────────────────────────────────────────
+  // Walk through the extraction looking for things no template line consumed.
+  // We populate working.unmapped[] with { label, detail, sourceLabel,
+  // sourceType, sourceKey, amount, quantity }.
+  var unmapped = [];
+  // Unmapped classifications: any that have a non-zero mat_cost and weren't
+  // consumed. Per Mike's rule (Q4A), we surface mat_cost only — lay_cost is
+  // intentionally not surfaced as a separate unmapped item.
+  (extr.classifications || []).forEach(function(c){
+    var key = String(c.code).toUpperCase();
+    if (consumedClassCodes[key]) return;
+    var matCost = Number(c.mat_cost) || 0;
+    if (matCost <= 0.005) return;  // skip empty classifications
+    unmapped.push({
+      label:        (c.name || c.code) + ' (material)',
+      detail:       'Classification ' + c.code + (c.unit ? ' · ' + bgFmtQty(c.qty) + ' ' + c.unit : ''),
+      sourceLabel:  'PDF Class Totals — ' + c.code,
+      sourceType:   'pdf_class_total',
+      sourceKey:    key,
+      amount:       matCost,
+      quantity:     Number(c.qty) || 0
+    });
+  });
+  // Unmapped misc breakdown items
+  var mb3 = extr.misc_breakdown || {};
+  ['mobilization','caulking','granite_pc','precast','misc_materials'].forEach(function(k){
+    if (consumedMiscKeys[k]) return;
+    var v = Number(mb3[k]) || 0;
+    if (v <= 0.005) return;
+    var labelMap = {
+      mobilization:   'Mobilization',
+      caulking:       'Caulking',
+      granite_pc:     'Granite/PC',
+      precast:        'Precast',
+      misc_materials: 'Miscellaneous Materials + Tax'
+    };
+    unmapped.push({
+      label:        labelMap[k] || k,
+      detail:       '',
+      sourceLabel:  'PDF Misc. Sub-Total',
+      sourceType:   'pdf_misc_breakdown',
+      sourceKey:    k,
+      amount:       v,
+      quantity:     0
+    });
+  });
+
+  // On append, prepend to existing unmapped (so old entries survive
+  // until addressed).
+  if (append) {
+    working.unmapped = (working.unmapped || []).concat(unmapped);
+  } else {
+    working.unmapped = unmapped;
+  }
+
   // Capture top-level scalars (only on first extract; append preserves existing)
   if (!append) {
     working.taxRate = Number(extr.tax_rate_percent) || 0;
@@ -2525,7 +2910,6 @@ async function bgSaveBudget() {
     return;
   }
   var saveBtn = g('bg-save-btn');
-  var origLabel = saveBtn.textContent;
   saveBtn.disabled = true;
   saveBtn.textContent = 'Saving…';
 
@@ -2591,7 +2975,7 @@ async function bgSaveBudget() {
     console.error('bgSaveBudget error:', e);
     bgSetBanner('error', 'Save failed: ' + (e && e.message ? e.message : String(e)));
     saveBtn.disabled = false;
-    saveBtn.textContent = origLabel;
+    saveBtn.textContent = 'Save budget';
   }
 }
 
