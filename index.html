@@ -298,6 +298,8 @@ textarea{resize:vertical;min-height:72px}
     <div class="sb-group-items">
       <div class="ni" onclick="nav('users')"><span class="nico">◑</span>Users</div>
       <div class="ni" onclick="nav('templates')"><span class="nico">◫</span>Templates</div>
+      <div class="ni" onclick="nav('email-log')"><span class="nico">&#9993;</span>Email log</div>
+      <div class="ni" onclick="nav('email-settings')"><span class="nico">&#9881;</span>Email settings</div>
     </div>
   </div>
   <div style="margin-top:auto;padding:10px 20px 4px;border-top:1px solid var(--kmi2)">
@@ -714,6 +716,18 @@ textarea{resize:vertical;min-height:72px}
   <div class="card"><div class="ch"><span class="ct">Labor rates</span><button class="btn btn-sm btn-p" onclick="showAddLaborSet()">+ Add rate set</button></div><div id="t-labor"></div></div>
 </div>
 
+<!-- EMAIL LOG -->
+<div class="pg" id="pg-email-log">
+  <div class="ph"><div><h1>Email log</h1><div class="sub">Audit history of emails sent through the CRM</div><div class="stripe"></div></div></div>
+  <div id="el-content"></div>
+</div>
+
+<!-- EMAIL SETTINGS -->
+<div class="pg" id="pg-email-settings">
+  <div class="ph"><div><h1>Email settings</h1><div class="sub">Configure outbound email behavior</div><div class="stripe"></div></div></div>
+  <div id="es-content"></div>
+</div>
+
 <!-- IMPORT DATA -->
 <div class="pg" id="pg-import">
   <div class="ph" style="margin-bottom:0"><div><h1>Import Data</h1><div class="sub">Upload CSV files to import customers, project managers, users, or opportunities</div><div class="stripe"></div></div></div>
@@ -1004,7 +1018,9 @@ var PERMISSIONS = {
   'edit-vendor-contacts': ['full','full','full','full','none','none'],
   'analytics':          ['full','read','read','read','none','none'],
   'users':              ['full','none','none','none','none','none'],
-  'templates':          ['full','read','none','none','none','none']
+  'templates':          ['full','read','none','none','none','none'],
+  'email-log':          ['full','none','none','none','none','none'],
+  'email-settings':     ['full','none','none','none','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -1053,7 +1069,9 @@ var PAGE_ACTION_MAP = {
   'vendor-contacts':   'add-vendor-contacts',
   'analytics':      'analytics',
   'users':          'users',
-  'templates':      'templates'
+  'templates':      'templates',
+  'email-log':      'email-log',
+  'email-settings': 'email-settings'
 };
 function canAccess(action) {
   if (!_currentUser) return 'none';
@@ -1232,6 +1250,81 @@ async function sendTempPasswordEmail(u, tempPw, title) {
       '<div style="background:#FBE9E9;border:1px solid #E8B8B8;border-radius:7px;padding:11px 13px;margin-bottom:14px;font-size:12px;color:#7A2E2E;line-height:1.5">' +
         '<strong>Error:</strong> ' + _vendorEsc(result.error || 'Unknown error') + '<br>' +
         'Share the password below with ' + _vendorEsc(u.firstName || 'the user') + ' another way so they can sign in.' +
+      '</div>' +
+      '<div style="background:#F5F5F3;border-radius:8px;padding:16px">' +
+        '<div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.7px;margin-bottom:8px">Temporary password for ' + _vendorEsc((u.firstName || '') + ' ' + (u.lastName || '')) + '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<code style="font-size:18px;background:#fff;padding:9px 14px;border:1px solid #ddd;border-radius:6px;letter-spacing:2.5px;font-weight:700;color:var(--kmi);flex:1">' + tempPw + '</code>' +
+          "<button class=\"btn btn-sm\" onclick=\"navigator.clipboard.writeText('" + safePw + "').then(function(){this.textContent='\u2713 Copied';}.bind(this))\">Copy</button>" +
+        '</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:11px">The user will be prompted to set a new password on their next sign in.</div>' +
+      '</div>' +
+      '<div class="mf"><button class="btn btn-p" onclick="closeModal()">Done</button></div>'
+    );
+  }
+}
+
+// ── Send welcome email (for new-user creation) ─────────────────
+// Fires from saveUser() after a new user is created. Same fallback pattern as
+// sendTempPasswordEmail: success \u2192 toast; failure \u2192 modal showing the temp
+// password inline so the admin isn't blocked by an email outage.
+async function sendWelcomeEmail(u, tempPw) {
+  showModal(
+    '<div class="mt">Sending welcome email\u2026</div>' +
+    '<div class="msb">Delivering account details to <strong>' + _vendorEsc(u.email) + '</strong></div>'
+  );
+
+  // window.location.origin gets the live site (e.g. https://kmi.build) at send time.
+  // pathname is included so deployments under a subpath still produce a working link.
+  var loginUrl = window.location.origin + window.location.pathname;
+
+  var subject = 'Welcome to KMI CRM';
+  var body = [
+    'Hi ' + (u.firstName || '') + ',',
+    '',
+    'A KMI CRM account has been created for you.',
+    '',
+    'Sign in:             ' + loginUrl,
+    'Your email:          ' + u.email,
+    'Temporary password:  ' + tempPw,
+    '',
+    'You will be prompted to set a new password the first time you sign in.',
+    '',
+    'If you have questions, please contact your administrator.',
+    '',
+    '\u2014 KMI Construction'
+  ].join('\r\n');
+
+  var result = await sendEmail({
+    to:                u.email,
+    subject:           subject,
+    text:              body,
+    flowType:          'welcome',
+    sentBy:            (_currentUser ? _currentUser.id    : null),
+    sentByEmail:       (_currentUser ? _currentUser.email : null),
+    relatedEntityType: 'user',
+    relatedEntityId:   String(u.id)
+  });
+
+  if (result.success) {
+    closeModal();
+    var name = ((u.firstName || '') + ' ' + (u.lastName || '')).trim() || u.email;
+    showToast(
+      result.testMode
+        ? 'Test mode: welcome email redirected (would have gone to ' + name + ')'
+        : 'Welcome email sent to ' + name,
+      'success'
+    );
+  } else {
+    // Email failed — surface the temp password so admin can deliver it manually
+    var safePw = String(tempPw).replace(/\'/g,"\\'");
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt" style="color:#7A2E2E">Welcome email failed</div>' +
+      '<div class="msb">The user account was created, but the welcome email could not be sent to <strong>' + _vendorEsc(u.email) + '</strong>.</div>' +
+      '<div style="background:#FBE9E9;border:1px solid #E8B8B8;border-radius:7px;padding:11px 13px;margin-bottom:14px;font-size:12px;color:#7A2E2E;line-height:1.5">' +
+        '<strong>Error:</strong> ' + _vendorEsc(result.error || 'Unknown error') + '<br>' +
+        'Share the temporary password below with ' + _vendorEsc(u.firstName || 'the user') + ' another way so they can sign in.' +
       '</div>' +
       '<div style="background:#F5F5F3;border-radius:8px;padding:16px">' +
         '<div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.7px;margin-bottom:8px">Temporary password for ' + _vendorEsc((u.firstName || '') + ' ' + (u.lastName || '')) + '</div>' +
@@ -1570,7 +1663,9 @@ function nav(page) {
     'supabase-setup': renderSupabaseSetup,
     templates:        renderTemplates,
     projects:         renderProjects,
-    'new-project':    initNewProject
+    'new-project':    initNewProject,
+    'email-log':      renderEmailLog,
+    'email-settings': renderEmailSettings
   };
   if (fns[page]) fns[page]();
 }
@@ -3852,7 +3947,7 @@ function userForm(u, opts) {
 }
 function showAddUser()  { _editUserId=null; _pendingSignatureImage=undefined; _selfEditMode=false; showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Add user</div><div class="msb">Add a KMI team member for estimator assignment</div>' + userForm(null) + '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveUser()">Add user</button></div>'); }
 function showEditUser(id, opts) { _editUserId=id; _pendingSignatureImage=undefined; _selfEditMode=!!(opts && opts.selfEdit); var u=db.users.find(function(x){return x.id===id}); if(!u)return; var titleTxt = _selfEditMode ? 'My profile' : 'Edit user'; showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">'+titleTxt+'</div><div class="msb">'+u.firstName+' '+u.lastName+'</div>' + userForm(u, {selfEdit: _selfEditMode}) + '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveUser()">Save changes</button></div>'); }
-function saveUser() {
+async function saveUser() {
   // Self-edit (sidebar 'My profile') bypasses the admin perm check.
   // Anyone editing someone else's row still needs full users perms.
   if (!_selfEditMode && !requireFull('users', 'manage users')) return;
@@ -3890,8 +3985,27 @@ function saveUser() {
   if (_pendingSignatureImage !== undefined) {
     data.signatureImage = _pendingSignatureImage;  // may be null
   }
-  if (_editUserId) { var u=db.users.find(function(x){return x.id===_editUserId}); if(u)Object.assign(u,data); }
-  else { data.id=Date.now(); db.users.push(data); }
+
+  // Populated only on a new-user create, used to fire the welcome email
+  // after the form modal closes and the user is in db.users.
+  var welcomeContext = null;
+
+  if (_editUserId) {
+    var u = db.users.find(function(x){return x.id===_editUserId});
+    if (u) Object.assign(u, data);
+  } else {
+    // NEW USER — generate a temp password and seed auth fields BEFORE pushing,
+    // so the welcome email can deliver something the user can sign in with.
+    var tempPw = generateTempPassword();
+    var salt   = generateSalt();
+    data.passwordHash       = await hashPassword(tempPw, salt);
+    data.passwordSalt       = salt;
+    data.mustResetPassword  = true;
+    data.status             = 'active';
+    data.id                 = Date.now();
+    db.users.push(data);
+    welcomeContext = { user: data, tempPw: tempPw };
+  }
   // Reset the staged signature so next form open starts clean.
   _pendingSignatureImage = undefined;
   _selfEditMode = false;
@@ -3904,6 +4018,13 @@ function saveUser() {
     _currentUser.lastName  = last;
     _currentUser.phone     = phone;
     if (typeof renderUserBlock === 'function') { try { renderUserBlock(); } catch (_) {} }
+  }
+
+  // Fire the welcome email last — after closeModal + renderUsers — so the new
+  // user is visible in the list while the email is in flight. sendWelcomeEmail
+  // shows its own modal (success toast or fallback with the temp password).
+  if (welcomeContext) {
+    await sendWelcomeEmail(welcomeContext.user, welcomeContext.tempPw);
   }
 }
 // ── Signature image upload helpers ──────────────────────────────
@@ -6878,6 +6999,309 @@ async function autoConnectSupabase() {
 // This eliminates a race condition where a fresh device could log in
 // against locally-seeded stub accounts before Supabase had answered.
 bootSequence();
+
+// ================================================================
+// EMAIL LOG (Maintenance \u2192 Email log)
+// ════════════════════════════════════════════════════════════════
+var _emailLogState = { recipient:'', flowType:'', status:'', dateFrom:'', dateTo:'', limit:50, rows:[] };
+
+async function renderEmailLog() {
+  var el = g('el-content');
+  if (!hasFull('email-log')) {
+    el.innerHTML = '<div class="card"><div style="text-align:center;padding:30px;color:#888">You do not have permission to view this page.</div></div>';
+    return;
+  }
+  el.innerHTML = renderEmailLogFilters() + '<div id="el-table"><div style="text-align:center;padding:30px;color:#888">Loading\u2026</div></div>';
+  await loadEmailLog();
+}
+
+function renderEmailLogFilters() {
+  var s = _emailLogState;
+  var flowOpts = ['password_reset','assignment_alert','proposal','welcome'];
+  var statOpts = ['sent','failed','test_redirected','queued'];
+  return '<div class="card" style="margin-bottom:14px">' +
+    '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;align-items:end">' +
+      '<div><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:4px">Recipient</label><input id="el-recipient" type="text" value="' + _vendorEsc(s.recipient) + '" placeholder="Search email\u2026"></div>' +
+      '<div><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:4px">Flow</label><select id="el-flow"><option value="">All</option>' +
+        flowOpts.map(function(f){ return '<option value="'+f+'"'+(s.flowType===f?' selected':'')+'>'+f.replace(/_/g,' ')+'</option>'; }).join('') +
+      '</select></div>' +
+      '<div><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:4px">Status</label><select id="el-status"><option value="">All</option>' +
+        statOpts.map(function(st){ return '<option value="'+st+'"'+(s.status===st?' selected':'')+'>'+st.replace(/_/g,' ')+'</option>'; }).join('') +
+      '</select></div>' +
+      '<div><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:4px">From date</label><input id="el-from" type="date" value="' + _vendorEsc(s.dateFrom) + '"></div>' +
+      '<div><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:4px">To date</label><input id="el-to" type="date" value="' + _vendorEsc(s.dateTo) + '"></div>' +
+    '</div>' +
+    '<div style="margin-top:10px;display:flex;gap:8px;align-items:center">' +
+      '<button class="btn btn-p" onclick="applyEmailLogFilter()">Filter</button>' +
+      '<button class="btn" onclick="resetEmailLogFilter()">Reset</button>' +
+      '<button class="btn" onclick="loadEmailLog()" style="margin-left:auto" title="Reload from Supabase">\u21bb Refresh</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function applyEmailLogFilter() {
+  _emailLogState.recipient = (g('el-recipient').value || '').trim();
+  _emailLogState.flowType  = g('el-flow').value;
+  _emailLogState.status    = g('el-status').value;
+  _emailLogState.dateFrom  = g('el-from').value;
+  _emailLogState.dateTo    = g('el-to').value;
+  _emailLogState.limit     = 50;
+  loadEmailLog();
+}
+
+function resetEmailLogFilter() {
+  _emailLogState = { recipient:'', flowType:'', status:'', dateFrom:'', dateTo:'', limit:50, rows:[] };
+  renderEmailLog();
+}
+
+async function loadEmailLog() {
+  var tableEl = g('el-table');
+  if (!supabaseClient) {
+    tableEl.innerHTML = '<div class="card"><div style="text-align:center;padding:30px;color:#888">Not connected to Supabase \u2014 cannot load the email log.</div></div>';
+    return;
+  }
+  tableEl.innerHTML = '<div style="text-align:center;padding:30px;color:#888">Loading\u2026</div>';
+
+  var s = _emailLogState;
+  var q = supabaseClient.from('kmi_email_log').select('*').order('sent_at', { ascending: false }).limit(s.limit);
+  if (s.recipient) q = q.ilike('recipient', '%' + s.recipient + '%');
+  if (s.flowType)  q = q.eq('flow_type', s.flowType);
+  if (s.status)    q = q.eq('status',    s.status);
+  if (s.dateFrom)  q = q.gte('sent_at',  s.dateFrom);
+  if (s.dateTo)    q = q.lte('sent_at',  s.dateTo + 'T23:59:59');
+
+  try {
+    var r = await q;
+    if (r.error) throw r.error;
+    s.rows = r.data || [];
+    renderEmailLogTable();
+  } catch (e) {
+    tableEl.innerHTML = '<div class="card"><div style="text-align:center;padding:30px;color:#7A2E2E">Failed to load: ' + _vendorEsc(e.message || String(e)) + '</div></div>';
+  }
+}
+
+function renderEmailLogTable() {
+  var rows = _emailLogState.rows;
+  var tableEl = g('el-table');
+  if (!rows.length) {
+    tableEl.innerHTML = '<div class="card"><div style="text-align:center;padding:30px;color:#888">No email log entries match the current filters.</div></div>';
+    return;
+  }
+  var statusBadge = function(st) {
+    var color = st === 'sent' ? '#3B6D11' : (st === 'failed' ? '#7A2E2E' : (st === 'test_redirected' ? '#6B5A2E' : '#666'));
+    var bg    = st === 'sent' ? '#EAF3DE' : (st === 'failed' ? '#FBE9E9' : (st === 'test_redirected' ? '#FFF8DC' : '#F0F0F0'));
+    return '<span style="padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;background:' + bg + ';color:' + color + ';letter-spacing:.3px;white-space:nowrap">' + _vendorEsc(String(st || '').replace(/_/g,' ')) + '</span>';
+  };
+  var fmtDate = function(iso) {
+    if (!iso) return '\u2014';
+    try { return new Date(iso).toLocaleString(); } catch(_) { return iso; }
+  };
+  var html = '<div class="card" style="overflow-x:auto;padding:0">' +
+    '<table style="width:100%;border-collapse:collapse;font-size:13px">' +
+      '<thead><tr style="border-bottom:1px solid #eee;text-align:left;background:#FAFAFA">' +
+        '<th style="padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888">When</th>' +
+        '<th style="padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888">Flow</th>' +
+        '<th style="padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888">From / To</th>' +
+        '<th style="padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888">Subject</th>' +
+        '<th style="padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888">Status</th>' +
+      '</tr></thead><tbody>' +
+      rows.map(function(r){
+        var redirNote = (r.test_mode && r.intended_recipient)
+          ? ' <span style="color:#C8A84B;font-size:10px">(was \u2192 ' + _vendorEsc(r.intended_recipient) + ')</span>'
+          : '';
+        var route = '<div style="font-size:12px">' + _vendorEsc(r.from_address || '\u2014') + '</div>' +
+                    '<div style="font-size:11px;color:#888">to ' + _vendorEsc(r.recipient || '\u2014') + redirNote + '</div>';
+        var subj  = String(r.subject || '');
+        if (subj.length > 60) subj = subj.substring(0,60) + '\u2026';
+        return '<tr style="cursor:pointer;border-bottom:1px solid #f5f5f5" onclick="viewEmailLogEntry(' + r.id + ')" onmouseover="this.style.background=\'#FAFAFA\'" onmouseout="this.style.background=\'\'">' +
+          '<td style="padding:10px 12px;white-space:nowrap;font-size:12px">' + fmtDate(r.sent_at) + '</td>' +
+          '<td style="padding:10px 12px;font-size:12px">' + _vendorEsc(String(r.flow_type || '').replace(/_/g,' ')) + '</td>' +
+          '<td style="padding:10px 12px">' + route + '</td>' +
+          '<td style="padding:10px 12px;font-size:12px">' + _vendorEsc(subj) + '</td>' +
+          '<td style="padding:10px 12px">' + statusBadge(r.status) + '</td>' +
+        '</tr>';
+      }).join('') +
+    '</tbody></table>' +
+  '</div>';
+  if (rows.length >= _emailLogState.limit) {
+    html += '<div style="text-align:center;margin-top:14px"><button class="btn" onclick="loadMoreEmailLog()">Load 50 more</button></div>';
+  } else {
+    html += '<div style="text-align:center;margin-top:10px;font-size:11px;color:#888">' + rows.length + ' entr' + (rows.length === 1 ? 'y' : 'ies') + '</div>';
+  }
+  tableEl.innerHTML = html;
+}
+
+function loadMoreEmailLog() {
+  _emailLogState.limit += 50;
+  loadEmailLog();
+}
+
+function viewEmailLogEntry(id) {
+  var r = _emailLogState.rows.find(function(x){ return x.id === id; });
+  if (!r) return;
+  var detail = [];
+  detail.push(['Sent at',     r.sent_at ? new Date(r.sent_at).toLocaleString() : '\u2014']);
+  detail.push(['Flow',        String(r.flow_type || '').replace(/_/g,' ')]);
+  detail.push(['Status',      String(r.status || '').replace(/_/g,' ')]);
+  detail.push(['From',        (r.from_name ? r.from_name + ' <' + (r.from_address || '') + '>' : (r.from_address || '\u2014'))]);
+  detail.push(['To',          r.recipient || '\u2014']);
+  if (r.cc)        detail.push(['CC',  r.cc]);
+  if (r.bcc)       detail.push(['BCC', r.bcc]);
+  if (r.reply_to)  detail.push(['Reply-To', r.reply_to]);
+  detail.push(['Subject',     r.subject || '\u2014']);
+  if (r.has_attachment)              detail.push(['Attachment',     r.attachment_filename || 'yes']);
+  if (r.test_mode && r.intended_recipient) detail.push(['Intended recipient', r.intended_recipient + ' (test mode redirected)']);
+  if (r.sent_by_email)               detail.push(['Sent by',        r.sent_by_email]);
+  if (r.resend_id)                   detail.push(['Resend ID',      r.resend_id]);
+  if (r.related_entity_type)         detail.push(['Related',        r.related_entity_type + ' ' + (r.related_entity_id || '')]);
+
+  var rowsHtml = detail.map(function(x){
+    return '<div style="display:grid;grid-template-columns:130px 1fr;gap:10px;padding:7px 0;border-bottom:1px solid #f5f5f5;font-size:13px">' +
+             '<div style="color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.5px;padding-top:1px">' + _vendorEsc(x[0]) + '</div>' +
+             '<div style="word-break:break-word">' + _vendorEsc(x[1]) + '</div>' +
+           '</div>';
+  }).join('');
+
+  var errBlock = r.error_message
+    ? '<div style="background:#FBE9E9;border:1px solid #E8B8B8;border-radius:7px;padding:11px 13px;margin-top:14px;font-size:12px;color:#7A2E2E;line-height:1.5"><strong>Error:</strong> ' + _vendorEsc(r.error_message) + '</div>'
+    : '';
+
+  var preview = r.body_preview
+    ? '<div style="margin-top:14px"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Body preview</div><div style="background:#F8F8F8;border-radius:6px;padding:12px;font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;max-height:300px;overflow-y:auto">' + _vendorEsc(r.body_preview) + (String(r.body_preview).length >= 500 ? '\u2026' : '') + '</div></div>'
+    : '';
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Email log entry</div>' +
+    '<div class="msb">#' + r.id + '</div>' +
+    rowsHtml + errBlock + preview +
+    '<div class="mf"><button class="btn btn-p" onclick="closeModal()">Close</button></div>'
+  );
+}
+
+// ================================================================
+// EMAIL SETTINGS (Maintenance \u2192 Email settings)
+// ════════════════════════════════════════════════════════════════
+var _emailSettingsState = { testMode:false, testRecipient:'' };
+
+async function renderEmailSettings() {
+  var el = g('es-content');
+  if (!hasFull('email-settings')) {
+    el.innerHTML = '<div class="card"><div style="text-align:center;padding:30px;color:#888">You do not have permission to view this page.</div></div>';
+    return;
+  }
+  el.innerHTML = '<div class="card"><div style="text-align:center;padding:30px;color:#888">Loading\u2026</div></div>';
+
+  if (!supabaseClient) {
+    el.innerHTML = '<div class="card"><div style="text-align:center;padding:30px;color:#888">Not connected to Supabase \u2014 settings unavailable.</div></div>';
+    return;
+  }
+
+  try {
+    var r = await supabaseClient.from('kmi_settings').select('*').in('key', ['emailTestMode','emailTestRecipient']);
+    if (r.error) throw r.error;
+    var s = _emailSettingsState;
+    s.testMode = false; s.testRecipient = '';
+    (r.data || []).forEach(function(row){
+      if (row.key === 'emailTestMode')      s.testMode      = row.value === true || row.value === 'true';
+      if (row.key === 'emailTestRecipient') s.testRecipient = (typeof row.value === 'string' ? row.value : '');
+    });
+    drawEmailSettings();
+  } catch (e) {
+    el.innerHTML = '<div class="card"><div style="text-align:center;padding:30px;color:#7A2E2E">Failed to load: ' + _vendorEsc(e.message || String(e)) + '</div></div>';
+  }
+}
+
+function drawEmailSettings() {
+  var s = _emailSettingsState;
+  var modeBadge = s.testMode
+    ? '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;background:#FFF8DC;color:#6B5A2E;border:1px solid #E8D08A;letter-spacing:.5px;margin-left:8px">TEST MODE ON</span>'
+    : '';
+  g('es-content').innerHTML =
+    '<div class="card" style="max-width:680px">' +
+      '<div class="ch"><span class="ct">Test mode' + modeBadge + '</span></div>' +
+      '<div style="font-size:13px;color:#666;line-height:1.6;margin-bottom:14px">When test mode is on, ALL outbound email (password resets, assignment alerts, proposals, welcome emails) is redirected to the test recipient instead of the intended address. The original recipient is recorded in the audit log so you can verify routing was correct.</div>' +
+      '<div class="fg">' +
+        '<div class="fgr full">' +
+          '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:500;text-transform:none;letter-spacing:0;color:#333">' +
+            '<input id="es-toggle" type="checkbox"' + (s.testMode ? ' checked' : '') + ' style="width:auto;margin:0"> ' +
+            'Enable test mode (redirect all outbound email)' +
+          '</label>' +
+        '</div>' +
+        '<div class="fgr full">' +
+          '<label>Test recipient email</label>' +
+          '<input id="es-recipient" type="email" value="' + _vendorEsc(s.testRecipient) + '" placeholder="ops@kmi-construction.com">' +
+          '<div style="font-size:11px;color:#888;margin-top:4px">All outbound email is redirected here when test mode is on. Required when toggle is enabled.</div>' +
+        '</div>' +
+      '</div>' +
+      '<div id="es-msg" style="display:none;margin-top:12px;padding:10px 12px;border-radius:7px;font-size:12px;line-height:1.5"></div>' +
+      '<div class="mf" style="margin-top:14px">' +
+        '<button class="btn btn-p" onclick="saveEmailSettings()">Save</button>' +
+        '<button class="btn" onclick="renderEmailSettings()">Cancel</button>' +
+        '<button class="btn" onclick="sendEmailSettingsTest()" style="margin-left:auto" title="Send a test email to your own address \u2014 verifies the email pipeline is working">Send test email to me</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function showEmailSettingsMsg(type, msg) {
+  var el = g('es-msg');
+  if (!el) return;
+  if (type === 'success') {
+    el.style.background = '#EAF3DE'; el.style.borderWidth = '1px'; el.style.borderStyle = 'solid'; el.style.borderColor = '#B8D88A'; el.style.color = '#3B6D11';
+  } else {
+    el.style.background = '#FBE9E9'; el.style.borderWidth = '1px'; el.style.borderStyle = 'solid'; el.style.borderColor = '#E8B8B8'; el.style.color = '#7A2E2E';
+  }
+  el.textContent = msg;
+  el.style.display = '';
+}
+
+async function saveEmailSettings() {
+  if (!hasFull('email-settings')) { showEmailSettingsMsg('error', 'You do not have permission to change email settings.'); return; }
+  if (!supabaseClient) { showEmailSettingsMsg('error', 'Not connected to Supabase.'); return; }
+  var checked = g('es-toggle').checked;
+  var recip   = (g('es-recipient').value || '').trim();
+  if (checked && !recip) {
+    showEmailSettingsMsg('error', 'Test recipient is required when test mode is on.'); return;
+  }
+  if (recip && !isValidEmail(recip)) {
+    showEmailSettingsMsg('error', 'Test recipient is not a valid email address.'); return;
+  }
+  try {
+    var r1 = await supabaseClient.from('kmi_settings').upsert({ key: 'emailTestMode',      value: checked });
+    if (r1.error) throw r1.error;
+    var r2 = await supabaseClient.from('kmi_settings').upsert({ key: 'emailTestRecipient', value: recip });
+    if (r2.error) throw r2.error;
+    _emailSettingsState.testMode = checked;
+    _emailSettingsState.testRecipient = recip;
+    drawEmailSettings();  // refresh badge
+    showEmailSettingsMsg('success', 'Settings saved. Test mode is ' + (checked ? 'ON \u2014 all outbound mail will redirect to ' + recip + '.' : 'OFF \u2014 mail will go to intended recipients.'));
+  } catch (e) {
+    showEmailSettingsMsg('error', 'Save failed: ' + (e.message || String(e)));
+  }
+}
+
+async function sendEmailSettingsTest() {
+  if (!_currentUser || !_currentUser.email) {
+    showEmailSettingsMsg('error', 'Your account needs an email address to send a test.'); return;
+  }
+  showEmailSettingsMsg('success', 'Sending test email\u2026');
+  var result = await sendEmail({
+    to:          _currentUser.email,
+    subject:     'KMI CRM \u2014 Email pipeline test',
+    text:        'This is a test of the KMI CRM email pipeline.\r\n\r\nIf you received this, outbound email is working correctly.\r\n\r\nSent by: ' + _currentUser.email + '\r\nSent at: ' + new Date().toLocaleString(),
+    flowType:    'password_reset',
+    sentBy:      _currentUser.id,
+    sentByEmail: _currentUser.email
+  });
+  if (result.success) {
+    var msg = result.testMode
+      ? 'Test email sent. Test mode redirected it to ' + (_emailSettingsState.testRecipient || 'the configured test recipient') + '.'
+      : 'Test email sent to ' + _currentUser.email + '. Check your inbox.';
+    showEmailSettingsMsg('success', msg);
+  } else {
+    showEmailSettingsMsg('error', 'Send failed: ' + (result.error || 'Unknown error'));
+  }
+}
 </script>
 </body>
 </html>
