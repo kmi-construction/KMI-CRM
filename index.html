@@ -5494,8 +5494,12 @@ function importFoundationCSV(evt, type) {
 
   var reader = new FileReader();
   reader.onload = function(e) {
-    var rows = parseCSV(e.target.result);
+    var rawText = e.target.result;
+    var rows = parseCSV(rawText);
     if (!rows.length) { alert('No data rows found in the CSV.'); return; }
+    // Stash raw text on the array so importers that need positional parsing
+    // (Foundation customer CSV with duplicate headers) can re-tokenize.
+    rows.__rawText = rawText;
 
     if (type === 'costCodes') {
       importFoundationCostCodes(rows);
@@ -5597,22 +5601,43 @@ function importFoundationCostClasses(rows) {
 }
 
 function importFoundationCustomers(rows) {
+  // Foundation's customer export has 44 columns including DUPLICATE header
+  // names (multiple "description" columns and a second "name" column for
+  // ship-to). The generic parseCSV() builds a per-row object keyed by header
+  // name, and duplicate keys get overwritten by the later columns — which
+  // erases the customer name with the (usually blank) ship-to name and makes
+  // every row look invalid.
+  //
+  // Re-parse the CSV here using positional column indices so duplicates
+  // don't matter. We grab column 0 (customer_no), column 1 (name), and
+  // map the address fields by header name, but only by the FIRST occurrence
+  // of each header.
+  if (!rows.length || !rows.__rawText) {
+    // Fallback for any caller that passes pre-parsed rows without raw text.
+    return importFoundationCustomersLegacy(rows);
+  }
+  var positional = parseFoundationCustomerCSV(rows.__rawText);
+  if (!positional || !positional.length) {
+    alert('No valid rows found in the CSV.');
+    return;
+  }
+
   var parsed = [];
   var skipped = 0;
-  rows.forEach(function(r){
-    var no = (r.customer_no || r.no || r['Customer No'] || '').trim();
-    var nm = (r.name || r['Name'] || '').trim();
+  positional.forEach(function(r){
+    var no = (r.customer_no || '').trim();
+    var nm = (r.name || '').trim();
     if (!no || !nm) { skipped++; return; }
     parsed.push({
       id: Date.now() + parsed.length,
       customerNo: no,
       name: nm,
-      sortName: (r.sort_name || r['Sort Name'] || nm).trim(),
-      address1:  (r.address_1 || r['Address 1'] || r['Address Line 1'] || '').trim(),
-      address2:  (r.address_2 || r['Address 2'] || r['Address Line 2'] || '').trim(),
-      city:      (r.city || r['City'] || '').trim(),
-      state:     (r.state || r['State'] || r['State/Prov'] || '').trim(),
-      zip:       (r.zip_code || r.zip || r['Zip Code'] || r['ZIP'] || '').trim(),
+      sortName:  (r.sort_name || nm).trim(),
+      address1:  (r.address_1 || '').trim(),
+      address2:  (r.address_2 || '').trim(),
+      city:      (r.city      || '').trim(),
+      state:     (r.state     || '').trim(),
+      zip:       (r.zip_code  || '').trim(),
       active: true
     });
   });
@@ -5641,6 +5666,81 @@ function importFoundationCustomers(rows) {
       } catch (e) { console.warn('customers_foundation sync exception:', e); }
     })();
   }
+  renderTemplates();
+  alert('\u2714 Imported ' + parsed.length + ' customer' + (parsed.length === 1 ? '' : 's') + '.');
+}
+
+// Foundation customer CSV has 44 columns with duplicate header names
+// (multiple "description", a second "name"). Walks the CSV with the same
+// quote-aware tokenizer as parseCSV, but resolves duplicate headers by
+// keeping only the FIRST occurrence so the customer name (col 1) wins
+// over the ship-to name (col ~27).
+function parseFoundationCustomerCSV(text) {
+  var lines = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
+  if (lines.length < 2) return [];
+  // Tokenize a single CSV line, returning an array of cell values.
+  function tokenize(line) {
+    var vals = [], cur = '', inQ = false;
+    for (var j = 0; j < line.length; j++) {
+      var ch = line[j];
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === ',' && !inQ) { vals.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+    vals.push(cur);
+    return vals;
+  }
+  var headers = tokenize(lines[0]).map(function(h){
+    return h.trim().replace(/^"|"$/g,'').toLowerCase();
+  });
+  // Keep the FIRST column index for each header name. Duplicates are ignored.
+  var firstIdx = {};
+  headers.forEach(function(h, i){
+    if (!(h in firstIdx)) firstIdx[h] = i;
+  });
+  var rows = [];
+  for (var i = 1; i < lines.length; i++) {
+    var line = lines[i];
+    if (!line.trim()) continue;
+    var vals = tokenize(line).map(function(v){ return v.replace(/^"|"$/g,'').trim(); });
+    var row = {};
+    Object.keys(firstIdx).forEach(function(h){
+      row[h] = vals[firstIdx[h]] || '';
+    });
+    rows.push(row);
+  }
+  return rows;
+}
+
+// Retained for callers that don't have raw CSV text available — falls back
+// to the original key-based behavior. Will fail on duplicate-header files
+// but works for hand-built CSVs.
+function importFoundationCustomersLegacy(rows) {
+  var parsed = [];
+  var skipped = 0;
+  rows.forEach(function(r){
+    var no = (r.customer_no || r.no || r['Customer No'] || '').trim();
+    var nm = (r.name || r['Name'] || '').trim();
+    if (!no || !nm) { skipped++; return; }
+    parsed.push({
+      id: Date.now() + parsed.length,
+      customerNo: no, name: nm,
+      sortName: (r.sort_name || r['Sort Name'] || nm).trim(),
+      address1: (r.address_1 || r['Address 1'] || '').trim(),
+      address2: (r.address_2 || r['Address 2'] || '').trim(),
+      city:     (r.city || r['City'] || '').trim(),
+      state:    (r.state || r['State'] || '').trim(),
+      zip:      (r.zip_code || r.zip || r['Zip Code'] || '').trim(),
+      active: true
+    });
+  });
+  if (!parsed.length) {
+    alert('No valid rows found.\n\nExpected columns include "customer_no" and "name".');
+    return;
+  }
+  if (!confirm('Replace the Foundation customer list with ' + parsed.length + ' row(s)?')) return;
+  db.customersFoundation = parsed;
+  saveDB();
   renderTemplates();
   alert('\u2714 Imported ' + parsed.length + ' customer' + (parsed.length === 1 ? '' : 's') + '.');
 }
