@@ -2316,7 +2316,7 @@ function renderOppDetail(id) {
         '<button class="btn btn-sm" onclick="chgPropStatus(\'' + prop.id + '\')">Change status</button>' +
         '<button class="btn btn-sm" onclick="editProposal(\'' + prop.id + '\')">\u270e Edit</button>' +
         '<button class="btn btn-sm btn-pdf" onclick="dlPDF(\'' + prop.id + '\')">&#x2193; Download PDF</button>' +
-        '<button class="btn btn-sm btn-pdf" onclick="emailProposalToPM(\'' + prop.id + '\')" title="Open a draft email to the Customer PM with the proposal summary">\u2709 Email PM</button>' +
+        emailPMButtonHtml(prop.id, o.id) +
         '<button class="btn btn-sm btn-nobid" onclick="deleteProposal(\'' + prop.id + '\')" title="Delete this proposal — cannot be undone">\u00d7 Delete</button>' +
         '</div></div>' +
         (function(){
@@ -2868,107 +2868,249 @@ async function deleteProposal(propId) {
   }
 }
 
-function emailProposalToPM(propId) {
+// ── PROPOSAL EMAIL ──────────────────────────────────────────────
+// Send a proposal to the Customer PM via the Edge Function.
+//   • From / Reply-To: the logged-in user's @kmi-construction.com address (send-as-user)
+//   • BCC: the sender (so they have a copy in their inbox — no Sent-folder otherwise)
+//   • Attachment: freshly-generated PDF
+//   • Preview-and-edit modal lets the user tweak To / CC / Subject / Body before send
+//   • On success: status flips draft \u2192 sent (more advanced statuses left alone),
+//     lastEmailedAt / lastEmailedTo recorded, activity entry added
+
+function userCanSendProposals(u) {
+  if (!u || !u.email) return false;
+  return u.email.toLowerCase().endsWith('@kmi-construction.com');
+}
+function isValidEmail(s) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || '').trim());
+}
+function sanitizeForFilename(s) {
+  return String(s || '').replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').substring(0, 60) || 'Proposal';
+}
+
+// Render the "Email PM" button with the appropriate enabled / disabled state.
+// Disabled cases (each with a clear tooltip):
+//   - logged-in user has no @kmi-construction.com email
+//   - no Customer PM assigned to opportunity
+//   - Customer PM has no email on file
+function emailPMButtonHtml(propId, oppId) {
+  var u = _currentUser;
+  var o = getOpp(oppId);
+  var pm = (o && o.pmId) ? db.pms.find(function(x){ return x.id === o.pmId; }) : null;
+  var reason = '';
+  if (!userCanSendProposals(u)) {
+    reason = 'Your account does not have an @kmi-construction.com email \u2014 proposals cannot be sent from this account.';
+  } else if (!pm) {
+    reason = 'Assign a Customer PM to this opportunity before emailing the proposal.';
+  } else if (!pm.email) {
+    reason = 'The Customer PM does not have an email address on file.';
+  }
+  if (reason) {
+    return '<button class="btn btn-sm btn-pdf" disabled style="opacity:.5;cursor:not-allowed" title="' + _vendorEsc(reason) + '">\u2709 Email PM</button>';
+  }
+  var pmName = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim();
+  return '<button class="btn btn-sm btn-pdf" onclick="openProposalEmailModal(\'' + propId + '\')" title="Send proposal to ' + _vendorEsc(pmName) + ' with PDF attached">\u2709 Email PM</button>';
+}
+
+function openProposalEmailModal(propId) {
   var prop = db.proposals.find(function(p){ return p.id === propId; });
   if (!prop) { alert('Proposal not found.'); return; }
   var o = getOpp(prop.opportunityId);
   if (!o) { alert('Linked opportunity not found.'); return; }
-
-  // Resolve recipient (Customer PM) and cc (assigned estimator)
-  var pm = o.pmId ? db.pms.find(function(p){ return p.id === o.pmId; }) : null;
-  var est = o.estimatorId ? getUser(o.estimatorId) : null;
+  var pm   = o.pmId ? db.pms.find(function(p){ return p.id === o.pmId; }) : null;
   var cust = getCust(o.customerId);
+  var u    = _currentUser;
 
-  if (!pm) {
-    alert('No Customer PM is assigned to this opportunity. Assign one on the opportunity Edit screen and try again.');
+  // Re-validate (state may have changed since the button was rendered)
+  if (!userCanSendProposals(u)) {
+    alert('Your account does not have an @kmi-construction.com email \u2014 proposals cannot be sent from this account.');
     return;
   }
-  if (!pm.email) {
-    alert('The Customer PM (' + pm.firstName + ' ' + pm.lastName + ') does not have an email address on file. Add one from the Project Managers page.');
+  if (!pm || !pm.email) {
+    alert('Customer PM email is missing. Assign a PM with an email and try again.');
     return;
   }
 
-  // Resolve inclusions & exclusions for the summary
-  var incItems = [];
-  (prop.inc || []).forEach(function(id){
-    var t = db.stdClar.find(function(x){ return x.id === id; });
-    if (t) incItems.push(t.text);
-  });
-  (prop.customIncs || []).forEach(function(t){ incItems.push(t); });
+  // Show "preparing" placeholder while PDF generates (sync but can take a moment for large PDFs)
+  showModal('<div class="mt">Preparing email\u2026</div><div class="msb">Generating proposal PDF</div>');
 
-  var excItems = [];
-  (prop.exc || []).forEach(function(id){
-    var t = db.exclusions.find(function(x){ return x.id === id; });
-    if (t) excItems.push(t.text);
-  });
-  (prop.customExcs || []).forEach(function(t){ excItems.push(t); });
+  setTimeout(function(){
+    var built;
+    try { built = buildProposalPDF(propId); }
+    catch (e) { console.error('PDF build threw:', e); built = null; }
+    if (!built || !built.doc) {
+      showModal(
+        '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+        '<div class="mt" style="color:#7A2E2E">PDF generation failed</div>' +
+        '<div class="msb">The proposal PDF could not be generated. Try clicking \u201cDownload PDF\u201d first to confirm the PDF works on its own.</div>' +
+        '<div class="mf"><button class="btn" onclick="closeModal()">Close</button></div>'
+      );
+      return;
+    }
 
-  // Build the email body as plain text
-  var lines = [];
-  lines.push('Hi ' + pm.firstName + ',');
-  lines.push('');
-  lines.push('Please find below a summary of KMI Construction\'s proposal for ' + (o.project || prop.project) + '.');
-  lines.push('');
-  lines.push('-----------------------------------------');
-  lines.push('PROPOSAL SUMMARY');
-  lines.push('-----------------------------------------');
-  lines.push('Proposal #:    ' + prop.id);
-  lines.push('Opportunity:   ' + o.id);
-  lines.push('Project:       ' + (prop.project || o.project || ''));
-  if (cust) lines.push('Customer:      ' + cust.name);
-  var typeStr = Array.isArray(o.types) && o.types.length ? o.types.join(', ') : (o.type || '');
-  if (typeStr) lines.push('Project type:  ' + typeStr);
-  var addr = (typeof formatOppAddress === 'function') ? formatOppAddress(o) : '';
-  if (addr) lines.push('Location:      ' + addr);
-  if (o.bidDate) lines.push('Bid due:       ' + o.bidDate);
-  lines.push('Total value:   ' + fmtC(prop.value || 0));
-  lines.push('');
+    // jsPDF datauristring is "data:application/pdf;filename=generated.pdf;base64,JVBE..."
+    var dataUri = built.doc.output('datauristring');
+    var commaIdx = dataUri.indexOf(',');
+    var pdfBase64 = (commaIdx > 0) ? dataUri.substring(commaIdx + 1) : '';
+    var binBytes = Math.round(pdfBase64.length * 0.75);  // base64 inflates ~33%
+    var sizeKB   = (binBytes / 1024).toFixed(1);
+    var filename = 'KMI_' + sanitizeForFilename(o.project || prop.project) + '_Proposal.pdf';
 
-  if (incItems.length) {
-    lines.push('INCLUSIONS:');
-    incItems.forEach(function(t){ lines.push('  \u2022 ' + t); });
+    var subject = 'KMI Proposal \u2014 ' + (o.project || prop.project || '');
+
+    // Compose default body (plain text)
+    var addr = (typeof formatOppAddress === 'function') ? formatOppAddress(o) : '';
+    var lines = [];
+    lines.push('Hi ' + (pm.firstName || '') + ',');
     lines.push('');
-  }
-  if (excItems.length) {
-    lines.push('EXCLUSIONS:');
-    excItems.forEach(function(t){ lines.push('  \u2022 ' + t); });
+    lines.push('Please find attached KMI Construction\'s proposal for ' + (o.project || prop.project || 'your project') + '.');
     lines.push('');
-  }
-  lines.push('-----------------------------------------');
-  lines.push('Please let me know if you have any questions.');
-  lines.push('');
-  if (est) {
+    lines.push('Proposal #:    ' + prop.id);
+    if (cust) lines.push('Customer:      ' + cust.name);
+    if (addr) lines.push('Location:      ' + addr);
+    lines.push('Total value:   ' + fmtC(prop.value || 0));
+    lines.push('');
+    lines.push('Full inclusions, exclusions, and pricing detail are in the attached PDF.');
+    lines.push('');
+    lines.push('Please let me know if you have any questions.');
+    lines.push('');
     lines.push('Best regards,');
-    lines.push(est.firstName + ' ' + est.lastName);
-    if (est.email) lines.push(est.email);
-    if (est.phone) lines.push(est.phone);
-  } else {
-    lines.push('Best regards,');
+    lines.push(((u.firstName || '') + ' ' + (u.lastName || '')).trim());
+    if (u.email) lines.push(u.email);
+    if (u.phone) lines.push(u.phone);
+    lines.push('');
     lines.push('KMI Construction');
+    lines.push('2880 S. 171st Street, New Berlin, WI 53151');
+    lines.push('T 262-548-0632 | KMI-Construction.com');
+    var body = lines.join('\n');
+
+    // Stash context for the Send handler — too much state to inline in onclick,
+    // and PDF base64 is too big to round-trip through HTML attrs.
+    window._pendingProposalEmail = {
+      propId:   propId,
+      filename: filename,
+      pdfBase64: pdfBase64,
+      from:     u.email,
+      fromName: ((u.firstName || '') + ' ' + (u.lastName || '')).trim(),
+      pmName:   ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim()
+    };
+
+    var fromDisplay = ((u.firstName || '') + ' ' + (u.lastName || '')).trim() + ' <' + u.email + '>';
+
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt">Send Proposal</div>' +
+      '<div class="msb">Review and edit before sending. The PDF will be attached automatically.</div>' +
+      '<div id="pem-err" style="display:none;background:#FBE9E9;border:1px solid #E8B8B8;border-radius:7px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:#7A2E2E;line-height:1.5"></div>' +
+      '<div class="fg">' +
+        '<div class="fgr full"><label>From</label>' +
+          '<input type="text" value="' + _vendorEsc(fromDisplay) + '" disabled style="background:#f5f5f5;color:#888;cursor:not-allowed">' +
+        '</div>' +
+        '<div class="fgr full"><label>To *</label>' +
+          '<input id="pem-to" type="text" value="' + _vendorEsc(pm.email) + '">' +
+        '</div>' +
+        '<div class="fgr full"><label>CC <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional, single address)</span></label>' +
+          '<input id="pem-cc" type="text" placeholder="Leave blank for no CC">' +
+        '</div>' +
+        '<div class="fgr full"><label>Subject *</label>' +
+          '<input id="pem-subject" type="text" value="' + _vendorEsc(subject) + '">' +
+        '</div>' +
+        '<div class="fgr full"><label>Message *</label>' +
+          '<textarea id="pem-body" style="min-height:240px;font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5">' + _vendorEsc(body) + '</textarea>' +
+        '</div>' +
+        '<div class="fgr full"><label>Attachment</label>' +
+          '<div style="background:#F5F5F3;border-radius:7px;padding:10px 12px;font-size:13px;display:flex;align-items:center;gap:10px">' +
+            '<span style="font-size:18px">\u{1F4CE}</span>' +
+            '<span style="flex:1"><strong>' + _vendorEsc(filename) + '</strong> <span style="color:#888;margin-left:6px">' + sizeKB + ' KB</span></span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="background:#F5F5F3;border-radius:7px;padding:10px 12px;margin-top:12px;font-size:12px;color:#666;line-height:1.5">A copy of this email will be sent to your inbox (' + _vendorEsc(u.email) + ') so you have a record.</div>' +
+      '<div class="mf">' +
+        '<button class="btn" id="pem-cancel" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-p" id="pem-send" onclick="sendProposalEmail()">Send Proposal</button>' +
+      '</div>'
+    );
+  }, 0);
+}
+
+async function sendProposalEmail() {
+  var ctx = window._pendingProposalEmail;
+  if (!ctx) { alert('Email context lost. Please reopen the email modal.'); return; }
+
+  var to      = (g('pem-to').value      || '').trim();
+  var cc      = (g('pem-cc').value      || '').trim();
+  var subject = (g('pem-subject').value || '').trim();
+  var body    = g('pem-body').value     || '';
+  var errEl   = g('pem-err');
+  var sendBtn = g('pem-send');
+  var cancelBtn = g('pem-cancel');
+
+  function showErr(msg) {
+    errEl.innerHTML = msg;
+    errEl.style.display = '';
   }
 
-  var subject = 'KMI Proposal ' + prop.id + ' \u2014 ' + (o.project || prop.project || '');
-  var body    = lines.join('\r\n');
+  errEl.style.display = 'none';
 
-  // mailto: has URL-encoding requirements; encodeURIComponent handles them.
-  // Note: very long bodies may be truncated by some mail clients (~1800-2000
-  // chars is a safe ceiling). We warn if we're approaching that.
-  var mailto = 'mailto:' + encodeURIComponent(pm.email) +
-               '?subject=' + encodeURIComponent(subject) +
-               '&body=' + encodeURIComponent(body);
-  if (est && est.email) mailto += '&cc=' + encodeURIComponent(est.email);
+  if (!to || !isValidEmail(to))           { showErr('Please enter a valid To address.'); return; }
+  if (cc && !isValidEmail(cc))            { showErr('Please enter a valid CC address (or leave it blank).'); return; }
+  if (!subject)                           { showErr('Subject is required.'); return; }
+  if (!body.trim())                       { showErr('Message body is required.'); return; }
 
-  if (mailto.length > 8000) {
-    // Some browsers/mail clients truncate long mailto URIs. Trim the body.
-    var shorter = lines.slice(0, 20).join('\r\n') + '\r\n\r\n[Summary truncated \u2014 full details in attached PDF]';
-    mailto = 'mailto:' + encodeURIComponent(pm.email) +
-             '?subject=' + encodeURIComponent(subject) +
-             '&body=' + encodeURIComponent(shorter);
-    if (est && est.email) mailto += '&cc=' + encodeURIComponent(est.email);
+  // Disable buttons while sending
+  sendBtn.disabled = true; cancelBtn.disabled = true;
+  sendBtn.textContent = 'Sending\u2026';
+
+  var prop = db.proposals.find(function(x){ return x.id === ctx.propId; });
+  if (!prop) {
+    sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Proposal';
+    showErr('Proposal not found.'); return;
   }
 
-  // Open in default mail client
-  window.location.href = mailto;
+  var payload = {
+    to:                to,
+    from:              ctx.from,
+    fromName:          ctx.fromName,
+    replyTo:           ctx.from,        // proposal: send-as-user, replies route back to user
+    bcc:               ctx.from,        // BCC sender for inbox copy
+    subject:           subject,
+    text:              body,
+    flowType:          'proposal',
+    sentBy:            _currentUser ? _currentUser.id    : null,
+    sentByEmail:       _currentUser ? _currentUser.email : null,
+    relatedEntityType: 'proposal',
+    relatedEntityId:   prop.id,
+    attachments: [{ filename: ctx.filename, content: ctx.pdfBase64 }]
+  };
+  if (cc) payload.cc = cc;
+
+  var result = await sendEmail(payload);
+
+  if (result.success) {
+    // Update proposal — only flip status from draft \u2192 sent. Leave more advanced
+    // statuses (review, negotiation, won, lost) untouched on resends.
+    if (prop.status === 'draft' || !prop.status) prop.status = 'sent';
+    prop.lastEmailedAt = new Date().toISOString();
+    prop.lastEmailedTo = to;
+
+    var name = ctx.pmName || to;
+    db.activity.unshift({ text: prop.id + ' emailed to ' + name, type: 'sent', time: 'Just now' });
+    saveDB();
+
+    closeModal();
+    showToast(
+      result.testMode
+        ? 'Test mode: proposal redirected (would have gone to ' + name + ')'
+        : 'Proposal sent to ' + name,
+      'success'
+    );
+    delete window._pendingProposalEmail;
+    if (typeof currentOppId !== 'undefined' && currentOppId) renderOppDetail(currentOppId);
+  } else {
+    sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Proposal';
+    showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
+  }
 }
 
 function npAddRow(desc, qty, unit, rate) {
@@ -5377,9 +5519,13 @@ function rmLaborRate(id) {
 }
 
 // ── PDF ─────────────────────────────────────────────────────────
-function dlPDF(id) {
-  var p = db.proposals.find(function(x){ return x.id===id; }); if(!p)return;
-  if(!window.jspdf){alert('PDF library loading, please try again.');return;}
+// `buildProposalPDF(id)` does all the work and returns
+// `{ doc, prop, opp, customer }` (or `null` on failure).
+// `dlPDF(id)` is a thin wrapper that triggers a browser download.
+// The proposal-email flow uses `buildProposalPDF` directly to get base64.
+function buildProposalPDF(id) {
+  var p = db.proposals.find(function(x){ return x.id===id; }); if(!p) return null;
+  if(!window.jspdf){alert('PDF library loading, please try again.');return null;}
 
   var c = getCust(p.customerId);
   var jsPDF = window.jspdf.jsPDF;
@@ -5652,7 +5798,14 @@ function dlPDF(id) {
   doc.text(sigName, LM, y); y += 14;
   if (sigRole) doc.text(sigRole, LM, y);
 
-  doc.save(p.id + '_Proposal.pdf');
+  return { doc: doc, prop: p };
+}
+
+// Thin wrapper preserving the original download behavior.
+function dlPDF(id) {
+  var built = buildProposalPDF(id);
+  if (!built || !built.doc) return;
+  built.doc.save(built.prop.id + '_Proposal.pdf');
 }
 
 
@@ -6315,7 +6468,8 @@ function toSBProposal(r) {
     customer_id:r.customerId||null, value:r.value||0, status:r.status||'draft',
     created:r.created||'', type:r.type||'',
     inc:r.inc||[], pc:r.pc||[], exc:r.exc||[], costs:r.costs||[],
-    alternate_costs:r.alternateCosts||[], ve_costs:r.veCosts||[]
+    alternate_costs:r.alternateCosts||[], ve_costs:r.veCosts||[],
+    last_emailed_at:r.lastEmailedAt||null, last_emailed_to:r.lastEmailedTo||null
   };
 }
 function fromSBProposal(r) {
@@ -6324,7 +6478,8 @@ function fromSBProposal(r) {
     customerId:r.customer_id||null, value:r.value||0, status:r.status||'draft',
     created:r.created||'', type:r.type||'',
     inc:r.inc||[], pc:r.pc||[], exc:r.exc||[], costs:r.costs||[],
-    alternateCosts:r.alternate_costs||[], veCosts:r.ve_costs||[]
+    alternateCosts:r.alternate_costs||[], veCosts:r.ve_costs||[],
+    lastEmailedAt:r.last_emailed_at||null, lastEmailedTo:r.last_emailed_to||null
   };
 }
 
