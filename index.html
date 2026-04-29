@@ -801,16 +801,57 @@ textarea{resize:vertical;min-height:72px}
 
 <!-- BUDGET (Chunk 1: placeholder. Full UI lands in Chunks 2 & 3.) -->
 <div class="pg" id="pg-budget">
-  <div class="ph"><div><h1>Budget</h1><div class="sub">Project budgets — upload bid price reports, generate Foundation CSV exports</div><div class="stripe"></div></div></div>
-  <div class="card" style="text-align:center;padding:40px 20px">
-    <div style="font-size:48px;margin-bottom:12px;color:#ccc">$</div>
-    <div style="font-size:15px;font-weight:600;color:var(--kmi);margin-bottom:6px">Budget feature coming soon</div>
-    <div style="font-size:13px;color:#888;max-width:520px;margin:0 auto;line-height:1.5">
-      Chunk 1 of the budget feature has been deployed: database schema, master data import on the Templates page, and Foundation setup fields on projects.
-      The PDF extraction (Chunk 2) and CSV exports (Chunk 3) will populate this page next.
+  <div class="ph">
+    <div>
+      <h1 id="bg-title">Budget</h1>
+      <div class="sub" id="bg-sub">Project budgets — upload bid price reports, generate Foundation CSV exports</div>
+      <div class="stripe"></div>
     </div>
-    <div style="margin-top:20px;font-size:12px;color:#aaa">Master data status:
-      <span id="bg-md-status" style="color:#555">checking…</span>
+  </div>
+  <!-- Project picker (when no project is selected) -->
+  <div id="bg-picker"></div>
+  <!-- Per-project budget view (when a project is selected) -->
+  <div id="bg-detail" style="display:none">
+    <!-- Toolbar -->
+    <div class="card" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+      <button class="btn" onclick="bgClose()">&larr; All projects</button>
+      <div style="flex:1"></div>
+      <div id="bg-version-info" style="font-size:12px;color:#666"></div>
+      <select id="bg-version-select" style="padding:6px;font-size:12px;border-radius:4px;border:1px solid #DDD;min-width:200px" onchange="bgLoadVersion(this.value)"></select>
+      <button class="btn btn-sm" id="bg-view-pdf-btn" onclick="bgViewSourcePDF()" disabled>View source PDF</button>
+      <label class="btn btn-sm btn-p" id="bg-upload-btn" style="cursor:pointer">
+        Upload Bid Price Report <input type="file" id="bg-upload-input" accept=".pdf" style="display:none" onchange="bgOnPdfChosen(event)">
+      </label>
+    </div>
+    <!-- Status banner (extraction in progress, errors, warnings) -->
+    <div id="bg-banner" style="display:none"></div>
+    <!-- Tax rate / metadata bar -->
+    <div class="card" id="bg-meta" style="display:none">
+      <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:center">
+        <div>
+          <label style="display:block;font-size:11px;color:#888;margin-bottom:2px">Tax rate (%)</label>
+          <input type="number" id="bg-tax-rate" step="0.001" min="0" max="20" style="width:90px;padding:5px" onchange="bgOnTaxRateChange()">
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:#888;margin-bottom:2px">Total square feet</label>
+          <input type="number" id="bg-sqft" step="1" min="0" style="width:120px;padding:5px" onchange="bgMarkDirty()">
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn btn-sm" id="bg-discard-btn" onclick="bgDiscardChanges()" style="display:none;color:#A32D2D">Discard changes</button>
+        <button class="btn btn-sm btn-p" id="bg-save-btn" onclick="bgSaveBudget()" disabled>Save budget</button>
+      </div>
+    </div>
+    <!-- Budget line table -->
+    <div class="card" id="bg-table-card" style="display:none">
+      <div id="bg-table"></div>
+    </div>
+    <!-- Empty state for projects with no budget yet -->
+    <div class="card" id="bg-empty" style="display:none;text-align:center;padding:40px 20px">
+      <div style="font-size:48px;margin-bottom:12px;color:#ccc">$</div>
+      <div style="font-size:15px;font-weight:600;color:var(--kmi);margin-bottom:6px">No budget yet</div>
+      <div style="font-size:13px;color:#888;max-width:520px;margin:0 auto;line-height:1.5">
+        Upload a Bid Price Report PDF to extract a budget. Lines will populate automatically based on the report's Class Totals, Misc Sub-Total, and Project Notes; you can edit any value before saving.
+      </div>
     </div>
   </div>
 </div>
@@ -1785,27 +1826,802 @@ function nav(page) {
     templates:        renderTemplates,
     projects:         renderProjects,
     'new-project':    initNewProject,
-    budget:           renderBudgetPlaceholder,
+    budget:           renderBudget,
     'email-log':      renderEmailLog,
     'email-settings': renderEmailSettings
   };
   if (fns[page]) fns[page]();
 }
 
-// Chunk 1 placeholder — surfaces the master-data import status so users know
-// what's wired up before the upload UI lands. Replaced in Chunk 2.
-function renderBudgetPlaceholder() {
-  var el = g('bg-md-status');
+// ═══════════════════════════════════════════════════════════════════════
+// BUDGET FEATURE — Chunk 2
+// ═══════════════════════════════════════════════════════════════════════
+// Page state:
+//   _bgProjectId   — the project currently being viewed (null = picker mode)
+//   _bgVersionId   — the version being displayed (null = unsaved working copy)
+//   _bgWorking     — the in-memory budget being edited:
+//                    { lines:[...], taxRate, totalSquareFeet, dirty }
+//   _bgExtractionResult — the latest raw extraction from the Edge Function,
+//                         held in memory until the user saves; this is what
+//                         determines "extracted vs manually edited" markers
+// _bgPendingPdfBytes — the base64 PDF awaiting save (we don't write to
+//                      Storage until the user clicks Save, so failed
+//                      extractions don't litter the bucket)
+
+var _bgProjectId        = null;
+var _bgVersionId        = null;
+var _bgWorking          = null;
+var _bgExtractionResult = null;
+var _bgPendingPdfBytes  = null;
+var _bgPendingPdfName   = '';
+var _bgIsAppendMode     = false;  // tracks Append vs Replace path
+
+// Format helpers
+function bgFmtMoney(n) {
+  var v = Number(n) || 0;
+  return v.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+function bgFmtQty(n) {
+  var v = Number(n) || 0;
+  return v.toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:2});
+}
+
+// ── Page entry: route to picker or detail view ─────────────────────────
+function renderBudget() {
+  if (_bgProjectId) {
+    bgShowDetail();
+  } else {
+    bgShowPicker();
+  }
+}
+
+// Project picker: list all projects with budget status
+function bgShowPicker() {
+  g('bg-picker').style.display = '';
+  g('bg-detail').style.display = 'none';
+  g('bg-title').textContent = 'Budget';
+  g('bg-sub').textContent = 'Project budgets — upload bid price reports, generate Foundation CSV exports';
+
+  var projects = (db.projects || []).slice().sort(function(a,b){
+    return String(b.number || '').localeCompare(String(a.number || ''));
+  });
+  if (!projects.length) {
+    g('bg-picker').innerHTML = '<div class="card" style="text-align:center;padding:40px 20px">' +
+      '<div style="font-size:13px;color:#888">No projects yet. Create one from the Projects page.</div>' +
+    '</div>';
+    return;
+  }
+  // Index latest version per project
+  var byProj = {};
+  (db.projectBudgets || []).forEach(function(b){
+    var prev = byProj[b.projectId];
+    if (!prev || (b.version || 0) > (prev.version || 0)) byProj[b.projectId] = b;
+  });
+
+  g('bg-picker').innerHTML = '<div class="card">' +
+    '<div style="font-size:13px;color:#666;margin-bottom:12px">Select a project to view, edit, or upload its budget.</div>' +
+    '<table><thead><tr>' +
+      '<th style="width:120px">Project #</th>' +
+      '<th>Project name</th>' +
+      '<th>Customer</th>' +
+      '<th style="width:140px">Budget status</th>' +
+      '<th style="width:120px;text-align:right">Latest total</th>' +
+      '<th style="width:60px"></th>' +
+    '</tr></thead><tbody>' +
+    projects.map(function(p){
+      var c = getCust(p.customerId);
+      var b = byProj[p.id];
+      var statusHtml, totalHtml;
+      if (b) {
+        statusHtml = '<span style="color:#3B6D11;font-size:12px">v' + b.version + ' &middot; ' + bgFmtVerDate(b.createdAt) + '</span>';
+        var grand = (b.totals && b.totals.grand_total) || 0;
+        totalHtml = '<span style="color:var(--kmi);font-weight:600">$' + bgFmtMoney(grand) + '</span>';
+      } else {
+        statusHtml = '<span style="color:#888;font-size:12px">No budget</span>';
+        totalHtml  = '<span style="color:#ccc">—</span>';
+      }
+      return '<tr style="cursor:pointer" onclick="bgOpenProject(' + p.id + ')">' +
+        '<td style="font-weight:600">' + (p.number || '—') + '</td>' +
+        '<td>' + (p.name || '<span style="color:#aaa">—</span>') + '</td>' +
+        '<td style="font-size:12px;color:#666">' + (c.name || '—') + '</td>' +
+        '<td>' + statusHtml + '</td>' +
+        '<td style="text-align:right">' + totalHtml + '</td>' +
+        '<td style="text-align:right"><span style="color:var(--kmi);font-size:18px">›</span></td>' +
+      '</tr>';
+    }).join('') +
+    '</tbody></table></div>';
+}
+
+function bgFmtVerDate(iso) {
+  if (!iso) return '';
+  try {
+    var d = new Date(iso);
+    return (d.getMonth()+1) + '/' + d.getDate() + '/' + d.getFullYear();
+  } catch (e) { return ''; }
+}
+
+function bgOpenProject(projectId) {
+  if (!hasRead('view_project_budget')) {
+    alert('You do not have permission to view budgets.');
+    return;
+  }
+  _bgProjectId = projectId;
+  _bgWorking = null;
+  _bgExtractionResult = null;
+  _bgPendingPdfBytes = null;
+  _bgPendingPdfName = '';
+  _bgIsAppendMode = false;
+  // Load latest version (if any)
+  var bs = (db.projectBudgets || []).filter(function(b){ return b.projectId === projectId; });
+  bs.sort(function(a,b){ return (b.version || 0) - (a.version || 0); });
+  if (bs.length) {
+    _bgVersionId = bs[0].id;
+    _bgWorking = bgCloneVersionAsWorking(bs[0]);
+  } else {
+    _bgVersionId = null;
+  }
+  nav('budget');
+}
+
+function bgClose() {
+  if (_bgWorking && _bgWorking.dirty) {
+    if (!confirm('You have unsaved changes. Discard and return to project list?')) return;
+  }
+  _bgProjectId = null;
+  _bgVersionId = null;
+  _bgWorking = null;
+  _bgExtractionResult = null;
+  _bgPendingPdfBytes = null;
+  _bgPendingPdfName = '';
+  renderBudget();
+}
+
+// Build a working copy from a saved version (for editing without mutating
+// the saved row in db.projectBudgets).
+function bgCloneVersionAsWorking(version) {
+  return {
+    versionId:        version.id,
+    sourcePdfPath:    version.sourcePdfPath || '',
+    taxRate:          Number(version.taxRate) || 0,
+    totalSquareFeet:  (version.totals && version.totals.total_square_feet) || 0,
+    lines:            JSON.parse(JSON.stringify(version.lines || [])),
+    dirty:            false
+  };
+}
+
+// Build a fresh working copy from the budget template, used when no
+// budget exists yet for a project.
+function bgBuildWorkingFromTemplate() {
+  var tmpl = (db.budgetTemplate || []).slice().sort(function(a,b){
+    return (a.sortOrder || 0) - (b.sortOrder || 0);
+  });
+  return {
+    versionId:        null,
+    sourcePdfPath:    '',
+    taxRate:          0,
+    totalSquareFeet:  0,
+    lines: tmpl.map(function(t){
+      return {
+        sortOrder:       t.sortOrder || 0,
+        description:     t.description || '',
+        costCode:        t.costCode || '',
+        costClass:       t.costClass || '',
+        sourceType:      t.sourceType || 'manual',
+        sourceKey:       t.sourceKey || '',
+        amountNet:       0,
+        quantity:        0,
+        wasExtracted:    false,
+        manuallyEdited:  false
+      };
+    }),
+    dirty: false
+  };
+}
+
+// ── Detail view: budget table + toolbar ────────────────────────────────
+function bgShowDetail() {
+  g('bg-picker').style.display = 'none';
+  g('bg-detail').style.display = '';
+
+  var p = getProj(_bgProjectId);
+  if (!p) {
+    bgClose();
+    return;
+  }
+  g('bg-title').textContent = 'Budget — ' + (p.number || '') + (p.name ? ' · ' + p.name : '');
+  var c = getCust(p.customerId);
+  g('bg-sub').textContent = (c.name || 'Customer') + (p.contractAmount ? ' · Contract: ' + fmtC(p.contractAmount) : '');
+
+  bgRefreshVersionDropdown();
+  bgRefreshTable();
+  bgRefreshButtons();
+}
+
+function bgRefreshVersionDropdown() {
+  var sel = g('bg-version-select');
+  var info = g('bg-version-info');
+  var versions = (db.projectBudgets || []).filter(function(b){ return b.projectId === _bgProjectId; });
+  versions.sort(function(a,b){ return (b.version || 0) - (a.version || 0); });
+  if (!versions.length) {
+    sel.innerHTML = '<option value="">No saved versions</option>';
+    sel.disabled = true;
+    info.textContent = '';
+  } else {
+    sel.disabled = false;
+    sel.innerHTML = versions.map(function(v){
+      var u = getUser(v.createdBy);
+      var who = u ? (u.firstName + ' ' + u.lastName) : 'Unknown';
+      return '<option value="' + v.id + '"' + (v.id === _bgVersionId ? ' selected' : '') + '>v' + v.version + ' — ' + bgFmtVerDate(v.createdAt) + ' by ' + who + '</option>';
+    }).join('');
+    var current = versions.find(function(v){ return v.id === _bgVersionId; });
+    if (current) {
+      var u2 = getUser(current.createdBy);
+      var who2 = u2 ? (u2.firstName + ' ' + u2.lastName) : 'Unknown';
+      info.innerHTML = 'Viewing <strong>v' + current.version + '</strong> &middot; saved ' + bgFmtVerDate(current.createdAt) + ' by ' + who2;
+    } else {
+      info.textContent = '';
+    }
+  }
+  // Toggle the "View source PDF" button based on whether the current view
+  // has a stored PDF path.
+  var hasPdf = _bgWorking && _bgWorking.sourcePdfPath;
+  g('bg-view-pdf-btn').disabled = !hasPdf;
+}
+
+function bgLoadVersion(versionId) {
+  if (_bgWorking && _bgWorking.dirty) {
+    if (!confirm('You have unsaved changes. Switch to a different version and discard them?')) {
+      // restore selector to current
+      bgRefreshVersionDropdown();
+      return;
+    }
+  }
+  versionId = Number(versionId);
+  var v = (db.projectBudgets || []).find(function(b){ return b.id === versionId; });
+  if (!v) return;
+  _bgVersionId = versionId;
+  _bgWorking = bgCloneVersionAsWorking(v);
+  _bgExtractionResult = null;
+  _bgPendingPdfBytes = null;
+  _bgPendingPdfName = '';
+  _bgIsAppendMode = false;
+  bgShowDetail();
+}
+
+function bgRefreshButtons() {
+  var hasWorking = !!_bgWorking;
+  g('bg-meta').style.display       = hasWorking ? '' : 'none';
+  g('bg-table-card').style.display = hasWorking ? '' : 'none';
+  g('bg-empty').style.display      = hasWorking ? 'none' : '';
+  if (!hasWorking) return;
+
+  var canEdit = hasFull('edit_project_budget');
+  g('bg-tax-rate').value = _bgWorking.taxRate || 0;
+  g('bg-tax-rate').disabled = !canEdit;
+  g('bg-sqft').value = _bgWorking.totalSquareFeet || 0;
+  g('bg-sqft').disabled = !canEdit;
+  g('bg-save-btn').disabled = !canEdit || !_bgWorking.dirty;
+  g('bg-discard-btn').style.display = (canEdit && _bgWorking.dirty) ? '' : 'none';
+  g('bg-upload-btn').style.display = canEdit ? '' : 'none';
+}
+
+function bgMarkDirty() {
+  if (!_bgWorking) return;
+  _bgWorking.dirty = true;
+  // Capture sqft on every change
+  var sqftEl = g('bg-sqft');
+  if (sqftEl) _bgWorking.totalSquareFeet = parseFloat(sqftEl.value) || 0;
+  bgRefreshButtons();
+}
+
+function bgOnTaxRateChange() {
+  if (!_bgWorking) return;
+  _bgWorking.taxRate = parseFloat(g('bg-tax-rate').value) || 0;
+  _bgWorking.dirty = true;
+  bgRefreshTable();
+  bgRefreshButtons();
+}
+
+function bgDiscardChanges() {
+  if (!_bgWorking) return;
+  if (!confirm('Discard all unsaved changes?')) return;
+  if (_bgVersionId) {
+    var v = (db.projectBudgets || []).find(function(b){ return b.id === _bgVersionId; });
+    if (v) _bgWorking = bgCloneVersionAsWorking(v);
+  } else {
+    _bgWorking = null;
+  }
+  _bgExtractionResult = null;
+  _bgPendingPdfBytes = null;
+  _bgPendingPdfName = '';
+  _bgIsAppendMode = false;
+  g('bg-banner').style.display = 'none';
+  bgShowDetail();
+}
+
+// ── The editable budget table ──────────────────────────────────────────
+function bgRefreshTable() {
+  var el = g('bg-table');
+  if (!_bgWorking) { el.innerHTML = ''; return; }
+  var canEdit = hasFull('edit_project_budget');
+  var tax = (Number(_bgWorking.taxRate) || 0) / 100;
+
+  // Tax computed only on class 2 (Materials) lines
+  var totals = bgComputeTotals(_bgWorking.lines, tax);
+
+  var rows = _bgWorking.lines.slice().sort(function(a,b){
+    return (a.sortOrder||0) - (b.sortOrder||0);
+  }).map(function(l){
+    var idx = _bgWorking.lines.indexOf(l);
+    var isMat = String(l.costClass) === '2';
+    var taxAmt = isMat ? (Number(l.amountNet) || 0) * tax : 0;
+    var lineTotal = (Number(l.amountNet) || 0) + taxAmt;
+    var marker = '';
+    if (l.wasExtracted && l.manuallyEdited) {
+      marker = '<span title="Auto-extracted then edited" style="color:#9A7A2E;margin-left:6px">&#9998;</span>';
+    } else if (l.wasExtracted) {
+      marker = '<span title="Auto-extracted from PDF" style="color:#3B6D11;margin-left:6px">&#10003;</span>';
+    } else if (l.manuallyEdited) {
+      marker = '<span title="Manually entered" style="color:#666;margin-left:6px">&#9998;</span>';
+    }
+    var ccDesc = bgCostCodeDesc(l.costCode);
+    var clDesc = bgCostClassDesc(l.costClass);
+    return '<tr>' +
+      '<td style="color:#888;font-size:11px;text-align:right">' + (l.sortOrder || '') + '</td>' +
+      '<td style="font-weight:600">' + (l.description || '') + marker + '</td>' +
+      '<td><span title="' + (ccDesc || '') + '" style="font-family:monospace;font-size:12px">' + l.costCode + '</span></td>' +
+      '<td><span title="' + (clDesc || '') + '" style="font-family:monospace;font-size:12px">' + l.costClass + '</span></td>' +
+      '<td style="text-align:right"><input type="number" step="0.01" min="0" value="' + (Number(l.quantity) || 0) + '" style="width:80px;text-align:right;padding:3px;font-size:12px" ' + (canEdit ? '' : 'disabled') + ' onchange="bgEditLine(' + idx + ',\'quantity\',this.value)"></td>' +
+      '<td style="text-align:right"><input type="number" step="0.01" min="0" value="' + (Number(l.amountNet) || 0).toFixed(2) + '" style="width:120px;text-align:right;padding:3px;font-size:12px" ' + (canEdit ? '' : 'disabled') + ' onchange="bgEditLine(' + idx + ',\'amountNet\',this.value)"></td>' +
+      '<td style="text-align:right;font-size:12px;color:' + (isMat ? '#666' : '#ccc') + '">' + (isMat ? bgFmtMoney(taxAmt) : '—') + '</td>' +
+      '<td style="text-align:right;font-weight:600;font-size:12px">' + bgFmtMoney(lineTotal) + '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table style="font-size:12px"><thead><tr>' +
+      '<th style="width:32px;text-align:right">#</th>' +
+      '<th>Description</th>' +
+      '<th style="width:60px">Code</th>' +
+      '<th style="width:50px">Class</th>' +
+      '<th style="width:90px;text-align:right">Quantity</th>' +
+      '<th style="width:130px;text-align:right">Net amount</th>' +
+      '<th style="width:90px;text-align:right">Tax</th>' +
+      '<th style="width:110px;text-align:right">Total</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody><tfoot>' +
+      '<tr style="border-top:2px solid var(--kmi);background:#F8F6E6"><td colspan="5" style="text-align:right;font-weight:700">Net total</td><td style="text-align:right;font-weight:700">$' + bgFmtMoney(totals.net) + '</td><td style="text-align:right;font-weight:700">$' + bgFmtMoney(totals.tax) + '</td><td style="text-align:right;font-weight:700;color:var(--kmi);font-size:14px">$' + bgFmtMoney(totals.grand_total) + '</td></tr>' +
+    '</tfoot></table>';
+}
+
+function bgEditLine(idx, field, value) {
+  if (!_bgWorking) return;
+  if (!hasFull('edit_project_budget')) return;
+  var l = _bgWorking.lines[idx];
+  if (!l) return;
+  var num = parseFloat(value) || 0;
+  if (l[field] !== num) {
+    l[field] = num;
+    l.manuallyEdited = true;
+    _bgWorking.dirty = true;
+    bgRefreshTable();
+    bgRefreshButtons();
+  }
+}
+
+// Compute net / tax / grand total for the current working copy.
+function bgComputeTotals(lines, taxFraction) {
+  var net = 0;
+  var tax = 0;
+  (lines || []).forEach(function(l){
+    var amt = Number(l.amountNet) || 0;
+    net += amt;
+    if (String(l.costClass) === '2') tax += amt * (Number(taxFraction) || 0);
+  });
+  return { net: net, tax: tax, grand_total: net + tax };
+}
+
+function bgCostCodeDesc(code) {
+  var c = (db.costCodes || []).find(function(x){ return x.code === code; });
+  return c ? c.description : '';
+}
+function bgCostClassDesc(cls) {
+  var c = (db.costClasses || []).find(function(x){ return x.classNo === cls; });
+  return c ? c.description : '';
+}
+
+// ── PDF upload + extraction flow ───────────────────────────────────────
+function bgOnPdfChosen(evt) {
+  if (!hasFull('edit_project_budget')) {
+    alert('You do not have permission to edit budgets.');
+    evt.target.value = '';
+    return;
+  }
+  var file = evt.target.files && evt.target.files[0];
+  evt.target.value = '';
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) {
+    alert('PDF too large (max 10 MB).');
+    return;
+  }
+  if (!/\.pdf$/i.test(file.name)) {
+    alert('Please choose a PDF file.');
+    return;
+  }
+  // If a budget already exists for this project, prompt Replace / Append / Cancel
+  var hasExisting = (db.projectBudgets || []).some(function(b){ return b.projectId === _bgProjectId; });
+  if (hasExisting) {
+    bgShowReplaceAppendPrompt(file);
+  } else {
+    bgBeginExtraction(file, /*isAppend*/ false);
+  }
+}
+
+function bgShowReplaceAppendPrompt(file) {
+  var versions = (db.projectBudgets || []).filter(function(b){ return b.projectId === _bgProjectId; });
+  versions.sort(function(a,b){ return (b.version || 0) - (a.version || 0); });
+  var latest = versions[0];
+  var u = latest && getUser(latest.createdBy);
+  var who = u ? (u.firstName + ' ' + u.lastName) : 'Unknown';
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Existing budget detected</div>' +
+    '<div class="msb">This project already has a saved budget.</div>' +
+    '<div class="sb3" style="margin-bottom:14px">' +
+      '<div style="font-size:13px;line-height:1.8">' +
+        '<div><strong>Latest version:</strong> v' + (latest.version || 1) + ' &middot; saved ' + bgFmtVerDate(latest.createdAt) + ' by ' + who + '</div>' +
+        '<div><strong>New PDF:</strong> ' + file.name + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="sb3" style="margin-bottom:14px">' +
+      '<h4>How should the new PDF be applied?</h4>' +
+      '<div style="font-size:13px;line-height:1.6">' +
+        '<div style="margin-bottom:6px"><strong style="color:var(--kmi)">Replace</strong> &mdash; the new extraction becomes a fresh budget. The current version stays in version history.</div>' +
+        '<div><strong style="color:#9A7A2E">Append</strong> &mdash; new line items merge into the existing budget by cost code + class. Useful when a project has multiple bid price reports (e.g. base scope + alternate). Saved as a new version.</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn" style="color:#9A7A2E" onclick="closeModal();bgBeginExtractionFromPending(true)">Append &rarr;</button>' +
+      '<button class="btn btn-p" onclick="closeModal();bgBeginExtractionFromPending(false)">Replace &rarr;</button>' +
+    '</div>'
+  );
+  // stash the file for the chosen-path callback
+  _bgPendingPickerFile = file;
+}
+var _bgPendingPickerFile = null;
+function bgBeginExtractionFromPending(isAppend) {
+  var f = _bgPendingPickerFile;
+  _bgPendingPickerFile = null;
+  if (f) bgBeginExtraction(f, isAppend);
+}
+
+async function bgBeginExtraction(file, isAppend) {
+  _bgIsAppendMode = !!isAppend;
+  bgSetBanner('info', 'Reading PDF…');
+  // Read as base64
+  var b64;
+  try {
+    b64 = await bgFileToBase64(file);
+  } catch (e) {
+    bgSetBanner('error', 'Failed to read file: ' + (e && e.message ? e.message : String(e)));
+    return;
+  }
+  _bgPendingPdfBytes = b64;
+  _bgPendingPdfName  = file.name;
+  bgSetBanner('info', 'Extracting budget data from PDF… this usually takes 10–30 seconds.');
+
+  // Resolve creds
+  var creds = getSBCreds();
+  if ((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) {
+    creds = { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY };
+  }
+  if (!creds || !creds.url || !creds.key) {
+    bgSetBanner('error', 'Supabase not configured — cannot reach extraction service.');
+    return;
+  }
+  var fnUrl = normalizeSBUrl(creds.url) + '/functions/v1/extract-budget-from-pdf';
+
+  var resp, data;
+  try {
+    resp = await fetch(fnUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'apikey':        creds.key,
+        'Authorization': 'Bearer ' + creds.key
+      },
+      body: JSON.stringify({ pdf_base64: b64, project_id: _bgProjectId })
+    });
+    data = await resp.json();
+  } catch (e) {
+    bgSetBanner('error', 'Network error contacting extraction service: ' + (e && e.message ? e.message : String(e)));
+    return;
+  }
+  if (!resp.ok || !data || !data.ok) {
+    var msg = (data && data.error) || ('HTTP ' + resp.status);
+    if (data && data.detail) msg += ' (' + String(data.detail).slice(0, 200) + ')';
+    bgSetBanner('error', 'Extraction failed: ' + msg);
+    _bgPendingPdfBytes = null;
+    _bgPendingPdfName = '';
+    return;
+  }
+
+  _bgExtractionResult = data.data;
+  // Build (or merge into) the working copy
+  if (isAppend && _bgWorking) {
+    bgApplyExtractionToWorking(_bgWorking, data.data, /*append*/ true);
+  } else {
+    var fresh = bgBuildWorkingFromTemplate();
+    bgApplyExtractionToWorking(fresh, data.data, /*append*/ false);
+    _bgWorking = fresh;
+    _bgVersionId = null;  // unsaved working copy from this point
+  }
+  _bgWorking.dirty = true;
+  var warn = data.data.warning ? '<div style="margin-top:6px;color:#9A7A2E"><strong>PDF warning:</strong> ' + data.data.warning + '</div>' : '';
+  bgSetBanner('success',
+    'Extraction complete. ' + (_bgExtractionResult.classifications || []).length + ' classification(s) extracted. ' +
+    'Review the values below and click <strong>Save budget</strong> to commit.' + warn);
+  bgShowDetail();
+}
+
+function bgFileToBase64(file) {
+  return new Promise(function(resolve, reject){
+    var r = new FileReader();
+    r.onload = function() {
+      var s = String(r.result || '');
+      var idx = s.indexOf(',');
+      resolve(idx >= 0 ? s.slice(idx + 1) : s);
+    };
+    r.onerror = function() { reject(new Error('FileReader error')); };
+    r.readAsDataURL(file);
+  });
+}
+
+function bgSetBanner(kind, html) {
+  var el = g('bg-banner');
   if (!el) return;
-  var cc = (db.costCodes || []).length;
-  var cl = (db.costClasses || []).length;
-  var cf = (db.customersFoundation || []).length;
-  var bt = (db.budgetTemplate || []).length;
-  el.innerHTML =
-    '<strong>' + cc + '</strong> cost codes · ' +
-    '<strong>' + cl + '</strong> cost classes · ' +
-    '<strong>' + cf + '</strong> Foundation customers · ' +
-    '<strong>' + bt + '</strong> budget template lines';
+  var bg, fg, border;
+  if (kind === 'error')   { bg='#FDEBEB'; fg='#A32D2D'; border='#E24B4A'; }
+  else if (kind === 'success') { bg='#EAF3DE'; fg='#3B6D11'; border='#7A9F4A'; }
+  else                    { bg='#F8F6E6'; fg='#9A7A2E'; border='#C8A84B'; }
+  el.style.cssText = 'display:block;background:' + bg + ';color:' + fg + ';border:1px solid ' + border + ';border-radius:6px;padding:12px 16px;margin:12px 0;font-size:13px;line-height:1.5';
+  el.innerHTML = html;
+}
+
+// ── Map extraction → working budget lines ──────────────────────────────
+// This is the heart of the auto-population logic. Each template line has a
+// sourceType + sourceKey that tells us where to look in the extraction
+// payload.
+function bgApplyExtractionToWorking(working, extr, append) {
+  var split = db.budgetEquipmentSplit || {};
+  var conv  = db.budgetQtyConversions || {};
+
+  // Index extraction classifications by code for fast lookup
+  var classByCode = {};
+  (extr.classifications || []).forEach(function(c){ classByCode[String(c.code).toUpperCase()] = c; });
+
+  // For append: index existing working lines by costCode+costClass to merge.
+  var byCk = {};
+  if (append) {
+    working.lines.forEach(function(l){
+      byCk[l.costCode + '|' + l.costClass] = l;
+    });
+  }
+
+  // For each template line, compute the new value
+  (working.lines || []).forEach(function(line){
+    var newAmount = null;   // null = leave as-is (manual lines, etc.)
+    var newQty    = null;
+    switch (line.sourceType) {
+      case 'pdf_class_total': {
+        var cls = classByCode[String(line.sourceKey).toUpperCase()];
+        if (cls) {
+          newAmount = (Number(cls.mat_cost) || 0);
+          // Apply quantity conversions for Mortar / Wire / Grout
+          var rawQty = Number(cls.qty) || 0;
+          var key = String(line.sourceKey).toUpperCase();
+          if (key === 'MOR') {
+            newQty = (conv.mortar_cuft_per_bag && conv.mortar_cuft_per_bag > 0) ? rawQty / conv.mortar_cuft_per_bag : rawQty;
+          } else if (key === 'WIR') {
+            newQty = (conv.wire_lf_per_bundle && conv.wire_lf_per_bundle > 0) ? rawQty / conv.wire_lf_per_bundle : rawQty;
+          } else if (key === 'GRO') {
+            newQty = (conv.grout_cuft_per_bag && conv.grout_cuft_per_bag > 0) ? rawQty / conv.grout_cuft_per_bag : rawQty;
+          } else if (key === 'SCA') {
+            // Scaffolding maps to lay_cost (labor-side scaffold rental), not material
+            newAmount = (Number(cls.lay_cost) || 0);
+            newQty = rawQty;
+          } else if (key === 'CLE') {
+            // Veneer cleaning: also use lay_cost (subcontracted cleaning)
+            newAmount = (Number(cls.lay_cost) || 0);
+            newQty = rawQty;
+          } else {
+            newQty = rawQty;
+          }
+        } else {
+          newAmount = 0;
+          newQty = 0;
+        }
+        break;
+      }
+      case 'pdf_misc_breakdown': {
+        var k = line.sourceKey;
+        var mb = extr.misc_breakdown || {};
+        if (k === 'mobilization')   newAmount = Number(mb.mobilization)   || 0;
+        else if (k === 'caulking')  newAmount = Number(mb.caulking)       || 0;
+        else if (k === 'misc_materials') newAmount = Number(mb.misc_materials) || 0;
+        else newAmount = 0;
+        break;
+      }
+      case 'pdf_project_notes': {
+        var pn = extr.project_notes || {};
+        var mb2 = extr.misc_breakdown || {};
+        if (line.sourceKey === 'granite_materials') {
+          // Prefer Project Notes when present, fall back to Misc Sub-Total
+          newAmount = (Number(pn.granite_materials) > 0) ? Number(pn.granite_materials) : (Number(mb2.granite_pc) || 0);
+        } else if (line.sourceKey === 'precast_materials') {
+          newAmount = (Number(pn.precast_materials) > 0) ? Number(pn.precast_materials) : (Number(mb2.precast) || 0);
+        } else {
+          newAmount = 0;
+        }
+        break;
+      }
+      case 'equipment_split': {
+        var pct = Number(split[line.sourceKey]) || 0;
+        var eq = Number(extr.equipment_total) || 0;
+        newAmount = eq * pct / 100;
+        break;
+      }
+      case 'labor_sum': {
+        var lab = extr.labor || {};
+        newAmount = (Number(lab.crew_labor_cost) || 0) +
+                    (Number(lab.super_l)         || 0) +
+                    (Number(lab.cleanup_l)       || 0) +
+                    (Number(lab.wage_increase)   || 0);
+        newQty = Number(lab.total_hours) || 0;
+        break;
+      }
+      case 'tax_calc':
+      case 'manual':
+      default:
+        // Leave manual lines as zero on first extract; on append, leave whatever's there.
+        if (!append) newAmount = 0;
+        break;
+    }
+
+    if (newAmount !== null) {
+      if (append) {
+        // Sum into the existing line
+        line.amountNet = (Number(line.amountNet) || 0) + newAmount;
+      } else {
+        line.amountNet = newAmount;
+      }
+      line.wasExtracted = (line.sourceType !== 'manual');
+      line.manuallyEdited = false;
+    }
+    if (newQty !== null) {
+      if (append) {
+        line.quantity = (Number(line.quantity) || 0) + newQty;
+      } else {
+        line.quantity = newQty;
+      }
+    }
+  });
+
+  // Capture top-level scalars (only on first extract; append preserves existing)
+  if (!append) {
+    working.taxRate = Number(extr.tax_rate_percent) || 0;
+    working.totalSquareFeet = Number(extr.total_square_feet) || 0;
+  }
+}
+
+// ── Save budget (uploads PDF to storage, inserts new version row) ──────
+async function bgSaveBudget() {
+  if (!_bgWorking) return;
+  if (!hasFull('edit_project_budget')) {
+    alert('You do not have permission to save budgets.');
+    return;
+  }
+  if (!supabaseClient) {
+    alert('Supabase not connected. Please sync first.');
+    return;
+  }
+  var saveBtn = g('bg-save-btn');
+  var origLabel = saveBtn.textContent;
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving…';
+
+  try {
+    // 1) Determine next version number for this project
+    var existing = (db.projectBudgets || []).filter(function(b){ return b.projectId === _bgProjectId; });
+    var maxV = existing.reduce(function(m, b){ return Math.max(m, b.version || 0); }, 0);
+    var nextV = maxV + 1;
+
+    // 2) Upload pending PDF to storage (if we have one)
+    var pdfPath = _bgWorking.sourcePdfPath || null;
+    var newBudgetId = Date.now();
+    if (_bgPendingPdfBytes) {
+      pdfPath = _bgProjectId + '/' + newBudgetId + '.pdf';
+      var bin = bgBase64ToBytes(_bgPendingPdfBytes);
+      var up = await supabaseClient.storage.from('kmi-budget-pdfs')
+        .upload(pdfPath, bin, { contentType: 'application/pdf', upsert: false });
+      if (up && up.error) {
+        throw new Error('Storage upload failed: ' + up.error.message);
+      }
+    }
+
+    // 3) Build the row
+    var tax = (Number(_bgWorking.taxRate) || 0) / 100;
+    var totals = bgComputeTotals(_bgWorking.lines, tax);
+    totals.total_square_feet = _bgWorking.totalSquareFeet || 0;
+    var nowISO = new Date().toISOString();
+    var creator = _currentUser ? _currentUser.id : null;
+    var row = {
+      id:              newBudgetId,
+      projectId:       _bgProjectId,
+      version:         nextV,
+      createdAt:       nowISO,
+      createdBy:       creator,
+      sourcePdfPath:   pdfPath,
+      taxRate:         _bgWorking.taxRate || 0,
+      lines:           JSON.parse(JSON.stringify(_bgWorking.lines)),
+      totals:          totals,
+      notes:           _bgIsAppendMode ? 'Appended from ' + (_bgPendingPdfName || 'second PDF') : null
+    };
+
+    // 4) Insert into Supabase
+    var ins = await supabaseClient.from('kmi_project_budgets').insert(toSBProjBudget(row));
+    if (ins && ins.error) throw new Error('Database insert failed: ' + ins.error.message);
+
+    // 5) Update local state
+    db.projectBudgets = db.projectBudgets || [];
+    db.projectBudgets.push(row);
+    saveDB();
+    var pNum = getProj(_bgProjectId) ? getProj(_bgProjectId).number : _bgProjectId;
+    db.activity = db.activity || [];
+    db.activity.unshift({text: 'Saved budget v' + nextV + ' for project ' + pNum, type: 'budget', time: 'Just now'});
+
+    _bgVersionId = newBudgetId;
+    _bgWorking = bgCloneVersionAsWorking(row);
+    _bgExtractionResult = null;
+    _bgPendingPdfBytes = null;
+    _bgPendingPdfName = '';
+    _bgIsAppendMode = false;
+    bgSetBanner('success', 'Budget v' + nextV + ' saved.');
+    bgShowDetail();
+  } catch (e) {
+    console.error('bgSaveBudget error:', e);
+    bgSetBanner('error', 'Save failed: ' + (e && e.message ? e.message : String(e)));
+    saveBtn.disabled = false;
+    saveBtn.textContent = origLabel;
+  }
+}
+
+// Decode base64 → Uint8Array for storage upload
+function bgBase64ToBytes(b64) {
+  var bin = atob(b64);
+  var arr = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
+
+// ── View source PDF (signed URL) ───────────────────────────────────────
+async function bgViewSourcePDF() {
+  if (!_bgWorking || !_bgWorking.sourcePdfPath) return;
+  if (!supabaseClient) {
+    alert('Supabase not connected.');
+    return;
+  }
+  try {
+    var r = await supabaseClient.storage.from('kmi-budget-pdfs')
+      .createSignedUrl(_bgWorking.sourcePdfPath, 300);  // 5 min
+    if (r && r.error) throw new Error(r.error.message);
+    if (r && r.data && r.data.signedUrl) {
+      window.open(r.data.signedUrl, '_blank');
+    } else {
+      alert('Could not generate a download link for the source PDF.');
+    }
+  } catch (e) {
+    alert('Failed to load PDF: ' + (e && e.message ? e.message : String(e)));
+  }
 }
 
 function showModal(html) { g('modal-body').innerHTML = html; g('overlay').classList.add('show'); }
@@ -4921,6 +5737,7 @@ function viewProject(id) {
     '<div class="mf">' +
       '<button class="btn" onclick="closeModal()">Close</button>' +
       '<button class="btn" onclick="closeModal();editProject(' + p.id + ')">✎ Edit</button>' +
+      '<button class="btn" onclick="closeModal();bgOpenProject(' + p.id + ')">$ Budget</button>' +
       '<button class="btn" style="color:#A32D2D" onclick="closeModal();deleteProject(' + p.id + ')">Delete</button>' +
     '</div>';
   showModal(html);
@@ -7551,7 +8368,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudgetPlaceholder};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
