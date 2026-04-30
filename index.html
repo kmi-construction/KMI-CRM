@@ -797,6 +797,21 @@ textarea{resize:vertical;min-height:72px}
       </div>
     </div>
   </div>
+
+  <!-- ── Auto-routing rules ─────────────────────────────────────────── -->
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Auto-routing rules</span>
+      <button class="btn btn-sm btn-p" onclick="bgShowAddRouteModal()">+ Add rule</button>
+    </div>
+    <div style="font-size:12px;color:#666;margin-bottom:12px;line-height:1.5">
+      When a PDF extraction includes an item that doesn't match a configured budget template line, these rules try to route it to a known cost code/class.
+      Items that match a rule are added to the budget automatically; items that don't match appear in the unmapped panel for manual review.
+      <br><br>
+      Two match types: <strong>classification</strong> matches a 2-3 letter classification code on the PDF (DEM, PA, etc.); <strong>misc_other</strong> matches a case-insensitive substring in the misc-line label (e.g. matching "sealant" catches "Joint Sealants").
+    </div>
+    <div id="t-auto-routes"></div>
+  </div>
 </div>
 
 <!-- BUDGET (Chunk 1: placeholder. Full UI lands in Chunks 2 & 3.) -->
@@ -1035,6 +1050,17 @@ var DB_DEFAULTS = {
   projectBudgets:      [],   // { id, projectId, version, createdAt, createdBy, sourcePdfPath, taxRate, lines, totals, notes }
   budgetEquipmentSplit: { class_5: 46, class_6: 20, class_10: 30, class_11: 4 },
   budgetQtyConversions: { mortar_cuft_per_bag: 28, wire_lf_per_bundle: 500, grout_cuft_per_bag: 22 },
+  // Auto-routing rules: when an extracted PDF item doesn't match a
+  // configured template line, these rules try to route it to a known
+  // cost code/class. Editable on the Templates page. Defaults match
+  // KMI's most common patterns: DEM/PA classifications go to 4000/2,
+  // anything labeled "sealant" or "firestop" goes to 4300/3.
+  budgetAutoRoutes: [
+    { id:'rt_dem_class', match:{ type:'classification', code:'DEM' }, route:{ costCode:'4000', costClass:'2', taxable:true  }, label:'Masonry Demolition (DEM) → 4000/2' },
+    { id:'rt_pa_class',  match:{ type:'classification', code:'PA'  }, route:{ costCode:'4000', costClass:'2', taxable:true  }, label:'Patching (PA) → 4000/2' },
+    { id:'rt_sealant',   match:{ type:'misc_other', labelContains:'sealant'  }, route:{ costCode:'4300', costClass:'3', taxable:false }, label:'Joint Sealants → 4300/3' },
+    { id:'rt_firestop',  match:{ type:'misc_other', labelContains:'firestop' }, route:{ costCode:'4300', costClass:'3', taxable:false }, label:'Firestopping → 4300/3' }
+  ],
   companyTypes: ['General Contractor','Commercial','Developer','Civil Engineering','Industrial','Residential'],
   projectTypes: ['Foundation','Structural Steel','Structural Concrete','Masonry','Concrete','Earthwork','Site Utilities','Shoring & Excavation','Demolition','Other'],
   projectRoles: ['Assistant Project Manager','Project Engineer','Project Coordinator','Superintendent','Project Foreman','Project Manager','Sr. Project Manager','Project Executive'],
@@ -1108,6 +1134,7 @@ function loadDB() {
         projectBudgets:      p.projectBudgets      || [],
         budgetEquipmentSplit: p.budgetEquipmentSplit || JSON.parse(JSON.stringify(DB_DEFAULTS.budgetEquipmentSplit)),
         budgetQtyConversions: p.budgetQtyConversions || JSON.parse(JSON.stringify(DB_DEFAULTS.budgetQtyConversions)),
+        budgetAutoRoutes:     Array.isArray(p.budgetAutoRoutes) ? p.budgetAutoRoutes : JSON.parse(JSON.stringify(DB_DEFAULTS.budgetAutoRoutes)),
         stdClar:      p.stdClar      || DB_DEFAULTS.stdClar,
         projClar:     p.projClar     || DB_DEFAULTS.projClar,
         exclusions:   p.exclusions   || DB_DEFAULTS.exclusions,
@@ -1988,7 +2015,9 @@ function bgCloneVersionAsWorking(version) {
     // Backfill fields added in chunk 2.5 — older saved versions won't have these.
     if (!copy.id) copy.id = bgNewLineId(i);
     if (typeof copy.taxable !== 'boolean') {
-      copy.taxable = String(copy.costClass) === '2';
+      // Match the new template default: pdf_class_total lines default
+      // taxable, plus class-2 lines.
+      copy.taxable = (copy.sourceType === 'pdf_class_total') || (String(copy.costClass) === '2');
     }
     return copy;
   });
@@ -2015,6 +2044,17 @@ function bgBuildWorkingFromTemplate() {
     taxRate:          0,
     totalSquareFeet:  0,
     lines: tmpl.map(function(t, i){
+      // Default taxable: any line that pulls a value from a PDF Class
+      // Total is taxable by default, because the PDF's Material Costs
+      // figure (which drives the tax calculation) sums mat_cost across
+      // ALL classifications regardless of which Foundation cost class
+      // they end up in. This makes the budget grand total match the PDF
+      // grand total without manual per-line tweaks. User can override
+      // per line via the Tax? checkbox.
+      // Class 2 (Materials) lines that AREN'T from a class total (e.g.
+      // a manually-entered Sign Base & Lintels line) also default to
+      // taxable, matching the conventional rule.
+      var defaultTaxable = (t.sourceType === 'pdf_class_total') || (String(t.costClass) === '2');
       return {
         id:              bgNewLineId(i),
         sortOrder:       t.sortOrder || (i+1),
@@ -2025,9 +2065,7 @@ function bgBuildWorkingFromTemplate() {
         sourceKey:       t.sourceKey || '',
         amountNet:       0,
         quantity:        0,
-        // class 2 (Materials) defaults taxable; everything else defaults non-taxable.
-        // User can flip per line.
-        taxable:         String(t.costClass) === '2',
+        taxable:         defaultTaxable,
         wasExtracted:    false,
         manuallyEdited:  false
       };
@@ -2458,12 +2496,18 @@ function bgAddUnmappedToLines(idx) {
   var allClasses = (db.costClasses || []).filter(function(c){ return c.active !== false; })
     .sort(function(a,b){ return Number(a.classNo) - Number(b.classNo); });
 
+  // Defaults for the picker: 4000 cost code, class 2. Per Mike's chunk
+  // 2.6 spec, anything that didn't auto-route is still most likely a
+  // material under code 4000, so this is the path of least resistance.
+  var defaultCode  = '4000';
+  var defaultClass = '2';
   var codeOpts = '<option value="">— choose —</option>' + budgetableCodes.map(function(c){
-    return '<option value="' + bgEsc(c.code) + '">' + bgEsc(c.code) + ' — ' + bgEsc(c.description || '') + '</option>';
+    var sel = (String(c.code) === defaultCode) ? ' selected' : '';
+    return '<option value="' + bgEsc(c.code) + '"' + sel + '>' + bgEsc(c.code) + ' — ' + bgEsc(c.description || '') + '</option>';
   }).join('');
   var classOpts = '<option value="">— choose —</option>' + allClasses.map(function(c){
-    var pre = (String(c.classNo) === '2') ? ' selected' : '';
-    return '<option value="' + bgEsc(c.classNo) + '"' + pre + '>' + bgEsc(c.classNo) + ' — ' + bgEsc(c.description || '') + '</option>';
+    var sel = (String(c.classNo) === defaultClass) ? ' selected' : '';
+    return '<option value="' + bgEsc(c.classNo) + '"' + sel + '>' + bgEsc(c.classNo) + ' — ' + bgEsc(c.description || '') + '</option>';
   }).join('');
 
   showModal(
@@ -2723,6 +2767,7 @@ function bgSetBanner(kind, html) {
 function bgApplyExtractionToWorking(working, extr, append) {
   var split = db.budgetEquipmentSplit || {};
   var conv  = db.budgetQtyConversions || {};
+  var routes = Array.isArray(db.budgetAutoRoutes) ? db.budgetAutoRoutes : [];
 
   // Index extraction classifications by code for fast lookup
   var classByCode = {};
@@ -2733,14 +2778,6 @@ function bgApplyExtractionToWorking(working, extr, append) {
   var consumedClassCodes = {};
   // Misc breakdown keys we recognize via template:
   var consumedMiscKeys   = {};
-
-  // For append: index existing working lines by costCode+costClass to merge.
-  var byCk = {};
-  if (append) {
-    working.lines.forEach(function(l){
-      byCk[l.costCode + '|' + l.costClass] = l;
-    });
-  }
 
   // For each template line, compute the new value
   (working.lines || []).forEach(function(line){
@@ -2773,9 +2810,18 @@ function bgApplyExtractionToWorking(working, extr, append) {
       case 'pdf_misc_breakdown': {
         var k = line.sourceKey;
         var mb = extr.misc_breakdown || {};
+        // misc_taxable_costs (formerly misc_materials) is the standalone
+        // "Misc. Taxable Costs" line, NOT the rolled-up "Material + Tax"
+        // subtotal. The previous behavior summed the subtotal AND the
+        // individual classifications, double-counting all material costs.
         if (k === 'mobilization')   { newAmount = Number(mb.mobilization)   || 0; consumedMiscKeys.mobilization = true; }
         else if (k === 'caulking')  { newAmount = Number(mb.caulking)       || 0; consumedMiscKeys.caulking = true; }
-        else if (k === 'misc_materials') { newAmount = Number(mb.misc_materials) || 0; consumedMiscKeys.misc_materials = true; }
+        else if (k === 'misc_materials' || k === 'misc_taxable_costs') {
+          // Tolerate either source key — older template lines may say "misc_materials".
+          // Always pull from the new misc_taxable_costs field.
+          newAmount = Number(mb.misc_taxable_costs) || 0;
+          consumedMiscKeys.misc_taxable_costs = true;
+        }
         else newAmount = 0;
         break;
       }
@@ -2836,51 +2882,140 @@ function bgApplyExtractionToWorking(working, extr, append) {
     }
   });
 
-  // ── Detect unmapped items ────────────────────────────────────────────
-  // Walk through the extraction looking for things no template line consumed.
-  // We populate working.unmapped[] with { label, detail, sourceLabel,
-  // sourceType, sourceKey, amount, quantity }.
+  // ── Auto-route + unmapped detection ──────────────────────────────────
+  // Walk the extraction looking for items no template line consumed. For
+  // each, check the auto-route rules:
+  //   - if matched → add a new line directly to the budget
+  //   - if not matched → push to working.unmapped[] for the panel
   var unmapped = [];
-  // Unmapped classifications: any that have a non-zero mat_cost and weren't
-  // consumed. Per Mike's rule (Q4A), we surface mat_cost only — lay_cost is
-  // intentionally not surfaced as a separate unmapped item.
+
+  // Helper: try to apply auto-routes to an item. Returns true if routed.
+  function tryAutoRoute(item) {
+    // item: { matchType:'classification'|'misc_other', code?:string, label?:string,
+    //         description, amount, quantity, sourceType, sourceKey, sourceLabel }
+    var rule = bgFindAutoRoute(routes, item);
+    if (!rule) return false;
+    bgAddLine({
+      description:    item.description || item.label || 'Auto-routed',
+      costCode:       rule.route.costCode,
+      costClass:      rule.route.costClass,
+      taxable:        !!rule.route.taxable,
+      amountNet:      Number(item.amount)   || 0,
+      quantity:       Number(item.quantity) || 0,
+      sourceType:     item.sourceType,
+      sourceKey:      item.sourceKey || '',
+      wasExtracted:   true
+    });
+    return true;
+  }
+
+  // Unmapped classifications: any with non-zero mat_cost that no template line consumed.
+  // Per Mike's rule, surface mat_cost only — lay_cost is intentionally not surfaced.
   (extr.classifications || []).forEach(function(c){
     var key = String(c.code).toUpperCase();
     if (consumedClassCodes[key]) return;
     var matCost = Number(c.mat_cost) || 0;
-    if (matCost <= 0.005) return;  // skip empty classifications
-    unmapped.push({
+    if (matCost <= 0.005) return;
+    var item = {
+      matchType:    'classification',
+      code:         key,
       label:        (c.name || c.code) + ' (material)',
+      description:  (c.name || c.code),
       detail:       'Classification ' + c.code + (c.unit ? ' · ' + bgFmtQty(c.qty) + ' ' + c.unit : ''),
       sourceLabel:  'PDF Class Totals — ' + c.code,
       sourceType:   'pdf_class_total',
       sourceKey:    key,
       amount:       matCost,
       quantity:     Number(c.qty) || 0
-    });
+    };
+    if (!tryAutoRoute(item)) {
+      unmapped.push({
+        label:       item.label,
+        detail:      item.detail,
+        sourceLabel: item.sourceLabel,
+        sourceType:  item.sourceType,
+        sourceKey:   item.sourceKey,
+        amount:      item.amount,
+        quantity:    item.quantity
+      });
+    }
   });
-  // Unmapped misc breakdown items
+
+  // Unmapped well-known misc breakdown items (anything not consumed by template).
+  // Note: misc_taxable_costs is handled like the others — if no template line
+  // pulls it, surface it as unmapped (or auto-route if a rule exists).
   var mb3 = extr.misc_breakdown || {};
-  ['mobilization','caulking','granite_pc','precast','misc_materials'].forEach(function(k){
+  ['mobilization','caulking','granite_pc','precast','misc_taxable_costs'].forEach(function(k){
     if (consumedMiscKeys[k]) return;
     var v = Number(mb3[k]) || 0;
     if (v <= 0.005) return;
     var labelMap = {
-      mobilization:   'Mobilization',
-      caulking:       'Caulking',
-      granite_pc:     'Granite/PC',
-      precast:        'Precast',
-      misc_materials: 'Miscellaneous Materials + Tax'
+      mobilization:        'Mobilization',
+      caulking:            'Caulking',
+      granite_pc:          'Granite/PC',
+      precast:             'Precast',
+      misc_taxable_costs:  'Misc. Taxable Costs'
     };
-    unmapped.push({
-      label:        labelMap[k] || k,
-      detail:       '',
-      sourceLabel:  'PDF Misc. Sub-Total',
+    var lbl = labelMap[k] || k;
+    var item = {
+      matchType:   'misc_other',
+      label:       lbl,
+      description: lbl,
+      sourceLabel: 'PDF Misc. Sub-Total',
+      sourceType:  'pdf_misc_breakdown',
+      sourceKey:   k,
+      amount:      v,
+      quantity:    0
+    };
+    if (!tryAutoRoute(item)) {
+      unmapped.push({
+        label:       lbl,
+        detail:      '',
+        sourceLabel: item.sourceLabel,
+        sourceType:  item.sourceType,
+        sourceKey:   item.sourceKey,
+        amount:      v,
+        quantity:    0
+      });
+    }
+  });
+
+  // Catch-all misc_other_items (everything in Misc Sub-Total that isn't
+  // covered by a fixed schema slot). This is the new bucket for things
+  // like Joint Sealants and Firestopping.
+  (extr.misc_other_items || []).forEach(function(o){
+    var lbl = String(o.label || '').trim();
+    var amt = Number(o.amount) || 0;
+    if (!lbl || amt <= 0.005) return;
+    // Defensive: skip well-known labels that should have been pulled into
+    // misc_breakdown but somehow ended up here too. We don't want a
+    // duplicate "Mobilization" line if both fields landed values.
+    var lower = lbl.toLowerCase();
+    if (/\b(mobilization|caulking|granite\b|precast|super[. ]+\d+%|clean.?up\b.*%|wage\s+increase)/i.test(lower)) {
+      // Already handled above (or intentionally rolled into labor). Skip.
+      return;
+    }
+    var item = {
+      matchType:    'misc_other',
+      label:        lbl,
+      description:  lbl,
+      sourceLabel:  'PDF Misc. Sub-Total — ' + lbl,
       sourceType:   'pdf_misc_breakdown',
-      sourceKey:    k,
-      amount:       v,
+      sourceKey:    'misc_other:' + lower.replace(/[^a-z0-9]+/g, '_'),
+      amount:       amt,
       quantity:     0
-    });
+    };
+    if (!tryAutoRoute(item)) {
+      unmapped.push({
+        label:       lbl,
+        detail:      '',
+        sourceLabel: item.sourceLabel,
+        sourceType:  item.sourceType,
+        sourceKey:   item.sourceKey,
+        amount:      amt,
+        quantity:    0
+      });
+    }
   });
 
   // On append, prepend to existing unmapped (so old entries survive
@@ -2896,6 +3031,29 @@ function bgApplyExtractionToWorking(working, extr, append) {
     working.taxRate = Number(extr.tax_rate_percent) || 0;
     working.totalSquareFeet = Number(extr.total_square_feet) || 0;
   }
+}
+
+// Find the first matching auto-route rule for an extracted item.
+// Returns the rule object, or null if none match.
+function bgFindAutoRoute(rules, item) {
+  if (!Array.isArray(rules) || !rules.length) return null;
+  for (var i = 0; i < rules.length; i++) {
+    var r = rules[i];
+    if (!r || !r.match || !r.route) continue;
+    var m = r.match;
+    if (m.type === 'classification' && item.matchType === 'classification') {
+      // Match by code (case-insensitive)
+      var ruleCode = String(m.code || '').toUpperCase().trim();
+      var itemCode = String(item.code || '').toUpperCase().trim();
+      if (ruleCode && ruleCode === itemCode) return r;
+    } else if (m.type === 'misc_other' && item.matchType === 'misc_other') {
+      // Match by case-insensitive substring on label
+      var needle = String(m.labelContains || '').toLowerCase().trim();
+      var hay = String(item.label || '').toLowerCase();
+      if (needle && hay.indexOf(needle) !== -1) return r;
+    }
+  }
+  return null;
 }
 
 // ── Save budget (uploads PDF to storage, inserts new version row) ──────
@@ -6547,6 +6705,7 @@ function renderTemplates() {
   renderFoundationMasterStatus();
   renderBudgetTemplateTable();
   renderBudgetSettingsForms();
+  renderAutoRoutes();
 }
 
 // ── Foundation master data status indicators on Templates page ──────────
@@ -6677,6 +6836,196 @@ function saveQtyConversions() {
       .upsert({key:'budgetQtyConversions', value:next})
       .then(function(r){ if (r && r.error) console.warn('budgetQtyConversions sync error:', r.error.message); });
   }
+}
+
+// ── Auto-routing rules editor (Templates page) ──────────────────────────
+function renderAutoRoutes() {
+  var el = g('t-auto-routes');
+  if (!el) return;
+  var rules = Array.isArray(db.budgetAutoRoutes) ? db.budgetAutoRoutes : [];
+  if (!rules.length) {
+    el.innerHTML = '<div style="padding:16px;color:#888;font-size:12px;text-align:center;background:#FAFAFA;border-radius:6px">No auto-routing rules. Click <strong>+ Add rule</strong> to create one.</div>';
+    return;
+  }
+  el.innerHTML =
+    '<table style="font-size:12px"><thead><tr>' +
+      '<th>Match</th>' +
+      '<th>Routes to</th>' +
+      '<th style="width:80px;text-align:center">Taxable</th>' +
+      '<th style="width:160px"></th>' +
+    '</tr></thead><tbody>' +
+    rules.map(function(r, i){
+      var matchTxt;
+      if (r.match && r.match.type === 'classification') {
+        matchTxt = '<span style="font-family:monospace;background:#EEF;padding:2px 6px;border-radius:3px;font-size:11px">classification</span> code = <strong>' + bgEsc(r.match.code || '') + '</strong>';
+      } else if (r.match && r.match.type === 'misc_other') {
+        matchTxt = '<span style="font-family:monospace;background:#EFE;padding:2px 6px;border-radius:3px;font-size:11px">misc_other</span> label contains <strong>"' + bgEsc(r.match.labelContains || '') + '"</strong>';
+      } else {
+        matchTxt = '<em style="color:#aaa">invalid match</em>';
+      }
+      var ccDesc = bgCostCodeDesc((r.route && r.route.costCode) || '');
+      var clDesc = bgCostClassDesc((r.route && r.route.costClass) || '');
+      var routeTxt = '<strong>' + bgEsc((r.route && r.route.costCode) || '') + '</strong>' +
+                     (ccDesc ? ' <span style="color:#888">' + bgEsc(ccDesc) + '</span>' : '') +
+                     ' / <strong>' + bgEsc((r.route && r.route.costClass) || '') + '</strong>' +
+                     (clDesc ? ' <span style="color:#888">' + bgEsc(clDesc) + '</span>' : '');
+      return '<tr>' +
+        '<td>' + matchTxt + '</td>' +
+        '<td>' + routeTxt + '</td>' +
+        '<td style="text-align:center">' + (r.route && r.route.taxable ? '<span style="color:#3B6D11">&#10003;</span>' : '<span style="color:#aaa">—</span>') + '</td>' +
+        '<td style="text-align:right">' +
+          '<button class="btn btn-sm" onclick="bgEditRoute(\'' + bgEsc(r.id || '') + '\')">Edit</button> ' +
+          '<button class="btn btn-sm" onclick="bgDeleteRoute(\'' + bgEsc(r.id || '') + '\')" style="color:#A32D2D">Remove</button>' +
+        '</td>' +
+      '</tr>';
+    }).join('') +
+    '</tbody></table>';
+}
+
+function bgShowAddRouteModal() {
+  if (!requireFull('templates', 'edit auto-routing rules')) return;
+  bgShowRouteModal(null);
+}
+
+function bgEditRoute(ruleId) {
+  if (!requireFull('templates', 'edit auto-routing rules')) return;
+  var rules = Array.isArray(db.budgetAutoRoutes) ? db.budgetAutoRoutes : [];
+  var r = rules.find(function(x){ return x.id === ruleId; });
+  if (!r) return;
+  bgShowRouteModal(r);
+}
+
+function bgShowRouteModal(rule) {
+  var isEdit = !!rule;
+  var matchType = (rule && rule.match && rule.match.type) || 'classification';
+  var matchCode = (rule && rule.match && rule.match.code) || '';
+  var matchLabel = (rule && rule.match && rule.match.labelContains) || '';
+  var routeCode = (rule && rule.route && rule.route.costCode) || '4000';
+  var routeClass = (rule && rule.route && rule.route.costClass) || '2';
+  var routeTax = !!(rule && rule.route && rule.route.taxable);
+
+  var budgetableCodes = (db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+    .sort(function(a,b){ return String(a.code).localeCompare(String(b.code)); });
+  var allClasses = (db.costClasses || []).filter(function(c){ return c.active !== false; })
+    .sort(function(a,b){ return Number(a.classNo) - Number(b.classNo); });
+
+  var codeOpts = budgetableCodes.map(function(c){
+    var sel = (String(c.code) === routeCode) ? ' selected' : '';
+    return '<option value="' + bgEsc(c.code) + '"' + sel + '>' + bgEsc(c.code) + ' — ' + bgEsc(c.description || '') + '</option>';
+  }).join('');
+  var classOpts = allClasses.map(function(c){
+    var sel = (String(c.classNo) === String(routeClass)) ? ' selected' : '';
+    return '<option value="' + bgEsc(c.classNo) + '"' + sel + '>' + bgEsc(c.classNo) + ' — ' + bgEsc(c.description || '') + '</option>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">' + (isEdit ? 'Edit auto-routing rule' : 'Add auto-routing rule') + '</div>' +
+    '<div class="msb">When an extracted item matches, route it to the chosen cost code/class.</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>Match type</label>' +
+        '<select id="ar-type" onchange="bgRouteModalToggleFields()">' +
+          '<option value="classification"' + (matchType==='classification'?' selected':'') + '>Classification (3-letter PDF code)</option>' +
+          '<option value="misc_other"' + (matchType==='misc_other'?' selected':'') + '>Misc-other (substring of misc-line label)</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="fgr full" id="ar-code-row" style="display:' + (matchType==='classification'?'':'none') + '">' +
+        '<label>Classification code</label>' +
+        '<input type="text" id="ar-code" value="' + bgEsc(matchCode) + '" placeholder="e.g. DEM, PA, BRI" maxlength="5">' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Case-insensitive exact match.</div>' +
+      '</div>' +
+      '<div class="fgr full" id="ar-label-row" style="display:' + (matchType==='misc_other'?'':'none') + '">' +
+        '<label>Label contains (substring)</label>' +
+        '<input type="text" id="ar-label" value="' + bgEsc(matchLabel) + '" placeholder="e.g. sealant, firestop">' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Case-insensitive. A misc-line whose label contains this text will match.</div>' +
+      '</div>' +
+      '<div class="fgr"><label>Route to cost code</label><select id="ar-route-code">' + codeOpts + '</select></div>' +
+      '<div class="fgr"><label>Route to cost class</label><select id="ar-route-class">' + classOpts + '</select></div>' +
+      '<div class="fgr full" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="ar-taxable"' + (routeTax?' checked':'') + '><label for="ar-taxable" style="margin:0;cursor:pointer">Apply sales tax to this line</label></div>' +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="bgSaveRoute(\'' + (isEdit ? bgEsc(rule.id) : '') + '\')">' + (isEdit ? 'Save changes' : 'Add rule') + '</button>' +
+    '</div>'
+  );
+}
+
+function bgRouteModalToggleFields() {
+  var type = g('ar-type').value;
+  g('ar-code-row').style.display  = (type === 'classification') ? '' : 'none';
+  g('ar-label-row').style.display = (type === 'misc_other')     ? '' : 'none';
+}
+
+function bgSaveRoute(ruleId) {
+  if (!requireFull('templates', 'edit auto-routing rules')) return;
+  var type       = g('ar-type').value;
+  var matchCode  = (g('ar-code').value || '').trim().toUpperCase();
+  var matchLabel = (g('ar-label').value || '').trim();
+  var routeCode  = g('ar-route-code').value;
+  var routeClass = g('ar-route-class').value;
+  var routeTax   = !!g('ar-taxable').checked;
+
+  if (type === 'classification' && !matchCode) {
+    alert('Please enter a classification code.');
+    return;
+  }
+  if (type === 'misc_other' && !matchLabel) {
+    alert('Please enter a label substring to match.');
+    return;
+  }
+  if (!routeCode || !routeClass) {
+    alert('Please choose a cost code and cost class.');
+    return;
+  }
+
+  var rules = Array.isArray(db.budgetAutoRoutes) ? db.budgetAutoRoutes.slice() : [];
+  var labelTxt;
+  if (type === 'classification') {
+    labelTxt = matchCode + ' → ' + routeCode + '/' + routeClass;
+  } else {
+    labelTxt = '"' + matchLabel + '" → ' + routeCode + '/' + routeClass;
+  }
+  var newRule = {
+    id:    ruleId || ('rt_' + Date.now().toString(36)),
+    match: type === 'classification'
+              ? { type:'classification', code: matchCode }
+              : { type:'misc_other',     labelContains: matchLabel },
+    route: { costCode: routeCode, costClass: routeClass, taxable: routeTax },
+    label: labelTxt
+  };
+
+  if (ruleId) {
+    var idx = rules.findIndex(function(r){ return r.id === ruleId; });
+    if (idx >= 0) rules[idx] = newRule;
+    else rules.push(newRule);
+  } else {
+    rules.push(newRule);
+  }
+  db.budgetAutoRoutes = rules;
+  saveDB();
+  if (supabaseClient) {
+    supabaseClient.from('kmi_settings')
+      .upsert({key:'budgetAutoRoutes', value:rules})
+      .then(function(r){ if (r && r.error) console.warn('budgetAutoRoutes sync error:', r.error.message); });
+  }
+  closeModal();
+  renderAutoRoutes();
+}
+
+function bgDeleteRoute(ruleId) {
+  if (!requireFull('templates', 'edit auto-routing rules')) return;
+  var rules = Array.isArray(db.budgetAutoRoutes) ? db.budgetAutoRoutes : [];
+  var r = rules.find(function(x){ return x.id === ruleId; });
+  if (!r) return;
+  if (!confirm('Remove this auto-routing rule?\n\n  ' + (r.label || '(no label)') + '\n\nFuture extractions will surface matching items in the unmapped panel instead.')) return;
+  db.budgetAutoRoutes = rules.filter(function(x){ return x.id !== ruleId; });
+  saveDB();
+  if (supabaseClient) {
+    supabaseClient.from('kmi_settings')
+      .upsert({key:'budgetAutoRoutes', value:db.budgetAutoRoutes})
+      .then(function(r){ if (r && r.error) console.warn('budgetAutoRoutes sync error:', r.error.message); });
+  }
+  renderAutoRoutes();
 }
 
 // ── Foundation CSV import ───────────────────────────────────────────────
@@ -8592,7 +8941,8 @@ async function pushToSupabase() {
       {key:'vendorTypes',  value:db.vendorTypes},
       {key:'clarGroups',   value:db.clarGroups},
       {key:'budgetEquipmentSplit', value:db.budgetEquipmentSplit},
-      {key:'budgetQtyConversions', value:db.budgetQtyConversions}
+      {key:'budgetQtyConversions', value:db.budgetQtyConversions},
+      {key:'budgetAutoRoutes',     value:db.budgetAutoRoutes}
     ];
     var r = await supabaseClient.from('kmi_settings').upsert(settingsRows);
     if (r.error) errs.push('settings: ' + r.error.message);
@@ -8731,7 +9081,7 @@ async function pullFromSupabase() {
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
                                 'laborRates','laborRateSets',
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
-                                'budgetEquipmentSplit','budgetQtyConversions',
+                                'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
                                 'anthropic_api_key'];
     (settings.data || []).forEach(function(row) {
       if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
