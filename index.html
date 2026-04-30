@@ -2396,12 +2396,32 @@ function bgMoveLine(lid, dir) {
 }
 
 // Add a new manual line at the bottom of the budget.
+// User-facing add-line action (button on the budget table). Operates on
+// the currently-displayed working copy and re-renders.
 function bgAddLine(prefill) {
   if (!_bgWorking) return;
   if (!hasFull('edit_project_budget')) return;
+  bgAppendLineToWorking(_bgWorking, prefill || {});
+  _bgWorking.dirty = true;
+  bgRefreshTable();
+  bgRefreshButtons();
+}
+
+// Pure helper: appends a new line to the supplied working copy.
+// Used by both the user-facing bgAddLine and by the extraction mapping
+// (where `working` is the in-progress fresh copy that hasn't yet been
+// installed as `_bgWorking`).
+//
+// CRITICAL: the auto-routing path inside bgApplyExtractionToWorking()
+// must call THIS function, not bgAddLine — bgAddLine targets _bgWorking,
+// which during extraction may still be the PREVIOUS working copy (or
+// null on a brand-new project), causing auto-routed lines to be silently
+// discarded when `_bgWorking = fresh` runs at the end.
+function bgAppendLineToWorking(target, prefill) {
+  if (!target) return;
   prefill = prefill || {};
   var maxSort = 0;
-  _bgWorking.lines.forEach(function(l){ if ((l.sortOrder||0) > maxSort) maxSort = l.sortOrder; });
+  (target.lines || []).forEach(function(l){ if ((l.sortOrder||0) > maxSort) maxSort = l.sortOrder; });
   var newLine = {
     id:              bgNewLineId(maxSort + 1),
     sortOrder:       maxSort + 1,
@@ -2418,10 +2438,9 @@ function bgAddLine(prefill) {
     wasExtracted:    !!prefill.wasExtracted,
     manuallyEdited:  !prefill.wasExtracted   // a manually-added line is always "manually entered" unless it came from unmapped extraction
   };
-  _bgWorking.lines.push(newLine);
-  _bgWorking.dirty = true;
-  bgRefreshTable();
-  bgRefreshButtons();
+  target.lines = target.lines || [];
+  target.lines.push(newLine);
+  return newLine;
 }
 
 // Remove a line from the budget. Confirms first.
@@ -2895,7 +2914,11 @@ function bgApplyExtractionToWorking(working, extr, append) {
     //         description, amount, quantity, sourceType, sourceKey, sourceLabel }
     var rule = bgFindAutoRoute(routes, item);
     if (!rule) return false;
-    bgAddLine({
+    // CRITICAL: target the `working` copy passed into this function, not the
+    // global _bgWorking. During extraction, `working` is a fresh copy that
+    // hasn't been installed yet — calling bgAddLine here would push onto
+    // the previous working copy and the new lines would be lost.
+    bgAppendLineToWorking(working, {
       description:    item.description || item.label || 'Auto-routed',
       costCode:       rule.route.costCode,
       costClass:      rule.route.costClass,
