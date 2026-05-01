@@ -450,6 +450,15 @@ textarea{resize:vertical;min-height:72px}
     </div>
   </div>
   <div id="od-outcome-section"></div>
+  <div class="card"><div class="pmg" id="od-meta"></div></div>
+  <div id="od-final-bid-section"></div>
+  <div id="od-prop-section"></div>
+  <div class="card" id="od-addenda-card">
+    <div class="ch" style="margin-bottom:12px"><span class="ct">Addenda</span>
+      <button class="btn btn-sm" onclick="addendumAdd()" title="Add a new addendum entry">+ Add addendum</button>
+    </div>
+    <div id="od-addenda-list"></div>
+  </div>
   <div class="card" id="od-scope-card">
     <div class="ch" style="margin-bottom:12px"><span class="ct">Scope checklist</span>
       <div style="display:flex;gap:6px">
@@ -466,9 +475,6 @@ textarea{resize:vertical;min-height:72px}
     <input type="file" id="od-scope-file" accept="application/pdf,.pdf" style="display:none">
     <div id="od-scope-items"></div>
   </div>
-  <div class="card"><div class="pmg" id="od-meta"></div></div>
-  <div id="od-final-bid-section"></div>
-  <div id="od-prop-section"></div>
 </div>
 
 <!-- NEW PROPOSAL -->
@@ -4331,6 +4337,7 @@ function renderOppDetail(id) {
   } else {
     sec.innerHTML = '<div class="card" style="text-align:center;padding:24px;color:#888;font-size:13px">Use the <strong>Bidding</strong> or <strong>Not Bidding</strong> buttons above to set a decision for this opportunity.</div>';
   }
+  renderAddenda(o);
   renderScopeChecklist(o);
 }
 
@@ -8460,6 +8467,83 @@ function dlPDF(id) {
 
 
 // ================================================================
+// ADDENDA TRACKING
+// ================================================================
+var _addendaOppId = null;
+
+function _addendaGetOpp() {
+  return _addendaOppId ? getOpp(_addendaOppId) : null;
+}
+
+function _addendaEsc(v) {
+  return (v == null ? '' : String(v))
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderAddenda(o) {
+  if (!o) return;
+  _addendaOppId = o.id;
+  if (!Array.isArray(o.addenda)) o.addenda = [];
+
+  var container = g('od-addenda-list');
+  if (!container) return;
+
+  if (!o.addenda.length) {
+    container.innerHTML = '<div style="text-align:center;padding:18px;color:#888;font-size:13px;background:#fafafa;border:1px dashed #ddd;border-radius:8px">No addenda recorded yet. Click <strong>+ Add addendum</strong> to track one.</div>';
+    return;
+  }
+
+  var rows = o.addenda.map(function(a, idx) {
+    return '<div style="display:flex;gap:10px;align-items:flex-end;padding:10px 0;border-bottom:1px solid #f0f0f0;flex-wrap:wrap">' +
+      '<div style="flex:0 0 140px">' +
+        '<label style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Addendum #</label>' +
+        '<input type="text" placeholder="e.g. #1" value="' + _addendaEsc(a.num || '') + '" ' +
+          'onchange="addendumSave(' + idx + ', \'num\', this.value)" ' +
+          'style="width:100%;padding:7px 9px;font-size:13px;border:1px solid var(--stl);border-radius:6px"></div>' +
+      '<div style="flex:0 0 160px">' +
+        '<label style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Date</label>' +
+        '<input type="text" placeholder="MM/DD/YYYY" value="' + _addendaEsc(a.date || '') + '" ' +
+          'onchange="addendumSave(' + idx + ', \'date\', this.value)" ' +
+          'style="width:100%;padding:7px 9px;font-size:13px;border:1px solid var(--stl);border-radius:6px"></div>' +
+      '<div style="flex:1;min-width:200px">' +
+        '<label style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Notes <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa">(optional)</span></label>' +
+        '<input type="text" placeholder="Brief description..." value="' + _addendaEsc(a.notes || '') + '" ' +
+          'onchange="addendumSave(' + idx + ', \'notes\', this.value)" ' +
+          'style="width:100%;padding:7px 9px;font-size:13px;border:1px solid var(--stl);border-radius:6px"></div>' +
+      '<div>' +
+        '<button class="btn btn-sm" onclick="addendumRemove(' + idx + ')" title="Remove this addendum" ' +
+          'style="color:#A32D2D;border-color:#e8c8c8">&#215; Remove</button></div>' +
+    '</div>';
+  }).join('');
+
+  container.innerHTML = rows;
+}
+
+function addendumAdd() {
+  var o = _addendaGetOpp(); if (!o) return;
+  if (!Array.isArray(o.addenda)) o.addenda = [];
+  o.addenda.push({num: '', date: '', notes: ''});
+  saveDB(); renderAddenda(o);
+}
+
+function addendumSave(idx, field, value) {
+  var o = _addendaGetOpp(); if (!o || !Array.isArray(o.addenda) || !o.addenda[idx]) return;
+  o.addenda[idx][field] = (value || '').trim();
+  saveDB();
+}
+
+function addendumRemove(idx) {
+  var o = _addendaGetOpp(); if (!o || !Array.isArray(o.addenda) || !o.addenda[idx]) return;
+  var a = o.addenda[idx];
+  var label = a.num || a.date || 'this addendum';
+  if (!confirm('Remove ' + label + '?')) return;
+  o.addenda.splice(idx, 1);
+  saveDB(); renderAddenda(o);
+}
+
+
+// ================================================================
 // SCOPE CHECKLIST
 // ================================================================
 var _scopeOppId = null;
@@ -9092,6 +9176,7 @@ function toSBOpp(r) {
     outcome_status:r.outcomeStatus||null,
     scope_items:r.scopeItems||[],
     scope_source_url:r.scopeSourceUrl||'',
+    addenda:r.addenda||[],
     vendor_assignments:r.vendorAssignments||[],
     created:r.created||''
   };
@@ -9109,6 +9194,7 @@ function fromSBOpp(r) {
     outcomeStatus:r.outcome_status||null,
     scopeItems:r.scope_items||[],
     scopeSourceUrl:r.scope_source_url||'',
+    addenda:r.addenda||[],
     vendorAssignments:r.vendor_assignments||[],
     created:r.created||''
   };
