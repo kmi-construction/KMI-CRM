@@ -3334,9 +3334,10 @@ function bgRunJobFileExport() {
     if (u && u.foundationPmCode) pmCode = u.foundationPmCode;
   }
 
-  // Header order MUST match Job_File_Name.xlsx exactly. Column casing
-  // mirrors the template (Foundation likely reads positionally, but the
-  // strings match what the user already trusts.)
+  // Column order MUST match Job_File_Name.xlsx exactly. Foundation's
+  // importer reads CSVs as data-only — no header row is written to the
+  // file. We keep this array here as in-code documentation of the
+  // 23-column order; the actual CSV emits just the data row below.
   var headers = [
     'Job No', 'Description', 'Customer No', 'Project Manager',
     'Geographical Area', 'Project Class', 'Payroll Local Tax', 'Certified Payroll',
@@ -3398,7 +3399,10 @@ function bgRunJobFileExport() {
     p.payrollDepartment || 'field'
   ];
 
-  var csv = bgRowsToCSV([headers, row]);
+  // Foundation's importer reads the CSV as data-only — no header row.
+  // We keep the headers array above for code-level documentation of the
+  // column order, but it's NOT written to the file.
+  var csv = bgRowsToCSV([row]);
   bgDownloadCSV(csv, (p.number || 'project') + '_JobFile.csv');
 }
 
@@ -3473,17 +3477,12 @@ function bgRunEstimateExport() {
     if (!go) return;
   }
 
-  // Build CSV. Header order matches the updated Estimate_File_Name.xlsx:
+  // Build CSV. Foundation's importer reads as data-only — no header row.
+  // Column order (kept here as a reference, NOT written to the file):
   //   Col 1: Job No
   //   Col 2: Cost Code No
-  //   Cols 3-23: Orig. Est Dollars for {classNo} (21 class columns)
-  // The previous "Job Original Estimated Amount" column was removed in
-  // the new template.
-  var headers = ['Job No', 'Cost Code No'];
-  BG_ESTIMATE_CLASS_COLS.forEach(function(cn){
-    headers.push('Orig. Est Dollars for ' + cn);
-  });
-
+  //   Cols 3-23: Orig. Est Dollars for {classNo} (21 class columns,
+  //              order driven by BG_ESTIMATE_CLASS_COLS)
   // Sort cost codes numerically (string-numeric — '1000' before '4001').
   var codes = Object.keys(byCode).sort(function(a,b){
     var an = parseInt(a, 10), bn = parseInt(b, 10);
@@ -3491,7 +3490,7 @@ function bgRunEstimateExport() {
     return String(a).localeCompare(String(b));
   });
 
-  var rows = [headers];
+  var rows = [];
   codes.forEach(function(cc){
     // Skip rows that are entirely zero (per spec).
     var perClass = byCode[cc];
@@ -3513,7 +3512,7 @@ function bgRunEstimateExport() {
     rows.push(row);
   });
 
-  if (rows.length === 1) {
+  if (rows.length === 0) {
     alert('No non-zero budget lines to export. Add or populate budget lines first.');
     return;
   }
