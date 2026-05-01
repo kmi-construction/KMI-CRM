@@ -3217,10 +3217,13 @@ async function bgViewSourcePDF() {
 
 // CSV column ORDER for Estimate file. The header text in column N follows
 // the pattern "Orig. Est Dollars for {classNo}". Class columns: 1, 2, 3,
-// 4, 5, 6, 7, 9, 10, 11, 12, 17, 18, 19, 20, 22, 24, 25, 40, 45, 50, 60.
-// Class 8 (BURDEN), 14 (EQUIPMENT REPAIR), 16 (Novation), etc. are not in
-// the export — Foundation expects only the columns shown in the template.
-var BG_ESTIMATE_CLASS_COLS = ['1','2','3','4','5','6','7','9','10','11','12','17','18','19','20','22','24','25','40','45','50','60'];
+// 4, 5, 6, 7, 9, 10, 11, 12, 17, 18, 19, 20, 22, 24, 25, 45, 50, 60.
+// Class 8 (BURDEN), 14 (EQUIPMENT REPAIR), 16 (Novation), and 40
+// (Contingency) are not in the export — Foundation expects only the
+// columns shown in the current Estimate_File_Name.xlsx template. If a
+// budget line is on a class not in this list, it will be flagged at
+// export time and dropped from the CSV.
+var BG_ESTIMATE_CLASS_COLS = ['1','2','3','4','5','6','7','9','10','11','12','17','18','19','20','22','24','25','45','50','60'];
 
 // Validate the project + budget have everything Foundation needs. Returns
 // either { ok:true } or { ok:false, errors:[...], warnings:[...] }.
@@ -3342,10 +3345,33 @@ function bgRunJobFileExport() {
     'A/R Tax Type', 'Sales Tax - A/R', 'Stored Material Retainage %',
     'Customer Job Number', 'Payroll Department'
   ];
-  // One data row. Many fields are nullable by Mike's spec — output empty
-  // strings for those (not "null", not the literal "None").
+  // One data row. Foundation's importer treats numeric columns strictly
+  // and rejects empty strings ("Numeric Column contains a non Numeric
+  // Value"). For nullable numeric columns we emit 0 (formatted with the
+  // appropriate decimal places). For Y/N flag columns we emit 'N' when
+  // unset. Pure text columns can safely stay empty.
   var origContract  = Number(p.contractAmount) || 0;
   var origEstimated = Number(totals.grand_total) || 0;
+  // Numeric defaults — if the project field is blank, write 0.0 so the
+  // importer parses it cleanly. Decimal precision matches the template.
+  var retainage    = (p.retainagePct === '' || p.retainagePct == null)
+                       ? 0 : Number(p.retainagePct);
+  var salesTaxAr   = (p.salesTaxAr === '' || p.salesTaxAr == null)
+                       ? 0 : Number(p.salesTaxAr);
+  var storedRet    = (p.storedMaterialRetainagePct === '' || p.storedMaterialRetainagePct == null)
+                       ? 0 : Number(p.storedMaterialRetainagePct);
+  // Y/N flag defaults — Foundation expects either 'Y' or 'N', not blank,
+  // for these flag columns. When the project field is unset, default to 'N'
+  // (the conservative, default-off interpretation).
+  function flagDefault(v) {
+    if (v == null) return 'N';
+    var s = String(v).trim();
+    if (!s) return 'N';
+    var u = s.toUpperCase();
+    if (u === 'Y' || u === 'YES' || u === 'TRUE')  return 'Y';
+    if (u === 'N' || u === 'NO'  || u === 'FALSE') return 'N';
+    return s;  // pass through anything Foundation might accept (e.g. a code)
+  }
   var row = [
     p.number || '',
     p.name   || '',
@@ -3353,12 +3379,12 @@ function bgRunJobFileExport() {
     pmCode,
     p.geographicalArea  || '',
     p.projectClass      || '',
-    p.payrollLocalTax   || '',
-    p.certifiedPayroll  || '',
+    flagDefault(p.payrollLocalTax),
+    flagDefault(p.certifiedPayroll),
     origContract.toFixed(2),
     origEstimated.toFixed(2),
-    (p.retainagePct === '' || p.retainagePct == null) ? '' : Number(p.retainagePct).toFixed(3),
-    p.apTaxExempt       || '',
+    retainage.toFixed(3),
+    flagDefault(p.apTaxExempt),
     p.attention         || '',
     fndCust.address1    || '',
     fndCust.address2    || '',
@@ -3366,8 +3392,8 @@ function bgRunJobFileExport() {
     fndCust.state       || '',
     fndCust.zip         || '',
     p.arTaxType         || '',
-    (p.salesTaxAr === '' || p.salesTaxAr == null) ? '' : Number(p.salesTaxAr).toFixed(4),
-    (p.storedMaterialRetainagePct === '' || p.storedMaterialRetainagePct == null) ? '' : Number(p.storedMaterialRetainagePct).toFixed(3),
+    salesTaxAr.toFixed(4),
+    storedRet.toFixed(3),
     p.customerJobNumber || '',
     p.payrollDepartment || 'field'
   ];
@@ -3392,18 +3418,34 @@ function bgRunEstimateExport() {
   if (!p) return;
   var working = _bgWorking;
   var taxFrac = (Number(working.taxRate) || 0) / 100;
-  var totals  = bgComputeTotals(working.lines, taxFrac);
-  var grandTotal = Number(totals.grand_total) || 0;
 
-  // Aggregate budget lines by costCode → { classNo: { net, tax } }.
+  // Build a quick lookup so we know which classes are exportable. Lines
+  // on a class outside this set get tracked separately and surfaced as
+  // a warning before download — those amounts won't appear in the CSV.
+  var inExport = {};
+  BG_ESTIMATE_CLASS_COLS.forEach(function(c){ inExport[c] = true; });
+
+  // Aggregate budget lines by costCode → { classNo: amountNet (summed) }.
   // Net amounts go into the matching class column; tax (where applicable)
-  // accumulates into class 25.
+  // accumulates into class 25 under the same cost code.
   var byCode = {};
+  var droppedAmount = 0;
+  var droppedClasses = {};
   (working.lines || []).forEach(function(l){
     var cc = String(l.costCode || '').trim();
     var cls = String(l.costClass || '').trim();
     if (!cc || !cls) return;  // skip lines missing code/class — they can't be exported
     var amt = Number(l.amountNet) || 0;
+    if (!inExport[cls]) {
+      // Class isn't in the Foundation Estimate template (e.g. class 40
+      // Contingency). Track it for the warning, then skip — emitting an
+      // unexpected column would break the import.
+      if (Math.abs(amt) > 0.005) {
+        droppedAmount += amt;
+        droppedClasses[cls] = (droppedClasses[cls] || 0) + amt;
+      }
+      return;
+    }
     if (!byCode[cc]) byCode[cc] = {};
     byCode[cc][cls] = (byCode[cc][cls] || 0) + amt;
     // Tax allocation: if line is taxable, tax amount goes to class 25 column under same cost code
@@ -3413,8 +3455,31 @@ function bgRunEstimateExport() {
     }
   });
 
-  // Build CSV. Header order matches Estimate_File_Name.xlsx.
-  var headers = ['Job No', 'Job Original Estimated Amount', 'Cost Code No'];
+  // Warn if any dollar amounts are sitting on classes the Foundation
+  // template doesn't include.
+  if (droppedAmount > 0.005) {
+    var droppedDesc = Object.keys(droppedClasses).sort(function(a,b){
+      return Number(a) - Number(b);
+    }).map(function(cn){
+      return 'class ' + cn + ' ($' + bgFmtMoney(droppedClasses[cn]) + ')';
+    }).join(', ');
+    var go = confirm(
+      'Heads up: $' + bgFmtMoney(droppedAmount) + ' on ' + droppedDesc +
+      ' will NOT be in the Estimate CSV.\n\n' +
+      'These cost classes are not part of the current Foundation Estimate template. ' +
+      'Either reassign those budget lines to a class that is in the template (1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 17, 18, 19, 20, 22, 24, 25, 45, 50, 60), or proceed and enter those amounts manually in Foundation after the import.\n\n' +
+      'Proceed with the export?'
+    );
+    if (!go) return;
+  }
+
+  // Build CSV. Header order matches the updated Estimate_File_Name.xlsx:
+  //   Col 1: Job No
+  //   Col 2: Cost Code No
+  //   Cols 3-23: Orig. Est Dollars for {classNo} (21 class columns)
+  // The previous "Job Original Estimated Amount" column was removed in
+  // the new template.
+  var headers = ['Job No', 'Cost Code No'];
   BG_ESTIMATE_CLASS_COLS.forEach(function(cn){
     headers.push('Orig. Est Dollars for ' + cn);
   });
@@ -3428,7 +3493,7 @@ function bgRunEstimateExport() {
 
   var rows = [headers];
   codes.forEach(function(cc){
-    // Per Mike's earlier confirmation: skip rows that are entirely zero (Q4).
+    // Skip rows that are entirely zero (per spec).
     var perClass = byCode[cc];
     var nonZero = false;
     BG_ESTIMATE_CLASS_COLS.forEach(function(cn){
@@ -3437,12 +3502,13 @@ function bgRunEstimateExport() {
     if (!nonZero) return;
     var row = [
       p.number || '',
-      grandTotal.toFixed(2),
       cc
     ];
     BG_ESTIMATE_CLASS_COLS.forEach(function(cn){
       var v = perClass[cn] || 0;
-      row.push(v ? Number(v).toFixed(2) : '');
+      // Foundation rejects empty strings in numeric columns. Emit 0.00
+      // for empty cells so the importer parses cleanly.
+      row.push(Number(v).toFixed(2));
     });
     rows.push(row);
   });
