@@ -2232,7 +2232,10 @@ function initNewTmTicket() {
 
 function ntmProjectChanged() {
   var pid = g('ntm-project').value;
-  var p = getProj(pid);
+  // getProj uses strict === on IDs; <select>.value is always a string but
+  // project IDs are Date.now() numbers, so we look up via String() coercion
+  // to match the established pattern used elsewhere in this file.
+  var p = pid ? db.projects.find(function(x){ return String(x.id) === String(pid); }) : null;
   if (p) {
     g('ntm-pnum').value  = p.number || '';
     g('ntm-pname').value = p.name   || '';
@@ -2425,7 +2428,8 @@ function saveTmTicket() {
   var labor = ntmReadLaborRows();
   if (!labor.length) { alert('Please add at least one labor row before saving.'); return; }
 
-  var p = getProj(pid); if (!p) { alert('Project not found.'); return; }
+  var p = db.projects.find(function(x){ return String(x.id) === String(pid); });
+  if (!p) { alert('Project not found.'); return; }
 
   if (_editTmTicketId) {
     // Update path
