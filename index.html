@@ -637,6 +637,18 @@ textarea{resize:vertical;min-height:72px}
     </div>
   </div>
 
+  <!-- Labor rate template (Round 2) -->
+  <div class="card">
+    <div class="ch"><span class="ct">Labor rate template</span></div>
+    <div id="nprj-labor-rate-section"></div>
+  </div>
+
+  <!-- Project material list (Round 2) -->
+  <div class="card">
+    <div class="ch"><span class="ct">Project material list</span></div>
+    <div id="nprj-mat-list-section"></div>
+  </div>
+
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
     <button class="btn" onclick="nav('projects')">Cancel</button>
     <button class="btn btn-p" onclick="saveProject()" style="padding:10px 32px;font-size:14px;font-weight:700" id="nprj-save-btn">Create project</button>
@@ -736,6 +748,24 @@ textarea{resize:vertical;min-height:72px}
   </div>
   <div class="card"><div class="ch"><span class="ct">Cost item templates</span><button class="btn btn-sm btn-p" onclick="showAddCostTmpl()">+ Add item</button></div><div id="t-cost"></div></div>
   <div class="card"><div class="ch"><span class="ct">Labor rates</span><button class="btn btn-sm btn-p" onclick="showAddLaborSet()">+ Add rate set</button></div><div id="t-labor"></div></div>
+
+  <!-- ── Material Templates (Round 2) ──────────────────────────────── -->
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Material templates</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Global libraries of common materials, applied to projects as snapshots</span>
+    </div>
+    <div style="font-size:12px;color:#666;margin-bottom:12px;line-height:1.5">
+      Build named libraries (e.g. "KMI Standard Masonry 2026") that can be applied to a project's material list with one click. Each row references a Foundation cost code (only <code>isBudgetable</code> codes are selectable). Templates are <strong>snapshotted</strong> when applied — editing a template later does not disturb projects already using it. Multiple templates can be applied to the same project.
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px">
+      <label class="btn btn-sm" style="cursor:pointer;display:inline-block;margin:0">
+        Import CSV<input type="file" accept=".csv" style="display:none" onchange="importMaterialTemplateCSV(event)">
+      </label>
+      <button class="btn btn-sm btn-p" onclick="showAddMaterialTemplate()">+ Add template</button>
+    </div>
+    <div id="t-mat-templates"></div>
+  </div>
 
   <!-- ── Foundation master data (Chunk 1: budget feature) ─────────── -->
   <div class="card" style="border:1px solid var(--ac);background:#FFFCF3">
@@ -1222,6 +1252,12 @@ var DB_DEFAULTS = {
       ]
     }
   ],
+  // Material Templates (Round 2) — global libraries of common materials.
+  // Each template is a named list of rows referencing isBudgetable cost codes.
+  // Applied to a project as a SNAPSHOT (copied onto p.materialList); future
+  // template edits don't disturb live projects.
+  // Shape: { id, label, lines: [{ id, description, unit, costCode, defaultUnitCost }] }
+  materialTemplates: [],
   clarGroups: ['brick veneer','stone veneer','precast','CMU','demolition','patching','granite','cladding support','terracotta']
 };
 
@@ -1259,6 +1295,7 @@ function loadDB() {
         exclusions:   p.exclusions   || DB_DEFAULTS.exclusions,
         costTmpls:    p.costTmpls    || DB_DEFAULTS.costTmpls,
         laborRateSets: labSets       || DB_DEFAULTS.laborRateSets,
+        materialTemplates: p.materialTemplates || [],
         clarGroups:   p.clarGroups   || DB_DEFAULTS.clarGroups,
         companyTypes: p.companyTypes  || DB_DEFAULTS.companyTypes,
         projectTypes: p.projectTypes  || DB_DEFAULTS.projectTypes,
@@ -1991,6 +2028,662 @@ function nav(page) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// MATERIAL TEMPLATES + PROJECT SNAPSHOTS — Round 2
+// ═══════════════════════════════════════════════════════════════════════
+// Three things in one section, because they share concepts and helpers:
+//
+//  1. MATERIAL TEMPLATES (Templates page) — global libraries of materials,
+//     each row tagged with an isBudgetable cost code and a default unit cost.
+//     Stored in db.materialTemplates and synced via kmi_settings (no new
+//     table — same channel as costTmpls / laborRateSets).
+//
+//  2. PROJECT MATERIAL LIST (Project edit form) — per-project list, populated
+//     by applying one or more templates as SNAPSHOTS (rows copied at apply
+//     time). Editable per-row: description, unit, costCode, unitCost. Stored
+//     on the project record as p.materialList.
+//
+//  3. LABOR RATE SNAPSHOT (Project edit form) — single-rate-set picker with
+//     "Apply" button that copies the chosen db.laborRateSets entry onto the
+//     project as p.laborRates (snapshot). Used by COR module in Round 4 for
+//     premium-time math without re-fetching the template.
+//
+// Snapshot pattern: editing a template later does NOT disturb projects that
+// already used it. Re-applying the same template overwrites the project's
+// snapshot (with confirmation) — useful when rates change mid-job.
+//
+// In Round 4, COR generation reads from p.materialList and p.laborRates.
+
+var _editMatTmplId = null;
+var _matTmplViewId = null;  // which template is expanded for line editing
+
+// ── Material units (small enum, but extensible) ────────────────────────
+var MATERIAL_UNITS = ['EA','SF','LF','SY','CF','CY','LB','TON','BAG','BNDL','LS','DAY','HR','MSF','MLF'];
+
+function matEsc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Render: Material Templates section on Templates page ────────────
+function renderMaterialTemplates() {
+  var el = g('t-mat-templates'); if (!el) return;
+  db.materialTemplates = db.materialTemplates || [];
+
+  if (!db.materialTemplates.length) {
+    el.innerHTML = '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No material templates yet — click <strong>+ Add template</strong> to create one, or <strong>Import CSV</strong> to seed the first one.</div>';
+    return;
+  }
+
+  var html = '<div style="display:flex;flex-direction:column;gap:8px">';
+
+  db.materialTemplates.forEach(function(tmpl){
+    var lines = tmpl.lines || [];
+    var isExpanded = String(_matTmplViewId) === String(tmpl.id);
+    var lblEsc = matEsc(tmpl.label || '');
+
+    html += '<div style="border:0.5px solid #e5e5e5;border-radius:6px;background:#fff">' +
+      // Header row (always visible)
+      '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;background:' +
+        (isExpanded ? '#FAF8F0' : '#fff') + '" onclick="toggleMatTmplView(\'' + tmpl.id + '\')">' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<span style="color:#888;font-size:11px;width:14px">' + (isExpanded ? '▾' : '▸') + '</span>' +
+          '<strong style="font-size:13px;color:var(--kmi)">' + lblEsc + '</strong>' +
+          '<span class="tag" style="font-size:11px">' + lines.length + ' line' + (lines.length === 1 ? '' : 's') + '</span>' +
+        '</div>' +
+        '<div style="display:flex;gap:6px" onclick="event.stopPropagation()">' +
+          '<button class="btn btn-sm" onclick="showRenameMatTmpl(\'' + tmpl.id + '\')">Rename</button>' +
+          '<button class="btn btn-sm" onclick="duplicateMatTmpl(\'' + tmpl.id + '\')">Duplicate</button>' +
+          '<button class="btn btn-sm" onclick="rmMatTmpl(\'' + tmpl.id + '\')" style="color:#A32D2D">Delete</button>' +
+        '</div>' +
+      '</div>';
+
+    // Expanded body: line list
+    if (isExpanded) {
+      html += '<div style="border-top:0.5px solid #eee;padding:10px 12px">' +
+        '<div style="display:flex;justify-content:flex-end;margin-bottom:8px">' +
+          '<button class="btn btn-sm btn-p" onclick="showAddMatTmplLine(\'' + tmpl.id + '\')">+ Add line</button>' +
+        '</div>';
+      if (!lines.length) {
+        html += '<div style="padding:12px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+          'No lines yet — click <strong>+ Add line</strong> to add a material.</div>';
+      } else {
+        html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px">' +
+          '<thead style="background:#fafafa"><tr>' +
+            '<th style="padding:6px 8px;text-align:left">Description</th>' +
+            '<th style="padding:6px 8px;text-align:left;width:80px">Unit</th>' +
+            '<th style="padding:6px 8px;text-align:left;width:140px">Cost code</th>' +
+            '<th style="padding:6px 8px;text-align:right;width:120px">Unit cost</th>' +
+            '<th style="padding:6px 8px;width:120px"></th>' +
+          '</tr></thead><tbody>';
+        lines.forEach(function(line){
+          var ccDesc = '';
+          var cc = (db.costCodes || []).find(function(c){ return c.code === line.costCode; });
+          if (cc) ccDesc = cc.description || '';
+          html += '<tr>' +
+            '<td style="padding:6px 8px">' + matEsc(line.description || '') + '</td>' +
+            '<td style="padding:6px 8px">' + matEsc(line.unit || '') + '</td>' +
+            '<td style="padding:6px 8px"><span style="font-family:monospace;font-size:11px">' + matEsc(line.costCode || '—') + '</span>' +
+              (ccDesc ? '<span style="color:#888;font-size:10px;margin-left:4px">' + matEsc(ccDesc) + '</span>' : '') + '</td>' +
+            '<td style="padding:6px 8px;text-align:right;font-family:monospace">' + fmtC(line.defaultUnitCost) + '</td>' +
+            '<td style="padding:6px 8px;text-align:right">' +
+              '<button class="btn btn-sm" onclick="showEditMatTmplLine(\'' + tmpl.id + '\',\'' + line.id + '\')">Edit</button> ' +
+              '<button class="btn btn-sm" onclick="rmMatTmplLine(\'' + tmpl.id + '\',\'' + line.id + '\')" style="color:#A32D2D">Remove</button>' +
+            '</td>' +
+          '</tr>';
+        });
+        html += '</tbody></table></div>';
+      }
+      html += '</div>';
+    }
+
+    html += '</div>';
+  });
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function toggleMatTmplView(id) {
+  _matTmplViewId = String(_matTmplViewId) === String(id) ? null : id;
+  renderMaterialTemplates();
+}
+
+// ── Add / rename / duplicate / delete template ──────────────────────
+function showAddMaterialTemplate() {
+  _editMatTmplId = null;
+  showModal('<button class="xbtn" onclick="closeModal();_editMatTmplId=null;">&#215;</button>' +
+    '<div class="mt">Add material template</div>' +
+    '<div class="msb">Give this template a label (e.g. "KMI Standard Masonry 2026"). You can add lines after creating it.</div>' +
+    '<div class="fgr" style="margin:12px 0"><label>Label *</label>' +
+      '<input id="mat-tmpl-label" placeholder="e.g. KMI Standard Masonry 2026"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal();_editMatTmplId=null;">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveMatTmpl()">Create</button>' +
+    '</div>');
+  setTimeout(function(){ var el = g('mat-tmpl-label'); if (el) el.focus(); }, 50);
+}
+
+function showRenameMatTmpl(id) {
+  var t = (db.materialTemplates || []).find(function(x){ return String(x.id) === String(id); });
+  if (!t) return;
+  _editMatTmplId = id;
+  showModal('<button class="xbtn" onclick="closeModal();_editMatTmplId=null;">&#215;</button>' +
+    '<div class="mt">Rename material template</div>' +
+    '<div class="fgr" style="margin:12px 0"><label>Label *</label>' +
+      '<input id="mat-tmpl-label" value="' + matEsc(t.label || '') + '"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal();_editMatTmplId=null;">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveMatTmpl()">Save</button>' +
+    '</div>');
+  setTimeout(function(){ var el = g('mat-tmpl-label'); if (el) { el.focus(); el.select(); } }, 50);
+}
+
+function saveMatTmpl() {
+  var label = (g('mat-tmpl-label').value || '').trim();
+  if (!label) { alert('Please enter a label.'); return; }
+  db.materialTemplates = db.materialTemplates || [];
+  if (_editMatTmplId) {
+    var t = db.materialTemplates.find(function(x){ return String(x.id) === String(_editMatTmplId); });
+    if (t) t.label = label;
+  } else {
+    var newId = 'mt' + Date.now();
+    db.materialTemplates.push({id:newId, label:label, lines:[]});
+    _matTmplViewId = newId;
+  }
+  _editMatTmplId = null;
+  saveDB();
+  closeModal();
+  renderMaterialTemplates();
+}
+
+function duplicateMatTmpl(id) {
+  var t = (db.materialTemplates || []).find(function(x){ return String(x.id) === String(id); });
+  if (!t) return;
+  var copy = {
+    id: 'mt' + Date.now(),
+    label: (t.label || '') + ' (copy)',
+    lines: (t.lines || []).map(function(l){
+      return {id:'ml' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+              description:l.description, unit:l.unit, costCode:l.costCode, defaultUnitCost:l.defaultUnitCost};
+    })
+  };
+  db.materialTemplates.push(copy);
+  _matTmplViewId = copy.id;
+  saveDB();
+  renderMaterialTemplates();
+}
+
+function rmMatTmpl(id) {
+  var t = (db.materialTemplates || []).find(function(x){ return String(x.id) === String(id); });
+  if (!t) return;
+  if (!confirm('Delete material template "' + (t.label || '') + '"?\n\nThis will not affect any projects that have already had this template applied — those snapshots stay intact.')) return;
+  db.materialTemplates = db.materialTemplates.filter(function(x){ return String(x.id) !== String(id); });
+  if (String(_matTmplViewId) === String(id)) _matTmplViewId = null;
+  saveDB();
+  renderMaterialTemplates();
+}
+
+// ── Add / edit / delete line within a template ──────────────────────
+function showAddMatTmplLine(tmplId) {
+  _editMatTmplId = tmplId;
+  _showMatTmplLineModal(null);
+}
+function showEditMatTmplLine(tmplId, lineId) {
+  _editMatTmplId = tmplId;
+  var t = (db.materialTemplates || []).find(function(x){ return String(x.id) === String(tmplId); });
+  if (!t) return;
+  var line = (t.lines || []).find(function(l){ return String(l.id) === String(lineId); });
+  if (!line) return;
+  _showMatTmplLineModal(line);
+}
+function _showMatTmplLineModal(line) {
+  var isEdit = !!line;
+  // isBudgetable cost codes only — per Round 2 lock-in
+  var codes = (db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+    .sort(function(a,b){ return String(a.code).localeCompare(String(b.code)); });
+  var ccOpts = '<option value="">— Select cost code —</option>' +
+    codes.map(function(c){
+      var sel = line && line.costCode === c.code ? ' selected' : '';
+      return '<option value="' + matEsc(c.code) + '"' + sel + '>' + matEsc(c.code) + ' — ' + matEsc(c.description || '') + '</option>';
+    }).join('');
+  var unitOpts = '<option value="">— Select unit —</option>' +
+    MATERIAL_UNITS.map(function(u){
+      var sel = line && line.unit === u ? ' selected' : '';
+      return '<option value="' + u + '"' + sel + '>' + u + '</option>';
+    }).join('');
+
+  showModal('<button class="xbtn" onclick="closeModal();">&#215;</button>' +
+    '<div class="mt">' + (isEdit ? 'Edit material line' : 'Add material line') + '</div>' +
+    '<div class="fg" style="margin:12px 0">' +
+      '<div class="fgr full"><label>Description *</label>' +
+        '<input id="ml-desc" placeholder="e.g. 8&quot; CMU Block" value="' + matEsc(line ? (line.description || '') : '') + '"></div>' +
+      '<div class="fgr"><label>Unit *</label><select id="ml-unit">' + unitOpts + '</select></div>' +
+      '<div class="fgr"><label>Default unit cost ($)</label>' +
+        '<input id="ml-cost" type="number" min="0" step="0.01" value="' + (line ? (line.defaultUnitCost || '') : '') + '"></div>' +
+      '<div class="fgr full"><label>Cost code *</label><select id="ml-cc">' + ccOpts + '</select>' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Only <code>isBudgetable</code> codes are shown.</div></div>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal();">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveMatTmplLine(' + (line ? "'" + line.id + "'" : 'null') + ')">' +
+        (isEdit ? 'Save' : 'Add line') + '</button>' +
+    '</div>');
+  setTimeout(function(){ var el = g('ml-desc'); if (el) el.focus(); }, 50);
+}
+function saveMatTmplLine(lineId) {
+  var t = (db.materialTemplates || []).find(function(x){ return String(x.id) === String(_editMatTmplId); });
+  if (!t) { alert('Template not found.'); return; }
+  var desc = (g('ml-desc').value || '').trim();
+  var unit = (g('ml-unit').value || '').trim();
+  var cc   = (g('ml-cc').value   || '').trim();
+  var cost = parseFloat(g('ml-cost').value) || 0;
+  if (!desc) { alert('Please enter a description.'); return; }
+  if (!unit) { alert('Please select a unit.'); return; }
+  if (!cc)   { alert('Please select a cost code.'); return; }
+  if (lineId) {
+    var line = (t.lines || []).find(function(l){ return String(l.id) === String(lineId); });
+    if (line) {
+      line.description = desc;
+      line.unit = unit;
+      line.costCode = cc;
+      line.defaultUnitCost = cost;
+    }
+  } else {
+    t.lines = t.lines || [];
+    t.lines.push({
+      id: 'ml' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+      description: desc, unit: unit, costCode: cc, defaultUnitCost: cost
+    });
+  }
+  saveDB();
+  closeModal();
+  renderMaterialTemplates();
+}
+function rmMatTmplLine(tmplId, lineId) {
+  var t = (db.materialTemplates || []).find(function(x){ return String(x.id) === String(tmplId); });
+  if (!t) return;
+  var line = (t.lines || []).find(function(l){ return String(l.id) === String(lineId); });
+  if (!line) return;
+  if (!confirm('Remove line "' + (line.description || '') + '"?')) return;
+  t.lines = (t.lines || []).filter(function(l){ return String(l.id) !== String(lineId); });
+  saveDB();
+  renderMaterialTemplates();
+}
+
+// ── CSV import — seeds a brand-new template from a CSV file ─────────
+// Required columns: label, description, unit, cost_code
+// Optional column:  default_unit_cost (defaults to 0)
+// All rows in one file go into ONE template (the value of `label` on the
+// first data row is the template label; if subsequent rows have a different
+// label, they're routed to additional templates of that name).
+function importMaterialTemplateCSV(ev) {
+  var file = ev && ev.target && ev.target.files && ev.target.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var text = String(e.target.result || '');
+      var rows = _parseMatCsv(text);
+      if (!rows.length) { alert('CSV is empty or could not be parsed.'); return; }
+      // Group by label
+      var byLabel = {};
+      rows.forEach(function(r){
+        var label = (r.label || '').trim();
+        if (!label) return;
+        byLabel[label] = byLabel[label] || [];
+        byLabel[label].push(r);
+      });
+      var labels = Object.keys(byLabel);
+      if (!labels.length) { alert('No rows with a label found. Make sure the CSV has a "label" column.'); return; }
+
+      // Validate cost codes
+      var validCodes = {};
+      (db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+        .forEach(function(c){ validCodes[c.code] = true; });
+
+      var skipped = [];
+      var importedTmpls = 0, importedLines = 0;
+      labels.forEach(function(label){
+        var lines = [];
+        byLabel[label].forEach(function(r, idx){
+          var desc = (r.description || '').trim();
+          var unit = (r.unit || '').trim().toUpperCase();
+          var cc   = (r.cost_code || '').trim();
+          var cost = parseFloat(r.default_unit_cost) || 0;
+          if (!desc) { skipped.push(label + ': row ' + (idx+1) + ' missing description'); return; }
+          if (!unit) { skipped.push(label + ': "' + desc + '" missing unit'); return; }
+          if (!cc)   { skipped.push(label + ': "' + desc + '" missing cost_code'); return; }
+          if (!validCodes[cc]) { skipped.push(label + ': "' + desc + '" cost code ' + cc + ' is not isBudgetable or not in master'); return; }
+          if (MATERIAL_UNITS.indexOf(unit) === -1) { skipped.push(label + ': "' + desc + '" unit "' + unit + '" not in standard list (' + MATERIAL_UNITS.join(', ') + ')'); return; }
+          lines.push({
+            id: 'ml' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+            description: desc, unit: unit, costCode: cc, defaultUnitCost: cost
+          });
+        });
+        if (!lines.length) return;
+        db.materialTemplates = db.materialTemplates || [];
+        db.materialTemplates.push({id:'mt' + Date.now() + '_' + Math.random().toString(36).slice(2,8), label:label, lines:lines});
+        importedTmpls++;
+        importedLines += lines.length;
+      });
+
+      saveDB();
+      renderMaterialTemplates();
+      var msg = 'Imported ' + importedTmpls + ' template' + (importedTmpls === 1 ? '' : 's') + ' (' + importedLines + ' line' + (importedLines === 1 ? '' : 's') + ').';
+      if (skipped.length) msg += '\n\nSkipped ' + skipped.length + ' row' + (skipped.length === 1 ? '' : 's') + ':\n• ' + skipped.slice(0, 12).join('\n• ') + (skipped.length > 12 ? '\n• …' : '');
+      alert(msg);
+    } catch (err) {
+      alert('CSV import failed: ' + err.message);
+    } finally {
+      ev.target.value = '';
+    }
+  };
+  reader.readAsText(file);
+}
+
+// Tiny CSV parser sufficient for our format (handles quoted fields with commas).
+function _parseMatCsv(text) {
+  var lines = text.replace(/\r\n/g, '\n').split('\n').filter(function(l){ return l.trim() !== ''; });
+  if (!lines.length) return [];
+  var headers = _splitCsvRow(lines[0]).map(function(h){ return h.trim().toLowerCase(); });
+  var out = [];
+  for (var i = 1; i < lines.length; i++) {
+    var cells = _splitCsvRow(lines[i]);
+    var row = {};
+    headers.forEach(function(h, idx){ row[h] = (cells[idx] != null ? cells[idx] : '').trim(); });
+    out.push(row);
+  }
+  return out;
+}
+function _splitCsvRow(line) {
+  // Standard CSV: a `"` only starts a quoted field at the beginning of a
+  // cell (i.e. immediately after a comma or at line start). A `"` that
+  // appears mid-cell — like the inch mark in `8" CMU Block` — is treated
+  // as a literal. Inside a quoted field, `""` is an escaped quote.
+  var out = [], cur = '', inQ = false, atCellStart = true;
+  for (var i = 0; i < line.length; i++) {
+    var ch = line[i];
+    if (inQ) {
+      if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') { inQ = false; }
+      else { cur += ch; }
+    } else {
+      if (ch === '"' && atCellStart) { inQ = true; atCellStart = false; }
+      else if (ch === ',') { out.push(cur); cur = ''; atCellStart = true; }
+      else { cur += ch; atCellStart = false; }
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PROJECT MATERIAL LIST + LABOR RATE SNAPSHOT (Project edit form)
+// ═══════════════════════════════════════════════════════════════════════
+// These get rendered inside the Project edit form by initNewProject /
+// editProject. They write directly to the project record (not via the
+// payload-overwrite path of saveProject), so changes are saved as the
+// user makes them — same pattern Mike uses for kmiAssignments rows.
+
+// ── Labor Rate snapshot ──────────────────────────────────────────────
+function renderProjectLaborRateSection() {
+  var el = g('nprj-labor-rate-section'); if (!el) return;
+  var p = _editProjectId ? getProj(_editProjectId) : null;
+  var sets = db.laborRateSets || [];
+  var snap = p && p.laborRates ? p.laborRates : null;
+
+  var setOpts = '<option value="">— Select a labor rate template to apply —</option>' +
+    sets.map(function(s){ return '<option value="' + matEsc(s.id) + '">' + matEsc(s.label || '') + '</option>'; }).join('');
+
+  var snapHtml = '';
+  if (snap) {
+    var ratesArr = snap.rates || [];
+    snapHtml = '<div style="margin-top:12px;background:#FAF8F0;border:0.5px solid var(--ac);border-radius:6px;padding:10px 12px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">' +
+        '<div style="font-size:12px;color:#666">Snapshot from <strong style="color:var(--kmi)">' + matEsc(snap.sourceLabel || '(unknown source)') + '</strong>' +
+          (snap.appliedAt ? '<span style="color:#aaa;margin-left:8px">applied ' + matEsc((snap.appliedAt || '').slice(0,10)) + '</span>' : '') +
+        '</div>' +
+        '<div>' +
+          '<button type="button" class="btn btn-sm" onclick="clearProjectLaborRates()" style="color:#A32D2D">Clear snapshot</button>' +
+        '</div>' +
+      '</div>';
+    if (!ratesArr.length) {
+      snapHtml += '<div style="color:#aaa;font-size:11px;text-align:center;padding:8px">Snapshot has no rate rows.</div>';
+    } else {
+      snapHtml += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px">' +
+        '<thead style="background:#fff"><tr>' +
+          '<th style="padding:6px 8px;text-align:left">Classification</th>' +
+          '<th style="padding:6px 8px;text-align:right" colspan="2">Standard</th>' +
+          '<th style="padding:6px 8px;text-align:right" colspan="2">OT (1.5)</th>' +
+          '<th style="padding:6px 8px;text-align:right" colspan="2">DT (2.0)</th>' +
+        '</tr><tr style="font-size:10px;color:#888">' +
+          '<th></th>' +
+          '<th style="padding:2px 8px;text-align:right">Cost</th><th style="padding:2px 8px;text-align:right">CO</th>' +
+          '<th style="padding:2px 8px;text-align:right">Cost</th><th style="padding:2px 8px;text-align:right">CO</th>' +
+          '<th style="padding:2px 8px;text-align:right">Cost</th><th style="padding:2px 8px;text-align:right">CO</th>' +
+        '</tr></thead><tbody>';
+      ratesArr.forEach(function(r){
+        snapHtml += '<tr>' +
+          '<td style="padding:4px 8px">' + matEsc(r.classification || '') + '</td>' +
+          '<td style="padding:4px 8px;text-align:right;font-family:monospace">' + fmtC(r.stdCostRate) + '</td>' +
+          '<td style="padding:4px 8px;text-align:right;font-family:monospace">' + fmtC(r.stdCoRate) + '</td>' +
+          '<td style="padding:4px 8px;text-align:right;font-family:monospace">' + fmtC(r.otCostRate) + '</td>' +
+          '<td style="padding:4px 8px;text-align:right;font-family:monospace">' + fmtC(r.otCoRate) + '</td>' +
+          '<td style="padding:4px 8px;text-align:right;font-family:monospace">' + fmtC(r.dtCostRate) + '</td>' +
+          '<td style="padding:4px 8px;text-align:right;font-family:monospace">' + fmtC(r.dtCoRate) + '</td>' +
+        '</tr>';
+      });
+      snapHtml += '</tbody></table></div>';
+    }
+    snapHtml += '</div>';
+  } else {
+    snapHtml = '<div style="margin-top:8px;color:#aaa;font-size:12px;font-style:italic">No labor rate snapshot applied yet.</div>';
+  }
+
+  var canApply = !!_editProjectId;
+  el.innerHTML =
+    '<div style="font-size:12px;color:#888;margin-bottom:10px">Apply a labor rate template from the Templates page. The rates are <strong>snapshotted</strong> onto the project — editing the template later does not affect this project.' +
+      (canApply ? '' : '<br><strong style="color:#A32D2D">Save the project first, then re-open it to apply a labor rate template.</strong>') + '</div>' +
+    '<div style="display:flex;gap:8px;align-items:flex-end">' +
+      '<div class="fgr" style="flex:1;margin:0">' +
+        '<select id="nprj-lrs-select"' + (canApply ? '' : ' disabled') + '>' + setOpts + '</select>' +
+      '</div>' +
+      '<button type="button" class="btn btn-p btn-sm" onclick="applyLaborRateTemplate()"' + (canApply ? '' : ' disabled') + ' style="margin-bottom:0">Apply</button>' +
+    '</div>' + snapHtml;
+}
+
+function applyLaborRateTemplate() {
+  if (!_editProjectId) { alert('Save the project first, then re-open it to apply a labor rate template.'); return; }
+  var p = getProj(_editProjectId); if (!p) return;
+  var setId = g('nprj-lrs-select').value;
+  if (!setId) { alert('Please select a labor rate template.'); return; }
+  var set = (db.laborRateSets || []).find(function(s){ return String(s.id) === String(setId); });
+  if (!set) { alert('Rate template not found.'); return; }
+  if (p.laborRates) {
+    if (!confirm('This project already has a labor rate snapshot. Overwrite it with "' + (set.label || '') + '"?\n\nIn-flight CORs and T&M tickets retain whatever rates were captured at the time they were created.')) return;
+  }
+  p.laborRates = {
+    sourceSetId: set.id,
+    sourceLabel: set.label || '',
+    appliedAt: new Date().toISOString(),
+    rates: (set.rates || []).map(function(r){
+      return {
+        id: r.id, classification: r.classification,
+        stdCostRate: Number(r.stdCostRate) || 0, stdCoRate: Number(r.stdCoRate) || 0,
+        otCostRate:  Number(r.otCostRate)  || 0, otCoRate:  Number(r.otCoRate)  || 0,
+        dtCostRate:  Number(r.dtCostRate)  || 0, dtCoRate:  Number(r.dtCoRate)  || 0
+      };
+    })
+  };
+  saveDB();
+  renderProjectLaborRateSection();
+}
+
+function clearProjectLaborRates() {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  if (!confirm('Clear the labor rate snapshot from this project?\n\nIn-flight CORs and T&M tickets are unaffected.')) return;
+  p.laborRates = null;
+  saveDB();
+  renderProjectLaborRateSection();
+}
+
+// ── Project Material List ────────────────────────────────────────────
+function renderProjectMaterialList() {
+  var el = g('nprj-mat-list-section'); if (!el) return;
+  var p = _editProjectId ? getProj(_editProjectId) : null;
+  var list = (p && p.materialList) || [];
+  var canEdit = !!_editProjectId;
+
+  var tmplOpts = '<option value="">— Select a material template to apply —</option>' +
+    (db.materialTemplates || []).map(function(t){
+      return '<option value="' + matEsc(t.id) + '">' + matEsc(t.label || '') + ' (' + (t.lines || []).length + ' lines)</option>';
+    }).join('');
+
+  var html =
+    '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
+      'Apply one or more material templates to seed this project\'s list. Each apply is a <strong>snapshot</strong> — editing the template later does not affect this project. Multiple templates can be applied (additive); duplicates by description are skipped.' +
+      (canEdit ? '' : '<br><strong style="color:#A32D2D">Save the project first, then re-open it to manage the material list.</strong>') +
+    '</div>' +
+    '<div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:12px">' +
+      '<div class="fgr" style="flex:1;margin:0">' +
+        '<select id="nprj-mat-tmpl-select"' + (canEdit ? '' : ' disabled') + '>' + tmplOpts + '</select>' +
+      '</div>' +
+      '<button type="button" class="btn btn-p btn-sm" onclick="applyMaterialTemplate()"' + (canEdit ? '' : ' disabled') + ' style="margin-bottom:0">Apply</button>' +
+      '<button type="button" class="btn btn-sm" onclick="addCustomMaterialRow()"' + (canEdit ? '' : ' disabled') + ' style="margin-bottom:0">+ Custom row</button>' +
+    '</div>';
+
+  if (!list.length) {
+    html += '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No materials on this project yet — apply a template above or add custom rows.</div>';
+  } else {
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px">' +
+      '<thead style="background:#fafafa"><tr>' +
+        '<th style="padding:6px 8px;text-align:left">Description</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:80px">Unit</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:140px">Cost code</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:140px">Unit cost ($)</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:160px">Source</th>' +
+        '<th style="padding:6px 8px;width:80px"></th>' +
+      '</tr></thead><tbody>';
+    list.forEach(function(row){
+      html += '<tr>' +
+        '<td style="padding:4px 6px"><input style="width:100%;padding:5px 7px;font-size:12px" data-mat-id="' + matEsc(row.id) + '" data-mat-fld="description" value="' + matEsc(row.description || '') + '" oninput="onProjMatRowEdit(this)"></td>' +
+        '<td style="padding:4px 6px">' + _matUnitSelect(row) + '</td>' +
+        '<td style="padding:4px 6px">' + _matCostCodeSelect(row) + '</td>' +
+        '<td style="padding:4px 6px"><input type="number" min="0" step="0.01" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-mat-id="' + matEsc(row.id) + '" data-mat-fld="unitCost" value="' + (row.unitCost || 0) + '" oninput="onProjMatRowEdit(this)"></td>' +
+        '<td style="padding:4px 6px;font-size:11px;color:#888">' + matEsc(row.sourceLabel || 'Custom') + '</td>' +
+        '<td style="padding:4px 6px;text-align:center">' +
+          '<button type="button" class="btn btn-sm" onclick="rmProjMatRow(\'' + matEsc(row.id) + '\')" style="color:#A32D2D">✕</button>' +
+        '</td>' +
+      '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  el.innerHTML = html;
+}
+
+function _matUnitSelect(row) {
+  var opts = MATERIAL_UNITS.map(function(u){
+    var sel = (row.unit || '') === u ? ' selected' : '';
+    return '<option value="' + u + '"' + sel + '>' + u + '</option>';
+  }).join('');
+  return '<select style="width:100%;padding:5px 7px;font-size:12px" data-mat-id="' + matEsc(row.id) + '" data-mat-fld="unit" onchange="onProjMatRowEdit(this)">' +
+    '<option value="">—</option>' + opts +
+  '</select>';
+}
+function _matCostCodeSelect(row) {
+  var codes = (db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+    .sort(function(a,b){ return String(a.code).localeCompare(String(b.code)); });
+  var opts = codes.map(function(c){
+    var sel = (row.costCode || '') === c.code ? ' selected' : '';
+    return '<option value="' + matEsc(c.code) + '"' + sel + '>' + matEsc(c.code) + (c.description ? ' — ' + matEsc(c.description) : '') + '</option>';
+  }).join('');
+  return '<select style="width:100%;padding:5px 7px;font-size:12px" data-mat-id="' + matEsc(row.id) + '" data-mat-fld="costCode" onchange="onProjMatRowEdit(this)">' +
+    '<option value="">—</option>' + opts +
+  '</select>';
+}
+
+function onProjMatRowEdit(inp) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var rowId = inp.getAttribute('data-mat-id');
+  var fld   = inp.getAttribute('data-mat-fld');
+  var row = (p.materialList || []).find(function(r){ return String(r.id) === String(rowId); });
+  if (!row) return;
+  var val = inp.value;
+  if (fld === 'unitCost') val = parseFloat(val) || 0;
+  row[fld] = val;
+  saveDB();
+}
+
+function applyMaterialTemplate() {
+  if (!_editProjectId) { alert('Save the project first, then re-open it to apply a material template.'); return; }
+  var p = getProj(_editProjectId); if (!p) return;
+  var tmplId = g('nprj-mat-tmpl-select').value;
+  if (!tmplId) { alert('Please select a material template.'); return; }
+  var tmpl = (db.materialTemplates || []).find(function(t){ return String(t.id) === String(tmplId); });
+  if (!tmpl) { alert('Template not found.'); return; }
+  var lines = tmpl.lines || [];
+  if (!lines.length) { alert('That template has no lines to apply.'); return; }
+
+  p.materialList = p.materialList || [];
+
+  // Skip duplicates by case-insensitive description match
+  var existingDescs = {};
+  p.materialList.forEach(function(r){ existingDescs[(r.description || '').toLowerCase().trim()] = true; });
+
+  var added = 0, skipped = 0;
+  lines.forEach(function(l){
+    var desc = (l.description || '').toLowerCase().trim();
+    if (!desc) return;
+    if (existingDescs[desc]) { skipped++; return; }
+    p.materialList.push({
+      id: 'pml' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+      description: l.description,
+      unit: l.unit,
+      costCode: l.costCode,
+      unitCost: Number(l.defaultUnitCost) || 0,
+      sourceTemplateId: tmpl.id,
+      sourceLabel: tmpl.label || '',
+      appliedAt: new Date().toISOString()
+    });
+    existingDescs[desc] = true;
+    added++;
+  });
+
+  saveDB();
+  renderProjectMaterialList();
+
+  var msg = 'Added ' + added + ' line' + (added === 1 ? '' : 's') + ' from "' + (tmpl.label || '') + '".';
+  if (skipped) msg += '\nSkipped ' + skipped + ' duplicate' + (skipped === 1 ? '' : 's') + ' (matched by description).';
+  alert(msg);
+}
+
+function addCustomMaterialRow() {
+  if (!_editProjectId) { alert('Save the project first, then re-open it to add custom rows.'); return; }
+  var p = getProj(_editProjectId); if (!p) return;
+  p.materialList = p.materialList || [];
+  p.materialList.push({
+    id: 'pml' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+    description: '', unit: '', costCode: '', unitCost: 0,
+    sourceTemplateId: null, sourceLabel: 'Custom', appliedAt: new Date().toISOString()
+  });
+  saveDB();
+  renderProjectMaterialList();
+}
+
+function rmProjMatRow(rowId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var row = (p.materialList || []).find(function(r){ return String(r.id) === String(rowId); });
+  if (!row) return;
+  if (!confirm('Remove "' + (row.description || 'this row') + '" from the project material list?')) return;
+  p.materialList = (p.materialList || []).filter(function(r){ return String(r.id) !== String(rowId); });
+  saveDB();
+  renderProjectMaterialList();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // T&M TICKETS — Round 1
 // ═══════════════════════════════════════════════════════════════════════
 // Daily field tickets capturing labor/equipment/materials performed under
@@ -2243,6 +2936,18 @@ function ntmProjectChanged() {
     g('ntm-pnum').value  = '';
     g('ntm-pname').value = '';
   }
+  // Round 2: re-render all material rows so they pick up the new project's
+  // material list. Preserve any data the user has typed so far.
+  var matBody = g('ntm-mat-rows');
+  if (matBody) {
+    var existingRows = ntmReadMatRows();  // capture what's there
+    matBody.innerHTML = '';
+    if (existingRows.length) {
+      existingRows.forEach(function(r){ ntmAddMatRow(r); });
+    } else {
+      ntmAddMatRow();  // seed one empty row for friendliness
+    }
+  }
 }
 
 // ── Form: open Edit / View ──────────────────────────────────────────────
@@ -2350,10 +3055,98 @@ function ntmAddMatRow(r) {
   var tr = document.createElement('tr');
   tr.setAttribute('data-row', key);
   tr.innerHTML =
-    '<td style="padding:4px 6px"><input style="width:100%;padding:5px 7px;font-size:12px" data-fld="description" value="' + tmEsc(r.description || '') + '" placeholder="Description (Round 2: dropdown from project material list)"></td>' +
+    '<td style="padding:4px 6px">' + _ntmMaterialPickerHtml(r) + '</td>' +
     '<td style="padding:4px 6px"><input type="number" min="0" step="0.01" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="quantity" value="' + (r.quantity || '') + '"></td>' +
     '<td style="padding:4px 6px;text-align:center"><button class="btn btn-sm" onclick="ntmRemoveRow(this,\'mat\')" title="Remove">✕</button></td>';
   tbody.appendChild(tr);
+}
+
+// Build the material picker for a T&M ticket row.
+//
+// Sourced from the SELECTED project's materialList (snapshot). Format per
+// the Round 2 lock-in: "Description (UNIT)". Cost is captured silently
+// for the Round 4 COR rollup; the foreman doesn't see or care about it.
+//
+// Always includes a "Custom item — type description" sentinel option for
+// one-offs that aren't in the list. When the foreman picks Custom, a
+// free-text input appears in place of the dropdown (and persists if the
+// row is reloaded with a description that doesn't match a list item).
+function _ntmMaterialPickerHtml(r) {
+  var pid = g('ntm-project') ? g('ntm-project').value : '';
+  var p = pid ? db.projects.find(function(x){ return String(x.id) === String(pid); }) : null;
+  var list = (p && p.materialList) || [];
+
+  // Determine if r.description matches a list item (by case-insensitive desc match)
+  var matchedRow = null;
+  if (r.description) {
+    var d = String(r.description).toLowerCase().trim();
+    matchedRow = list.find(function(m){ return String(m.description || '').toLowerCase().trim() === d; });
+  }
+
+  // If row is custom (no list match) OR project has no materials yet, render free-text.
+  // Otherwise render dropdown with a Custom fallback option.
+  var isCustom = !!r.description && !matchedRow;
+
+  if (!list.length) {
+    return '<input style="width:100%;padding:5px 7px;font-size:12px" data-fld="description" data-fld-source="custom" value="' + tmEsc(r.description || '') + '" placeholder="Description (project has no material list — apply a template on the project, or enter custom)">';
+  }
+
+  var opts = '<option value="">— Select material —</option>';
+  list.forEach(function(m){
+    var label = (m.description || '') + (m.unit ? ' (' + m.unit + ')' : '');
+    var sel = matchedRow && matchedRow.id === m.id ? ' selected' : '';
+    opts += '<option value="' + tmEsc(m.id) + '"' + sel + '>' + tmEsc(label) + '</option>';
+  });
+  opts += '<option value="__custom__"' + (isCustom ? ' selected' : '') + '>Custom item — type description below</option>';
+
+  var selectHtml = '<select style="width:100%;padding:5px 7px;font-size:12px" data-fld="materialId" data-fld-source="dropdown" onchange="onNtmMaterialPick(this)">' + opts + '</select>';
+
+  if (isCustom) {
+    return selectHtml +
+      '<input style="width:100%;padding:5px 7px;font-size:12px;margin-top:4px" data-fld="description" data-fld-source="custom" value="' + tmEsc(r.description || '') + '" placeholder="Custom description">';
+  }
+  // Hidden description field is set by onNtmMaterialPick when a dropdown option is selected
+  return selectHtml +
+    '<input type="hidden" data-fld="description" data-fld-source="dropdown" value="' + tmEsc(matchedRow ? matchedRow.description : '') + '">';
+}
+
+// When the dropdown changes, swap the row to show/hide the custom text input
+// and update the hidden description field.
+function onNtmMaterialPick(sel) {
+  var tr = sel.closest('tr'); if (!tr) return;
+  var firstCellHtml;
+  var val = sel.value;
+  var pid = g('ntm-project').value;
+  var p = pid ? db.projects.find(function(x){ return String(x.id) === String(pid); }) : null;
+  var list = (p && p.materialList) || [];
+
+  if (val === '__custom__') {
+    // Show selector + free-text input below it
+    var keep = sel.outerHTML;
+    sel.parentNode.innerHTML = keep +
+      '<input style="width:100%;padding:5px 7px;font-size:12px;margin-top:4px" data-fld="description" data-fld-source="custom" value="" placeholder="Custom description" autofocus>';
+    // re-bind the new select's onchange
+    var newSel = sel.parentNode.querySelector('select');
+    if (newSel) newSel.onchange = function(){ onNtmMaterialPick(newSel); };
+    setTimeout(function(){
+      var inp = sel.parentNode.querySelector('input[data-fld="description"]');
+      if (inp) inp.focus();
+    }, 30);
+  } else if (!val) {
+    // Cleared selection — replace with empty hidden description
+    var keepBlank = sel.outerHTML;
+    sel.parentNode.innerHTML = keepBlank + '<input type="hidden" data-fld="description" data-fld-source="dropdown" value="">';
+    var newSel2 = sel.parentNode.querySelector('select');
+    if (newSel2) newSel2.onchange = function(){ onNtmMaterialPick(newSel2); };
+  } else {
+    // Mapped to a list item — set hidden description to the canonical value
+    var matchedRow = list.find(function(m){ return String(m.id) === String(val); });
+    var keepSel = sel.outerHTML;
+    sel.parentNode.innerHTML = keepSel +
+      '<input type="hidden" data-fld="description" data-fld-source="dropdown" value="' + tmEsc(matchedRow ? matchedRow.description : '') + '">';
+    var newSel3 = sel.parentNode.querySelector('select');
+    if (newSel3) newSel3.onchange = function(){ onNtmMaterialPick(newSel3); };
+  }
 }
 
 function ntmRemoveRow(btn, kind) {
@@ -2406,11 +3199,48 @@ function ntmReadEquipRows() {
 }
 function ntmReadMatRows() {
   var out = [];
+  var pid = g('ntm-project').value;
+  var p = pid ? db.projects.find(function(x){ return String(x.id) === String(pid); }) : null;
+  var list = (p && p.materialList) || [];
+
   document.querySelectorAll('#ntm-mat-rows tr').forEach(function(tr){
-    var desc = (tr.querySelector('[data-fld="description"]').value || '').trim();
-    var qty  = Number(tr.querySelector('[data-fld="quantity"]').value) || 0;
+    var descEl = tr.querySelector('[data-fld="description"]');
+    var qtyEl  = tr.querySelector('[data-fld="quantity"]');
+    if (!descEl || !qtyEl) return;
+    var desc = (descEl.value || '').trim();
+    var qty  = Number(qtyEl.value) || 0;
     if (!desc && !qty) return;
-    out.push({description:desc, quantity:qty});
+
+    // Try to identify the project material list row this references — first
+    // by hidden materialId field (dropdown selection), then by description match.
+    var sel = tr.querySelector('[data-fld="materialId"]');
+    var selVal = sel ? sel.value : '';
+    var matched = null;
+    if (selVal && selVal !== '__custom__') {
+      matched = list.find(function(m){ return String(m.id) === String(selVal); });
+    }
+    if (!matched && desc) {
+      var d = desc.toLowerCase().trim();
+      matched = list.find(function(m){ return String(m.description || '').toLowerCase().trim() === d; });
+    }
+
+    var row = {description:desc, quantity:qty};
+    if (matched) {
+      // Attach silent rollup fields from the project material list snapshot.
+      // The COR module (Round 4) reads these to populate the Foundation
+      // breakdown without having to look up the project again.
+      row.materialListId = matched.id;
+      row.unit           = matched.unit || '';
+      row.costCode       = matched.costCode || '';
+      row.unitCost       = Number(matched.unitCost) || 0;
+      row.sourceTemplateId = matched.sourceTemplateId || null;
+    } else {
+      row.materialListId = null;
+      row.unit = '';
+      row.costCode = '';
+      row.unitCost = 0;
+    }
+    out.push(row);
   });
   return out;
 }
@@ -7183,6 +8013,12 @@ function initNewProject() {
     renderContactAssignmentRows(current);
   };
 
+  // Round 2: labor rate template + project material list sections.
+  // _editProjectId is null at this point (new project), so the sections
+  // render in disabled mode with a "save first, then re-open to apply" hint.
+  renderProjectLaborRateSection();
+  renderProjectMaterialList();
+
   // Stash the source opp id on the form for saveProject() to read, then clear the module-level var
   g('nprj-save-btn').dataset.oppId = _newProjectFromOppId || '';
   _newProjectFromOppId = null;
@@ -7292,6 +8128,11 @@ function editProject(id) {
     var current = readContactAssignments();
     renderContactAssignmentRows(current);
   };
+
+  // Round 2: labor rate template + project material list sections.
+  // _editProjectId is set, so the sections render in active mode.
+  renderProjectLaborRateSection();
+  renderProjectMaterialList();
 
   g('nprj-save-btn').dataset.oppId = '';
 }
@@ -8047,6 +8888,7 @@ function renderTemplates() {
   renderGroupList();
   g('t-cost').innerHTML = '<table><thead><tr><th>Description</th><th>Unit</th><th>Default rate</th><th></th></tr></thead><tbody>' + db.costTmpls.map(function(t){ return '<tr><td>'+t.desc+'</td><td>'+t.unit+'</td><td>'+fmtC(t.rate)+'</td><td><button class="btn btn-sm" onclick="rmTmpl(\'cost\',\''+t.id+'\')" style="color:#A32D2D">Remove</button></td></tr>'; }).join('') + '</tbody></table>';
   renderLaborRates();
+  renderMaterialTemplates();
   renderFoundationMasterStatus();
   renderBudgetTemplateTable();
   renderBudgetSettingsForms();
@@ -10169,7 +11011,10 @@ function toSBProject(r) {
     sales_tax_ar:                  (r.salesTaxAr    !== undefined && r.salesTaxAr    !== '') ? r.salesTaxAr    : null,
     stored_material_retainage_pct: (r.storedMaterialRetainagePct !== undefined && r.storedMaterialRetainagePct !== '') ? r.storedMaterialRetainagePct : null,
     customer_job_number:           r.customerJobNumber            || null,
-    foundation_customer_no:        r.foundationCustomerNo         || null
+    foundation_customer_no:        r.foundationCustomerNo         || null,
+    // Round 2 — project material list snapshot and labor rate snapshot
+    material_list:                 r.materialList                 || [],
+    labor_rates:                   r.laborRates                   || null
   };
 }
 function fromSBProject(r) {
@@ -10195,7 +11040,10 @@ function fromSBProject(r) {
     salesTaxAr:                  (r.sales_tax_ar   !== null && r.sales_tax_ar   !== undefined) ? r.sales_tax_ar   : '',
     storedMaterialRetainagePct:  (r.stored_material_retainage_pct !== null && r.stored_material_retainage_pct !== undefined) ? r.stored_material_retainage_pct : '',
     customerJobNumber:           r.customer_job_number           || '',
-    foundationCustomerNo:        r.foundation_customer_no        || ''
+    foundationCustomerNo:        r.foundation_customer_no        || '',
+    // Round 2 — project material list snapshot and labor rate snapshot
+    materialList:                Array.isArray(r.material_list) ? r.material_list : [],
+    laborRates:                  r.labor_rates                   || null
   };
 }
 
@@ -10437,6 +11285,7 @@ async function pushToSupabase() {
       {key:'exclusions',   value:db.exclusions},
       {key:'costTmpls',    value:db.costTmpls},
       {key:'laborRateSets',value:db.laborRateSets},
+      {key:'materialTemplates', value:db.materialTemplates || []},
       {key:'companyTypes', value:db.companyTypes},
       {key:'projectTypes', value:db.projectTypes},
       {key:'projectRoles', value:db.projectRoles},
@@ -10591,7 +11440,7 @@ async function pullFromSupabase() {
     // Settings — copy known setting rows into db. Includes runtime-config
     // keys like anthropic_api_key that aren't part of the default db shape.
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
-                                'laborRates','laborRateSets',
+                                'laborRates','laborRateSets','materialTemplates',
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
                                 'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
                                 'anthropic_api_key'];
