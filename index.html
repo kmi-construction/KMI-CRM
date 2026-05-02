@@ -410,6 +410,7 @@ textarea{resize:vertical;min-height:72px}
       <div class="ni" onclick="nav('projects')"><span class="nico">⬢</span>Projects</div>
       <div class="ni" onclick="nav('budget')"><span class="nico">$</span>Budget</div>
       <div class="ni" onclick="nav('tm-tickets')"><span class="nico">⏱</span>T&amp;M Tickets</div>
+      <div class="ni" onclick="nav('cors')"><span class="nico">◇</span>CORs</div>
     </div>
   </div>
   <div class="sb-group" data-group="directory">
@@ -767,6 +768,18 @@ textarea{resize:vertical;min-height:72px}
   <div class="card">
     <div class="ch"><span class="ct">Labor rate template</span></div>
     <div id="nprj-labor-rate-section"></div>
+  </div>
+
+  <!-- COR markup percentages (Round 4.1) — applied as Overhead & Profit
+       on the COR PDF. Defaults to 10% / 5% per industry norms; KMI can
+       adjust per project to match negotiated terms. -->
+  <div class="card">
+    <div class="ch"><span class="ct">Change Order markup</span></div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Overhead &amp; Profit percentages applied on Change Order Requests for this project. Labor doesn't get marked up.</div>
+    <div class="fg">
+      <div class="fgr"><label>Materials &amp; Equipment markup (%)</label><input type="number" id="nprj-mateq-markup" min="0" step="0.1" placeholder="10" value="10"></div>
+      <div class="fgr"><label>Subcontractor markup (%)</label><input type="number" id="nprj-sub-markup" min="0" step="0.1" placeholder="5" value="5"></div>
+    </div>
   </div>
 
   <!-- Project material list (Round 2) -->
@@ -1160,6 +1173,101 @@ textarea{resize:vertical;min-height:72px}
   </div>
 </div>
 
+<!-- ════════════════════════════════════════════════════════════════════
+     CORs (Change Order Requests) — Round 4.1 foundation shell
+     The list page + the form shell. Form sections (rolled-up tickets,
+     labor breakdown, materials, subs, totals) land in Round 4.2.
+     PDF + send-to-customer + lifecycle transitions land in Round 4.3.
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="pg" id="pg-cors">
+  <div class="ph">
+    <div><h1>Change Order Requests</h1><div class="sub">Roll up approved T&amp;M tickets, capture premium time and fixed fee changes, and send formal change orders to your customers</div><div class="stripe"></div></div>
+  </div>
+  <div class="mets" id="cor-mets"></div>
+  <div class="ab">
+    <input class="si" placeholder="Search by COR #, project, description..." oninput="filterCors()" id="cor-s">
+    <select class="fs" onchange="filterCors()" id="cor-fp"><option value="">All projects</option></select>
+    <select class="fs" onchange="filterCors()" id="cor-ft"><option value="">All types</option></select>
+    <select class="fs" onchange="filterCors()" id="cor-fs"><option value="">All statuses</option></select>
+    <button class="btn btn-p" style="margin-left:auto" onclick="showNewCorModal()" id="cor-new-btn">+ New COR</button>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table><thead><tr>
+      <th>COR #</th><th>Date</th><th>Project</th><th>Type</th><th>Description</th><th>Total</th><th>Status</th><th>Created by</th><th>Actions</th>
+    </tr></thead><tbody id="cor-tbody"></tbody></table>
+  </div>
+</div>
+
+<!-- NEW / EDIT COR — shell only in Round 4.1; sections fill in Round 4.2 -->
+<div class="pg" id="pg-new-cor">
+  <div class="ph" style="margin-bottom:0">
+    <div>
+      <h1 id="ncor-heading">New Change Order Request</h1>
+      <div class="sub" id="ncor-id-display" style="font-weight:600;color:var(--kmi)"></div>
+      <div class="stripe"></div>
+    </div>
+    <button class="btn" onclick="nav('cors')">← Cancel</button>
+  </div>
+
+  <!-- Status info card (shown only after first save) -->
+  <div id="ncor-status-card" class="card" style="display:none;background:#FAF8F0;border:0.5px solid var(--ac)">
+    <div id="ncor-status-card-body"></div>
+  </div>
+
+  <!-- COR header card -->
+  <div class="card">
+    <div class="ch"><span class="ct">COR header</span></div>
+    <div class="fg">
+      <div class="fgr"><label>COR #</label><input id="ncor-num" disabled style="background:#f5f5f5;color:#666" placeholder="Auto-generated on save"></div>
+      <div class="fgr"><label>Date *</label><input type="date" id="ncor-date"></div>
+      <div class="fgr"><label>Project *</label><select id="ncor-project" onchange="ncorProjectChanged()"><option value="">Select project...</option></select></div>
+      <div class="fgr"><label>Type</label><input id="ncor-type-display" disabled style="background:#f5f5f5;color:#666;font-weight:600"></div>
+      <div class="fgr"><label>Customer</label><input id="ncor-customer-display" disabled style="background:#f5f5f5;color:#666"></div>
+      <div class="fgr"><label>Attention *</label><select id="ncor-attention"><option value="">Select contact...</option></select></div>
+      <div class="fgr full"><label>Description *</label><textarea id="ncor-desc" rows="3" placeholder="Describe the change being requested..."></textarea></div>
+    </div>
+  </div>
+
+  <!-- Round 4.2 section anchors — placeholder cards rendered greyed-out
+       until Round 4.2 fills in the actual content -->
+  <div class="card" id="ncor-section-tickets" style="opacity:.55">
+    <div class="ch"><span class="ct">Rolled-up T&amp;M tickets</span></div>
+    <div style="padding:14px 16px;font-size:12px;color:#888">— Form section coming in Round 4.2 —</div>
+  </div>
+
+  <div class="card" id="ncor-section-labor" style="opacity:.55">
+    <div class="ch"><span class="ct">Labor breakdown</span></div>
+    <div style="padding:14px 16px;font-size:12px;color:#888">— Form section coming in Round 4.2 —</div>
+  </div>
+
+  <div class="card" id="ncor-section-materials" style="opacity:.55">
+    <div class="ch"><span class="ct">Materials &amp; Equipment</span></div>
+    <div style="padding:14px 16px;font-size:12px;color:#888">— Form section coming in Round 4.2 —</div>
+  </div>
+
+  <div class="card" id="ncor-section-subs" style="opacity:.55">
+    <div class="ch"><span class="ct">Subcontractors</span></div>
+    <div style="padding:14px 16px;font-size:12px;color:#888">— Form section coming in Round 4.2 —</div>
+  </div>
+
+  <div class="card" id="ncor-section-totals" style="opacity:.55">
+    <div class="ch"><span class="ct">Grand total</span></div>
+    <div style="padding:14px 16px;font-size:12px;color:#888">— Auto-calculated in Round 4.2 —</div>
+  </div>
+
+  <!-- Action buttons. Most are placeholders that wire up in Round 4.3. -->
+  <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
+    <button class="btn" onclick="nav('cors')">Cancel</button>
+    <button class="btn" onclick="downloadCorPDF()" id="ncor-pdf-btn" style="display:none" title="PDF generator lands in Round 4.3" disabled>⬇ Download PDF</button>
+    <button class="btn" onclick="showSendCorToCustomerMenu()" id="ncor-send-btn" style="display:none" title="Send-to-customer lands in Round 4.3" disabled>Send to customer ▾</button>
+    <button class="btn" onclick="markCorApproved()" id="ncor-approve-btn" style="display:none;background:#3B6D11;color:#fff;border-color:#3B6D11" title="Approve flow lands in Round 4.3" disabled>Mark Approved</button>
+    <button class="btn" onclick="markCorRejected()" id="ncor-reject-btn" style="display:none;background:#7A2E2E;color:#fff;border-color:#7A2E2E" title="Reject flow lands in Round 4.3" disabled>Mark Rejected</button>
+    <button class="btn" onclick="reopenCorAsDraft()" id="ncor-reopen-btn" style="display:none" title="Re-open flow lands in Round 4.3" disabled>Re-open as Draft</button>
+    <button class="btn" onclick="voidCor()" id="ncor-void-btn" style="display:none;color:#7A2E2E;border-color:#7A2E2E" title="Void flow lands in Round 4.3" disabled>Void COR</button>
+    <button class="btn btn-p" onclick="saveCor()" style="padding:10px 32px;font-size:14px;font-weight:700" id="ncor-save-btn">Create COR</button>
+  </div>
+</div>
+
 <!-- EMAIL LOG -->
 <div class="pg" id="pg-email-log">
   <div class="ph"><div><h1>Email log</h1><div class="sub">Audit history of emails sent through the CRM</div><div class="stripe"></div></div></div>
@@ -1335,6 +1443,11 @@ var DB_DEFAULTS = {
   // superintendent, approved by KMI PM, then rolled into a Change Order Request.
   // See the COR module (separate) for how rolled-up tickets feed CORs.
   tmTickets: [],
+  // CORs (Change Order Requests) — Round 4. Three types: T&M, Premium Time
+  // (OT or DT), and Fixed Fee. T&M and Premium Time roll up approved T&M
+  // tickets; Fixed Fee is purely manual. Issued to the customer; not signed
+  // (customer runs them through their own CO process).
+  cors: [],
   // Foundation master data (imported from CSV on Templates page)
   costCodes:           [],   // { id, code, description, isBudgetable, active }
   costClasses:         [],   // { id, classNo, description, active }
@@ -1427,6 +1540,7 @@ function loadDB() {
         vendors:        p.vendors        || [],
         vendorContacts: p.vendorContacts || [],
         tmTickets:      p.tmTickets      || [],
+        cors:           p.cors           || [],
         costCodes:           p.costCodes           || [],
         costClasses:         p.costClasses         || [],
         customersFoundation: p.customersFoundation || [],
@@ -1520,7 +1634,17 @@ var PERMISSIONS = {
   // Round 3: signing actions
   'send-tm-signature': ['full','full','none','none','none','none'],   // Send for Signature, Send Reminder
   'approve-tm-ticket': ['full','full','none','none','none','none'],   // KMI PM final approval
-  'upload-signed-tm':  ['full','full','full','none','none','none']    // Upload paper-signed PDF
+  'upload-signed-tm':  ['full','full','full','none','none','none'],   // Upload paper-signed PDF
+  // Round 4: CORs (Change Order Requests). Field roles can't see CORs at all
+  // — these are KMI-internal billing artifacts. Coordinator can read for
+  // tracking / referencing on customer calls, but only PMs and Admins
+  // create/edit/send/transition them.
+  'view-cors':       ['full','full','read','read','none','none'],
+  'create-cor':      ['full','full','none','none','none','none'],
+  'edit-cor':        ['full','full','none','none','none','none'],
+  'send-cor':        ['full','full','none','none','none','none'],
+  'transition-cor':  ['full','full','none','none','none','none'],
+  'delete-cor':      ['full','none','none','none','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -2604,6 +2728,8 @@ function nav(page) {
     budget:           renderBudget,
     'tm-tickets':     renderTmTickets,
     'new-tm-ticket':  initNewTmTicket,
+    cors:             renderCors,
+    'new-cor':        initNewCor,
     'email-log':      renderEmailLog,
     'email-settings': renderEmailSettings
   };
@@ -5259,6 +5385,593 @@ async function approveTmTicket() {
     alert('Approval saved locally but sync failed: ' + (e.message || e) + '\nIt will retry on next push.');
   }
   viewTmTicket(t.id);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CHANGE ORDER REQUESTS (CORs) — Round 4.1 foundation
+// ═══════════════════════════════════════════════════════════════════════
+// Three COR types:
+//   - 'T&M':            rolls up approved T&M tickets w/ all hours
+//   - 'Premium Time OT': rolls up approved tickets, OT hours only
+//   - 'Premium Time DT': rolls up approved tickets, DT hours only
+//   - 'Fixed Fee':       all manually entered, no ticket rollup
+//
+// Lifecycle: Draft → Pending → Approved | Rejected | Voided
+//   Draft ↔ Pending  via "Send to customer" or "Mark as sent"
+//   Pending → Approved | Rejected         (manual, KMI flips when CO comes back)
+//   Rejected → Draft                      (Re-open as Draft)
+//   any → Voided                          (kills the COR, unlocks tickets)
+//
+// Round 4.1 (this round): list page, type-picker, header form, save shell,
+// permissions, mappers, status card. The form sections (rolled-up tickets,
+// labor/materials/subs/totals) and PDF + send + transitions are placeholder
+// no-ops that arrive in 4.2 / 4.3.
+//
+// Numbering: per-project sequential starting at 1001. Format: <projNum>-COR-####
+// Counter lives on the project record as p.nextCorSeq, so it survives
+// Supabase pulls (the project is the source of truth for its own CORs).
+
+var _editCorId = null;
+var _newCorPrefill = null;  // { projectId, type } stashed when type-picker confirms
+
+// ── Helpers (escape, format, badges) ───────────────────────────────────
+function corEsc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function corFmtMoney(n) {
+  var v = Number(n) || 0;
+  return v.toLocaleString('en-US', { style:'currency', currency:'USD', minimumFractionDigits:2, maximumFractionDigits:2 });
+}
+
+var COR_STATUSES = ['Draft','Pending','Approved','Rejected','Voided'];
+var COR_TYPES    = ['T&M','Premium Time OT','Premium Time DT','Fixed Fee'];
+
+function corStatusBadge(c) {
+  var s = c.status || 'Draft';
+  var map = {
+    'Draft':    ['bd-draft',   'Draft'],
+    'Pending':  ['bd-sent',    'Pending'],
+    'Approved': ['bd-won',     'Approved'],
+    'Rejected': ['bd-lost',    'Rejected'],
+    'Voided':   ['bd-lost',    'Voided']
+  };
+  var m = map[s] || ['bd-draft', s];
+  return '<span class="bdg ' + m[0] + '">' + corEsc(m[1]) + '</span>';
+}
+
+function corTypeBadge(c) {
+  var t = c.corType || c.type || 'T&M';
+  // Compact label for table cells; use title attr for the full name
+  var compact = {
+    'T&M':              'T&M',
+    'Premium Time OT':  'Prem. (OT)',
+    'Premium Time DT':  'Prem. (DT)',
+    'Fixed Fee':        'Fixed Fee'
+  };
+  return '<span class="bdg bd-pending" title="' + corEsc(t) + '">' + corEsc(compact[t] || t) + '</span>';
+}
+
+// Per-project COR counter. Number stored on the COR as corNumber (e.g.
+// "26100-COR-1001"). Counter lives on the project as nextCorSeq.
+function corNextNumber(project) {
+  var seq = Number(project.nextCorSeq || 1001);
+  return (project.number || 'PROJ') + '-COR-' + seq;
+}
+
+// Increment-and-return the project's next COR sequence. Persists the
+// bump on the project record (saved to localStorage by saveDB).
+function corBumpProjectSeq(project) {
+  var seq = Number(project.nextCorSeq || 1001);
+  project.nextCorSeq = seq + 1;
+  return seq;
+}
+
+// ── Permission gates ──────────────────────────────────────────────────
+function corCanEdit(c) {
+  // Only Draft CORs are editable in the form. Pending/Approved/Rejected/Voided
+  // are read-only — KMI must Re-open Rejected to revise.
+  if (!c) return false;
+  if ((c.status || 'Draft') !== 'Draft') return false;
+  return hasFull('edit-cor');
+}
+
+function corCanDelete(c) {
+  // Hard-delete only allowed for Draft CORs (no impact on tickets, since
+  // ticket-locking happens on save; pre-save Drafts have no rollup yet).
+  // Pending+ CORs must be Voided instead, which unlocks tickets cleanly.
+  if (!c) return false;
+  if ((c.status || 'Draft') !== 'Draft') return false;
+  return hasFull('delete-cor');
+}
+
+// ── Render: list page ─────────────────────────────────────────────────
+function renderCors() {
+  if (!hasRead('view-cors')) {
+    g('cor-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;color:#aaa;padding:32px;font-size:13px">You do not have permission to view CORs.</td></tr>';
+    g('cor-mets').innerHTML = '';
+    return;
+  }
+  // Project filter
+  var projOpts = '<option value="">All projects</option>' +
+    db.projects.slice().sort(function(a,b){
+      return String(a.number || '').localeCompare(String(b.number || ''));
+    }).map(function(p){ return '<option value="' + p.id + '">' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>'; }).join('');
+  g('cor-fp').innerHTML = projOpts;
+  // Type filter
+  g('cor-ft').innerHTML = '<option value="">All types</option>' +
+    COR_TYPES.map(function(t){ return '<option value="' + corEsc(t) + '">' + corEsc(t) + '</option>'; }).join('');
+  // Status filter
+  g('cor-fs').innerHTML = '<option value="">All statuses</option>' +
+    COR_STATUSES.map(function(s){ return '<option value="' + corEsc(s) + '">' + corEsc(s) + '</option>'; }).join('');
+  // New-button gating
+  var newBtn = g('cor-new-btn');
+  if (newBtn) newBtn.style.display = hasFull('create-cor') ? '' : 'none';
+
+  filterCors();
+}
+
+function filterCors() {
+  var s  = (g('cor-s').value  || '').toLowerCase();
+  var fp = g('cor-fp').value;
+  var ft = g('cor-ft').value;
+  var fs = g('cor-fs').value;
+
+  var list = (db.cors || []).filter(function(c){
+    if (fp && String(c.projectId) !== String(fp)) return false;
+    if (ft && (c.corType || '') !== ft) return false;
+    if (fs && (c.status  || 'Draft') !== fs) return false;
+    if (!s) return true;
+    var p = getProj(c.projectId) || {};
+    var hay = [c.corNumber, c.description, p.number, p.name, c.status, c.corType].join(' ').toLowerCase();
+    return hay.indexOf(s) !== -1;
+  }).sort(function(a,b){
+    // Newest first
+    return String(b.corDate || '').localeCompare(String(a.corDate || ''))
+        || (Number(b.id) - Number(a.id));
+  });
+
+  // Metrics
+  var total      = list.length;
+  var draftN     = list.filter(function(c){ return (c.status || 'Draft') === 'Draft'; }).length;
+  var pendingN   = list.filter(function(c){ return (c.status || 'Draft') === 'Pending'; }).length;
+  var approvedN  = list.filter(function(c){ return (c.status || 'Draft') === 'Approved'; }).length;
+  var approvedTotal = list
+    .filter(function(c){ return (c.status || 'Draft') === 'Approved'; })
+    .reduce(function(sum, c){ return sum + (Number(c.totalAmount) || 0); }, 0);
+  g('cor-mets').innerHTML =
+    '<div class="mc"><div class="ml">CORs shown</div><div class="mv">' + total + '</div></div>' +
+    '<div class="mc"><div class="ml">Draft</div><div class="mv">' + draftN + '</div></div>' +
+    '<div class="mc"><div class="ml">Pending</div><div class="mv bl">' + pendingN + '</div></div>' +
+    '<div class="mc"><div class="ml">Approved</div><div class="mv gn">' + approvedN + '</div></div>' +
+    '<div class="mc"><div class="ml">Approved $ total</div><div class="mv gn">' + corFmtMoney(approvedTotal) + '</div></div>';
+
+  // Table
+  if (!list.length) {
+    g('cor-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;color:#aaa;padding:32px;font-size:13px">No CORs match your filters. ' +
+      (hasFull('create-cor') ? 'Click <strong>+ New COR</strong> to create one.' : '') +
+      '</td></tr>';
+    return;
+  }
+  g('cor-tbody').innerHTML = list.map(function(c){
+    var p = getProj(c.projectId) || {};
+    var creator = (db.users.find(function(u){ return String(u.id) === String(c.createdByUserId); }) || {});
+    var creatorName = ((creator.firstName || '') + ' ' + (creator.lastName || '')).trim() || (c.createdByName || '—');
+
+    var actions = '';
+    if (hasRead('view-cors')) {
+      actions += '<button class="btn btn-sm" onclick="viewCor(' + c.id + ')">' +
+        (corCanEdit(c) ? '✎ Edit' : '👁 View') + '</button>';
+    }
+    if (corCanDelete(c)) {
+      actions += '&nbsp;<button class="btn btn-sm" style="color:#A32D2D" onclick="deleteCor(' + c.id + ')">Delete</button>';
+    }
+
+    return '<tr>' +
+      '<td><strong style="color:var(--kmi)">' + corEsc(c.corNumber || '') + '</strong></td>' +
+      '<td>' + corEsc(c.corDate || '') + '</td>' +
+      '<td>' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</td>' +
+      '<td>' + corTypeBadge(c) + '</td>' +
+      '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + corEsc(c.description || '') + '">' + corEsc(c.description || '') + '</td>' +
+      '<td>' + corFmtMoney(c.totalAmount || 0) + '</td>' +
+      '<td>' + corStatusBadge(c) + '</td>' +
+      '<td>' + corEsc(creatorName) + '</td>' +
+      '<td>' + actions + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+// ── Type-picker modal (Step 1 of new COR creation) ────────────────────
+function showNewCorModal() {
+  if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); return; }
+  var projOpts = '<option value="">— Select project —</option>' +
+    db.projects.slice().sort(function(a,b){
+      return String(a.number || '').localeCompare(String(b.number || ''));
+    }).map(function(p){
+      return '<option value="' + p.id + '">' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+    }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">New Change Order Request</div>' +
+    '<div class="msb">Pick a project and type. The COR type can\'t be changed after creation, since it changes which data sources fill the form.</div>' +
+    '<div class="fg" style="margin-bottom:14px">' +
+      '<div class="fgr full"><label>Project *</label><select id="ncm-project">' + projOpts + '</select></div>' +
+    '</div>' +
+    '<div style="margin-bottom:14px">' +
+      '<label style="display:block;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.7px;margin-bottom:8px">Type *</label>' +
+      '<div style="display:flex;flex-direction:column;gap:8px">' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="T&M" checked style="margin-top:2px"><span><strong>T&amp;M</strong> — rolls up approved T&amp;M tickets with all hours</span></label>' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Premium Time OT" style="margin-top:2px"><span><strong>Premium Time — OT</strong> — rolls up overtime hours only</span></label>' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Premium Time DT" style="margin-top:2px"><span><strong>Premium Time — DT</strong> — rolls up double-time hours only</span></label>' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Fixed Fee" style="margin-top:2px"><span><strong>Fixed Fee</strong> — purely manual entry (no ticket rollup)</span></label>' +
+      '</div>' +
+    '</div>' +
+    '<div id="ncm-err" style="color:#A32D2D;font-size:12px;margin-bottom:10px;min-height:14px"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="newCorContinue()">Continue →</button>' +
+    '</div>'
+  );
+}
+
+function newCorContinue() {
+  var projectId = g('ncm-project').value;
+  var typeEl = document.querySelector('input[name="ncm-type"]:checked');
+  var corType = typeEl ? typeEl.value : '';
+  var err = g('ncm-err');
+  err.textContent = '';
+  if (!projectId) { err.textContent = 'Please pick a project.'; return; }
+  if (!corType)   { err.textContent = 'Please pick a type.'; return; }
+  if (COR_TYPES.indexOf(corType) === -1) { err.textContent = 'Invalid type.'; return; }
+  _newCorPrefill = { projectId: projectId, corType: corType };
+  closeModal();
+  nav('new-cor');
+}
+
+// ── Init: new COR form ────────────────────────────────────────────────
+function initNewCor() {
+  if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); nav('cors'); return; }
+  _editCorId = null;
+  g('ncor-heading').textContent     = 'New Change Order Request';
+  g('ncor-id-display').textContent  = '';
+  g('ncor-save-btn').textContent    = 'Create COR';
+  g('ncor-save-btn').style.display  = '';
+  g('ncor-status-card').style.display = 'none';
+
+  // Hide round-4.3 buttons; placeholder no-ops on this round
+  ['ncor-pdf-btn','ncor-send-btn','ncor-approve-btn','ncor-reject-btn','ncor-reopen-btn','ncor-void-btn'].forEach(function(idStr){
+    var el = g(idStr); if (el) el.style.display = 'none';
+  });
+
+  // Build project dropdown (always allowed at create time)
+  var projects = db.projects.slice().sort(function(a,b){
+    return String(a.number || '').localeCompare(String(b.number || ''));
+  });
+  var prefillProjectId = _newCorPrefill ? _newCorPrefill.projectId : '';
+  g('ncor-project').innerHTML = '<option value="">Select project...</option>' +
+    projects.map(function(p){
+      var sel = String(p.id) === String(prefillProjectId) ? ' selected' : '';
+      return '<option value="' + p.id + '"' + sel + '>' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+    }).join('');
+  g('ncor-project').disabled = false;
+
+  // Set type display (read-only on the form)
+  var corType = _newCorPrefill ? _newCorPrefill.corType : 'T&M';
+  g('ncor-type-display').value = corType;
+  g('ncor-type-display').dataset.corType = corType;
+
+  g('ncor-num').value  = '';                         // assigned at save
+  g('ncor-date').value = new Date().toISOString().slice(0,10);
+  g('ncor-desc').value = '';
+
+  // Trigger project-changed handler to populate customer + attention
+  ncorProjectChanged();
+
+  _newCorPrefill = null;
+}
+
+// ── viewCor: open COR for view/edit ───────────────────────────────────
+function viewCor(id) {
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(id); });
+  if (!c) { alert('COR not found.'); return; }
+  if (!hasRead('view-cors')) { alert('You do not have permission to view CORs.'); return; }
+
+  _editCorId = c.id;
+  setActivePage('cors');
+  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+  g('pg-new-cor').classList.add('active');
+  closeModal();
+
+  var canEdit = corCanEdit(c);
+  g('ncor-heading').textContent     = canEdit ? 'Edit Change Order Request' : 'View Change Order Request';
+  g('ncor-id-display').textContent  = c.corNumber || '';
+  g('ncor-save-btn').textContent    = 'Save changes';
+  g('ncor-save-btn').style.display  = canEdit ? '' : 'none';
+
+  // Project — locked on existing CORs
+  var projects = db.projects.slice().sort(function(a,b){
+    return String(a.number || '').localeCompare(String(b.number || ''));
+  });
+  g('ncor-project').innerHTML = '<option value="">Select project...</option>' +
+    projects.map(function(p){
+      var sel = String(p.id) === String(c.projectId) ? ' selected' : '';
+      return '<option value="' + p.id + '"' + sel + '>' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+    }).join('');
+  g('ncor-project').disabled = true;
+
+  g('ncor-type-display').value = c.corType || 'T&M';
+  g('ncor-type-display').dataset.corType = c.corType || 'T&M';
+
+  g('ncor-num').value  = c.corNumber || '';
+  g('ncor-date').value = c.corDate   || '';
+  g('ncor-desc').value = c.description || '';
+
+  // Disable inputs if read-only
+  ['ncor-date','ncor-desc'].forEach(function(idStr){
+    var el = g(idStr); if (el) el.disabled = !canEdit;
+  });
+
+  // Repopulate customer/attention dropdowns from the project
+  ncorProjectChanged();
+
+  // After dropdowns populate, set attention to whatever was saved
+  if (g('ncor-attention')) {
+    g('ncor-attention').value = c.attentionContactId || '';
+    g('ncor-attention').disabled = !canEdit;
+  }
+
+  renderCorStatusCard(c);
+  _refreshCorActionButtons(c);
+}
+
+// ── Project-changed handler: refresh customer + attention dropdowns ───
+function ncorProjectChanged() {
+  var pid = g('ncor-project').value;
+  var p = pid ? getProj(pid) : null;
+
+  // Customer (read-only display)
+  if (p) {
+    var cust = db.customers.find(function(c){ return String(c.id) === String(p.customerId); });
+    g('ncor-customer-display').value = cust ? (cust.name || '') : '';
+  } else {
+    g('ncor-customer-display').value = '';
+  }
+
+  // Attention dropdown — pulled from project's contactAssignments
+  var attn = g('ncor-attention');
+  if (!attn) return;
+  if (!p) {
+    attn.innerHTML = '<option value="">Select a project first...</option>';
+    return;
+  }
+  var contacts = (Array.isArray(p.contactAssignments) ? p.contactAssignments : [])
+    .map(function(ca){
+      var pm = (db.pms || []).find(function(x){ return String(x.id) === String(ca.pmId); });
+      if (!pm) return null;
+      var name = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim();
+      var roleStr = ca.role || pm.title || '';
+      return { id: pm.id, label: name + (roleStr ? ' — ' + roleStr : '') };
+    })
+    .filter(Boolean);
+
+  if (!contacts.length) {
+    attn.innerHTML = '<option value="">— No contacts assigned to this project —</option>';
+    return;
+  }
+  attn.innerHTML = '<option value="">— Select contact —</option>' +
+    contacts.map(function(c){
+      return '<option value="' + c.id + '">' + corEsc(c.label) + '</option>';
+    }).join('');
+}
+
+// ── saveCor: minimal Round 4.1 save (header only; sections come 4.2) ──
+async function saveCor() {
+  var projectId = g('ncor-project').value;
+  var corDate   = g('ncor-date').value;
+  var corType   = g('ncor-type-display').dataset.corType || g('ncor-type-display').value || 'T&M';
+  var attnId    = g('ncor-attention').value;
+  var description = (g('ncor-desc').value || '').trim();
+
+  if (!projectId) { alert('Please select a project.'); return; }
+  if (!corDate)   { alert('Please pick a date.'); return; }
+  if (COR_TYPES.indexOf(corType) === -1) { alert('Invalid COR type.'); return; }
+  if (!attnId)    { alert('Please pick an Attention contact (the customer-side person who receives this COR). If none are listed, assign a contact on the Project edit page first.'); return; }
+  if (!description) { alert('Please enter a description.'); return; }
+
+  var p = getProj(projectId);
+  if (!p) { alert('Project not found.'); return; }
+
+  // Existing edit?
+  if (_editCorId) {
+    var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
+    if (!c) { alert('COR not found.'); return; }
+    if (!corCanEdit(c)) { alert('This COR cannot be edited in its current status.'); return; }
+    c.corDate     = corDate;
+    c.attentionContactId = attnId;
+    c.description = description;
+    c.updatedAt = new Date().toISOString();
+    c.updatedByUserId = _currentUser ? _currentUser.id : null;
+    saveDB();
+    try {
+      if (supabaseClient) {
+        var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(c));
+        if (upRes && upRes.error) console.warn('COR sync error:', upRes.error.message);
+      }
+    } catch (e) { console.warn('COR sync exception:', e); }
+    nav('cors');
+    return;
+  }
+
+  // Create — assign next number from the project's sequence
+  var seqAssigned = corBumpProjectSeq(p);
+  var corNumber = (p.number || 'PROJ') + '-COR-' + seqAssigned;
+  var nowIso = new Date().toISOString();
+  var newCor = {
+    id: Date.now(),
+    corNumber: corNumber,
+    corDate: corDate,
+    corType: corType,
+    projectId: Number(projectId),
+    attentionContactId: attnId,
+    description: description,
+    status: 'Draft',
+    // Round 4.2 placeholders — populated by section-level save logic later
+    rolledUpTicketIds: [],
+    laborRows:    [],
+    materialRows: [],
+    subRows:      [],
+    // Markup snapshot — captured at COR create-time so future project edits
+    // don't disturb in-flight CORs (same snapshot pattern as labor rates)
+    matEqMarkupPct: (p.matEqMarkupPct !== null && p.matEqMarkupPct !== undefined) ? p.matEqMarkupPct : 10,
+    subMarkupPct:   (p.subMarkupPct   !== null && p.subMarkupPct   !== undefined) ? p.subMarkupPct   : 5,
+    // Totals — computed in 4.2 each save; 0 on the empty shell
+    totalLabor:    0,
+    totalMaterial: 0,
+    totalSub:      0,
+    mateqOhp:      0,
+    subOhp:        0,
+    totalAmount:   0,
+    // Lifecycle metadata
+    createdAt: nowIso,
+    createdByUserId: _currentUser ? _currentUser.id : null,
+    createdByName:   _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '',
+    updatedAt: nowIso,
+    updatedByUserId: _currentUser ? _currentUser.id : null,
+    sentAt: null, sentByUserId: null,
+    decisionAt: null, decisionByUserId: null,
+    voidedAt: null, voidedByUserId: null,
+    voidReason: null,
+    customerCoNumber: null  // populated by KMI when the formal CO comes back
+  };
+
+  db.cors = db.cors || [];
+  db.cors.unshift(newCor);
+  saveDB();
+
+  // Push the COR + the bumped project sequence to Supabase
+  try {
+    if (supabaseClient) {
+      var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(newCor));
+      if (upRes && upRes.error) {
+        console.warn('COR sync error:', upRes.error.message);
+        alert('COR created locally but cloud sync failed: ' + upRes.error.message + '\nIt will retry on next push.');
+      }
+      // Also push the project so nextCorSeq survives on cloud
+      var prjRes = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+      if (prjRes && prjRes.error) console.warn('Project sync error:', prjRes.error.message);
+    }
+  } catch (e) {
+    console.warn('COR sync exception:', e);
+  }
+
+  _editCorId = newCor.id;
+  // Re-open the same COR in edit mode so user can fill in sections in 4.2
+  viewCor(newCor.id);
+}
+
+// ── Status card on the COR form ───────────────────────────────────────
+function renderCorStatusCard(c) {
+  var card = g('ncor-status-card');
+  var body = g('ncor-status-card-body');
+  if (!card || !body) return;
+  if (!c || (c.status || 'Draft') === 'Draft') {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = '';
+
+  var blocks = [];
+  blocks.push(
+    '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">' +
+      '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:#888">Status</div>' +
+      corStatusBadge(c) +
+      '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:#888;margin-left:18px">Total</div>' +
+      '<strong style="font-size:14px;color:var(--kmi)">' + corFmtMoney(c.totalAmount || 0) + '</strong>' +
+    '</div>'
+  );
+
+  if (c.sentAt) {
+    var sender = (db.users.find(function(u){ return String(u.id) === String(c.sentByUserId); }) || {});
+    var senderName = ((sender.firstName || '') + ' ' + (sender.lastName || '')).trim() || '(unknown)';
+    blocks.push(
+      '<div style="font-size:12px;color:#555;margin-bottom:6px">' +
+        '<strong>Sent to customer:</strong> ' + corEsc(new Date(c.sentAt).toLocaleString()) + ' by ' + corEsc(senderName) +
+      '</div>'
+    );
+  }
+  if (c.decisionAt) {
+    var st = c.status || '';
+    var decider = (db.users.find(function(u){ return String(u.id) === String(c.decisionByUserId); }) || {});
+    var deciderName = ((decider.firstName || '') + ' ' + (decider.lastName || '')).trim() || '(unknown)';
+    blocks.push(
+      '<div style="font-size:12px;color:' + (st === 'Approved' ? '#3B6D11' : '#7A2E2E') + ';margin-bottom:6px">' +
+        (st === 'Approved' ? '✓ Approved' : '⊘ Rejected') + ' on ' + corEsc(new Date(c.decisionAt).toLocaleString()) + ' by ' + corEsc(deciderName) +
+        (c.customerCoNumber ? ' · Customer CO #: <strong>' + corEsc(c.customerCoNumber) + '</strong>' : '') +
+      '</div>'
+    );
+  }
+  if (c.voidedAt) {
+    var voider = (db.users.find(function(u){ return String(u.id) === String(c.voidedByUserId); }) || {});
+    var voiderName = ((voider.firstName || '') + ' ' + (voider.lastName || '')).trim() || '(unknown)';
+    blocks.push(
+      '<div style="font-size:12px;color:#7A2E2E;margin-bottom:6px">' +
+        'Voided on ' + corEsc(new Date(c.voidedAt).toLocaleString()) + ' by ' + corEsc(voiderName) +
+        (c.voidReason ? ' · Reason: ' + corEsc(c.voidReason) : '') +
+      '</div>'
+    );
+  }
+
+  body.innerHTML = blocks.join('');
+}
+
+// ── Action button visibility (Round 4.3 wires the actual handlers) ────
+function _refreshCorActionButtons(c) {
+  // All buttons start hidden; show by status. Round 4.3 will enable them
+  // by removing the `disabled` attr added in HTML.
+  var ids = ['ncor-pdf-btn','ncor-send-btn','ncor-approve-btn','ncor-reject-btn','ncor-reopen-btn','ncor-void-btn'];
+  ids.forEach(function(idStr){ var el = g(idStr); if (el) el.style.display = 'none'; });
+  if (!c || !c.id) return;
+  var s = c.status || 'Draft';
+  if (s === 'Draft') {
+    if (g('ncor-pdf-btn'))  g('ncor-pdf-btn').style.display  = '';
+    if (g('ncor-send-btn')) g('ncor-send-btn').style.display = hasFull('send-cor') ? '' : 'none';
+    if (g('ncor-void-btn')) g('ncor-void-btn').style.display = hasFull('transition-cor') ? '' : 'none';
+  } else if (s === 'Pending') {
+    if (g('ncor-pdf-btn'))     g('ncor-pdf-btn').style.display     = '';
+    if (g('ncor-approve-btn')) g('ncor-approve-btn').style.display = hasFull('transition-cor') ? '' : 'none';
+    if (g('ncor-reject-btn'))  g('ncor-reject-btn').style.display  = hasFull('transition-cor') ? '' : 'none';
+    if (g('ncor-void-btn'))    g('ncor-void-btn').style.display    = hasFull('transition-cor') ? '' : 'none';
+  } else if (s === 'Rejected') {
+    if (g('ncor-pdf-btn'))    g('ncor-pdf-btn').style.display    = '';
+    if (g('ncor-reopen-btn')) g('ncor-reopen-btn').style.display = hasFull('transition-cor') ? '' : 'none';
+    if (g('ncor-void-btn'))   g('ncor-void-btn').style.display   = hasFull('transition-cor') ? '' : 'none';
+  } else if (s === 'Approved' || s === 'Voided') {
+    if (g('ncor-pdf-btn'))  g('ncor-pdf-btn').style.display  = '';
+  }
+}
+
+// ── Round 4.3 placeholder no-ops (so onclick handlers don't ReferenceError) ─
+function downloadCorPDF()           { alert('PDF generation arrives in Round 4.3.'); }
+function showSendCorToCustomerMenu(){ alert('Send-to-customer arrives in Round 4.3.'); }
+function markCorApproved()          { alert('Approval flow arrives in Round 4.3.'); }
+function markCorRejected()          { alert('Reject flow arrives in Round 4.3.'); }
+function reopenCorAsDraft()         { alert('Re-open flow arrives in Round 4.3.'); }
+function voidCor()                  { alert('Void flow arrives in Round 4.3.'); }
+
+// ── deleteCor: hard delete for Draft CORs ─────────────────────────────
+async function deleteCor(id) {
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(id); });
+  if (!c) return;
+  if (!corCanDelete(c)) { alert('Only Draft CORs can be deleted. Use Void instead.'); return; }
+  if (!confirm('Delete COR ' + (c.corNumber || '') + '?\n\nThis cannot be undone. (Pending/Approved/Rejected CORs can\'t be deleted — Void them instead.)')) return;
+
+  db.cors = (db.cors || []).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+  try {
+    if (supabaseClient) {
+      var delRes = await supabaseClient.from('kmi_cors').delete().eq('id', c.id);
+      if (delRes && delRes.error) console.warn('COR delete sync error:', delRes.error.message);
+    }
+  } catch (e) { console.warn('COR delete exception:', e); }
+  renderCors();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -9637,6 +10350,9 @@ function initNewProject() {
   g('nprj-city').value  = prefill ? prefill.city : '';
   g('nprj-zip').value   = prefill ? prefill.zip : '';
   g('nprj-amt').value   = prefill ? (prefill.contractAmount || '') : '';
+  // Round 4.1: COR markup defaults
+  if (g('nprj-mateq-markup')) g('nprj-mateq-markup').value = 10;
+  if (g('nprj-sub-markup'))   g('nprj-sub-markup').value   = 5;
   // Foundation setup defaults — payroll dept defaults to 'field'.
   if (g('nprj-payroll-dept'))  g('nprj-payroll-dept').value  = 'field';
   if (g('nprj-cust-job-num'))  g('nprj-cust-job-num').value  = '';
@@ -9685,6 +10401,11 @@ function saveProject() {
   var payrollDeptEl = g('nprj-payroll-dept');
   var custJobNumEl  = g('nprj-cust-job-num');
   var fndCustEl     = g('nprj-fnd-cust');
+  // Round 4.1: COR markup percentages — default to 10/5 if empty/invalid
+  var matEqMarkupRaw = g('nprj-mateq-markup') ? g('nprj-mateq-markup').value : '';
+  var subMarkupRaw   = g('nprj-sub-markup')   ? g('nprj-sub-markup').value   : '';
+  var matEqMarkup = matEqMarkupRaw === '' ? 10 : (parseFloat(matEqMarkupRaw) || 0);
+  var subMarkup   = subMarkupRaw   === '' ? 5  : (parseFloat(subMarkupRaw)   || 0);
   var payload = {
     number: number,
     name: name,
@@ -9700,7 +10421,9 @@ function saveProject() {
     contactAssignments: contactAssignments,
     payrollDepartment: payrollDeptEl ? (payrollDeptEl.value || '').trim() : 'field',
     customerJobNumber: custJobNumEl  ? (custJobNumEl.value  || '').trim() : '',
-    foundationCustomerNo: fndCustEl  ? (fndCustEl.value     || '').trim() : ''
+    foundationCustomerNo: fndCustEl  ? (fndCustEl.value     || '').trim() : '',
+    matEqMarkupPct: matEqMarkup,
+    subMarkupPct:   subMarkup
   };
 
   if (_editProjectId) {
@@ -9751,6 +10474,9 @@ function editProject(id) {
   g('nprj-amt').value  = p.contractAmount || '';
   if (g('nprj-payroll-dept')) g('nprj-payroll-dept').value = p.payrollDepartment || 'field';
   if (g('nprj-cust-job-num')) g('nprj-cust-job-num').value = p.customerJobNumber || '';
+  // Round 4.1: COR markup — default to 10/5 if not set on legacy projects
+  if (g('nprj-mateq-markup')) g('nprj-mateq-markup').value = (p.matEqMarkupPct !== null && p.matEqMarkupPct !== undefined) ? p.matEqMarkupPct : 10;
+  if (g('nprj-sub-markup'))   g('nprj-sub-markup').value   = (p.subMarkupPct   !== null && p.subMarkupPct   !== undefined) ? p.subMarkupPct   : 5;
   populateFoundationCustomerDropdown(p.foundationCustomerNo || '');
   populateProjectCustDropdown(p.customerId);
   populateProjectStateDropdown(p.state || '');
@@ -12660,7 +13386,10 @@ function toSBProject(r) {
     material_list:                 r.materialList                 || [],
     labor_rates:                   r.laborRates                   || null,
     // Round 2.5 — project file attachments (quotes, drawings, anything)
-    attachments:                   r.attachments                  || []
+    attachments:                   r.attachments                  || [],
+    // Round 4.1 — COR markup percentages
+    mat_eq_markup_pct: (r.matEqMarkupPct !== undefined && r.matEqMarkupPct !== null && r.matEqMarkupPct !== '') ? r.matEqMarkupPct : null,
+    sub_markup_pct:    (r.subMarkupPct   !== undefined && r.subMarkupPct   !== null && r.subMarkupPct   !== '') ? r.subMarkupPct   : null
   };
 }
 function fromSBProject(r) {
@@ -12691,7 +13420,10 @@ function fromSBProject(r) {
     materialList:                Array.isArray(r.material_list) ? r.material_list : [],
     laborRates:                  r.labor_rates                   || null,
     // Round 2.5 — project file attachments
-    attachments:                 Array.isArray(r.attachments) ? r.attachments : []
+    attachments:                 Array.isArray(r.attachments) ? r.attachments : [],
+    // Round 4.1 — COR markup percentages (legacy projects fall back to defaults)
+    matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
+    subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5
   };
 }
 
@@ -12774,6 +13506,85 @@ function fromSBTmTicket(r) {
     sentForSignatureAt:      r.sent_for_signature_at     || null,
     corId: r.cor_id || null,
     corNumber: r.cor_number || null
+  };
+}
+
+// ── COR mappers (Round 4.1) ────────────────────────────────────────────
+// CORs follow the same camelCase ↔ snake_case + JSONB array pattern as
+// T&M tickets. The form sections (rolledUpTicketIds, laborRows, etc.)
+// are JSONB arrays so they can be saved/loaded without schema changes.
+function toSBCor(r) {
+  return {
+    id: r.id,
+    cor_number:    r.corNumber    || '',
+    cor_date:      r.corDate      || null,
+    cor_type:      r.corType      || 'T&M',
+    project_id:    r.projectId    || null,
+    attention_contact_id: r.attentionContactId || null,
+    description:   r.description  || '',
+    status:        r.status       || 'Draft',
+    rolled_up_ticket_ids: r.rolledUpTicketIds || [],
+    labor_rows:    r.laborRows    || [],
+    material_rows: r.materialRows || [],
+    sub_rows:      r.subRows      || [],
+    mat_eq_markup_pct: r.matEqMarkupPct,
+    sub_markup_pct:    r.subMarkupPct,
+    total_labor:    r.totalLabor    || 0,
+    total_material: r.totalMaterial || 0,
+    total_sub:      r.totalSub      || 0,
+    mateq_ohp:      r.mateqOhp      || 0,
+    sub_ohp:        r.subOhp        || 0,
+    total_amount:   r.totalAmount   || 0,
+    created_at:        r.createdAt        || null,
+    created_by_user_id: r.createdByUserId || null,
+    created_by_name:    r.createdByName   || '',
+    updated_at:        r.updatedAt        || null,
+    updated_by_user_id: r.updatedByUserId || null,
+    sent_at:           r.sentAt           || null,
+    sent_by_user_id:   r.sentByUserId     || null,
+    decision_at:       r.decisionAt       || null,
+    decision_by_user_id: r.decisionByUserId || null,
+    voided_at:         r.voidedAt         || null,
+    voided_by_user_id: r.voidedByUserId   || null,
+    void_reason:       r.voidReason       || null,
+    customer_co_number: r.customerCoNumber || null
+  };
+}
+function fromSBCor(r) {
+  return {
+    id: r.id,
+    corNumber:    r.cor_number    || '',
+    corDate:      r.cor_date      || '',
+    corType:      r.cor_type      || 'T&M',
+    projectId:    r.project_id    || null,
+    attentionContactId: r.attention_contact_id || null,
+    description:  r.description   || '',
+    status:       r.status        || 'Draft',
+    rolledUpTicketIds: Array.isArray(r.rolled_up_ticket_ids) ? r.rolled_up_ticket_ids : [],
+    laborRows:    Array.isArray(r.labor_rows)    ? r.labor_rows    : [],
+    materialRows: Array.isArray(r.material_rows) ? r.material_rows : [],
+    subRows:      Array.isArray(r.sub_rows)      ? r.sub_rows      : [],
+    matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
+    subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5,
+    totalLabor:    r.total_labor    || 0,
+    totalMaterial: r.total_material || 0,
+    totalSub:      r.total_sub      || 0,
+    mateqOhp:      r.mateq_ohp      || 0,
+    subOhp:        r.sub_ohp        || 0,
+    totalAmount:   r.total_amount   || 0,
+    createdAt:        r.created_at        || '',
+    createdByUserId:  r.created_by_user_id || null,
+    createdByName:    r.created_by_name   || '',
+    updatedAt:        r.updated_at        || '',
+    updatedByUserId:  r.updated_by_user_id || null,
+    sentAt:           r.sent_at           || null,
+    sentByUserId:     r.sent_by_user_id   || null,
+    decisionAt:       r.decision_at       || null,
+    decisionByUserId: r.decision_by_user_id || null,
+    voidedAt:         r.voided_at         || null,
+    voidedByUserId:   r.voided_by_user_id || null,
+    voidReason:       r.void_reason       || null,
+    customerCoNumber: r.customer_co_number || null
   };
 }
 
@@ -12910,6 +13721,11 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_tm_tickets').upsert(db.tmTickets.map(toSBTmTicket));
       if (r && r.error) errs.push('tm_tickets: ' + r.error.message);
     }
+    // CORs (Round 4.1) — non-fatal if table missing on older Supabase projects
+    if ((db.cors || []).length) {
+      var r = await supabaseClient.from('kmi_cors').upsert(db.cors.map(toSBCor));
+      if (r && r.error) errs.push('cors: ' + r.error.message);
+    }
     // Foundation master data — cost codes / classes / customers (Chunk 1).
     // These are populated by CSV import on the Templates page; if local is
     // empty we don't push (avoids wiping a populated cloud copy on a fresh
@@ -12984,7 +13800,7 @@ async function pullFromSupabase() {
   setSyncStatus('syncing', 'Loading\u2026');
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
-         ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix] = await Promise.all([
+         ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -13000,7 +13816,8 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_customers_foundation').select('*'),
       supabaseClient.from('kmi_budget_template_lines').select('*').order('sort_order', {ascending:true}),
       supabaseClient.from('kmi_project_budgets').select('*').order('created_at', {ascending:false}),
-      supabaseClient.from('kmi_tm_tickets').select('*')
+      supabaseClient.from('kmi_tm_tickets').select('*'),
+      supabaseClient.from('kmi_cors').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -13097,6 +13914,13 @@ async function pullFromSupabase() {
     } else if (tmTix && tmTix.error) {
       console.warn('kmi_tm_tickets load error (table missing?):', tmTix.error.message);
       if (!Array.isArray(db.tmTickets)) db.tmTickets = [];
+    }
+    // CORs (Round 4.1) — same preserve-on-missing pattern
+    if (corsRes && !corsRes.error) {
+      db.cors = (corsRes.data || []).map(fromSBCor);
+    } else if (corsRes && corsRes.error) {
+      console.warn('kmi_cors load error (table missing?):', corsRes.error.message);
+      if (!Array.isArray(db.cors)) db.cors = [];
     }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
