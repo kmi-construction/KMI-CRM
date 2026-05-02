@@ -649,6 +649,15 @@ textarea{resize:vertical;min-height:72px}
     <div id="nprj-mat-list-section"></div>
   </div>
 
+  <!-- Attached files (Round 2.5) — vendor quotes, drawings, anything -->
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Attached files</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Vendor quotes, drawings, photos — anything you want kept with the project</span>
+    </div>
+    <div id="nprj-attachments-section"></div>
+  </div>
+
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
     <button class="btn" onclick="nav('projects')">Cancel</button>
     <button class="btn btn-p" onclick="saveProject()" style="padding:10px 32px;font-size:14px;font-weight:700" id="nprj-save-btn">Create project</button>
@@ -2548,6 +2557,7 @@ function renderProjectMaterialList() {
         '<select id="nprj-mat-tmpl-select"' + (canEdit ? '' : ' disabled') + '>' + tmplOpts + '</select>' +
       '</div>' +
       '<button type="button" class="btn btn-p btn-sm" onclick="applyMaterialTemplate()"' + (canEdit ? '' : ' disabled') + ' style="margin-bottom:0">Apply</button>' +
+      '<button type="button" class="btn btn-sm" onclick="showBulkAddMaterialModal()"' + (canEdit ? '' : ' disabled') + ' style="margin-bottom:0">↑ Bulk add</button>' +
       '<button type="button" class="btn btn-sm" onclick="addCustomMaterialRow()"' + (canEdit ? '' : ' disabled') + ' style="margin-bottom:0">+ Custom row</button>' +
     '</div>';
 
@@ -2672,6 +2682,156 @@ function addCustomMaterialRow() {
   renderProjectMaterialList();
 }
 
+// ── Bulk-add modal (Round 2.5) ─────────────────────────────────────────
+// Lets the PM/Coordinator paste rows from a vendor quote PDF directly into
+// the project material list. Lenient parser:
+//   • Accepts tab-separated OR comma-separated input (auto-detects per line)
+//   • Skips blank lines and lines that don't have ≥4 fields with a numeric
+//     last field (so headers like "QUOTE FROM ABC STONE" or "ALTERNATE PRICING:"
+//     are silently dropped)
+//   • Validates cost codes against the isBudgetable list — invalid codes
+//     are reported and the row is skipped (better than silent miscoding)
+//   • Tags each imported row sourceLabel: "Quote — [optional name]"
+function showBulkAddMaterialModal() {
+  if (!_editProjectId) { alert('Save the project first, then re-open it to bulk-add rows.'); return; }
+  var p = getProj(_editProjectId); if (!p) return;
+
+  // Build list of valid cost codes for the help text
+  var validCodes = (db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+    .sort(function(a,b){ return String(a.code).localeCompare(String(b.code)); });
+  var codeHints = validCodes.length
+    ? validCodes.slice(0, 8).map(function(c){ return c.code + ' (' + (c.description || '').slice(0, 30) + ')'; }).join(', ') + (validCodes.length > 8 ? ', …' : '')
+    : '(no isBudgetable cost codes loaded — go to Templates → Foundation master data)';
+  var unitsHint = MATERIAL_UNITS.join(', ');
+
+  showModal('<button class="xbtn" onclick="closeModal();">&#215;</button>' +
+    '<div class="mt">Bulk-add material rows</div>' +
+    '<div class="msb">Paste lines from a vendor quote. One row per line, four fields per row: <strong>description, unit, cost code, unit cost</strong>. Tab-separated or comma-separated both work. Header rows, blank lines, and lines that don\'t match the format are skipped.</div>' +
+    '<div style="margin:12px 0">' +
+      '<div class="fgr full" style="margin-bottom:10px"><label>Quote source label <span style="font-weight:400;color:#888">(optional)</span></label>' +
+        '<input id="bulk-mat-source" placeholder="e.g. ABC Stone — 4/15/26 quote" maxlength="80"></div>' +
+      '<div class="fgr full"><label>Paste rows</label>' +
+        '<textarea id="bulk-mat-text" rows="10" style="width:100%;font-family:monospace;font-size:12px;padding:8px;border:0.5px solid #ccc;border-radius:6px" placeholder="Custom Limestone Coping&#9;LF&#9;4001&#9;42.50&#10;Precast Sill 6&quot;&#9;EA&#9;4001&#9;185.00&#10;Anchor Bolts - SS&#9;EA&#9;4000&#9;8.75"></textarea>' +
+        '<div style="font-size:11px;color:#888;margin-top:6px;line-height:1.5">' +
+          '<strong>Valid units:</strong> ' + unitsHint + '<br>' +
+          '<strong>Some valid cost codes:</strong> ' + matEsc(codeHints) +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal();">Cancel</button>' +
+      '<button class="btn btn-p" onclick="applyBulkAddMaterial()">Add rows</button>' +
+    '</div>');
+  setTimeout(function(){ var el = g('bulk-mat-text'); if (el) el.focus(); }, 50);
+}
+
+// Parse one line of bulk-add input. Auto-detects tab vs comma based on
+// which separator yields more cells. Returns an array of trimmed cells,
+// or [] for blank lines.
+function _parseBulkMatLine(line) {
+  if (!line || !line.trim()) return [];
+  // Tab takes precedence — it's the natural separator when copy-pasting
+  // from a PDF table or spreadsheet
+  if (line.indexOf('\t') !== -1) {
+    return line.split('\t').map(function(c){ return c.trim(); });
+  }
+  // Otherwise comma-split using the proper CSV-aware splitter so a
+  // quoted "8\" CMU Block" works
+  return _splitCsvRow(line).map(function(c){ return c.trim(); });
+}
+
+// Lenient classifier: is this line a valid material row?
+// Returns parsed object or null. A row is "valid" if it has ≥4 cells and
+// the 4th cell parses as a positive number (the unit cost).
+function _classifyBulkMatLine(cells) {
+  if (cells.length < 4) return null;
+  var desc = cells[0];
+  var unit = cells[1].toUpperCase();
+  var cc   = cells[2];
+  var costStr = cells[3].replace(/[$,]/g, '');  // strip $ and thousands commas
+  var cost = parseFloat(costStr);
+  if (!desc) return null;
+  if (isNaN(cost) || cost < 0) return null;
+  return { description: desc, unit: unit, costCode: cc, unitCost: cost };
+}
+
+function applyBulkAddMaterial() {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var text = (g('bulk-mat-text').value || '');
+  var sourceLabel = (g('bulk-mat-source').value || '').trim();
+  if (!text.trim()) { alert('Paste some rows first.'); return; }
+
+  // Build validation sets
+  var validCodes = {};
+  (db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+    .forEach(function(c){ validCodes[c.code] = c; });
+
+  // Existing descriptions (case-insensitive) for dedupe
+  p.materialList = p.materialList || [];
+  var existing = {};
+  p.materialList.forEach(function(r){ existing[(r.description || '').toLowerCase().trim()] = true; });
+
+  var lines = text.replace(/\r\n/g, '\n').split('\n');
+  var added = 0;
+  var skippedFormat = 0;     // didn't have 4+ fields or non-numeric cost
+  var skippedDuplicates = 0; // already in project material list
+  var rejectedReasons = []; // structured: row had right shape but failed validation
+  var importLabel = sourceLabel ? ('Quote — ' + sourceLabel) : 'Quote';
+  var nowIso = new Date().toISOString();
+
+  lines.forEach(function(rawLine, idx){
+    var trimmed = rawLine.trim();
+    if (!trimmed) return; // silently skip blank lines
+
+    var cells = _parseBulkMatLine(rawLine);
+    var parsed = _classifyBulkMatLine(cells);
+    if (!parsed) { skippedFormat++; return; }
+
+    // Validate unit
+    var unit = parsed.unit;
+    if (MATERIAL_UNITS.indexOf(unit) === -1) {
+      rejectedReasons.push('Line ' + (idx+1) + ' "' + parsed.description.slice(0,40) + '": unit "' + unit + '" not in standard list');
+      return;
+    }
+    // Validate cost code
+    if (!validCodes[parsed.costCode]) {
+      rejectedReasons.push('Line ' + (idx+1) + ' "' + parsed.description.slice(0,40) + '": cost code "' + parsed.costCode + '" not isBudgetable');
+      return;
+    }
+    // Dedupe by description
+    var d = parsed.description.toLowerCase().trim();
+    if (existing[d]) { skippedDuplicates++; return; }
+
+    p.materialList.push({
+      id: 'pml' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+      description: parsed.description,
+      unit: unit,
+      costCode: parsed.costCode,
+      unitCost: parsed.unitCost,
+      sourceTemplateId: null,
+      sourceLabel: importLabel,
+      appliedAt: nowIso
+    });
+    existing[d] = true;
+    added++;
+  });
+
+  saveDB();
+  closeModal();
+  renderProjectMaterialList();
+
+  // Summary message
+  var msg = 'Imported ' + added + ' row' + (added === 1 ? '' : 's') + '.';
+  if (skippedFormat) msg += '\nSkipped ' + skippedFormat + ' line' + (skippedFormat === 1 ? '' : 's') + " (didn't match 4-field format).";
+  if (skippedDuplicates) msg += '\nSkipped ' + skippedDuplicates + ' duplicate' + (skippedDuplicates === 1 ? '' : 's') + ' (matched existing description).';
+  if (rejectedReasons.length) {
+    msg += '\n\nRejected ' + rejectedReasons.length + ' row' + (rejectedReasons.length === 1 ? '' : 's') + ':\n• ' +
+      rejectedReasons.slice(0, 8).join('\n• ') + (rejectedReasons.length > 8 ? '\n• …' : '');
+  }
+  alert(msg);
+}
+
 function rmProjMatRow(rowId) {
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
@@ -2681,6 +2841,237 @@ function rmProjMatRow(rowId) {
   p.materialList = (p.materialList || []).filter(function(r){ return String(r.id) !== String(rowId); });
   saveDB();
   renderProjectMaterialList();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PROJECT FILE ATTACHMENTS — Round 2.5
+// ═══════════════════════════════════════════════════════════════════════
+// Lets PMs/Coordinators upload arbitrary files (vendor quote PDFs,
+// drawings, photos, RFI responses, etc.) and keep them with the project.
+// Files live in Supabase Storage bucket 'kmi-project-files'; metadata
+// rides on the project record as p.attachments.
+//
+// Each attachment: {
+//   id, name, path, size, contentType, label,
+//   uploadedAt, uploadedByUserId, uploadedByName
+// }
+//
+// Path scheme: '<projectId>/<timestamp>_<safeName>' — prevents collisions
+// when two users upload files with the same name.
+//
+// Bucket setup (one-time, in Supabase Console):
+//   Create private bucket 'kmi-project-files'. RLS policies are not
+//   strictly required for Round 2.5 since the app runs with anon key
+//   and authenticates client-side, matching the existing kmi-budget-pdfs
+//   pattern. Round 3 may tighten this when the signing flow lands.
+
+var PROJECT_FILES_BUCKET = 'kmi-project-files';
+
+function renderProjectAttachments() {
+  var el = g('nprj-attachments-section'); if (!el) return;
+  var p = _editProjectId ? getProj(_editProjectId) : null;
+  var canEdit = !!_editProjectId;
+  var atts = (p && Array.isArray(p.attachments)) ? p.attachments : [];
+
+  var html =
+    '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
+      'Files are uploaded to Supabase Storage and listed here for download. ' +
+      'Use this for anything you want kept with the project — vendor quote PDFs are the main use case, but anything goes.' +
+      (canEdit ? '' : '<br><strong style="color:#A32D2D">Save the project first, then re-open it to upload files.</strong>') +
+    '</div>' +
+    '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">' +
+      '<label class="btn btn-p btn-sm" style="cursor:pointer;display:inline-block;margin:0' + (canEdit ? '' : ';opacity:0.5;pointer-events:none') + '">' +
+        '↑ Upload file' +
+        '<input type="file" id="nprj-att-file" style="display:none" onchange="onProjectAttachmentSelected(event)"' + (canEdit ? '' : ' disabled') + '>' +
+      '</label>' +
+      '<input id="nprj-att-label" placeholder="Optional label (e.g. ABC Stone quote, 4/15/26)" style="flex:1;padding:6px 8px;font-size:12px"' + (canEdit ? '' : ' disabled') + '>' +
+      '<span id="nprj-att-status" style="font-size:11px;color:#888;min-width:100px"></span>' +
+    '</div>';
+
+  if (!atts.length) {
+    html += '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No files attached yet.</div>';
+  } else {
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px">' +
+      '<thead style="background:#fafafa"><tr>' +
+        '<th style="padding:6px 8px;text-align:left">File</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:240px">Label</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:80px">Size</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:160px">Uploaded</th>' +
+        '<th style="padding:6px 8px;width:140px"></th>' +
+      '</tr></thead><tbody>';
+    atts.slice().sort(function(a,b){
+      return String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || ''));
+    }).forEach(function(att){
+      var when = (att.uploadedAt || '').slice(0, 16).replace('T', ' ');
+      var who  = att.uploadedByName || '';
+      var meta = (when ? when : '—') + (who ? ' · ' + who : '');
+      html += '<tr>' +
+        '<td style="padding:6px 8px;word-break:break-all">' + matEsc(att.name || '') + '</td>' +
+        '<td style="padding:6px 8px;color:#555">' + matEsc(att.label || '') + '</td>' +
+        '<td style="padding:6px 8px;text-align:right;font-family:monospace;color:#888">' + _fmtFileSize(att.size) + '</td>' +
+        '<td style="padding:6px 8px;font-size:11px;color:#888">' + matEsc(meta) + '</td>' +
+        '<td style="padding:6px 8px;text-align:right">' +
+          '<button type="button" class="btn btn-sm" onclick="viewProjectAttachment(\'' + matEsc(att.id) + '\')">⬇ Open</button> ' +
+          '<button type="button" class="btn btn-sm" onclick="rmProjectAttachment(\'' + matEsc(att.id) + '\')" style="color:#A32D2D">Remove</button>' +
+        '</td>' +
+      '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  el.innerHTML = html;
+}
+
+function _fmtFileSize(b) {
+  var n = Number(b) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+// Sanitize a filename for storage path use — strip path separators,
+// collapse whitespace, keep only safe characters.
+function _safeFileName(name) {
+  return String(name || 'file')
+    .replace(/[\\/]/g, '_')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 80);
+}
+
+async function onProjectAttachmentSelected(ev) {
+  var fileEl = ev && ev.target;
+  var file = fileEl && fileEl.files && fileEl.files[0];
+  if (!file) return;
+  if (!_editProjectId) { alert('Save the project first.'); return; }
+  if (!supabaseClient) {
+    alert('Not connected to Supabase. Connect first, then upload.');
+    fileEl.value = '';
+    return;
+  }
+  var p = getProj(_editProjectId);
+  if (!p) { fileEl.value = ''; return; }
+
+  var labelEl = g('nprj-att-label');
+  var label   = labelEl ? (labelEl.value || '').trim() : '';
+  var status  = g('nprj-att-status');
+
+  // Soft size cap to avoid surprise upload failures (Supabase free-tier
+  // default is 50MB per object). We warn at 25MB.
+  if (file.size > 25 * 1024 * 1024) {
+    if (!confirm('This file is ' + _fmtFileSize(file.size) + '. Large uploads may be slow or fail. Continue?')) {
+      fileEl.value = '';
+      return;
+    }
+  }
+
+  if (status) status.textContent = 'Uploading…';
+  try {
+    var ts = Date.now();
+    var safeName = _safeFileName(file.name);
+    var path = String(_editProjectId) + '/' + ts + '_' + safeName;
+
+    var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+      .upload(path, file, {
+        contentType: file.type || 'application/octet-stream',
+        upsert: false
+      });
+    if (up && up.error) {
+      // Most common cause: bucket doesn't exist yet
+      if (/Bucket not found/i.test(up.error.message || '')) {
+        throw new Error("Storage bucket 'kmi-project-files' doesn't exist yet. " +
+          "Create it in the Supabase Console (Storage → New bucket → name 'kmi-project-files', private), then try again.");
+      }
+      throw new Error(up.error.message);
+    }
+
+    var att = {
+      id: 'att' + ts + '_' + Math.random().toString(36).slice(2,8),
+      name: file.name,
+      path: path,
+      size: file.size,
+      contentType: file.type || 'application/octet-stream',
+      label: label,
+      uploadedAt: new Date().toISOString(),
+      uploadedByUserId: _currentUser ? _currentUser.id : null,
+      uploadedByName: _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : ''
+    };
+    p.attachments = Array.isArray(p.attachments) ? p.attachments : [];
+    p.attachments.push(att);
+    saveDB();
+
+    // Also push the project record up so the new attachments array survives
+    // a pull on another device. Non-fatal if push fails — user will see a
+    // sync warning via the existing indicator.
+    try {
+      await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+    } catch (e) {
+      console.warn('project attachment metadata push warning:', e);
+    }
+
+    if (labelEl) labelEl.value = '';
+    if (status) status.textContent = 'Uploaded ✓';
+    setTimeout(function(){ if (status) status.textContent = ''; }, 3000);
+    renderProjectAttachments();
+  } catch (e) {
+    if (status) status.textContent = '';
+    alert('Upload failed: ' + (e && e.message ? e.message : String(e)));
+  } finally {
+    fileEl.value = '';
+  }
+}
+
+async function viewProjectAttachment(attId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var att = (p.attachments || []).find(function(a){ return String(a.id) === String(attId); });
+  if (!att) { alert('Attachment not found.'); return; }
+  if (!supabaseClient) { alert('Not connected to Supabase.'); return; }
+  try {
+    var r = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+      .createSignedUrl(att.path, 300);  // 5 min
+    if (r && r.error) throw new Error(r.error.message);
+    if (r && r.data && r.data.signedUrl) {
+      window.open(r.data.signedUrl, '_blank');
+    } else {
+      alert('Could not generate a download link.');
+    }
+  } catch (e) {
+    alert('Failed to open attachment: ' + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function rmProjectAttachment(attId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var att = (p.attachments || []).find(function(a){ return String(a.id) === String(attId); });
+  if (!att) return;
+  if (!confirm('Remove "' + (att.name || 'this file') + '" from the project?\n\nThis will delete the file from storage and cannot be undone.')) return;
+  if (!supabaseClient) { alert('Not connected to Supabase.'); return; }
+
+  try {
+    // Try to remove from storage. If it's already gone we don't fail —
+    // the metadata record removal is what the user actually sees.
+    var del = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+      .remove([att.path]);
+    if (del && del.error) {
+      console.warn('Storage remove warning:', del.error.message);
+    }
+  } catch (e) {
+    console.warn('Storage remove threw:', e);
+  }
+
+  // Always remove the metadata entry so the UI doesn't get stuck on a
+  // dead reference even if storage removal failed.
+  p.attachments = (p.attachments || []).filter(function(a){ return String(a.id) !== String(attId); });
+  saveDB();
+  try {
+    await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+  } catch (e) {
+    console.warn('project attachment metadata push warning:', e);
+  }
+  renderProjectAttachments();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -8018,6 +8409,7 @@ function initNewProject() {
   // render in disabled mode with a "save first, then re-open to apply" hint.
   renderProjectLaborRateSection();
   renderProjectMaterialList();
+  renderProjectAttachments();
 
   // Stash the source opp id on the form for saveProject() to read, then clear the module-level var
   g('nprj-save-btn').dataset.oppId = _newProjectFromOppId || '';
@@ -8133,6 +8525,7 @@ function editProject(id) {
   // _editProjectId is set, so the sections render in active mode.
   renderProjectLaborRateSection();
   renderProjectMaterialList();
+  renderProjectAttachments();
 
   g('nprj-save-btn').dataset.oppId = '';
 }
@@ -11014,7 +11407,9 @@ function toSBProject(r) {
     foundation_customer_no:        r.foundationCustomerNo         || null,
     // Round 2 — project material list snapshot and labor rate snapshot
     material_list:                 r.materialList                 || [],
-    labor_rates:                   r.laborRates                   || null
+    labor_rates:                   r.laborRates                   || null,
+    // Round 2.5 — project file attachments (quotes, drawings, anything)
+    attachments:                   r.attachments                  || []
   };
 }
 function fromSBProject(r) {
@@ -11043,7 +11438,9 @@ function fromSBProject(r) {
     foundationCustomerNo:        r.foundation_customer_no        || '',
     // Round 2 — project material list snapshot and labor rate snapshot
     materialList:                Array.isArray(r.material_list) ? r.material_list : [],
-    laborRates:                  r.labor_rates                   || null
+    laborRates:                  r.labor_rates                   || null,
+    // Round 2.5 — project file attachments
+    attachments:                 Array.isArray(r.attachments) ? r.attachments : []
   };
 }
 
