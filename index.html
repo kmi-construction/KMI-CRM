@@ -1228,31 +1228,49 @@ textarea{resize:vertical;min-height:72px}
     </div>
   </div>
 
-  <!-- Round 4.2 section anchors — placeholder cards rendered greyed-out
-       until Round 4.2 fills in the actual content -->
-  <div class="card" id="ncor-section-tickets" style="opacity:.55">
-    <div class="ch"><span class="ct">Rolled-up T&amp;M tickets</span></div>
-    <div style="padding:14px 16px;font-size:12px;color:#888">— Form section coming in Round 4.2 —</div>
+  <!-- Round 4.2 section cards — live content rendered by JS module -->
+
+  <!-- Rolled-up T&M tickets section -->
+  <div class="card" id="ncor-section-tickets">
+    <div class="ch">
+      <span class="ct">Rolled-up T&amp;M tickets</span>
+      <button class="btn btn-sm" onclick="ncorShowAddTicketsModal()" id="ncor-add-tickets-btn">+ Add tickets</button>
+    </div>
+    <div id="ncor-tickets-body"></div>
   </div>
 
-  <div class="card" id="ncor-section-labor" style="opacity:.55">
-    <div class="ch"><span class="ct">Labor breakdown</span></div>
-    <div style="padding:14px 16px;font-size:12px;color:#888">— Form section coming in Round 4.2 —</div>
+  <!-- Labor breakdown -->
+  <div class="card" id="ncor-section-labor">
+    <div class="ch">
+      <span class="ct">Labor breakdown</span>
+      <button class="btn btn-sm" onclick="ncorAddManualLaborRow()" id="ncor-add-labor-btn">+ Add manual row</button>
+    </div>
+    <div id="ncor-labor-body"></div>
   </div>
 
-  <div class="card" id="ncor-section-materials" style="opacity:.55">
-    <div class="ch"><span class="ct">Materials &amp; Equipment</span></div>
-    <div style="padding:14px 16px;font-size:12px;color:#888">— Form section coming in Round 4.2 —</div>
+  <!-- Materials & Equipment -->
+  <div class="card" id="ncor-section-materials">
+    <div class="ch">
+      <span class="ct">Materials &amp; Equipment</span>
+      <button class="btn btn-sm" onclick="ncorAddMaterialRow()" id="ncor-add-mat-btn">+ Add row</button>
+      <button class="btn btn-sm" onclick="ncorShowFromMaterialListModal()" id="ncor-from-list-btn" style="margin-left:6px">+ From list</button>
+    </div>
+    <div id="ncor-materials-body"></div>
   </div>
 
-  <div class="card" id="ncor-section-subs" style="opacity:.55">
-    <div class="ch"><span class="ct">Subcontractors</span></div>
-    <div style="padding:14px 16px;font-size:12px;color:#888">— Form section coming in Round 4.2 —</div>
+  <!-- Subcontractors -->
+  <div class="card" id="ncor-section-subs">
+    <div class="ch">
+      <span class="ct">Subcontractors</span>
+      <button class="btn btn-sm" onclick="ncorAddSubRow()" id="ncor-add-sub-btn">+ Add row</button>
+    </div>
+    <div id="ncor-subs-body"></div>
   </div>
 
-  <div class="card" id="ncor-section-totals" style="opacity:.55">
+  <!-- Grand total -->
+  <div class="card" id="ncor-section-totals">
     <div class="ch"><span class="ct">Grand total</span></div>
-    <div style="padding:14px 16px;font-size:12px;color:#888">— Auto-calculated in Round 4.2 —</div>
+    <div id="ncor-totals-body"></div>
   </div>
 
   <!-- Action buttons. Most are placeholders that wire up in Round 4.3. -->
@@ -5422,7 +5440,69 @@ function corFmtMoney(n) {
 }
 
 var COR_STATUSES = ['Draft','Pending','Approved','Rejected','Voided'];
-var COR_TYPES    = ['T&M','Premium Time OT','Premium Time DT','Fixed Fee'];
+var COR_TYPES    = ['T&M','Overtime','Double Time','Premium Time OT','Premium Time DT','Fixed Fee'];
+
+// Rate-resolution matrix: given a labor rate snapshot row and a COR type,
+// returns the customer-billing rate to use for the auto-pivot (and as
+// default for manual rows). Returns null when the rate isn't available.
+// Premium Time CORs use the delta between OT/DT and ST rates because
+// the customer already paid the ST equivalent on the original contract;
+// this COR captures only the extra cost of those hours being premium.
+function corResolveRate(rateRow, corType) {
+  if (!rateRow) return null;
+  var st = Number(rateRow.stCoRate) || 0;
+  var ot = Number(rateRow.otCoRate) || 0;
+  var dt = Number(rateRow.dtCoRate) || 0;
+  switch (corType) {
+    case 'T&M':              return st;
+    case 'Overtime':         return ot;
+    case 'Double Time':      return dt;
+    case 'Premium Time OT':  return ot - st;
+    case 'Premium Time DT':  return dt - st;
+    case 'Fixed Fee':        return st;
+    default:                 return st;
+  }
+}
+
+// Hour-resolution matrix: given a T&M ticket's labor row and the COR
+// type, returns how many hours of THAT row roll into the COR. Premium
+// Time CORs only pull premium hours; everything else pulls all hours.
+function corResolveHours(laborRow, corType) {
+  var st = Number(laborRow.stHours) || 0;
+  var ot = Number(laborRow.otHours) || 0;
+  var dt = Number(laborRow.dtHours) || 0;
+  switch (corType) {
+    case 'T&M':
+    case 'Overtime':
+    case 'Double Time':      return st + ot + dt;
+    case 'Premium Time OT':  return ot;
+    case 'Premium Time DT':  return dt;
+    case 'Fixed Fee':        return 0;  // never rolls up
+    default:                 return st + ot + dt;
+  }
+}
+
+// Ticket-eligibility for rollup. A ticket is eligible if it's signed +
+// KMI-approved + not already on another COR + has hours that match the
+// COR type's needs (e.g. Premium Time OT requires OT > 0).
+function corTicketEligible(ticket, corType) {
+  if (!ticket) return false;
+  // Must be signed and approved (Approved by KMI PM is the final gate)
+  if ((ticket.status || '') !== 'Approved by KMI PM') return false;
+  // Already locked to another COR? Not eligible.
+  if (ticket.corId) return false;
+  // Premium Time CORs need premium hours present
+  if (corType === 'Premium Time OT' || corType === 'Premium Time DT') {
+    var rows = Array.isArray(ticket.laborRows) ? ticket.laborRows : [];
+    var hours = rows.reduce(function(sum, r){
+      return sum + (corType === 'Premium Time OT' ? (Number(r.otHours) || 0) : (Number(r.dtHours) || 0));
+    }, 0);
+    if (hours <= 0) return false;
+  }
+  // Fixed Fee never rolls up tickets
+  if (corType === 'Fixed Fee') return false;
+  return true;
+}
 
 function corStatusBadge(c) {
   var s = c.status || 'Draft';
@@ -5442,6 +5522,8 @@ function corTypeBadge(c) {
   // Compact label for table cells; use title attr for the full name
   var compact = {
     'T&M':              'T&M',
+    'Overtime':         'OT',
+    'Double Time':      'DT',
     'Premium Time OT':  'Prem. (OT)',
     'Premium Time DT':  'Prem. (DT)',
     'Fixed Fee':        'Fixed Fee'
@@ -5597,11 +5679,13 @@ function showNewCorModal() {
     '</div>' +
     '<div style="margin-bottom:14px">' +
       '<label style="display:block;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.7px;margin-bottom:8px">Type *</label>' +
-      '<div style="display:flex;flex-direction:column;gap:8px">' +
-        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="T&M" checked style="margin-top:2px"><span><strong>T&amp;M</strong> — rolls up approved T&amp;M tickets with all hours</span></label>' +
-        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Premium Time OT" style="margin-top:2px"><span><strong>Premium Time — OT</strong> — rolls up overtime hours only</span></label>' +
-        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Premium Time DT" style="margin-top:2px"><span><strong>Premium Time — DT</strong> — rolls up double-time hours only</span></label>' +
-        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Fixed Fee" style="margin-top:2px"><span><strong>Fixed Fee</strong> — purely manual entry (no ticket rollup)</span></label>' +
+      '<div style="display:flex;flex-direction:column;gap:6px">' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:9px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="T&M" checked style="margin-top:2px"><span><strong>T&amp;M</strong> — rolls up approved tickets, billed at straight-time rate</span></label>' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:9px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Overtime" style="margin-top:2px"><span><strong>Overtime</strong> — rolls up approved tickets, billed at full OT rate (work scheduled as overtime)</span></label>' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:9px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Double Time" style="margin-top:2px"><span><strong>Double Time</strong> — rolls up approved tickets, billed at full DT rate</span></label>' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:9px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Premium Time OT" style="margin-top:2px"><span><strong>Premium Time — OT</strong> — captures only the OT premium (delta over ST rate) on OT hours</span></label>' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:9px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Premium Time DT" style="margin-top:2px"><span><strong>Premium Time — DT</strong> — captures only the DT premium (delta over ST rate) on DT hours</span></label>' +
+        '<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:9px 12px;border:0.5px solid #ddd;border-radius:7px"><input type="radio" name="ncm-type" value="Fixed Fee" style="margin-top:2px"><span><strong>Fixed Fee</strong> — purely manual entry, no ticket rollup</span></label>' +
       '</div>' +
     '</div>' +
     '<div id="ncm-err" style="color:#A32D2D;font-size:12px;margin-bottom:10px;min-height:14px"></div>' +
@@ -5666,6 +5750,22 @@ function initNewCor() {
   // Trigger project-changed handler to populate customer + attention
   ncorProjectChanged();
 
+  // Round 4.2: initialize working state for sections (empty COR shell)
+  var prefillProjectIdNum = prefillProjectId ? Number(prefillProjectId) : null;
+  var prefillProj = prefillProjectIdNum ? db.projects.find(function(x){ return String(x.id) === String(prefillProjectIdNum); }) : null;
+  ncorInitWorking({
+    rolledUpTicketIds: [],
+    manualLaborRows:    [],
+    manualMaterialRows: [],
+    autoMaterialRows:   [],
+    subRows:            [],
+    matEqMarkupPct: prefillProj ? ((prefillProj.matEqMarkupPct !== null && prefillProj.matEqMarkupPct !== undefined) ? prefillProj.matEqMarkupPct : 10) : 10,
+    subMarkupPct:   prefillProj ? ((prefillProj.subMarkupPct   !== null && prefillProj.subMarkupPct   !== undefined) ? prefillProj.subMarkupPct   : 5)  : 5,
+    corType:    corType,
+    projectId:  prefillProjectIdNum
+  });
+  ncorRenderSections();
+
   _newCorPrefill = null;
 }
 
@@ -5720,6 +5820,11 @@ function viewCor(id) {
     g('ncor-attention').disabled = !canEdit;
   }
 
+  // Round 4.2: hydrate working state from saved COR + recompute auto rows
+  ncorInitWorking(c);
+  ncorRebuildAutoMaterialRows();  // recompute on every open per Q9
+  ncorRenderSections();
+
   renderCorStatusCard(c);
   _refreshCorActionButtons(c);
 }
@@ -5769,7 +5874,7 @@ function ncorProjectChanged() {
     }).join('');
 }
 
-// ── saveCor: minimal Round 4.1 save (header only; sections come 4.2) ──
+// ── saveCor: Round 4.2 — persists header + sections + ticket lock state ──
 async function saveCor() {
   // For an existing COR, projectId is locked — read from the record, not
   // from the (disabled) dropdown. For a new COR, read from the dropdown.
@@ -5792,28 +5897,105 @@ async function saveCor() {
   var p = db.projects.find(function(x){ return String(x.id) === String(projectId); });
   if (!p) { alert('Project not found.'); return; }
 
-  // Existing edit?
-  if (_editCorId) {
-    var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
-    if (!c) { alert('COR not found.'); return; }
-    if (!corCanEdit(c)) { alert('This COR cannot be edited in its current status.'); return; }
-    c.corDate     = corDate;
-    c.attentionContactId = attnId;
-    c.description = description;
-    c.updatedAt = new Date().toISOString();
-    c.updatedByUserId = _currentUser ? _currentUser.id : null;
+  // Soft-fail warning per Q10: if the project has no labor rate snapshot
+  // and this COR type requires rates (anything except Fixed Fee), warn.
+  if (corType !== 'Fixed Fee' && (!Array.isArray(p.laborRates) || !p.laborRates.length)) {
+    if (!confirm('This project has no labor rate snapshot. Auto-pivoted labor rows will use $0 rates until you set up rates on the project edit page. Save anyway?')) return;
+  }
+
+  // Snapshot the section state from the working copy
+  var w = _ncorWorking || {};
+  var newRolledIds   = (w.rolledUpTicketIds   || []).map(Number);
+  var newManualLabor = (w.manualLaborRows     || []).map(function(r){
+    return { classification: r.classification || '', hours: Number(r.hours) || 0, rate: Number(r.rate) || 0 };
+  });
+  var newAutoMat = (w.autoMaterialRows || []).map(function(r){
+    return {
+      description: r.description || '',
+      quantity:    Number(r.quantity)  || 0,
+      unitPrice:   Number(r.unitPrice) || 0,
+      sourceTickets: r.sourceTickets || []
+    };
+  });
+  var newManualMat = (w.manualMaterialRows || []).map(function(r){
+    return {
+      description: r.description || '',
+      quantity:    Number(r.quantity)  || 0,
+      unitPrice:   Number(r.unitPrice) || 0
+    };
+  });
+  var newSubs = (w.subRows || []).map(function(r){
+    return { name: r.name || '', total: Number(r.total) || 0 };
+  });
+
+  // Persist the auto-snapshot of computed labor rows (for Round 4.3 PDF
+  // and historical accuracy — if a ticket changes after the COR is sent,
+  // we still want to know what was on the COR at the time).
+  var snapshotAutoLabor = ncorComputeAutoLaborRows().map(function(r){
+    return { classification: r.classification, hours: r.hours, rate: r.rate, source: 'auto' };
+  });
+
+  // Compute totals
+  var totals = ncorComputeTotals();
+
+  // ── Existing edit ──
+  if (_editCorId && existingCor) {
+    if (!corCanEdit(existingCor)) { alert('This COR cannot be edited in its current status.'); return; }
+
+    // ── Ticket locking diff: compute who's joining/leaving ──
+    var oldIds = (existingCor.rolledUpTicketIds || []).map(Number);
+    var addedIds   = newRolledIds.filter(function(id){ return oldIds.indexOf(id) === -1; });
+    var removedIds = oldIds.filter(function(id){ return newRolledIds.indexOf(id) === -1; });
+
+    // Apply ticket lock changes
+    addedIds.forEach(function(tid){
+      var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+      if (t && !t.corId) { t.corId = existingCor.id; t.corNumber = existingCor.corNumber; }
+    });
+    removedIds.forEach(function(tid){
+      var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+      if (t && String(t.corId) === String(existingCor.id)) { t.corId = null; t.corNumber = null; }
+    });
+
+    // Persist all section state on the COR
+    existingCor.corDate     = corDate;
+    existingCor.attentionContactId = attnId;
+    existingCor.description = description;
+    existingCor.rolledUpTicketIds = newRolledIds;
+    existingCor.laborRows         = snapshotAutoLabor;       // auto-pivot snapshot
+    existingCor.manualLaborRows   = newManualLabor;
+    existingCor.autoMaterialRows  = newAutoMat;
+    existingCor.manualMaterialRows = newManualMat;
+    existingCor.subRows           = newSubs;
+    existingCor.totalLabor    = totals.totalLabor;
+    existingCor.totalMaterial = totals.totalMaterial;
+    existingCor.totalSub      = totals.totalSub;
+    existingCor.mateqOhp      = totals.mateqOhp;
+    existingCor.subOhp        = totals.subOhp;
+    existingCor.totalAmount   = totals.totalAmount;
+    existingCor.updatedAt     = new Date().toISOString();
+    existingCor.updatedByUserId = _currentUser ? _currentUser.id : null;
+
     saveDB();
     try {
       if (supabaseClient) {
-        var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(c));
+        var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(existingCor));
         if (upRes && upRes.error) console.warn('COR sync error:', upRes.error.message);
+        // Push tickets whose lock state changed
+        var tixToSync = addedIds.concat(removedIds)
+          .map(function(tid){ return (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); }); })
+          .filter(Boolean);
+        if (tixToSync.length) {
+          var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(tixToSync.map(toSBTmTicket));
+          if (tixRes && tixRes.error) console.warn('Ticket sync error:', tixRes.error.message);
+        }
       }
     } catch (e) { console.warn('COR sync exception:', e); }
     nav('cors');
     return;
   }
 
-  // Create — assign next number from the project's sequence
+  // ── Create — assign next number from the project's sequence ──
   var seqAssigned = corBumpProjectSeq(p);
   var corNumber = (p.number || 'PROJ') + '-COR-' + seqAssigned;
   var nowIso = new Date().toISOString();
@@ -5826,23 +6008,20 @@ async function saveCor() {
     attentionContactId: attnId,
     description: description,
     status: 'Draft',
-    // Round 4.2 placeholders — populated by section-level save logic later
-    rolledUpTicketIds: [],
-    laborRows:    [],
-    materialRows: [],
-    subRows:      [],
-    // Markup snapshot — captured at COR create-time so future project edits
-    // don't disturb in-flight CORs (same snapshot pattern as labor rates)
+    rolledUpTicketIds: newRolledIds,
+    laborRows:         snapshotAutoLabor,
+    manualLaborRows:   newManualLabor,
+    autoMaterialRows:  newAutoMat,
+    manualMaterialRows: newManualMat,
+    subRows:           newSubs,
     matEqMarkupPct: (p.matEqMarkupPct !== null && p.matEqMarkupPct !== undefined) ? p.matEqMarkupPct : 10,
     subMarkupPct:   (p.subMarkupPct   !== null && p.subMarkupPct   !== undefined) ? p.subMarkupPct   : 5,
-    // Totals — computed in 4.2 each save; 0 on the empty shell
-    totalLabor:    0,
-    totalMaterial: 0,
-    totalSub:      0,
-    mateqOhp:      0,
-    subOhp:        0,
-    totalAmount:   0,
-    // Lifecycle metadata
+    totalLabor:    totals.totalLabor,
+    totalMaterial: totals.totalMaterial,
+    totalSub:      totals.totalSub,
+    mateqOhp:      totals.mateqOhp,
+    subOhp:        totals.subOhp,
+    totalAmount:   totals.totalAmount,
     createdAt: nowIso,
     createdByUserId: _currentUser ? _currentUser.id : null,
     createdByName:   _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '',
@@ -5852,14 +6031,20 @@ async function saveCor() {
     decisionAt: null, decisionByUserId: null,
     voidedAt: null, voidedByUserId: null,
     voidReason: null,
-    customerCoNumber: null  // populated by KMI when the formal CO comes back
+    customerCoNumber: null
   };
+
+  // Lock all rolled-up tickets onto the new COR
+  newRolledIds.forEach(function(tid){
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    if (t) { t.corId = newCor.id; t.corNumber = newCor.corNumber; }
+  });
 
   db.cors = db.cors || [];
   db.cors.unshift(newCor);
   saveDB();
 
-  // Push the COR + the bumped project sequence to Supabase
+  // Push to Supabase
   try {
     if (supabaseClient) {
       var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(newCor));
@@ -5867,16 +6052,25 @@ async function saveCor() {
         console.warn('COR sync error:', upRes.error.message);
         alert('COR created locally but cloud sync failed: ' + upRes.error.message + '\nIt will retry on next push.');
       }
-      // Also push the project so nextCorSeq survives on cloud
+      // Push the project so nextCorSeq survives a fresh device pull
       var prjRes = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
       if (prjRes && prjRes.error) console.warn('Project sync error:', prjRes.error.message);
+      // Push the locked tickets
+      if (newRolledIds.length) {
+        var tixToSync = newRolledIds
+          .map(function(tid){ return (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); }); })
+          .filter(Boolean);
+        if (tixToSync.length) {
+          var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(tixToSync.map(toSBTmTicket));
+          if (tixRes && tixRes.error) console.warn('Ticket sync error:', tixRes.error.message);
+        }
+      }
     }
   } catch (e) {
     console.warn('COR sync exception:', e);
   }
 
   _editCorId = newCor.id;
-  // Re-open the same COR in edit mode so user can fill in sections in 4.2
   viewCor(newCor.id);
 }
 
@@ -5985,6 +6179,774 @@ async function deleteCor(id) {
     }
   } catch (e) { console.warn('COR delete exception:', e); }
   renderCors();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// COR FORM SECTIONS — Round 4.2
+// ═══════════════════════════════════════════════════════════════════════
+// Five sections: rolled-up tickets, labor breakdown, materials/equipment,
+// subcontractors, grand total. Working state lives on _ncorWorking
+// (mirrors the COR record but is mutated freely by the UI; gets persisted
+// onto db.cors / Supabase on saveCor).
+//
+// Auto-pivot from rolled-up tickets:
+//   - Labor: sums hours per classification, applies the COR-type-specific
+//     CO rate (corResolveRate). One row per classification.
+//   - Materials: pulls material_rows from each ticket; matches descriptions
+//     against the project's material list to pre-fill unitPrice. KMI can edit.
+//
+// Auto rows are visually flagged "(auto)" and have hours/rate/qty/unitPrice
+// locked. Manual rows are fully editable. KMI can append manual rows on top
+// of auto rows in any section.
+
+var _ncorWorking = null;  // working copy of the active COR's editable fields
+
+// ── State init: clone COR fields into the working copy ─────────────────
+function ncorInitWorking(c) {
+  _ncorWorking = {
+    rolledUpTicketIds: Array.isArray(c.rolledUpTicketIds) ? c.rolledUpTicketIds.slice() : [],
+    // Manual rows are kept separately; auto rows are recomputed on every render
+    manualLaborRows:    Array.isArray(c.manualLaborRows)    ? JSON.parse(JSON.stringify(c.manualLaborRows))    : [],
+    manualMaterialRows: Array.isArray(c.manualMaterialRows) ? JSON.parse(JSON.stringify(c.manualMaterialRows)) : [],
+    autoMaterialRows:   Array.isArray(c.autoMaterialRows)   ? JSON.parse(JSON.stringify(c.autoMaterialRows))   : [],
+    subRows:            Array.isArray(c.subRows)            ? JSON.parse(JSON.stringify(c.subRows))            : [],
+    // Snapshotted markup (immutable on the COR; project edits don't disturb)
+    matEqMarkupPct: (c.matEqMarkupPct !== null && c.matEqMarkupPct !== undefined) ? c.matEqMarkupPct : 10,
+    subMarkupPct:   (c.subMarkupPct   !== null && c.subMarkupPct   !== undefined) ? c.subMarkupPct   : 5,
+    corType:    c.corType || 'T&M',
+    projectId:  c.projectId
+  };
+}
+
+// ── Render: master orchestrator (called after every change) ────────────
+function ncorRenderSections() {
+  if (!_ncorWorking) return;
+  ncorRenderTicketsSection();
+  ncorRenderLaborSection();
+  ncorRenderMaterialsSection();
+  ncorRenderSubsSection();
+  ncorRenderTotalsSection();
+}
+
+// ── Read-only mode helper: when the COR isn't editable, hide buttons ───
+function ncorIsEditable() {
+  if (!_editCorId) return true;  // creating
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
+  return corCanEdit(c);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 1 — Rolled-up T&M tickets
+// ─────────────────────────────────────────────────────────────────────
+function ncorRenderTicketsSection() {
+  var w = _ncorWorking;
+  var bodyEl = g('ncor-tickets-body');
+  var addBtn = g('ncor-add-tickets-btn');
+  if (!bodyEl) return;
+
+  var canEdit = ncorIsEditable();
+  if (addBtn) addBtn.style.display = (canEdit && w.corType !== 'Fixed Fee') ? '' : 'none';
+
+  // Fixed Fee: rolled-up tickets section is hidden entirely
+  var section = g('ncor-section-tickets');
+  if (section) section.style.display = (w.corType === 'Fixed Fee') ? 'none' : '';
+  if (w.corType === 'Fixed Fee') return;
+
+  var ticketIds = w.rolledUpTicketIds || [];
+  if (!ticketIds.length) {
+    bodyEl.innerHTML = '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No tickets rolled up yet. ' + (canEdit ? 'Click <strong>+ Add tickets</strong> to pick approved tickets for this project.' : '') +
+    '</div>';
+    return;
+  }
+
+  // Build row per ticket
+  var totals = { st: 0, ot: 0, dt: 0 };
+  var rowsHtml = ticketIds.map(function(tid){
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    if (!t) {
+      return '<tr><td colspan="6" style="color:#A32D2D;font-style:italic;padding:6px 8px">Ticket id ' + corEsc(tid) + ' not found</td></tr>';
+    }
+    var rows = Array.isArray(t.laborRows) ? t.laborRows : [];
+    var st = 0, ot = 0, dt = 0;
+    rows.forEach(function(r){ st += Number(r.stHours)||0; ot += Number(r.otHours)||0; dt += Number(r.dtHours)||0; });
+    totals.st += st; totals.ot += ot; totals.dt += dt;
+    var dateStr = t.ticketDate ? new Date(t.ticketDate + 'T12:00:00').toLocaleDateString() : '';
+    var removeBtn = canEdit
+      ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="ncorRemoveTicket(' + t.id + ')" title="Remove from this COR">×</button>'
+      : '';
+    return '<tr>' +
+      '<td style="padding:6px 10px"><strong style="color:var(--kmi)">' + corEsc(t.ticketNumber || '') + '</strong></td>' +
+      '<td style="padding:6px 10px">' + corEsc(dateStr) + '</td>' +
+      '<td style="padding:6px 10px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + corEsc(t.workDescription || '') + '">' + corEsc(t.workDescription || '') + '</td>' +
+      '<td style="padding:6px 10px;text-align:right;font-family:monospace">' + tmFmtHrs(st) + '/' + tmFmtHrs(ot) + '/' + tmFmtHrs(dt) + '</td>' +
+      '<td style="padding:6px 10px"><button class="btn btn-sm" onclick="viewTmTicket(' + t.id + ')">View</button></td>' +
+      '<td style="padding:6px 10px;text-align:right">' + removeBtn + '</td>' +
+    '</tr>';
+  }).join('');
+
+  bodyEl.innerHTML =
+    '<table style="width:100%;font-size:12px"><thead><tr style="border-bottom:0.5px solid #eee;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px">' +
+      '<th style="text-align:left;padding:6px 10px">Ticket #</th>' +
+      '<th style="text-align:left;padding:6px 10px">Date</th>' +
+      '<th style="text-align:left;padding:6px 10px">Description</th>' +
+      '<th style="text-align:right;padding:6px 10px">ST/OT/DT</th>' +
+      '<th style="padding:6px 10px"></th>' +
+      '<th style="padding:6px 10px"></th>' +
+    '</tr></thead><tbody>' + rowsHtml + '</tbody></table>' +
+    '<div style="margin-top:10px;font-size:12px;color:#666;padding:0 10px">' +
+      ticketIds.length + ' ticket' + (ticketIds.length === 1 ? '' : 's') + ' · ' +
+      'Total ST: ' + tmFmtHrs(totals.st) + ' · OT: ' + tmFmtHrs(totals.ot) + ' · DT: ' + tmFmtHrs(totals.dt) +
+    '</div>';
+}
+
+// + Add tickets modal — list of eligible tickets with checkboxes
+function ncorShowAddTicketsModal() {
+  var w = _ncorWorking;
+  if (!w) return;
+  var pid = w.projectId;
+  var corType = w.corType;
+
+  var eligible = (db.tmTickets || []).filter(function(t){
+    if (String(t.projectId) !== String(pid)) return false;
+    return corTicketEligible(t, corType);
+  }).sort(function(a, b){
+    return String(a.ticketDate || '').localeCompare(String(b.ticketDate || ''))
+        || (Number(a.id) - Number(b.id));
+  });
+
+  if (!eligible.length) {
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt">Add tickets</div>' +
+      '<div class="msb">No eligible tickets for this COR.</div>' +
+      '<div style="background:#FFF8DC;border:1px solid #E8D08A;border-radius:7px;padding:12px;margin-bottom:14px;font-size:12px;color:#6B5A2E;line-height:1.6">' +
+        'Tickets must be <strong>Signed and Approved by KMI PM</strong> AND not already on another COR to be eligible.' +
+        (corType === 'Premium Time OT' ? '<br>For Premium Time OT, the ticket must also have OT hours.' : '') +
+        (corType === 'Premium Time DT' ? '<br>For Premium Time DT, the ticket must also have DT hours.' : '') +
+      '</div>' +
+      '<div class="mbtns"><button class="btn btn-p" onclick="closeModal()">OK</button></div>'
+    );
+    return;
+  }
+
+  var rowsHtml = eligible.map(function(t){
+    var rows = Array.isArray(t.laborRows) ? t.laborRows : [];
+    var st = 0, ot = 0, dt = 0;
+    rows.forEach(function(r){ st += Number(r.stHours)||0; ot += Number(r.otHours)||0; dt += Number(r.dtHours)||0; });
+    var dateStr = t.ticketDate ? new Date(t.ticketDate + 'T12:00:00').toLocaleDateString() : '';
+    return '<tr>' +
+      '<td style="padding:5px 8px"><input type="checkbox" name="ncm-ticket" value="' + t.id + '"></td>' +
+      '<td style="padding:5px 8px"><strong style="color:var(--kmi)">' + corEsc(t.ticketNumber || '') + '</strong></td>' +
+      '<td style="padding:5px 8px">' + corEsc(dateStr) + '</td>' +
+      '<td style="padding:5px 8px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + corEsc(t.workDescription || '') + '">' + corEsc(t.workDescription || '') + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;font-family:monospace;font-size:11px">' + tmFmtHrs(st) + '/' + tmFmtHrs(ot) + '/' + tmFmtHrs(dt) + '</td>' +
+    '</tr>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add tickets to this COR</div>' +
+    '<div class="msb">Pick tickets to roll up. They\'ll be locked to this COR on save and unavailable for other CORs until you remove them or void this one.</div>' +
+    '<div style="max-height:380px;overflow-y:auto;border:0.5px solid #e5e5e5;border-radius:6px;margin-bottom:14px">' +
+      '<table style="width:100%;font-size:12px"><thead><tr style="background:#fafafa;border-bottom:0.5px solid #eee;color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0">' +
+        '<th style="padding:6px 8px;text-align:left;width:30px"><input type="checkbox" onclick="ncorToggleAllAddTickets(this)"></th>' +
+        '<th style="padding:6px 8px;text-align:left">Ticket #</th>' +
+        '<th style="padding:6px 8px;text-align:left">Date</th>' +
+        '<th style="padding:6px 8px;text-align:left">Description</th>' +
+        '<th style="padding:6px 8px;text-align:right">ST/OT/DT</th>' +
+      '</tr></thead><tbody>' + rowsHtml + '</tbody></table>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="ncorAddSelectedTickets()">Add selected</button>' +
+    '</div>'
+  );
+}
+
+function ncorToggleAllAddTickets(chk) {
+  document.querySelectorAll('input[name="ncm-ticket"]').forEach(function(cb){ cb.checked = chk.checked; });
+}
+
+function ncorAddSelectedTickets() {
+  var picked = [];
+  document.querySelectorAll('input[name="ncm-ticket"]:checked').forEach(function(cb){
+    if (cb.value !== 'on') picked.push(Number(cb.value));
+  });
+  if (!picked.length) { closeModal(); return; }
+  // Add to working state (dedup against existing)
+  var existing = _ncorWorking.rolledUpTicketIds || [];
+  picked.forEach(function(id){
+    if (existing.indexOf(id) === -1 && existing.indexOf(String(id)) === -1) existing.push(id);
+  });
+  _ncorWorking.rolledUpTicketIds = existing;
+  // Auto-merge ticket materials (Q3 = c: pre-populate, match project material list for prices)
+  ncorRebuildAutoMaterialRows();
+  closeModal();
+  ncorRenderSections();
+}
+
+function ncorRemoveTicket(ticketId) {
+  if (!_ncorWorking) return;
+  _ncorWorking.rolledUpTicketIds = (_ncorWorking.rolledUpTicketIds || []).filter(function(id){
+    return String(id) !== String(ticketId);
+  });
+  // Rebuild auto materials since the source set changed
+  ncorRebuildAutoMaterialRows();
+  ncorRenderSections();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 2 — Labor breakdown (auto pivot + manual rows)
+// ─────────────────────────────────────────────────────────────────────
+// Auto rows: one per classification across all rolled-up tickets, using
+// corResolveHours + corResolveRate per the COR-type matrix.
+function ncorComputeAutoLaborRows() {
+  var w = _ncorWorking;
+  if (!w) return [];
+  var corType = w.corType;
+  if (corType === 'Fixed Fee') return [];
+
+  // Get the project's labor rate snapshot
+  var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
+  var laborRates = (p && Array.isArray(p.laborRates)) ? p.laborRates : [];
+
+  // Aggregate hours by classification across all rolled tickets
+  var byClass = {};  // classification -> totalHours
+  (w.rolledUpTicketIds || []).forEach(function(tid){
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    if (!t) return;
+    (t.laborRows || []).forEach(function(r){
+      var cls = (r.classification || '').trim();
+      if (!cls) return;
+      var hrs = corResolveHours(r, corType);
+      if (hrs <= 0) return;
+      byClass[cls] = (byClass[cls] || 0) + hrs;
+    });
+  });
+
+  // Build rows. Order matches the labor rate snapshot if possible (so
+  // Foreman comes before Mason etc. as in the example PDF), else alpha.
+  var classOrder = laborRates.map(function(r){ return (r.classification || '').trim(); });
+  var classes = Object.keys(byClass).sort(function(a, b){
+    var ai = classOrder.indexOf(a), bi = classOrder.indexOf(b);
+    if (ai === -1 && bi === -1) return a.localeCompare(b);
+    if (ai === -1) return 1;
+    if (bi === -1) return -1;
+    return ai - bi;
+  });
+
+  return classes.map(function(cls){
+    var rateRow = laborRates.find(function(r){ return (r.classification || '').trim() === cls; });
+    var rate = corResolveRate(rateRow, corType);
+    if (rate === null || rate === undefined) rate = 0;
+    var hours = byClass[cls];
+    return {
+      classification: cls,
+      hours: hours,
+      rate: rate,
+      total: hours * rate,
+      source: 'auto',
+      missingRate: !rateRow
+    };
+  });
+}
+
+function ncorRenderLaborSection() {
+  var w = _ncorWorking;
+  var bodyEl = g('ncor-labor-body');
+  if (!bodyEl) return;
+  var canEdit = ncorIsEditable();
+
+  var addBtn = g('ncor-add-labor-btn');
+  if (addBtn) addBtn.style.display = canEdit ? '' : 'none';
+
+  var autoRows   = ncorComputeAutoLaborRows();
+  var manualRows = w.manualLaborRows || [];
+  var allRows    = autoRows.concat(manualRows.map(function(r){
+    var hrs = Number(r.hours) || 0;
+    var rate = Number(r.rate) || 0;
+    return Object.assign({}, r, { source: 'manual', total: hrs * rate });
+  }));
+
+  if (!allRows.length) {
+    bodyEl.innerHTML = '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No labor yet. ' + (w.corType === 'Fixed Fee' || (w.rolledUpTicketIds || []).length === 0
+        ? 'Click <strong>+ Add manual row</strong> to add labor.'
+        : 'Add tickets above to auto-populate, or click <strong>+ Add manual row</strong>.') +
+    '</div>';
+    return;
+  }
+
+  // Get the project's classification list for the dropdown on manual rows
+  var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
+  var classOpts = ((p && Array.isArray(p.laborRates)) ? p.laborRates : []).map(function(r){
+    return (r.classification || '').trim();
+  }).filter(Boolean);
+
+  var rowsHtml = allRows.map(function(r, idx){
+    var isAuto = r.source === 'auto';
+    var manualIdx = idx - autoRows.length;  // manual row index within manualLaborRows
+    var srcBadge = isAuto
+      ? '<span style="font-size:10px;color:#888">auto</span>'
+      : '<span style="font-size:10px;color:#3B6D11;font-weight:600">manual</span>';
+    var warning = (isAuto && r.missingRate)
+      ? ' <span style="font-size:10px;color:#A32D2D" title="Classification not in project labor rate snapshot — rate is $0">⚠ no rate</span>'
+      : '';
+    var clsCell = isAuto
+      ? '<span style="color:#333">' + corEsc(r.classification) + '</span>'
+      : (canEdit
+        ? '<select onchange="ncorUpdateManualLabor(' + manualIdx + ',\'classification\',this.value)" style="width:100%;font-size:12px;padding:3px 4px">' +
+            '<option value="">— Select —</option>' +
+            classOpts.map(function(cls){
+              var sel = (r.classification === cls) ? ' selected' : '';
+              return '<option value="' + corEsc(cls) + '"' + sel + '>' + corEsc(cls) + '</option>';
+            }).join('') +
+          '</select>'
+        : corEsc(r.classification || ''));
+    var hoursCell = isAuto || !canEdit
+      ? '<span style="font-family:monospace">' + tmFmtHrs(r.hours) + '</span>'
+      : '<input type="number" step="0.25" min="0" value="' + (Number(r.hours) || 0) + '" onchange="ncorUpdateManualLabor(' + manualIdx + ',\'hours\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">';
+    var rateCell = isAuto || !canEdit
+      ? '<span style="font-family:monospace">' + corFmtMoney(r.rate) + '</span>'
+      : '<input type="number" step="0.01" min="0" value="' + (Number(r.rate) || 0) + '" onchange="ncorUpdateManualLabor(' + manualIdx + ',\'rate\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">';
+    var removeCell = (!isAuto && canEdit)
+      ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="ncorRemoveManualLabor(' + manualIdx + ')">×</button>'
+      : '';
+    return '<tr>' +
+      '<td style="padding:5px 8px;width:50px">' + srcBadge + warning + '</td>' +
+      '<td style="padding:5px 8px">' + clsCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + hoursCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + rateCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;font-family:monospace;font-weight:600">' + corFmtMoney(r.total) + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;width:40px">' + removeCell + '</td>' +
+    '</tr>';
+  }).join('');
+
+  var totalLabor = allRows.reduce(function(s, r){ return s + (Number(r.total) || 0); }, 0);
+
+  bodyEl.innerHTML =
+    '<table style="width:100%;font-size:12px"><thead><tr style="border-bottom:0.5px solid #eee;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px">' +
+      '<th style="text-align:left;padding:6px 8px">Source</th>' +
+      '<th style="text-align:left;padding:6px 8px">Classification</th>' +
+      '<th style="text-align:right;padding:6px 8px">Hours</th>' +
+      '<th style="text-align:right;padding:6px 8px">Rate</th>' +
+      '<th style="text-align:right;padding:6px 8px">Total</th>' +
+      '<th style="padding:6px 8px"></th>' +
+    '</tr></thead><tbody>' + rowsHtml +
+    '<tr style="border-top:1px solid #ccc;background:#FAF8F0">' +
+      '<td colspan="4" style="padding:8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Total labor cost</td>' +
+      '<td style="padding:8px;text-align:right;font-family:monospace;font-weight:700;font-size:14px;color:var(--kmi)">' + corFmtMoney(totalLabor) + '</td>' +
+      '<td></td>' +
+    '</tr></tbody></table>';
+}
+
+function ncorAddManualLaborRow() {
+  if (!_ncorWorking) return;
+  _ncorWorking.manualLaborRows = _ncorWorking.manualLaborRows || [];
+  // Pre-fill rate from first classification's resolved rate? Cleaner to
+  // start blank and let KMI pick the classification, which auto-fills.
+  _ncorWorking.manualLaborRows.push({ classification: '', hours: 0, rate: 0 });
+  ncorRenderSections();
+}
+
+function ncorUpdateManualLabor(idx, field, value) {
+  var rows = _ncorWorking.manualLaborRows || [];
+  var r = rows[idx]; if (!r) return;
+  if (field === 'classification') {
+    r.classification = value;
+    // Auto-fill rate from project snapshot (KMI can override after)
+    var p = db.projects.find(function(x){ return String(x.id) === String(_ncorWorking.projectId); });
+    var laborRates = (p && Array.isArray(p.laborRates)) ? p.laborRates : [];
+    var rateRow = laborRates.find(function(rr){ return (rr.classification || '').trim() === value; });
+    var rate = corResolveRate(rateRow, _ncorWorking.corType);
+    if (rate !== null && rate !== undefined) r.rate = rate;
+  } else if (field === 'hours' || field === 'rate') {
+    r[field] = Number(value) || 0;
+  }
+  ncorRenderSections();
+}
+
+function ncorRemoveManualLabor(idx) {
+  var rows = _ncorWorking.manualLaborRows || [];
+  rows.splice(idx, 1);
+  ncorRenderSections();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 3 — Materials & Equipment
+// ─────────────────────────────────────────────────────────────────────
+// Auto rows pre-populated from rolled-up tickets' material_rows; KMI fills
+// in unit prices (or they auto-fill from project material list when desc
+// matches). Manual rows added on top.
+
+function ncorRebuildAutoMaterialRows() {
+  var w = _ncorWorking;
+  if (!w) return;
+  if (w.corType === 'Fixed Fee') { w.autoMaterialRows = []; return; }
+
+  // Project material list for description-based price match
+  var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
+  var matList = (p && Array.isArray(p.materialList)) ? p.materialList : [];
+
+  // Aggregate by description across rolled tickets (sum quantities)
+  var byDesc = {};  // description -> { quantity, sourceTickets:[] }
+  (w.rolledUpTicketIds || []).forEach(function(tid){
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    if (!t) return;
+    (t.materialRows || []).forEach(function(r){
+      var desc = (r.description || '').trim();
+      if (!desc) return;
+      var qty = Number(r.quantity) || 0;
+      if (qty <= 0) return;
+      if (!byDesc[desc]) byDesc[desc] = { quantity: 0, sourceTickets: [] };
+      byDesc[desc].quantity += qty;
+      if (byDesc[desc].sourceTickets.indexOf(t.ticketNumber) === -1) {
+        byDesc[desc].sourceTickets.push(t.ticketNumber);
+      }
+    });
+    (t.equipmentRows || []).forEach(function(r){
+      var desc = (r.description || '').trim();
+      if (!desc) return;
+      var hrs = Number(r.hours) || 0;
+      if (hrs <= 0) return;
+      var label = desc + ' (equipment hrs)';
+      if (!byDesc[label]) byDesc[label] = { quantity: 0, sourceTickets: [] };
+      byDesc[label].quantity += hrs;
+      if (byDesc[label].sourceTickets.indexOf(t.ticketNumber) === -1) {
+        byDesc[label].sourceTickets.push(t.ticketNumber);
+      }
+    });
+  });
+
+  // Preserve any unit prices KMI already overrode on existing auto rows
+  var oldAuto = w.autoMaterialRows || [];
+  var newAuto = Object.keys(byDesc).map(function(desc){
+    var agg = byDesc[desc];
+    // Look up unit price: existing override > project material list match > 0
+    var prior = oldAuto.find(function(r){ return r.description === desc; });
+    var unitPrice = 0;
+    if (prior && Number(prior.unitPrice) > 0) {
+      unitPrice = Number(prior.unitPrice);
+    } else {
+      var matched = matList.find(function(m){ return (m.description || '').trim().toLowerCase() === desc.toLowerCase(); });
+      if (matched && Number(matched.unitCost) > 0) unitPrice = Number(matched.unitCost);
+    }
+    return {
+      description: desc,
+      quantity: agg.quantity,
+      unitPrice: unitPrice,
+      cost: agg.quantity * unitPrice,
+      sourceTickets: agg.sourceTickets,
+      source: 'auto'
+    };
+  });
+  w.autoMaterialRows = newAuto;
+}
+
+function ncorRenderMaterialsSection() {
+  var w = _ncorWorking;
+  var bodyEl = g('ncor-materials-body');
+  if (!bodyEl) return;
+  var canEdit = ncorIsEditable();
+
+  var addBtn = g('ncor-add-mat-btn');
+  var fromListBtn = g('ncor-from-list-btn');
+  if (addBtn)      addBtn.style.display      = canEdit ? '' : 'none';
+  if (fromListBtn) fromListBtn.style.display = canEdit ? '' : 'none';
+
+  var autoRows   = w.autoMaterialRows   || [];
+  var manualRows = w.manualMaterialRows || [];
+  var allRows    = autoRows.concat(manualRows);
+
+  if (!allRows.length) {
+    bodyEl.innerHTML = '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No materials yet. ' + (canEdit ? 'Click <strong>+ Add row</strong> for a custom row, or <strong>+ From list</strong> to pick from the project material list.' : '') +
+    '</div>';
+    return;
+  }
+
+  var rowsHtml = allRows.map(function(r, idx){
+    var isAuto = r.source === 'auto';
+    var autoIdx = idx;
+    var manualIdx = idx - autoRows.length;
+    var srcBadge = isAuto
+      ? '<span style="font-size:10px;color:#888" title="From rolled-up tickets: ' + corEsc((r.sourceTickets || []).join(', ')) + '">auto</span>'
+      : '<span style="font-size:10px;color:#3B6D11;font-weight:600">manual</span>';
+    var descCell = isAuto || !canEdit
+      ? corEsc(r.description || '')
+      : '<input type="text" value="' + corEsc(r.description || '') + '" onchange="ncorUpdateManualMat(' + manualIdx + ',\'description\',this.value)" style="width:100%;font-size:12px;padding:3px 4px">';
+    var qtyCell = !canEdit
+      ? '<span style="font-family:monospace">' + tmFmtHrs(r.quantity) + '</span>'
+      : (isAuto
+          ? '<input type="number" step="0.01" min="0" value="' + (Number(r.quantity) || 0) + '" onchange="ncorUpdateAutoMat(' + autoIdx + ',\'quantity\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px" title="Override the rolled-up quantity">'
+          : '<input type="number" step="0.01" min="0" value="' + (Number(r.quantity) || 0) + '" onchange="ncorUpdateManualMat(' + manualIdx + ',\'quantity\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">');
+    var priceCell = !canEdit
+      ? '<span style="font-family:monospace">' + corFmtMoney(r.unitPrice) + '</span>'
+      : (isAuto
+          ? '<input type="number" step="0.01" min="0" value="' + (Number(r.unitPrice) || 0) + '" onchange="ncorUpdateAutoMat(' + autoIdx + ',\'unitPrice\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
+          : '<input type="number" step="0.01" min="0" value="' + (Number(r.unitPrice) || 0) + '" onchange="ncorUpdateManualMat(' + manualIdx + ',\'unitPrice\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">');
+    var cost = (Number(r.quantity) || 0) * (Number(r.unitPrice) || 0);
+    var removeCell = (!isAuto && canEdit)
+      ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="ncorRemoveManualMat(' + manualIdx + ')">×</button>'
+      : '';
+    return '<tr>' +
+      '<td style="padding:5px 8px;width:50px">' + srcBadge + '</td>' +
+      '<td style="padding:5px 8px">' + descCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + qtyCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + priceCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;font-family:monospace;font-weight:600">' + corFmtMoney(cost) + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;width:40px">' + removeCell + '</td>' +
+    '</tr>';
+  }).join('');
+
+  var subtotal = allRows.reduce(function(s, r){
+    return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
+  }, 0);
+  var markupPct = Number(w.matEqMarkupPct) || 0;
+  var markup = subtotal * (markupPct / 100);
+
+  bodyEl.innerHTML =
+    '<table style="width:100%;font-size:12px"><thead><tr style="border-bottom:0.5px solid #eee;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px">' +
+      '<th style="text-align:left;padding:6px 8px">Source</th>' +
+      '<th style="text-align:left;padding:6px 8px">Description</th>' +
+      '<th style="text-align:right;padding:6px 8px">Quantity</th>' +
+      '<th style="text-align:right;padding:6px 8px">Unit price</th>' +
+      '<th style="text-align:right;padding:6px 8px">Cost</th>' +
+      '<th style="padding:6px 8px"></th>' +
+    '</tr></thead><tbody>' + rowsHtml +
+    '<tr style="border-top:1px solid #ccc;background:#FAF8F0">' +
+      '<td colspan="4" style="padding:6px 8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Total material cost</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace;font-weight:700">' + corFmtMoney(subtotal) + '</td>' +
+      '<td></td>' +
+    '</tr>' +
+    '<tr style="background:#FAF8F0">' +
+      '<td colspan="4" style="padding:6px 8px;text-align:right;color:#666;font-size:11px">Overhead &amp; Profit (' + markupPct + '%)</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace">' + corFmtMoney(markup) + '</td>' +
+      '<td></td>' +
+    '</tr></tbody></table>';
+}
+
+function ncorAddMaterialRow() {
+  _ncorWorking.manualMaterialRows = _ncorWorking.manualMaterialRows || [];
+  _ncorWorking.manualMaterialRows.push({ description: '', quantity: 1, unitPrice: 0 });
+  ncorRenderSections();
+}
+
+function ncorUpdateManualMat(idx, field, value) {
+  var r = (_ncorWorking.manualMaterialRows || [])[idx]; if (!r) return;
+  if (field === 'description') r.description = value;
+  else if (field === 'quantity' || field === 'unitPrice') r[field] = Number(value) || 0;
+  ncorRenderSections();
+}
+
+function ncorUpdateAutoMat(idx, field, value) {
+  var r = (_ncorWorking.autoMaterialRows || [])[idx]; if (!r) return;
+  if (field === 'quantity' || field === 'unitPrice') r[field] = Number(value) || 0;
+  ncorRenderSections();
+}
+
+function ncorRemoveManualMat(idx) {
+  (_ncorWorking.manualMaterialRows || []).splice(idx, 1);
+  ncorRenderSections();
+}
+
+// + From list — picks from project's material list
+function ncorShowFromMaterialListModal() {
+  var w = _ncorWorking;
+  if (!w) return;
+  var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
+  var matList = (p && Array.isArray(p.materialList)) ? p.materialList : [];
+  if (!matList.length) {
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt">From project material list</div>' +
+      '<div class="msb">This project doesn\'t have a material list set up. Add one on the project edit page first, then come back.</div>' +
+      '<div class="mbtns"><button class="btn btn-p" onclick="closeModal()">OK</button></div>'
+    );
+    return;
+  }
+  var rowsHtml = matList.map(function(m){
+    var unit = m.unit || '';
+    return '<tr>' +
+      '<td style="padding:5px 8px"><input type="checkbox" name="ncm-matlist" value="' + corEsc(m.id) + '"></td>' +
+      '<td style="padding:5px 8px">' + corEsc(m.description || '') + (unit ? ' <span style="color:#888">(' + corEsc(unit) + ')</span>' : '') + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;font-family:monospace">' + corFmtMoney(m.unitCost || 0) + '</td>' +
+    '</tr>';
+  }).join('');
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add from project material list</div>' +
+    '<div class="msb">Pick rows. Each becomes a manual row with quantity 1 — adjust after.</div>' +
+    '<div style="max-height:380px;overflow-y:auto;border:0.5px solid #e5e5e5;border-radius:6px;margin-bottom:14px">' +
+      '<table style="width:100%;font-size:12px"><thead><tr style="background:#fafafa;border-bottom:0.5px solid #eee;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888">' +
+        '<th style="padding:6px 8px;width:30px"><input type="checkbox" onclick="document.querySelectorAll(\'input[name=\\\'ncm-matlist\\\']\').forEach(function(cb){cb.checked=this.checked;}.bind(this))"></th>' +
+        '<th style="padding:6px 8px;text-align:left">Description</th>' +
+        '<th style="padding:6px 8px;text-align:right">Default unit cost</th>' +
+      '</tr></thead><tbody>' + rowsHtml + '</tbody></table>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="ncorAddSelectedMatList()">Add selected</button>' +
+    '</div>'
+  );
+}
+
+function ncorAddSelectedMatList() {
+  var p = db.projects.find(function(x){ return String(x.id) === String(_ncorWorking.projectId); });
+  var matList = (p && Array.isArray(p.materialList)) ? p.materialList : [];
+  var picked = [];
+  document.querySelectorAll('input[name="ncm-matlist"]:checked').forEach(function(cb){ picked.push(cb.value); });
+  if (!picked.length) { closeModal(); return; }
+  _ncorWorking.manualMaterialRows = _ncorWorking.manualMaterialRows || [];
+  picked.forEach(function(mid){
+    var m = matList.find(function(x){ return String(x.id) === String(mid); });
+    if (!m) return;
+    _ncorWorking.manualMaterialRows.push({
+      description: m.description || '',
+      quantity: 1,
+      unitPrice: Number(m.unitCost) || 0
+    });
+  });
+  closeModal();
+  ncorRenderSections();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 4 — Subcontractors (manual entry only)
+// ─────────────────────────────────────────────────────────────────────
+function ncorRenderSubsSection() {
+  var w = _ncorWorking;
+  var bodyEl = g('ncor-subs-body');
+  if (!bodyEl) return;
+  var canEdit = ncorIsEditable();
+
+  var addBtn = g('ncor-add-sub-btn');
+  if (addBtn) addBtn.style.display = canEdit ? '' : 'none';
+
+  var rows = w.subRows || [];
+  if (!rows.length) {
+    bodyEl.innerHTML = '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No subcontractor lines. ' + (canEdit ? 'Click <strong>+ Add row</strong> if applicable.' : '') +
+    '</div>';
+    return;
+  }
+
+  var rowsHtml = rows.map(function(r, idx){
+    var nameCell = canEdit
+      ? '<input type="text" value="' + corEsc(r.name || '') + '" onchange="ncorUpdateSub(' + idx + ',\'name\',this.value)" style="width:100%;font-size:12px;padding:3px 4px">'
+      : corEsc(r.name || '');
+    var totalCell = canEdit
+      ? '<input type="number" step="0.01" min="0" value="' + (Number(r.total) || 0) + '" onchange="ncorUpdateSub(' + idx + ',\'total\',this.value)" style="width:120px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
+      : '<span style="font-family:monospace">' + corFmtMoney(r.total) + '</span>';
+    var removeCell = canEdit
+      ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="ncorRemoveSub(' + idx + ')">×</button>'
+      : '';
+    return '<tr>' +
+      '<td style="padding:5px 8px">' + nameCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + totalCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;width:40px">' + removeCell + '</td>' +
+    '</tr>';
+  }).join('');
+
+  var subtotal = rows.reduce(function(s, r){ return s + (Number(r.total) || 0); }, 0);
+  var markupPct = Number(w.subMarkupPct) || 0;
+  var markup = subtotal * (markupPct / 100);
+
+  bodyEl.innerHTML =
+    '<table style="width:100%;font-size:12px"><thead><tr style="border-bottom:0.5px solid #eee;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px">' +
+      '<th style="text-align:left;padding:6px 8px">Subcontractor</th>' +
+      '<th style="text-align:right;padding:6px 8px">Total</th>' +
+      '<th style="padding:6px 8px"></th>' +
+    '</tr></thead><tbody>' + rowsHtml +
+    '<tr style="border-top:1px solid #ccc;background:#FAF8F0">' +
+      '<td style="padding:6px 8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Total subcontractor cost</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace;font-weight:700">' + corFmtMoney(subtotal) + '</td>' +
+      '<td></td>' +
+    '</tr>' +
+    '<tr style="background:#FAF8F0">' +
+      '<td style="padding:6px 8px;text-align:right;color:#666;font-size:11px">Overhead &amp; Profit (' + markupPct + '%)</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace">' + corFmtMoney(markup) + '</td>' +
+      '<td></td>' +
+    '</tr></tbody></table>';
+}
+
+function ncorAddSubRow() {
+  _ncorWorking.subRows = _ncorWorking.subRows || [];
+  _ncorWorking.subRows.push({ name: '', total: 0 });
+  ncorRenderSections();
+}
+
+function ncorUpdateSub(idx, field, value) {
+  var r = (_ncorWorking.subRows || [])[idx]; if (!r) return;
+  if (field === 'name')  r.name  = value;
+  else if (field === 'total') r.total = Number(value) || 0;
+  ncorRenderSections();
+}
+
+function ncorRemoveSub(idx) {
+  (_ncorWorking.subRows || []).splice(idx, 1);
+  ncorRenderSections();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 5 — Grand total (auto-calculated)
+// ─────────────────────────────────────────────────────────────────────
+function ncorComputeTotals() {
+  var w = _ncorWorking;
+  if (!w) return { totalLabor:0, totalMaterial:0, totalSub:0, mateqOhp:0, subOhp:0, totalAmount:0 };
+
+  // Labor
+  var autoLabor = ncorComputeAutoLaborRows();
+  var manualLabor = (w.manualLaborRows || []).map(function(r){
+    return { hours: Number(r.hours) || 0, rate: Number(r.rate) || 0 };
+  });
+  var totalLabor =
+    autoLabor.reduce(function(s, r){ return s + (Number(r.total) || 0); }, 0) +
+    manualLabor.reduce(function(s, r){ return s + (r.hours * r.rate); }, 0);
+
+  // Materials
+  var allMat = (w.autoMaterialRows || []).concat(w.manualMaterialRows || []);
+  var totalMaterial = allMat.reduce(function(s, r){
+    return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
+  }, 0);
+
+  // Subs
+  var totalSub = (w.subRows || []).reduce(function(s, r){ return s + (Number(r.total) || 0); }, 0);
+
+  // Markups (snapshotted on the COR)
+  var matEqPct = Number(w.matEqMarkupPct) || 0;
+  var subPct   = Number(w.subMarkupPct)   || 0;
+  var mateqOhp = totalMaterial * (matEqPct / 100);
+  var subOhp   = totalSub      * (subPct   / 100);
+
+  return {
+    totalLabor:    totalLabor,
+    totalMaterial: totalMaterial,
+    totalSub:      totalSub,
+    mateqOhp:      mateqOhp,
+    subOhp:        subOhp,
+    totalAmount:   totalLabor + totalMaterial + totalSub + mateqOhp + subOhp
+  };
+}
+
+function ncorRenderTotalsSection() {
+  var bodyEl = g('ncor-totals-body');
+  if (!bodyEl) return;
+  var t = ncorComputeTotals();
+  var w = _ncorWorking;
+  bodyEl.innerHTML =
+    '<div style="display:flex;flex-direction:column;gap:6px;font-size:13px">' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total labor cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalLabor) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total material cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalMaterial) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total subcontractor cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalSub) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>Overhead &amp; Profit on Mat/Eq (' + (Number(w.matEqMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.mateqOhp) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>Overhead &amp; Profit on Subcontractors (' + (Number(w.subMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.subOhp) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:10px 8px;border-top:2px solid #ccc;background:#FAF8F0;border-radius:6px;margin-top:4px">' +
+        '<strong style="font-size:14px;text-transform:uppercase;letter-spacing:.5px">Total Change Order Request</strong>' +
+        '<strong style="font-family:monospace;font-size:18px;color:var(--kmi)">' + corFmtMoney(t.totalAmount) + '</strong>' +
+      '</div>' +
+    '</div>';
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -13527,6 +14489,16 @@ function fromSBTmTicket(r) {
 // T&M tickets. The form sections (rolledUpTicketIds, laborRows, etc.)
 // are JSONB arrays so they can be saved/loaded without schema changes.
 function toSBCor(r) {
+  // Round 4.2: bundle auto/manual rows into the existing JSONB columns
+  // (no new schema needed). On read, we split them back out.
+  var laborEnvelope = {
+    auto:   Array.isArray(r.laborRows)        ? r.laborRows        : [],   // snapshotted auto-pivot at last save
+    manual: Array.isArray(r.manualLaborRows)  ? r.manualLaborRows  : []
+  };
+  var materialEnvelope = {
+    auto:   Array.isArray(r.autoMaterialRows)   ? r.autoMaterialRows   : [],
+    manual: Array.isArray(r.manualMaterialRows) ? r.manualMaterialRows : []
+  };
   return {
     id: r.id,
     cor_number:    r.corNumber    || '',
@@ -13537,8 +14509,8 @@ function toSBCor(r) {
     description:   r.description  || '',
     status:        r.status       || 'Draft',
     rolled_up_ticket_ids: r.rolledUpTicketIds || [],
-    labor_rows:    r.laborRows    || [],
-    material_rows: r.materialRows || [],
+    labor_rows:    laborEnvelope,
+    material_rows: materialEnvelope,
     sub_rows:      r.subRows      || [],
     mat_eq_markup_pct: r.matEqMarkupPct,
     sub_markup_pct:    r.subMarkupPct,
@@ -13564,6 +14536,25 @@ function toSBCor(r) {
   };
 }
 function fromSBCor(r) {
+  // Unwrap the labor/material envelopes. Tolerate legacy Round 4.1 shape
+  // (plain arrays) by falling back when the envelope keys aren't there.
+  var labor = r.labor_rows;
+  var laborAuto = [], laborManual = [];
+  if (labor && typeof labor === 'object' && !Array.isArray(labor)) {
+    laborAuto   = Array.isArray(labor.auto)   ? labor.auto   : [];
+    laborManual = Array.isArray(labor.manual) ? labor.manual : [];
+  } else if (Array.isArray(labor)) {
+    // Legacy: old plain-array shape — treat as auto so historical CORs render
+    laborAuto = labor;
+  }
+  var material = r.material_rows;
+  var matAuto = [], matManual = [];
+  if (material && typeof material === 'object' && !Array.isArray(material)) {
+    matAuto   = Array.isArray(material.auto)   ? material.auto   : [];
+    matManual = Array.isArray(material.manual) ? material.manual : [];
+  } else if (Array.isArray(material)) {
+    matAuto = material;
+  }
   return {
     id: r.id,
     corNumber:    r.cor_number    || '',
@@ -13574,9 +14565,11 @@ function fromSBCor(r) {
     description:  r.description   || '',
     status:       r.status        || 'Draft',
     rolledUpTicketIds: Array.isArray(r.rolled_up_ticket_ids) ? r.rolled_up_ticket_ids : [],
-    laborRows:    Array.isArray(r.labor_rows)    ? r.labor_rows    : [],
-    materialRows: Array.isArray(r.material_rows) ? r.material_rows : [],
-    subRows:      Array.isArray(r.sub_rows)      ? r.sub_rows      : [],
+    laborRows:         laborAuto,
+    manualLaborRows:   laborManual,
+    autoMaterialRows:  matAuto,
+    manualMaterialRows: matManual,
+    subRows:      Array.isArray(r.sub_rows) ? r.sub_rows : [],
     matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
     subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5,
     totalLabor:    r.total_labor    || 0,
