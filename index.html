@@ -5726,8 +5726,13 @@ function viewCor(id) {
 
 // ── Project-changed handler: refresh customer + attention dropdowns ───
 function ncorProjectChanged() {
-  var pid = g('ncor-project').value;
-  var p = pid ? getProj(pid) : null;
+  // Project dropdown returns a string; project records store numeric IDs.
+  // Use String-coerced comparison via .find() instead of getProj() (which
+  // uses strict ===, which fails on the string/number mismatch).
+  var pidRaw = g('ncor-project').value;
+  var p = pidRaw
+    ? db.projects.find(function(x){ return String(x.id) === String(pidRaw); })
+    : null;
 
   // Customer (read-only display)
   if (p) {
@@ -5783,7 +5788,8 @@ async function saveCor() {
   if (!attnId)    { alert('Please pick an Attention contact (the customer-side person who receives this COR). If none are listed, assign a contact on the Project edit page first.'); return; }
   if (!description) { alert('Please enter a description.'); return; }
 
-  var p = getProj(projectId);
+  // String-coerced lookup since dropdown gives a string but ids are numbers
+  var p = db.projects.find(function(x){ return String(x.id) === String(projectId); });
   if (!p) { alert('Project not found.'); return; }
 
   // Existing edit?
