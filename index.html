@@ -3885,7 +3885,7 @@ function renderTmTickets() {
     }).map(function(p){ return '<option value="' + p.id + '">' + tmEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>'; }).join('');
   g('tm-fp').innerHTML = projOpts;
   // Status filter
-  var statuses = ['Draft','Sent for Signature','Signed','Signed (Uploaded)','Approved by KMI PM','Rejected by Super','Voided','Rolled into COR'];
+  var statuses = ['Draft','Sent for Signature','Signed','Signed (Uploaded)','Rejected by Super','Voided','Rolled into COR'];
   g('tm-fs').innerHTML = '<option value="">All statuses</option>' +
     statuses.map(function(s){ return '<option value="' + tmEsc(s) + '">' + tmEsc(s) + '</option>'; }).join('');
 
@@ -4142,11 +4142,13 @@ function _refreshTmActionButtons(t) {
   var approveBtn = g('ntm-approve-btn');
   if (!sendBtn) return;
 
-  // Hide all by default
+  // Hide all by default. Approve button is permanently hidden — KMI PM
+  // approval was collapsed into customer signing per Mike's clarification:
+  // signing IS approval, no separate gate needed.
   sendBtn.style.display = 'none';
   remindBtn.style.display = 'none';
   uploadBtn.style.display = 'none';
-  approveBtn.style.display = 'none';
+  if (approveBtn) approveBtn.style.display = 'none';
 
   if (!t || !t.id) return; // unsaved new ticket
 
@@ -4157,10 +4159,9 @@ function _refreshTmActionButtons(t) {
   } else if (s === 'Sent for Signature') {
     if (hasFull('send-tm-signature')) remindBtn.style.display = '';
     if (hasFull('upload-signed-tm'))   uploadBtn.style.display = '';
-  } else if (s === 'Signed' || s === 'Signed (Uploaded)') {
-    if (hasFull('approve-tm-ticket')) approveBtn.style.display = '';
   }
-  // Other statuses (Approved, Rejected, Voided, COR-rolled): no action buttons
+  // Signed / Signed (Uploaded) / legacy Approved by KMI PM / Rejected /
+  // Voided / COR-rolled: no further actions on the ticket itself.
 }
 
 // ── Row builders (form) ────────────────────────────────────────────────
@@ -5550,8 +5551,13 @@ function corResolveHours(laborRow, corType) {
 // COR type's needs (e.g. Premium Time OT requires OT > 0).
 function corTicketEligible(ticket, corType) {
   if (!ticket) return false;
-  // Must be signed and approved (Approved by KMI PM is the final gate)
-  if ((ticket.status || '') !== 'Approved by KMI PM') return false;
+  // Customer signing is the gate — both digital ('Signed') and paper-uploaded
+  // ('Signed (Uploaded)') count. Legacy tickets with the now-deprecated
+  // 'Approved by KMI PM' status are also accepted (Q1: option a — coexist
+  // rather than rewrite history).
+  var s = ticket.status || '';
+  var eligibleStatuses = ['Signed', 'Signed (Uploaded)', 'Approved by KMI PM'];
+  if (eligibleStatuses.indexOf(s) === -1) return false;
   // Already locked to another COR? Not eligible.
   if (ticket.corId) return false;
   // Premium Time CORs need premium hours present
@@ -6384,7 +6390,7 @@ function ncorShowAddTicketsModal() {
       '<div class="mt">Add tickets</div>' +
       '<div class="msb">No eligible tickets for this COR.</div>' +
       '<div style="background:#FFF8DC;border:1px solid #E8D08A;border-radius:7px;padding:12px;margin-bottom:14px;font-size:12px;color:#6B5A2E;line-height:1.6">' +
-        'Tickets must be <strong>Signed and Approved by KMI PM</strong> AND not already on another COR to be eligible.' +
+        'Tickets must be <strong>Signed</strong> AND not already on another COR to be eligible.' +
         (corType === 'Premium Time OT' ? '<br>For Premium Time OT, the ticket must also have OT hours.' : '') +
         (corType === 'Premium Time DT' ? '<br>For Premium Time DT, the ticket must also have DT hours.' : '') +
       '</div>' +
