@@ -4392,7 +4392,7 @@ function ntmReadMatRows() {
 }
 
 // ── Save (create or update) ────────────────────────────────────────────
-function saveTmTicket() {
+async function saveTmTicket() {
   var pid  = g('ntm-project').value;
   var date = (g('ntm-date').value  || '').trim();
   var desc = (g('ntm-desc').value  || '').trim();
@@ -4464,6 +4464,69 @@ function saveTmTicket() {
   p.nextTmTicketSeq = (p.nextTmTicketSeq || 1) + 1;
   db.activity.unshift({text: 'T&M ticket ' + ticketNumber + ' created', type: 'won', time: 'Just now'});
   saveDB();
+
+  // Push to Supabase — both the ticket AND the project (so the bumped
+  // nextTmTicketSeq survives a fresh-device pull). If the ticket-number
+  // collides (e.g. another device already used this number), reconcile
+  // by re-syncing the project's seq from cloud and trying the next-up
+  // number. Limited to 5 retries to avoid an infinite loop in pathological
+  // cases (which shouldn't happen in practice).
+  if (supabaseClient) {
+    var syncOk = false;
+    var attempt = 0;
+    var lastErr = null;
+    while (!syncOk && attempt < 5) {
+      attempt++;
+      try {
+        var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(ticket));
+        if (tixRes && tixRes.error) {
+          lastErr = tixRes.error;
+          var msg = tixRes.error.message || '';
+          // Duplicate-key on (project_id, ticket_number) — pull cloud's
+          // current seq and retry with the next number.
+          if (/duplicate key|kmi_tm_tickets_project_ticket_number_uq/i.test(msg)) {
+            // Fetch the highest existing ticket number for this project from cloud
+            var maxRes = await supabaseClient
+              .from('kmi_tm_tickets')
+              .select('ticket_number')
+              .eq('project_id', p.id);
+            if (maxRes && !maxRes.error && Array.isArray(maxRes.data)) {
+              // Extract the numeric suffix and pick max
+              var maxSeq = 0;
+              maxRes.data.forEach(function(row){
+                var m = String(row.ticket_number || '').match(/-(\d+)$/);
+                if (m) { var n = parseInt(m[1], 10); if (n > maxSeq) maxSeq = n; }
+              });
+              // Bump to one above whatever cloud has, refresh ticket number locally
+              p.nextTmTicketSeq = maxSeq + 1;
+              var newNumber = tmNextTicketNumber(p);
+              ticket.ticketNumber = newNumber;
+              p.nextTmTicketSeq = (p.nextTmTicketSeq || 1) + 1;
+              saveDB();
+              continue;  // retry upsert with new number
+            }
+          }
+          // Some other error — give up
+          break;
+        }
+        syncOk = true;
+      } catch (e) {
+        lastErr = e;
+        break;
+      }
+    }
+    if (syncOk) {
+      // Also push the project so the bumped seq is durable across devices
+      try {
+        var prjRes = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+        if (prjRes && prjRes.error) console.warn('Project seq sync warning:', prjRes.error.message);
+      } catch (e) { console.warn('Project seq sync exception:', e); }
+    } else if (lastErr) {
+      var em = (lastErr && lastErr.message) ? lastErr.message : String(lastErr);
+      alert('Ticket ' + ticket.ticketNumber + ' was saved locally but cloud sync failed: ' + em + '\nIt will retry on next push.');
+    }
+  }
+
   nav('tm-tickets');
 }
 
