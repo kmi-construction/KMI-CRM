@@ -5648,9 +5648,10 @@ function initNewCor() {
   var prefillProjectId = _newCorPrefill ? _newCorPrefill.projectId : '';
   g('ncor-project').innerHTML = '<option value="">Select project...</option>' +
     projects.map(function(p){
-      var sel = String(p.id) === String(prefillProjectId) ? ' selected' : '';
-      return '<option value="' + p.id + '"' + sel + '>' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+      return '<option value="' + p.id + '">' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
     }).join('');
+  // Explicitly set the value so ncorProjectChanged() can read it back
+  g('ncor-project').value = prefillProjectId ? String(prefillProjectId) : '';
   g('ncor-project').disabled = false;
 
   // Set type display (read-only on the form)
@@ -5692,9 +5693,10 @@ function viewCor(id) {
   });
   g('ncor-project').innerHTML = '<option value="">Select project...</option>' +
     projects.map(function(p){
-      var sel = String(p.id) === String(c.projectId) ? ' selected' : '';
-      return '<option value="' + p.id + '"' + sel + '>' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+      return '<option value="' + p.id + '">' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
     }).join('');
+  // Explicitly set value (more reliable than `selected` attr on a disabled select)
+  g('ncor-project').value = c.projectId != null ? String(c.projectId) : '';
   g('ncor-project').disabled = true;
 
   g('ncor-type-display').value = c.corType || 'T&M';
@@ -5764,7 +5766,12 @@ function ncorProjectChanged() {
 
 // ── saveCor: minimal Round 4.1 save (header only; sections come 4.2) ──
 async function saveCor() {
-  var projectId = g('ncor-project').value;
+  // For an existing COR, projectId is locked — read from the record, not
+  // from the (disabled) dropdown. For a new COR, read from the dropdown.
+  var existingCor = _editCorId
+    ? (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); })
+    : null;
+  var projectId = existingCor ? existingCor.projectId : g('ncor-project').value;
   var corDate   = g('ncor-date').value;
   var corType   = g('ncor-type-display').dataset.corType || g('ncor-type-display').value || 'T&M';
   var attnId    = g('ncor-attention').value;
