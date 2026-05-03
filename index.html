@@ -5512,11 +5512,24 @@ var COR_TYPES    = ['T&M','Overtime','Double Time','Premium Time OT','Premium Ti
 // Premium Time CORs use the delta between OT/DT and ST rates because
 // the customer already paid the ST equivalent on the original contract;
 // this COR captures only the extra cost of those hours being premium.
+// Project labor rate snapshots can be in two shapes:
+//   - Modern: { sourceSetId, sourceLabel, appliedAt, rates: [...] }
+//   - Legacy: a plain array of rate rows
+// This helper returns the rate array regardless of which shape is in use.
+function corGetProjectLaborRates(p) {
+  if (!p || !p.laborRates) return [];
+  if (Array.isArray(p.laborRates)) return p.laborRates;
+  if (Array.isArray(p.laborRates.rates)) return p.laborRates.rates;
+  return [];
+}
+
 function corResolveRate(rateRow, corType) {
   if (!rateRow) return null;
-  var st = Number(rateRow.stCoRate) || 0;
-  var ot = Number(rateRow.otCoRate) || 0;
-  var dt = Number(rateRow.dtCoRate) || 0;
+  // Project labor rate snapshots use 'stdCoRate' (not 'stCoRate'). Match
+  // the rest of the codebase. otCoRate / dtCoRate already match.
+  var st = Number(rateRow.stdCoRate) || 0;
+  var ot = Number(rateRow.otCoRate)  || 0;
+  var dt = Number(rateRow.dtCoRate)  || 0;
   switch (corType) {
     case 'T&M':              return st;
     case 'Overtime':         return ot;
@@ -5968,7 +5981,7 @@ async function saveCor() {
 
   // Soft-fail warning per Q10: if the project has no labor rate snapshot
   // and this COR type requires rates (anything except Fixed Fee), warn.
-  if (corType !== 'Fixed Fee' && (!Array.isArray(p.laborRates) || !p.laborRates.length)) {
+  if (corType !== 'Fixed Fee' && !corGetProjectLaborRates(p).length) {
     if (!confirm('This project has no labor rate snapshot. Auto-pivoted labor rows will use $0 rates until you set up rates on the project edit page. Save anyway?')) return;
   }
 
@@ -6476,9 +6489,10 @@ function ncorComputeAutoLaborRows() {
   var corType = w.corType;
   if (corType === 'Fixed Fee') return [];
 
-  // Get the project's labor rate snapshot
+  // Get the project's labor rate snapshot (handles both modern and
+  // legacy shapes via corGetProjectLaborRates).
   var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
-  var laborRates = (p && Array.isArray(p.laborRates)) ? p.laborRates : [];
+  var laborRates = corGetProjectLaborRates(p);
 
   // Aggregate hours by classification across all rolled tickets
   var byClass = {};  // classification -> totalHours
@@ -6549,7 +6563,7 @@ function ncorRenderLaborSection() {
 
   // Get the project's classification list for the dropdown on manual rows
   var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
-  var classOpts = ((p && Array.isArray(p.laborRates)) ? p.laborRates : []).map(function(r){
+  var classOpts = corGetProjectLaborRates(p).map(function(r){
     return (r.classification || '').trim();
   }).filter(Boolean);
 
@@ -6626,7 +6640,7 @@ function ncorUpdateManualLabor(idx, field, value) {
     r.classification = value;
     // Auto-fill rate from project snapshot (KMI can override after)
     var p = db.projects.find(function(x){ return String(x.id) === String(_ncorWorking.projectId); });
-    var laborRates = (p && Array.isArray(p.laborRates)) ? p.laborRates : [];
+    var laborRates = corGetProjectLaborRates(p);
     var rateRow = laborRates.find(function(rr){ return (rr.classification || '').trim() === value; });
     var rate = corResolveRate(rateRow, _ncorWorking.corType);
     if (rate !== null && rate !== undefined) r.rate = rate;
