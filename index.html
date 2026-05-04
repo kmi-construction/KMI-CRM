@@ -6374,6 +6374,104 @@ function corResolveRate(rateRow, corType) {
   }
 }
 
+// Resolve the INTERNAL COST rate (stdCostRate / otCostRate / dtCostRate)
+// for a given classification + COR type. Mirrors corResolveRate's matrix
+// so Premium Time CORs use the OT/DT-minus-ST delta on cost rates too.
+//
+// Defensive fallback: if all three cost rates on this row are 0/unset,
+// fall back to corResolveRate (CO rates). This protects projects that
+// haven't yet populated cost data — the Foundation CSV won't silently
+// drop to $0 labor. Once any cost rate is populated, the cost matrix
+// is used strictly (so a single 0 in stdCostRate while otCostRate is
+// set won't cause an unexpected fallback for an OT COR).
+function corResolveCostRate(rateRow, corType) {
+  if (!rateRow) return null;
+  var stCost = Number(rateRow.stdCostRate) || 0;
+  var otCost = Number(rateRow.otCostRate)  || 0;
+  var dtCost = Number(rateRow.dtCostRate)  || 0;
+  if (stCost === 0 && otCost === 0 && dtCost === 0) {
+    return corResolveRate(rateRow, corType);
+  }
+  switch (corType) {
+    case 'T&M':              return stCost;
+    case 'Overtime':         return otCost;
+    case 'Double Time':      return dtCost;
+    case 'Premium Time OT':  return otCost - stCost;
+    case 'Premium Time DT':  return dtCost - stCost;
+    case 'Fixed Fee':        return stCost;
+    default:                 return stCost;
+  }
+}
+
+// Compute the actual labor COST for a saved COR, using the project's
+// internal cost rates rather than the customer-billed CO rates. Used by
+// the Foundation Header & Detail CSV exports so the "Cost" column
+// reflects KMI's true labor cost — what we pay — not what the customer
+// is billed (which is what cor.totalLabor stores, and what stays on the
+// customer-facing PDF / COR form).
+//
+// Lookup strategy:
+//   - Auto rows (cor.laborRows snapshot): match classification to the
+//     project labor rate snapshot; resolve cost rate by COR type. No
+//     match → 0 (auto rows are built from the snapshot, so a missing
+//     match means data drift and silent fallback would hide it).
+//   - Manual rows (cor.manualLaborRows): match classification likewise;
+//     no match → fall back to the row's stored rate (customer rate).
+//     Smart-extracted CORs may carry classifications that don't match
+//     the project's rate names; falling back keeps their cost in the
+//     export rather than silently zeroing it.
+//
+// Defensive fallback: if cor.laborRows is missing/empty on a COR with
+// rolled-up tickets (legacy record saved before the snapshot field
+// existed), return cor.totalLabor — same as current behavior — so old
+// records don't regress to 0.
+function corComputeLaborCost(cor, project) {
+  if (!cor)     return 0;
+  if (!project) return Number(cor.totalLabor) || 0;
+  var corType = cor.corType;
+  var laborRates = corGetProjectLaborRates(project);
+
+  function rateRowFor(cls) {
+    var key = (cls || '').trim().toLowerCase();
+    if (!key) return null;
+    return laborRates.find(function(rr){
+      return ((rr.classification || '').trim().toLowerCase()) === key;
+    }) || null;
+  }
+
+  // Legacy fallback: COR has rolled tickets but no auto snapshot.
+  var hasAutoSnapshot   = Array.isArray(cor.laborRows) && cor.laborRows.length > 0;
+  var hasRolledTickets  = Array.isArray(cor.rolledUpTicketIds) && cor.rolledUpTicketIds.length > 0;
+  if (!hasAutoSnapshot && hasRolledTickets && corType !== 'Fixed Fee') {
+    return Number(cor.totalLabor) || 0;
+  }
+
+  // Auto rows — use the snapshotted hours, look up cost rate fresh
+  var autoCost = 0;
+  (cor.laborRows || []).forEach(function(r){
+    var hours = Number(r.hours) || 0;
+    if (hours <= 0) return;
+    var rateRow  = rateRowFor(r.classification);
+    var costRate = corResolveCostRate(rateRow, corType);
+    if (costRate === null || costRate === undefined) costRate = 0;
+    autoCost += hours * costRate;
+  });
+
+  // Manual rows — same lookup; fall back to row.rate when no match
+  var manualCost = (cor.manualLaborRows || []).reduce(function(sum, r){
+    var hours = Number(r.hours) || 0;
+    if (hours <= 0) return sum;
+    var rateRow  = rateRowFor(r.classification);
+    var costRate = corResolveCostRate(rateRow, corType);
+    if (costRate === null || costRate === undefined) {
+      costRate = Number(r.rate) || 0;
+    }
+    return sum + (hours * costRate);
+  }, 0);
+
+  return autoCost + manualCost;
+}
+
 // Hour-resolution matrix: given a T&M ticket's labor row and the COR
 // type, returns how many hours of THAT row roll into the COR. Premium
 // Time CORs only pull premium hours; everything else pulls all hours.
@@ -12056,7 +12154,11 @@ function corBuildFoundationDetailRows(cor, project) {
   var subCc   = project.coDefaultSubCostCode      || '4000';
 
   // ── LABOR — single row, class 1 ──────────────────────────────────────
-  var totalLabor = Number(cor.totalLabor) || 0;
+  // Use the actual internal cost (stdCostRate/otCostRate/dtCostRate from
+  // the project rate snapshot) — NOT cor.totalLabor, which is the
+  // customer-billed amount. The customer-facing PDF / COR form still
+  // shows totalLabor; only the Foundation accounting export switches.
+  var totalLabor = corComputeLaborCost(cor, project);
   if (Math.abs(totalLabor) > 0.005) {
     rows.push([laborCc, '1', totalLabor]);
   }
@@ -12190,7 +12292,11 @@ function corValidateForFoundationExport(cor, project) {
 // matching the JC_CO_header_Import_File.xlsx column order.
 function corBuildFoundationHeaderRow(cor, project) {
   var seq = corExtractKmiSeq(cor.corNumber);
-  var rawCost = (Number(cor.totalLabor) || 0) + (Number(cor.totalMaterial) || 0) + (Number(cor.totalSub) || 0);
+  // Cost column = actual internal cost (labor uses cost rates, not the
+  // customer-billed total). Income column stays as the customer total
+  // since that's what KMI bills.
+  var laborCost = corComputeLaborCost(cor, project);
+  var rawCost = laborCost + (Number(cor.totalMaterial) || 0) + (Number(cor.totalSub) || 0);
   var income  = Number(cor.totalAmount) || 0;
   return [
     project.number || '',                            // Job No
