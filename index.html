@@ -1097,7 +1097,7 @@ textarea{resize:vertical;min-height:72px}
   </div>
   <div class="card" style="padding:0;overflow:hidden">
     <table><thead><tr>
-      <th>Ticket #</th><th>Date</th><th>Project</th><th>Description</th><th>Hours (ST/OT/DT)</th><th>Status</th><th>Created by</th><th>Actions</th>
+      <th class="sortable" onclick="sortTm('ticketNumber')">Ticket #</th><th class="sortable" onclick="sortTm('ticketDate')">Date</th><th class="sortable" onclick="sortTm('project')">Project</th><th class="sortable" onclick="sortTm('description')">Description</th><th class="sortable" onclick="sortTm('hours')">Hours (ST/OT/DT)</th><th class="sortable" onclick="sortTm('status')">Status</th><th class="sortable" onclick="sortTm('creator')">Created by</th><th>Actions</th>
     </tr></thead><tbody id="tm-tbody"></tbody></table>
   </div>
 </div>
@@ -1528,6 +1528,7 @@ var _pendingSignatureImage, _selfEditMode = false;
 var currentOppId = null;
 var _oppView = 'list';
 var _oppSort = { col: 'bidDate', dir: 'desc' };  // default: newest bid date first
+var _tmSort  = { col: 'ticketNumber', dir: 'asc' }; // default: ticket # smallest to largest
 var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; })();
 
 var DB_DEFAULTS = {
@@ -4007,11 +4008,10 @@ function filterTmTickets() {
     var p = getProj(t.projectId) || {};
     var hay = [t.ticketNumber, t.workDescription, p.number, p.name, t.status].join(' ').toLowerCase();
     return hay.indexOf(s) !== -1;
-  }).sort(function(a,b){
-    // Newest first
-    return String(b.ticketDate || '').localeCompare(String(a.ticketDate || ''))
-        || (Number(b.id) - Number(a.id));
   });
+  // Apply current sort (default: ticket # ascending)
+  list = sortTmArray(list);
+  updateTmSortIndicators();
 
   // Metrics
   var total = list.length;
@@ -4080,6 +4080,83 @@ function tmLaborTotals(t) {
     dt += Number(r.dtHours) || 0;
   });
   return {st:st, ot:ot, dt:dt};
+}
+
+// ── T&M list sorting ────────────────────────────────────────────────────
+// Mirrors the pattern used by the Bid Opportunities list. State lives in
+// _tmSort (declared near the other module state vars). Default is ticket
+// number ascending. Clicking a column header toggles direction; clicking
+// a different column starts at ascending. Empty values always sort to the
+// bottom regardless of direction.
+function sortTm(col) {
+  if (_tmSort && _tmSort.col === col) {
+    _tmSort.dir = _tmSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _tmSort = { col: col, dir: 'asc' };
+  }
+  filterTmTickets();
+}
+
+function getTmSortValue(t, col) {
+  switch (col) {
+    case 'ticketNumber': return t.ticketNumber || '';
+    case 'ticketDate':   return t.ticketDate   || '';
+    case 'project': {
+      var p = getProj(t.projectId) || {};
+      // Sort by project number first, then name, so two tickets in the same
+      // project group together
+      return (p.number || '') + '\u0001' + (p.name || '');
+    }
+    case 'description':  return t.workDescription || '';
+    case 'hours': {
+      var tot = tmLaborTotals(t);
+      return tot.st + tot.ot + tot.dt;
+    }
+    case 'status':       return t.status || 'Draft';
+    case 'creator': {
+      var u = (db.users || []).find(function(x){ return String(x.id) === String(t.createdByUserId); });
+      if (u) return ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+      return t.createdByName || '';
+    }
+    default: return '';
+  }
+}
+
+function sortTmArray(arr) {
+  if (!_tmSort) return arr;
+  var col = _tmSort.col, dir = _tmSort.dir;
+  var sorted = arr.slice();
+  sorted.sort(function(a, b) {
+    var va = getTmSortValue(a, col);
+    var vb = getTmSortValue(b, col);
+    var aEmpty = va === null || va === undefined || va === '';
+    var bEmpty = vb === null || vb === undefined || vb === '';
+    if (aEmpty && bEmpty) return Number(a.id) - Number(b.id); // stable-ish tiebreak
+    if (aEmpty) return 1;   // empties always at the bottom
+    if (bEmpty) return -1;
+    var cmp;
+    if (typeof va === 'number' && typeof vb === 'number') {
+      cmp = va - vb;
+    } else {
+      // Use locale-aware numeric compare so "26100-009" < "26100-010" and
+      // "9999" < "10000" — important for ticket numbers and project numbers
+      cmp = String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' });
+    }
+    if (cmp === 0) cmp = Number(a.id) - Number(b.id); // stable tiebreak by id
+    return dir === 'asc' ? cmp : -cmp;
+  });
+  return sorted;
+}
+
+function updateTmSortIndicators() {
+  var ths = document.querySelectorAll('#pg-tm-tickets th.sortable');
+  ths.forEach(function(th) {
+    th.classList.remove('asc', 'desc');
+    if (!_tmSort) return;
+    var oc = th.getAttribute('onclick') || '';
+    var m = oc.match(/sortTm\('([^']+)'\)/);
+    if (m && m[1] === _tmSort.col) th.classList.add(_tmSort.dir);
+  });
 }
 
 // ── Form: open New ──────────────────────────────────────────────────────
@@ -4715,17 +4792,171 @@ function deleteTmTicket(id) {
 //   - Materials Used table (Description | Quantity)
 //   - Construction Manager comments box
 //   - Two signature blocks at bottom (KMI rep / Construction Manager)
-function downloadTmTicketPDF() {
-  if (!_editTmTicketId) { alert('Save the ticket first, then generate the PDF.'); return; }
-  downloadTmTicketPDFById(_editTmTicketId);
+// ═══════════════════════════════════════════════════════════════════════
+// COMBINED-PDF HELPERS — append source files (PDF/image) to a jsPDF doc
+// ═══════════════════════════════════════════════════════════════════════
+// Used by both the T&M ticket PDF download and the COR email send flows
+// to attach the original Smart Upload source file (or any uploadedSignedFile)
+// as additional pages on the end of a jsPDF-built document.
+//
+// PDF sources are rasterised with pdf.js (already loaded for other features)
+// and added as JPEG images at 2x scale — this avoids a pdf-lib dependency
+// and keeps everything in one stack. Image sources (JPG/PNG) are added
+// directly via doc.addImage(). Aspect ratio is preserved; pages are
+// letter-sized (612x792 pt).
+
+// Fetch the bytes of an uploadedSignedFile / smartUploadedFile from
+// Supabase storage. Returns ArrayBuffer or null on missing file.
+async function _fetchUploadedFileBytes(uploadedFile) {
+  if (!uploadedFile || !uploadedFile.path) return null;
+  if (!supabaseClient) throw new Error('Not connected to Supabase storage.');
+  var r = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+    .createSignedUrl(uploadedFile.path, 300);
+  if (r && r.error) throw new Error(r.error.message);
+  if (!r || !r.data || !r.data.signedUrl) throw new Error('Could not generate signed URL.');
+  var resp = await fetch(r.data.signedUrl);
+  if (!resp.ok) throw new Error('Fetch failed: HTTP ' + resp.status);
+  return await resp.arrayBuffer();
 }
 
-function downloadTmTicketPDFById(id) {
+// Calculate fit-to-page dimensions preserving aspect ratio.
+// Returns {x, y, w, h} in PDF points for letter-size (612x792).
+function _fitToLetterPage(srcW, srcH) {
+  var PAGE_W = 612, PAGE_H = 792;
+  var pageRatio = PAGE_W / PAGE_H;
+  var imgRatio  = srcW / srcH;
+  if (imgRatio > pageRatio) {
+    var w1 = PAGE_W, h1 = w1 / imgRatio;
+    return { x: 0, y: (PAGE_H - h1) / 2, w: w1, h: h1 };
+  } else {
+    var h2 = PAGE_H, w2 = h2 * imgRatio;
+    return { x: (PAGE_W - w2) / 2, y: 0, w: w2, h: h2 };
+  }
+}
+
+// Append every page of a PDF (given as ArrayBuffer) onto a jsPDF doc as
+// rasterised JPEG pages. Each source page becomes one new page in the doc.
+async function _appendPdfBytesToJsPdf(doc, arrayBuffer) {
+  if (!window.pdfjsLib) throw new Error('pdf.js not loaded.');
+  var pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  for (var i = 1; i <= pdf.numPages; i++) {
+    var page = await pdf.getPage(i);
+    var viewport = page.getViewport({ scale: 2.0 });
+    var canvas = document.createElement('canvas');
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    var ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+    var imgData = canvas.toDataURL('image/jpeg', 0.85);
+    var fit = _fitToLetterPage(viewport.width, viewport.height);
+    doc.addPage();
+    doc.addImage(imgData, 'JPEG', fit.x, fit.y, fit.w, fit.h);
+  }
+  return pdf.numPages;
+}
+
+// Append a single image (JPG/PNG ArrayBuffer) onto a jsPDF doc as one new page.
+async function _appendImageBytesToJsPdf(doc, arrayBuffer, contentType) {
+  var bytes = new Uint8Array(arrayBuffer);
+  var binary = '';
+  // Chunk to avoid call-stack overflow on large images
+  var CHUNK = 0x8000;
+  for (var i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  var b64 = btoa(binary);
+  var ct = (contentType || '').toLowerCase();
+  var format = ct.indexOf('png') !== -1 ? 'PNG' : 'JPEG';
+  var mediaType = format === 'PNG' ? 'image/png' : 'image/jpeg';
+  var dataUrl = 'data:' + mediaType + ';base64,' + b64;
+
+  var img = await new Promise(function(resolve, reject) {
+    var im = new Image();
+    im.onload  = function(){ resolve(im); };
+    im.onerror = function(){ reject(new Error('Image load failed')); };
+    im.src = dataUrl;
+  });
+
+  var fit = _fitToLetterPage(img.width, img.height);
+  doc.addPage();
+  doc.addImage(dataUrl, format, fit.x, fit.y, fit.w, fit.h);
+  return 1;
+}
+
+// Top-level dispatcher — given an uploadedSignedFile / smartUploadedFile
+// record, fetch it from storage and append its content to the jsPDF doc.
+// Detects format by contentType then by filename; falls back to PDF then
+// image. Returns the number of pages appended (0 if nothing was appended,
+// e.g. no file or fetch failed).
+async function _appendUploadedFileToJsPdf(doc, uploadedFile) {
+  if (!uploadedFile) return 0;
+  var ab;
+  try {
+    ab = await _fetchUploadedFileBytes(uploadedFile);
+  } catch (e) {
+    console.warn('Could not fetch uploaded source file for PDF append:', e);
+    return 0;
+  }
+  if (!ab) return 0;
+  var ct = (uploadedFile.contentType || '').toLowerCase();
+  var nm = (uploadedFile.name || '').toLowerCase();
+  var isPdf   = ct.indexOf('pdf')    !== -1 || /\.pdf$/i.test(nm);
+  var isImage = ct.indexOf('image/') === 0  || /\.(jpe?g|png|gif|webp)$/i.test(nm);
+  try {
+    if (isPdf)        return await _appendPdfBytesToJsPdf(doc, ab);
+    if (isImage)      return await _appendImageBytesToJsPdf(doc, ab, ct || 'image/jpeg');
+    // Unknown — try PDF first, then image
+    try { return await _appendPdfBytesToJsPdf(doc, ab); }
+    catch (e) {
+      try { return await _appendImageBytesToJsPdf(doc, ab, 'image/jpeg'); }
+      catch (e2) {
+        console.warn('Source file format not recognised; skipped:', uploadedFile.name);
+        return 0;
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to append source file pages:', e);
+    return 0;
+  }
+}
+
+// Build a T&M ticket PDF and append its uploadedSignedFile (if any) as
+// additional pages. Returns the jsPDF doc, or null on error.
+async function _buildTmTicketPdfWithSource(id) {
   var doc = buildTmTicketPDF(id);
-  if (!doc) return;
+  if (!doc) return null;
   var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(id); });
-  var name = 'TM_Ticket_' + (t && t.ticketNumber ? t.ticketNumber : id) + '.pdf';
-  doc.save(name);
+  if (t && t.uploadedSignedFile) {
+    await _appendUploadedFileToJsPdf(doc, t.uploadedSignedFile);
+  }
+  return doc;
+}
+
+async function downloadTmTicketPDF() {
+  if (!_editTmTicketId) { alert('Save the ticket first, then generate the PDF.'); return; }
+  await downloadTmTicketPDFById(_editTmTicketId);
+}
+
+async function downloadTmTicketPDFById(id) {
+  // Find the trigger button (best-effort) for a brief loading state.
+  var btn = null;
+  try {
+    if (event && event.target) btn = event.target;
+  } catch (e) {}
+  var origLabel = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Building PDF\u2026'; }
+  try {
+    var doc = await _buildTmTicketPdfWithSource(id);
+    if (!doc) return;
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(id); });
+    var name = 'TM_Ticket_' + (t && t.ticketNumber ? t.ticketNumber : id) + '.pdf';
+    doc.save(name);
+  } catch (e) {
+    console.error('Ticket PDF download failed:', e);
+    alert('Could not build the PDF: ' + (e.message || e));
+  } finally {
+    if (btn && origLabel != null) { btn.disabled = false; btn.textContent = origLabel; }
+  }
 }
 
 function buildTmTicketPDF(id) {
@@ -8970,11 +9201,98 @@ function _corAfterTransition(c) {
 
 // Helper: extract the COR's PDF as base64 (no data: prefix). Used as
 // email attachment payload.
-function _corPdfBase64(c, p) {
+//
+// Behavior:
+//   - Smart-uploaded COR (c.smartUploadedFile present): the original uploaded
+//     PDF IS the COR. We fetch it from storage and use it as the attachment
+//     payload directly, instead of generating a new form. (The generated
+//     form would just duplicate what's already in the uploaded PDF.)
+//   - Otherwise: build the COR PDF as before (Standard or Hunzinger).
+//
+// Then for any rolled-up T&M tickets (cor.rolledUpTicketIds), append each
+// ticket's generated PDF and its uploadedSignedFile (if any) as additional
+// pages. The result is one combined attachment containing the COR plus
+// all backup tickets.
+async function _corPdfBase64(c, p) {
   if (!window.jspdf) throw new Error('PDF library not loaded.');
-  var formType = (p && p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
-  var doc = (formType === 'Hunzinger') ? buildHunzingerCorPDF(c, p) : buildStandardCorPDF(c, p);
-  if (!doc) throw new Error('PDF builder returned no document.');
+  var jsPDF = window.jspdf.jsPDF;
+  var doc;
+
+  // ── Base document: smart-uploaded original, or freshly generated ──────
+  if (c && c.smartUploaded && c.smartUploadedFile && c.smartUploadedFile.path) {
+    // Use the original PDF as the base. Start with an empty jsPDF doc, drop
+    // its initial blank page, and rasterise the original onto it.
+    doc = new jsPDF({unit:'pt', format:'letter'});
+    try {
+      var ab = await _fetchUploadedFileBytes(c.smartUploadedFile);
+      if (!ab) throw new Error('Original COR file not found in storage.');
+      // Drop the auto-created first blank page so the original starts on page 1
+      var addedPages = 0;
+      // _appendPdfBytesToJsPdf calls doc.addPage() before each page;
+      // we'll delete the leading blank afterwards.
+      var ct = (c.smartUploadedFile.contentType || '').toLowerCase();
+      var nm = (c.smartUploadedFile.name || '').toLowerCase();
+      var isPdf   = ct.indexOf('pdf')    !== -1 || /\.pdf$/i.test(nm);
+      var isImage = ct.indexOf('image/') === 0  || /\.(jpe?g|png|gif|webp)$/i.test(nm);
+      if (isPdf) {
+        addedPages = await _appendPdfBytesToJsPdf(doc, ab);
+      } else if (isImage) {
+        addedPages = await _appendImageBytesToJsPdf(doc, ab, ct || 'image/jpeg');
+      } else {
+        try       { addedPages = await _appendPdfBytesToJsPdf(doc, ab); }
+        catch (e) { addedPages = await _appendImageBytesToJsPdf(doc, ab, 'image/jpeg'); }
+      }
+      if (addedPages > 0) {
+        // Remove the original blank page jsPDF creates on construction
+        doc.deletePage(1);
+      }
+    } catch (e) {
+      // Fallback: if fetch/append of the original fails, generate the form
+      // so the user still has something to send rather than failing outright.
+      console.warn('Smart-uploaded COR original could not be loaded; generating form as fallback:', e);
+      var formType0 = (p && p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
+      doc = (formType0 === 'Hunzinger') ? buildHunzingerCorPDF(c, p) : buildStandardCorPDF(c, p);
+      if (!doc) throw new Error('PDF builder returned no document.');
+    }
+  } else {
+    var formType = (p && p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
+    doc = (formType === 'Hunzinger') ? buildHunzingerCorPDF(c, p) : buildStandardCorPDF(c, p);
+    if (!doc) throw new Error('PDF builder returned no document.');
+  }
+
+  // ── Append each rolled-up T&M ticket: generated form + source file ────
+  var ticketIds = Array.isArray(c && c.rolledUpTicketIds) ? c.rolledUpTicketIds : [];
+  for (var i = 0; i < ticketIds.length; i++) {
+    var tid = ticketIds[i];
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    if (!t) continue;
+
+    // Build the ticket's own PDF on a temp doc, then copy each page into
+    // the main doc by re-rendering. Easier alternative: re-run the same
+    // build logic but on the main doc. Simpler still: render the ticket
+    // doc to a Blob, read it back as bytes, and pdf.js-render those pages
+    // onto the main doc — this reuses _appendPdfBytesToJsPdf and keeps
+    // formatting identical.
+    try {
+      var ticketDoc = buildTmTicketPDF(t.id);
+      if (ticketDoc) {
+        var ticketAb = ticketDoc.output('arraybuffer');
+        await _appendPdfBytesToJsPdf(doc, ticketAb);
+      }
+    } catch (e) {
+      console.warn('Could not append ticket ' + (t.ticketNumber || t.id) + ' to COR PDF:', e);
+    }
+
+    // Append the ticket's original source file (signed/uploaded) if present
+    if (t.uploadedSignedFile) {
+      try {
+        await _appendUploadedFileToJsPdf(doc, t.uploadedSignedFile);
+      } catch (e) {
+        console.warn('Could not append source file for ticket ' + (t.ticketNumber || t.id) + ':', e);
+      }
+    }
+  }
+
   var dataUri = doc.output('datauristring');
   var commaIdx = dataUri.indexOf(',');
   return (commaIdx > 0) ? dataUri.substring(commaIdx + 1) : '';
@@ -9137,11 +9455,14 @@ async function sendCorEmail() {
   if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = 'Sending\u2026'; }
   if (cancelBtn) cancelBtn.disabled = true;
 
-  // Build PDF attachment
+  // Build PDF attachment (async — may fetch source files from storage and
+  // rasterise via pdf.js, so this can take a few seconds on big CORs)
   var pdfBase64;
   try {
-    pdfBase64 = _corPdfBase64(c, p);
+    if (sendBtn) sendBtn.textContent = 'Building PDF\u2026';
+    pdfBase64 = await _corPdfBase64(c, p);
     if (!pdfBase64) throw new Error('PDF generation returned empty');
+    if (sendBtn) sendBtn.textContent = 'Sending\u2026';
   } catch (e) {
     if (errEl) errEl.textContent = 'Could not generate PDF: ' + (e.message || e);
     if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = '\u2709\uFE0F Send'; }
