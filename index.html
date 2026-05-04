@@ -784,11 +784,20 @@ textarea{resize:vertical;min-height:72px}
        on the COR PDF. Defaults to 10% / 5% per industry norms; KMI can
        adjust per project to match negotiated terms. -->
   <div class="card">
-    <div class="ch"><span class="ct">Change Order markup</span></div>
-    <div style="font-size:12px;color:#888;margin-bottom:10px">Overhead &amp; Profit percentages applied on Change Order Requests for this project. Labor doesn't get marked up.</div>
+    <div class="ch"><span class="ct">Change Order settings</span></div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px">COR form template, Overhead &amp; Profit percentages, and Bond rate for this project. Labor doesn't get marked up.</div>
     <div class="fg">
+      <div class="fgr full">
+        <label>COR form template</label>
+        <select id="nprj-cor-form">
+          <option value="Standard">KMI Standard</option>
+          <option value="Hunzinger">Hunzinger Construction</option>
+        </select>
+        <div style="font-size:11px;color:#888;margin-top:4px">Some customers require their own COR form. Pick "Hunzinger Construction" for Hunzinger projects &mdash; the COR PDF will be rendered in their format with their layout, labels, Reg/T&amp;H/DT columns, and Added/Omitted scope sections.</div>
+      </div>
       <div class="fgr"><label>Materials &amp; Equipment markup (%)</label><input type="number" id="nprj-mateq-markup" min="0" step="0.1" placeholder="10" value="10"></div>
       <div class="fgr"><label>Subcontractor markup (%)</label><input type="number" id="nprj-sub-markup" min="0" step="0.1" placeholder="5" value="5"></div>
+      <div class="fgr"><label>Bond rate (%)</label><input type="number" id="nprj-bond-rate" min="0" step="0.01" placeholder="0" value="0"><div style="font-size:11px;color:#888;margin-top:4px">Applied to the COR subtotal as a separate "Bond Cost" line. Leave at 0 if not bonded.</div></div>
     </div>
   </div>
 
@@ -1271,7 +1280,22 @@ textarea{resize:vertical;min-height:72px}
       <div class="fgr"><label>Customer</label><input id="ncor-customer-display" disabled style="background:#f5f5f5;color:#666"></div>
       <div class="fgr"><label>Attention *</label><select id="ncor-attention"><option value="">Select contact...</option></select></div>
       <div class="fgr"><label>Customer CO #</label><input id="ncor-customer-co-num" placeholder="Customer's CO reference number (optional)"><div style="font-size:11px;color:#888;margin-top:4px">Set this when the customer issues their own CO number against this COR.</div></div>
-      <div class="fgr full"><label>Description *</label><textarea id="ncor-desc" rows="3" placeholder="Describe the change being requested..."></textarea></div>
+      <div class="fgr full"><label id="ncor-desc-label">Description *</label><textarea id="ncor-desc" rows="3" placeholder="Describe the change being requested..."></textarea></div>
+    </div>
+  </div>
+
+  <!-- Hunzinger-only fields. Visibility is toggled by ncorRenderHunzingerSection()
+       based on the parent project's corFormType. Time extension + Omitted scope
+       are required by Hunzinger Construction's COR form layout but are no-ops
+       on the KMI Standard form. -->
+  <div class="card" id="ncor-section-hunzinger" style="display:none">
+    <div class="ch">
+      <span class="ct">Hunzinger Construction COR fields</span>
+      <span style="font-size:11px;color:#888;font-weight:400;margin-left:auto">Required by Hunzinger&apos;s COR form</span>
+    </div>
+    <div class="fg">
+      <div class="fgr"><label>Project Time Extension (days)</label><input type="number" id="ncor-time-ext-days" min="0" step="1" placeholder="0"><div style="font-size:11px;color:#888;margin-top:4px">Number of additional contract days requested by this change. Leave blank or 0 if no extension.</div></div>
+      <div class="fgr full"><label>Omitted Scope</label><textarea id="ncor-omitted-scope" rows="2" placeholder="Describe any scope being omitted by this change (optional)..."></textarea><div style="font-size:11px;color:#888;margin-top:4px">Hunzinger&apos;s form has a separate &ldquo;Omitted Scope&rdquo; narrative box at the bottom. The Description above maps to &ldquo;Added Scope&rdquo;.</div></div>
     </div>
   </div>
 
@@ -1324,7 +1348,7 @@ textarea{resize:vertical;min-height:72px}
   <!-- Action buttons. Most are placeholders that wire up in Round 4.3. -->
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
     <button class="btn" onclick="_smartUpCorCancel(); nav('cors');">Cancel</button>
-    <button class="btn" onclick="downloadCorPDF()" id="ncor-pdf-btn" style="display:none" title="PDF generator lands in Round 4.3" disabled>⬇ Download PDF</button>
+    <button class="btn" onclick="downloadCorPDF()" id="ncor-pdf-btn" style="display:none" title="Generate the COR PDF (Standard or Hunzinger format depending on the project)">⬇ Download PDF</button>
     <button class="btn" onclick="corExportFoundationHeaderCsv()" id="ncor-fnd-header-btn" style="display:none" title="Generate the Foundation CO Header CSV (1 row)">⬇ Export Header CSV</button>
     <button class="btn" onclick="corExportFoundationDetailCsv()" id="ncor-fnd-detail-btn" style="display:none" title="Generate the Foundation CO Detail CSV (cost-code lines)">⬇ Export Detail CSV</button>
     <button class="btn" onclick="showSendCorToCustomerMenu()" id="ncor-send-btn" style="display:none" title="Send-to-customer lands in Round 4.3" disabled>Send to customer ▾</button>
@@ -6645,6 +6669,9 @@ function initNewCor() {
     subRows:            [],
     matEqMarkupPct: prefillProj ? ((prefillProj.matEqMarkupPct !== null && prefillProj.matEqMarkupPct !== undefined) ? prefillProj.matEqMarkupPct : 10) : 10,
     subMarkupPct:   prefillProj ? ((prefillProj.subMarkupPct   !== null && prefillProj.subMarkupPct   !== undefined) ? prefillProj.subMarkupPct   : 5)  : 5,
+    bondRatePct:    prefillProj ? ((prefillProj.bondRatePct   !== null && prefillProj.bondRatePct   !== undefined) ? prefillProj.bondRatePct   : 0)  : 0,
+    timeExtensionDays: '',
+    omittedScope:   '',
     corType:    corType,
     projectId:  prefillProjectIdNum
   });
@@ -6730,6 +6757,17 @@ function ncorProjectChanged() {
   var p = pidRaw
     ? db.projects.find(function(x){ return String(x.id) === String(pidRaw); })
     : null;
+  // Keep working-state projectId in sync so ncorRenderHunzingerSection
+  // (and anything else reading w.projectId) sees the current selection.
+  // saveCor still reads markups + bond rate from the selected project at
+  // save time, matching the legacy pattern for the existing percentages.
+  if (_ncorWorking) {
+    _ncorWorking.projectId = pidRaw ? Number(pidRaw) : null;
+  }
+  // Toggle the Hunzinger card if applicable
+  if (typeof ncorRenderHunzingerSection === 'function') {
+    ncorRenderHunzingerSection();
+  }
 
   // Customer (read-only display)
   if (p) {
@@ -6829,6 +6867,9 @@ async function saveCor() {
     return { classification: r.classification, hours: r.hours, rate: r.rate, source: 'auto' };
   });
 
+  // Read Hunzinger fields back into working state before snapshotting
+  ncorReadHunzingerFields();
+
   // Compute totals
   var totals = ncorComputeTotals();
 
@@ -6868,7 +6909,12 @@ async function saveCor() {
     existingCor.totalSub      = totals.totalSub;
     existingCor.mateqOhp      = totals.mateqOhp;
     existingCor.subOhp        = totals.subOhp;
+    existingCor.bondCost      = totals.bondCost;
     existingCor.totalAmount   = totals.totalAmount;
+    // Hunzinger-specific fields. Carry working-state values regardless of
+    // form type so a later flip back to Hunzinger doesn't lose the data.
+    existingCor.timeExtensionDays = (w.timeExtensionDays === '' || w.timeExtensionDays === null || w.timeExtensionDays === undefined) ? null : Number(w.timeExtensionDays);
+    existingCor.omittedScope      = w.omittedScope || '';
     existingCor.updatedAt     = new Date().toISOString();
     existingCor.updatedByUserId = _currentUser ? _currentUser.id : null;
 
@@ -6912,11 +6958,18 @@ async function saveCor() {
     subRows:           newSubs,
     matEqMarkupPct: (p.matEqMarkupPct !== null && p.matEqMarkupPct !== undefined) ? p.matEqMarkupPct : 10,
     subMarkupPct:   (p.subMarkupPct   !== null && p.subMarkupPct   !== undefined) ? p.subMarkupPct   : 5,
+    // Bond rate snapshot at create time (same pattern as the markups above).
+    bondRatePct:    (p.bondRatePct !== null && p.bondRatePct !== undefined) ? p.bondRatePct : 0,
+    // Hunzinger-specific fields (carried even on Standard projects so a
+    // later switch doesn't lose data; null/empty if not set)
+    timeExtensionDays: (w.timeExtensionDays === '' || w.timeExtensionDays === null || w.timeExtensionDays === undefined) ? null : Number(w.timeExtensionDays),
+    omittedScope:   w.omittedScope || '',
     totalLabor:    totals.totalLabor,
     totalMaterial: totals.totalMaterial,
     totalSub:      totals.totalSub,
     mateqOhp:      totals.mateqOhp,
     subOhp:        totals.subOhp,
+    bondCost:      totals.bondCost,
     totalAmount:   totals.totalAmount,
     createdAt: nowIso,
     createdByUserId: _currentUser ? _currentUser.id : null,
@@ -7292,6 +7345,9 @@ async function smartUploadCorExtract() {
       '  "subRows":           [{"name": "...", "total": 0}],\n' +
       '  "matEqMarkupPct":    "number or null — Materials & Equipment OH&P markup percent (often 10)",\n' +
       '  "subMarkupPct":      "number or null — Subcontractor OH&P markup percent (often 5)",\n' +
+      '  "bondRatePct":       "number or null — bond cost percent applied to subtotal (often 0 or 1.5)",\n' +
+      '  "timeExtensionDays": "integer or null — number of additional days requested (Hunzinger forms specifically)",\n' +
+      '  "omittedScope":      "string or null — text from the \"Omitted Scope\" narrative box if the form has one (Hunzinger forms specifically)",\n' +
       '  "totalLabor":        "number or null — labor subtotal as printed on the doc",\n' +
       '  "totalMaterial":     "number or null — material subtotal",\n' +
       '  "totalSub":          "number or null — sub subtotal",\n' +
@@ -7502,6 +7558,17 @@ function _smartUpCorApplyPrefill(project, parsed) {
   if (typeof parsed.subMarkupPct === 'number' && !isNaN(parsed.subMarkupPct)) {
     _ncorWorking.subMarkupPct = parsed.subMarkupPct;
   }
+  // Bond rate + Hunzinger-only fields. Values default to project / blank
+  // unless the document supplies something usable.
+  if (typeof parsed.bondRatePct === 'number' && !isNaN(parsed.bondRatePct)) {
+    _ncorWorking.bondRatePct = parsed.bondRatePct;
+  }
+  if (typeof parsed.timeExtensionDays === 'number' && !isNaN(parsed.timeExtensionDays)) {
+    _ncorWorking.timeExtensionDays = parsed.timeExtensionDays;
+  }
+  if (typeof parsed.omittedScope === 'string' && parsed.omittedScope.trim()) {
+    _ncorWorking.omittedScope = parsed.omittedScope.trim();
+  }
 
   // Re-render all sections to show the populated rows
   ncorRenderSections();
@@ -7609,6 +7676,9 @@ async function confirmSmartUploadCor() {
     subRows: newSubs,
     matEqMarkupPct: (w.matEqMarkupPct !== null && w.matEqMarkupPct !== undefined) ? w.matEqMarkupPct : 10,
     subMarkupPct:   (w.subMarkupPct   !== null && w.subMarkupPct   !== undefined) ? w.subMarkupPct   : 5,
+    bondRatePct:    (w.bondRatePct    !== null && w.bondRatePct    !== undefined) ? w.bondRatePct    : 0,
+    timeExtensionDays: (w.timeExtensionDays === '' || w.timeExtensionDays === null || w.timeExtensionDays === undefined) ? null : Number(w.timeExtensionDays),
+    omittedScope:   w.omittedScope || '',
     totalLabor:    totals.totalLabor,
     totalMaterial: totals.totalMaterial,
     totalSub:      totals.totalSub,
@@ -7717,7 +7787,947 @@ async function confirmSmartUploadCor() {
 }
 
 // ── Round 4.3 placeholder no-ops (so onclick handlers don't ReferenceError) ─
-function downloadCorPDF()           { alert('PDF generation arrives in Round 4.3.'); }
+// ═══════════════════════════════════════════════════════════════════════
+// COR PDF GENERATION
+// ═══════════════════════════════════════════════════════════════════════
+// Two output formats, picked by the parent project's corFormType:
+//
+//   "Standard"  — KMI's own form. Layout mirrors the example PDF Mike
+//                 keeps as the canonical KMI COR template (see
+//                 CHANGE ORDER REQUEST PDF stored on the project knowledge):
+//                 KMI letterhead, Contractor / Date / COR # block,
+//                 Attention, Project, Description box, Labor breakdown,
+//                 Unit Cost / Material / Equipment breakdown, Subcontractor
+//                 breakdown, then OH&P + Bond + grand total summary.
+//
+//   "Hunzinger"  — Hunzinger Construction's COR form. Mirrors the cell
+//                  layout in HCCO_Change_Order_Template.xlsx provided by
+//                  Hunzinger: Contractor / Work Description / Document
+//                  Reference Number; LABOR COST table with Reg/T&H/DT
+//                  columns; MATERIALS section with markup; EQUIPMENT
+//                  section with markup (note: KMI bundles materials &
+//                  equipment, so we put everything under MATERIALS and
+//                  leave EQUIPMENT empty — totals match because both use
+//                  the same 10% markup); SUBCONTRACTORS, UNIT PRICING
+//                  (always empty for KMI), CHANGE Sub Total, BOND, CHANGE
+//                  Total; then bottom Contractor block; WORK SCOPE
+//                  NARRATIVE — Added Scope / Omitted Scope.
+//
+// Same data on both forms (labor classifications/hours, materials,
+// markups, bond, totals). The distinction is purely the rendered layout
+// and the labels Hunzinger expects.
+
+function downloadCorPDF() {
+  if (!_editCorId) { alert('Save the COR first, then generate the PDF.'); return; }
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
+  if (!c) { alert('COR not found.'); return; }
+  var p = getProj(c.projectId) || {};
+  var formType = (p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
+  var doc = (formType === 'Hunzinger') ? buildHunzingerCorPDF(c, p) : buildStandardCorPDF(c, p);
+  if (!doc) return;
+  var seqOnly = corExtractKmiSeq(c.corNumber) || c.corNumber || c.id;
+  var fname = 'COR_' + seqOnly + (formType === 'Hunzinger' ? '_Hunzinger' : '') + '.pdf';
+  doc.save(fname);
+}
+
+// ── Helpers shared by both PDF builders ────────────────────────────────
+
+// Resolve the customer's display block: company name + address, used at
+// the top of both forms. Falls back to project address when customer
+// has no full address on file.
+function _corPdfResolveContractorBlock(c, p) {
+  var cust = db.customers.find(function(x){ return String(x.id) === String(p.customerId); }) || {};
+  var name = cust.name || '';
+  var addr = (cust.address || '').trim();
+  var city = (cust.city || '').trim();
+  var state = (cust.state || '').trim();
+  var zip = (cust.zip || '').trim();
+  var line2 = addr;
+  var line3 = [city, state].filter(Boolean).join(', ');
+  if (zip) line3 = (line3 ? (line3 + ' ' + zip) : zip);
+  return { name: name, line2: line2, line3: line3 };
+}
+
+// Resolve the "Attention" name for the COR. attentionContactId points at
+// either a customer-side contact on the project, or (rare) a PM. Returns
+// just the display name string, or '' if not found.
+function _corPdfResolveAttention(c, p) {
+  var aid = c.attentionContactId;
+  if (!aid) return '';
+  var contacts = Array.isArray(p.contactAssignments) ? p.contactAssignments : [];
+  for (var i = 0; i < contacts.length; i++) {
+    var ca = contacts[i];
+    if (String(ca.contactId) === String(aid)) {
+      // Look up the actual contact record. Customer contacts live on
+      // db.customers[].contacts (per the contact-assignment pattern).
+      var cust = db.customers.find(function(x){ return String(x.id) === String(p.customerId); }) || {};
+      var found = (cust.contacts || []).find(function(co){ return String(co.id) === String(ca.contactId); });
+      if (found) return ((found.firstName || '') + ' ' + (found.lastName || '')).trim() || found.name || '';
+      // Fall back to whatever name was stored on the assignment row
+      return (ca.name || '').trim();
+    }
+  }
+  // Last-ditch: maybe the id matches a PM directly
+  var pm = (db.pms || []).find(function(x){ return String(x.id) === String(aid); });
+  if (pm) return ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim() || pm.name || '';
+  return '';
+}
+
+// Combined labor rows (auto + manual) for PDF output. Reads from the saved
+// COR record (not _ncorWorking) so PDFs work for any saved COR even when
+// no longer being edited.
+function _corPdfLaborRows(c) {
+  var auto = Array.isArray(c.laborRows) ? c.laborRows : [];
+  var manual = Array.isArray(c.manualLaborRows) ? c.manualLaborRows : [];
+  return auto.map(function(r){
+    var hrs = Number(r.hours) || 0;
+    var rate = Number(r.rate) || 0;
+    return {
+      classification: r.classification || '',
+      hours: hrs,
+      rate: rate,
+      total: hrs * rate,
+      source: 'auto'
+    };
+  }).concat(manual.map(function(r){
+    var hrs = Number(r.hours) || 0;
+    var rate = Number(r.rate) || 0;
+    return {
+      classification: r.classification || '',
+      hours: hrs,
+      rate: rate,
+      total: hrs * rate,
+      source: 'manual'
+    };
+  }));
+}
+
+// Combined material rows (auto + manual) for PDF output.
+function _corPdfMaterialRows(c) {
+  var auto = Array.isArray(c.autoMaterialRows) ? c.autoMaterialRows : [];
+  var manual = Array.isArray(c.manualMaterialRows) ? c.manualMaterialRows : [];
+  return auto.concat(manual).map(function(r){
+    var qty = Number(r.quantity) || 0;
+    var unitPrice = Number(r.unitPrice) || 0;
+    return {
+      description: r.description || '',
+      quantity: qty,
+      unitPrice: unitPrice,
+      cost: qty * unitPrice
+    };
+  });
+}
+
+// Format a date string (YYYY-MM-DD) → M/D/YYYY for display
+function _corPdfFmtDate(s) {
+  if (!s) return '';
+  var m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return s;
+  return Number(m[2]) + '/' + Number(m[3]) + '/' + m[1];
+}
+
+// Money formatter for PDFs (no $ sign — caller adds it explicitly to
+// match the example layout's cleaner column alignment).
+function _corPdfMoney(n) {
+  var v = Number(n) || 0;
+  return v.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+// Format integer-ish numbers (hours, qty) — 0 or 2 decimals depending
+// on whether there's a fractional part.
+function _corPdfNum(n) {
+  var v = Number(n) || 0;
+  return v.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 2});
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// STANDARD COR PDF (KMI's own form)
+// ═══════════════════════════════════════════════════════════════════════
+function buildStandardCorPDF(c, p) {
+  if (!window.jspdf) { alert('PDF library loading, please try again.'); return null; }
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({unit:'pt', format:'letter'});
+
+  var LM = 54, RM = 558, PAGE_W = 612, PAGE_H = 792;
+  var FOOTER_TOP = 720;
+
+  function letterhead() {
+    if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
+      try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 109); } catch(e) {}
+    }
+    if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
+      try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 72, PAGE_W, 72); } catch(e) {}
+    }
+  }
+  function sf(st, sz, col) {
+    doc.setFont('helvetica', st);
+    doc.setFontSize(sz);
+    doc.setTextColor(col ? col[0] : 0, col ? col[1] : 0, col ? col[2] : 0);
+  }
+  function ln(x1, y1, x2, y2, w, rgb) {
+    doc.setDrawColor(rgb ? rgb[0] : 0, rgb ? rgb[1] : 0, rgb ? rgb[2] : 0);
+    doc.setLineWidth(w || 0.5);
+    doc.line(x1, y1, x2, y2);
+  }
+  function box(x, y, w, h, fillRgb, strokeRgb) {
+    if (fillRgb) {
+      doc.setFillColor(fillRgb[0], fillRgb[1], fillRgb[2]);
+      doc.rect(x, y, w, h, 'F');
+    }
+    if (strokeRgb !== null) {
+      doc.setDrawColor(strokeRgb ? strokeRgb[0] : 80, strokeRgb ? strokeRgb[1] : 80, strokeRgb ? strokeRgb[2] : 80);
+      doc.setLineWidth(0.5);
+      doc.rect(x, y, w, h, 'S');
+    }
+  }
+  function wrap(text, maxW) {
+    return doc.splitTextToSize(String(text || ''), maxW);
+  }
+  function ensureRoom(yNeeded, currentY) {
+    if (currentY + yNeeded > FOOTER_TOP - 20) {
+      doc.addPage();
+      letterhead();
+      return 130;
+    }
+    return currentY;
+  }
+
+  var YELLOW = [255, 240, 130];   // total-row highlight
+  var KMI    = [42, 47, 92];      // dark navy used for headings
+  var ACCENT = [200, 168, 75];    // kmi gold accent
+
+  letterhead();
+
+  // ── Title ─────────────────────────────────────────────────────────
+  var y = 124;
+  sf('bold', 16, KMI);
+  doc.text('CHANGE ORDER REQUEST', PAGE_W / 2, y, {align:'center'});
+  y += 6;
+  ln(LM, y, RM, y, 0.8, ACCENT);
+  y += 22;
+
+  // ── Top block: Contractor (left) + DATE / COR # (right) ──────────
+  var contractor = _corPdfResolveContractorBlock(c, p);
+  var topY = y;
+
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('Contractor:', LM, y);
+  sf('normal', 10);
+  doc.text(contractor.name || '', LM + 88, y);
+  y += 14;
+  if (contractor.line2) { doc.text(contractor.line2, LM + 88, y); y += 14; }
+  if (contractor.line3) { doc.text(contractor.line3, LM + 88, y); y += 14; }
+  var leftBlockEnd = y;
+
+  // Right side: DATE and COR # with underlined values
+  var rLabelX = LM + 320;
+  var rValX   = LM + 380;
+  var rValEndX = RM - 12;
+  y = topY;
+  sf('bold', 10);
+  doc.text('DATE:', rLabelX, y);
+  sf('normal', 10);
+  doc.text(_corPdfFmtDate(c.corDate), rValEndX, y, {align:'right'});
+  ln(rValX, y + 2, rValEndX, y + 2, 0.4, [120, 120, 120]);
+  y += 18;
+  sf('bold', 10);
+  doc.text('COR #', rLabelX, y);
+  sf('normal', 10);
+  doc.text(String(corExtractKmiSeq(c.corNumber) || c.corNumber || ''), rValEndX, y, {align:'right'});
+  ln(rValX, y + 2, rValEndX, y + 2, 0.4, [120, 120, 120]);
+  y += 22;
+
+  y = Math.max(leftBlockEnd, y);
+
+  // ── Attention + Project rows ─────────────────────────────────────
+  sf('bold', 10);
+  doc.text('Attention:', LM, y);
+  sf('normal', 10);
+  doc.text(_corPdfResolveAttention(c, p) || '', LM + 88, y);
+  y += 18;
+
+  sf('bold', 10);
+  doc.text('Project:', LM, y);
+  sf('normal', 10);
+  var projLines = wrap((p.number ? (p.number + ' — ') : '') + (p.name || ''), RM - LM - 88);
+  doc.text(projLines, LM + 88, y);
+  y += projLines.length * 14 + 6;
+
+  // ── COR Description box ──────────────────────────────────────────
+  sf('bold', 10);
+  doc.text('Provide COR Description Below:', LM, y);
+  y += 6;
+  var descLines = wrap(c.description || '', RM - LM - 12);
+  var descBoxH = Math.max(58, descLines.length * 12 + 14);
+  box(LM, y, RM - LM, descBoxH, null, [120, 120, 120]);
+  sf('normal', 10);
+  doc.text(descLines, LM + 6, y + 14);
+  y += descBoxH + 14;
+
+  // ── LABOR BREAKDOWN ──────────────────────────────────────────────
+  y = ensureRoom(80, y);
+  sf('bold', 10);
+  doc.text('Labor Breakdown:', LM, y);
+  y += 8;
+
+  var laborRows = _corPdfLaborRows(c);
+
+  // Header row
+  var col = {
+    cls:   LM,
+    hours: LM + 240,
+    rate:  LM + 340,
+    total: RM
+  };
+  sf('bold', 9, [80, 80, 80]);
+  doc.text('Labor Type', col.cls, y);
+  doc.text('Hours', col.hours + 60, y, {align:'right'});
+  doc.text('Rate', col.rate + 60, y, {align:'right'});
+  doc.text('Total', col.total - 6, y, {align:'right'});
+  y += 4;
+  ln(LM, y, RM, y, 0.4, [180, 180, 180]);
+  y += 12;
+
+  sf('normal', 10, [0, 0, 0]);
+  if (!laborRows.length) {
+    sf('italic', 9, [150, 150, 150]);
+    doc.text('(no labor)', col.cls, y);
+    sf('normal', 10, [0, 0, 0]);
+    y += 14;
+  } else {
+    laborRows.forEach(function(r){
+      y = ensureRoom(16, y);
+      var clsLines = wrap(r.classification || '', 230);
+      doc.text(clsLines, col.cls, y);
+      doc.text(_corPdfNum(r.hours), col.hours + 60, y, {align:'right'});
+      doc.text('$ ' + _corPdfMoney(r.rate), col.rate + 60, y, {align:'right'});
+      doc.text('$ ' + _corPdfMoney(r.total), col.total - 6, y, {align:'right'});
+      y += clsLines.length * 12 + 2;
+    });
+  }
+  y += 6;
+
+  // TOTAL LABOR COST highlighted row
+  y = ensureRoom(22, y);
+  box(LM, y - 2, RM - LM, 18, YELLOW, [180, 150, 50]);
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('TOTAL LABOR COST', LM + 6, y + 10);
+  doc.text('$ ' + _corPdfMoney(c.totalLabor), RM - 6, y + 10, {align:'right'});
+  y += 28;
+
+  // ── UNIT COST / MATERIAL / EQUIPMENT BREAKDOWN ────────────────────
+  y = ensureRoom(80, y);
+  sf('bold', 10);
+  doc.text('Unit Cost/Material/Equipment Breakdown:', LM, y);
+  y += 8;
+
+  var matRows = _corPdfMaterialRows(c);
+  var mc = {
+    desc: LM,
+    qty:  LM + 280,
+    unit: LM + 360,
+    cost: RM
+  };
+  sf('bold', 9, [80, 80, 80]);
+  doc.text('Unit Cost/Material Description', mc.desc, y);
+  doc.text('Quantity', mc.qty + 60, y, {align:'right'});
+  doc.text('Unit Price', mc.unit + 60, y, {align:'right'});
+  doc.text('Cost', mc.cost - 6, y, {align:'right'});
+  y += 4;
+  ln(LM, y, RM, y, 0.4, [180, 180, 180]);
+  y += 12;
+
+  sf('normal', 10, [0, 0, 0]);
+  if (!matRows.length) {
+    sf('italic', 9, [150, 150, 150]);
+    doc.text('(no materials/equipment)', mc.desc, y);
+    sf('normal', 10, [0, 0, 0]);
+    y += 14;
+  } else {
+    matRows.forEach(function(r){
+      y = ensureRoom(16, y);
+      var dLines = wrap(r.description || '', 270);
+      doc.text(dLines, mc.desc, y);
+      doc.text(_corPdfNum(r.quantity), mc.qty + 60, y, {align:'right'});
+      doc.text('$ ' + _corPdfMoney(r.unitPrice), mc.unit + 60, y, {align:'right'});
+      doc.text('$ ' + _corPdfMoney(r.cost), mc.cost - 6, y, {align:'right'});
+      y += dLines.length * 12 + 2;
+    });
+  }
+  y += 6;
+
+  y = ensureRoom(22, y);
+  box(LM, y - 2, RM - LM, 18, YELLOW, [180, 150, 50]);
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('TOTAL MATERIAL COST', LM + 6, y + 10);
+  doc.text('$ ' + _corPdfMoney(c.totalMaterial), RM - 6, y + 10, {align:'right'});
+  y += 28;
+
+  // ── SUBCONTRACTOR BREAKDOWN ───────────────────────────────────────
+  y = ensureRoom(80, y);
+  sf('bold', 10);
+  doc.text('Subcontractor Breakdown', LM, y);
+  y += 8;
+
+  var subRows = Array.isArray(c.subRows) ? c.subRows : [];
+  sf('bold', 9, [80, 80, 80]);
+  doc.text('Subcontractor', LM, y);
+  doc.text('Total', RM - 6, y, {align:'right'});
+  y += 4;
+  ln(LM, y, RM, y, 0.4, [180, 180, 180]);
+  y += 12;
+
+  sf('normal', 10, [0, 0, 0]);
+  if (!subRows.length) {
+    sf('italic', 9, [150, 150, 150]);
+    doc.text('(none)', LM, y);
+    sf('normal', 10, [0, 0, 0]);
+    y += 14;
+  } else {
+    subRows.forEach(function(r){
+      y = ensureRoom(16, y);
+      var nLines = wrap(r.name || '', 380);
+      doc.text(nLines, LM, y);
+      doc.text('$ ' + _corPdfMoney(r.total), RM - 6, y, {align:'right'});
+      y += nLines.length * 12 + 2;
+    });
+  }
+  y += 6;
+
+  y = ensureRoom(22, y);
+  box(LM, y - 2, RM - LM, 18, YELLOW, [180, 150, 50]);
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('TOTAL SUBCONTRACTOR COST', LM + 6, y + 10);
+  doc.text('$ ' + _corPdfMoney(c.totalSub), RM - 6, y + 10, {align:'right'});
+  y += 32;
+
+  // ── OH&P / Bond summary lines + grand total ───────────────────────
+  y = ensureRoom(110, y);
+  var matEqPct = Number(c.matEqMarkupPct) || 0;
+  var subPct   = Number(c.subMarkupPct)   || 0;
+  var bondPct  = Number(c.bondRatePct)    || 0;
+  var bondCost = Number(c.bondCost);
+  if (isNaN(bondCost) || bondCost === null || bondCost === undefined) {
+    // Recompute from totals if the snapshot is stale (legacy CORs)
+    var subtotal = (Number(c.totalLabor) || 0) + (Number(c.totalMaterial) || 0) +
+                   (Number(c.totalSub) || 0) + (Number(c.mateqOhp) || 0) +
+                   (Number(c.subOhp) || 0);
+    bondCost = subtotal * (bondPct / 100);
+  }
+
+  sf('normal', 10, [0, 0, 0]);
+  doc.text('Contractor Overhead and Profit MAT/EQ(' + matEqPct + '%)', LM, y);
+  doc.text('$ ' + _corPdfMoney(c.mateqOhp), RM - 6, y, {align:'right'});
+  y += 16;
+
+  doc.text('Contractor Overhead and Profit on Subcontractors(' + subPct + '%)', LM, y);
+  doc.text('$ ' + _corPdfMoney(c.subOhp), RM - 6, y, {align:'right'});
+  y += 16;
+
+  // "Conractor Bond Cost" — preserve the typo-as-shown spelling in the
+  // canonical KMI form so the rendered PDF matches the existing template.
+  doc.text('Conractor Bond Cost(' + bondPct + '%)', LM, y);
+  doc.text('$ ' + _corPdfMoney(bondCost), RM - 6, y, {align:'right'});
+  y += 22;
+
+  // Grand total — yellow highlight matching the example
+  y = ensureRoom(22, y);
+  box(LM, y - 2, RM - LM, 22, YELLOW, [180, 150, 50]);
+  sf('bold', 12, [0, 0, 0]);
+  doc.text('Total Change Order Request', LM + 6, y + 12);
+  doc.text('$ ' + _corPdfMoney(c.totalAmount), RM - 6, y + 12, {align:'right'});
+  y += 32;
+
+  return doc;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HUNZINGER COR PDF (Hunzinger Construction's form)
+// ═══════════════════════════════════════════════════════════════════════
+// Mirrors HCCO_Change_Order_Template.xlsx cell layout. Hunzinger expects
+// to see all sections (LABOR / MATERIALS / EQUIPMENT / SUBCONTRACTORS /
+// UNIT PRICING) even when most are empty for a given COR.
+//
+// Mapping from KMI data → Hunzinger labels:
+//   - "T&H" column (Time-and-Half) ← KMI's OT column. Hunzinger projects
+//     are typically T&M, so all hours go in the Reg column with the
+//     resolved T&M rate. For Premium Time OT/DT CORs, hours go in the
+//     T&H or DT column respectively.
+//   - "EQUIPMENT" section is left blank — KMI bundles equipment into
+//     materials. The 10% markup applied to MATERIALS already covers
+//     what Hunzinger would split across the two sections.
+//   - "UNIT PRICING" is always blank for KMI's process.
+//   - "BOND - Rate per Contract" pulls from the project's bond rate.
+//   - Document Reference Number formatted as "KMI COR {seq}".
+//   - Description → "Added Scope" narrative; omittedScope → "Omitted Scope".
+function buildHunzingerCorPDF(c, p) {
+  if (!window.jspdf) { alert('PDF library loading, please try again.'); return null; }
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({unit:'pt', format:'letter'});
+
+  var LM = 36, RM = 576, PAGE_W = 612, PAGE_H = 792;
+  var FOOTER_TOP = 720;
+
+  function letterhead() {
+    if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
+      try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 90); } catch(e) {}
+    }
+    if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
+      try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 60, PAGE_W, 60); } catch(e) {}
+    }
+  }
+  function sf(st, sz, col) {
+    doc.setFont('helvetica', st);
+    doc.setFontSize(sz);
+    doc.setTextColor(col ? col[0] : 0, col ? col[1] : 0, col ? col[2] : 0);
+  }
+  function ln(x1, y1, x2, y2, w, rgb) {
+    doc.setDrawColor(rgb ? rgb[0] : 0, rgb ? rgb[1] : 0, rgb ? rgb[2] : 0);
+    doc.setLineWidth(w || 0.5);
+    doc.line(x1, y1, x2, y2);
+  }
+  function wrap(text, maxW) {
+    return doc.splitTextToSize(String(text || ''), maxW);
+  }
+  function ensureRoom(yNeeded, currentY) {
+    if (currentY + yNeeded > FOOTER_TOP - 12) {
+      doc.addPage();
+      letterhead();
+      return 110;
+    }
+    return currentY;
+  }
+
+  letterhead();
+
+  var seq = corExtractKmiSeq(c.corNumber) || c.corNumber || '';
+  var docRef = 'KMI COR ' + seq;
+  var workDesc = c.description || '';
+  var contractor = _corPdfResolveContractorBlock(c, p);
+  var contractorName = contractor.name || 'KMI Construction LLC';
+
+  // ── Top header block: 3 fields right-aligned on left side of page ─
+  var y = 104;
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('Contractor:', LM + 60, y);
+  sf('normal', 10);
+  doc.text('KMI Construction LLC', LM + 160, y);
+  y += 14;
+  sf('bold', 10);
+  doc.text('Work Description:', LM + 60, y);
+  sf('normal', 10);
+  var wdLines = wrap(workDesc, RM - (LM + 160) - 10);
+  doc.text(wdLines, LM + 160, y);
+  y += Math.max(14, wdLines.length * 12);
+  sf('bold', 10);
+  doc.text('Document Reference Number:', LM + 60, y);
+  sf('normal', 10);
+  doc.text(docRef, LM + 220, y);
+  y += 18;
+
+  // Determine which hour column to populate based on COR type.
+  // Hunzinger's columns are: Reg | T&H | DT
+  // KMI COR types map as follows:
+  //   "T&M", "Fixed Fee"              → Reg (full T&M billing)
+  //   "Overtime", "Premium Time OT"   → T&H
+  //   "Double Time", "Premium Time DT" → DT
+  function hourCol(corType) {
+    var t = (corType || '').toLowerCase();
+    if (t.indexOf('double') !== -1 || t === 'premium time dt' || t === 'dt') return 'dt';
+    if (t.indexOf('overtime') !== -1 || t === 'premium time ot' || t.indexOf('t&h') !== -1) return 'th';
+    return 'reg';
+  }
+  var hcol = hourCol(c.corType);
+
+  // ── LABOR COST section ────────────────────────────────────────────
+  y += 6;
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('LABOR COST:', LM, y);
+  y += 14;
+
+  // Table header row 1: Hours | Classification | Rate/hr per contract
+  var Lcols = {
+    reg:   LM + 12,    // header cell ~30pt
+    th:    LM + 50,
+    dt:    LM + 88,
+    cls:   LM + 130,
+    rateR: LM + 240,
+    rateT: LM + 290,
+    rateD: LM + 340,
+    ext:   RM - 6
+  };
+
+  sf('bold', 8, [80, 80, 80]);
+  doc.text('Hours', LM + 50, y);
+  doc.text('Rate/hr per contract', LM + 280, y);
+  y += 10;
+  doc.text('Reg.', Lcols.reg, y);
+  doc.text('T&H', Lcols.th, y);
+  doc.text('DT', Lcols.dt, y);
+  doc.text('Classification', Lcols.cls, y);
+  doc.text('Reg.', Lcols.rateR, y);
+  doc.text('T&H', Lcols.rateT, y);
+  doc.text('DT', Lcols.rateD, y);
+  doc.text('Extension', Lcols.ext, y, {align:'right'});
+  y += 4;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+
+  var laborRows = _corPdfLaborRows(c);
+  // Pull rate triplet (Reg/OT/DT) from project's labor rate snapshot
+  // when available, so Hunzinger sees full rate context per row.
+  var laborRates = (typeof corGetProjectLaborRates === 'function') ? corGetProjectLaborRates(p) : (Array.isArray(p.laborRates) ? p.laborRates : []);
+  function rateForCls(cls, kind) {
+    var match = (laborRates || []).find(function(rr){ return ((rr.classification || '').trim().toLowerCase()) === ((cls || '').trim().toLowerCase()); });
+    if (!match) return 0;
+    // Project labor rate snapshots use stdCoRate / otCoRate / dtCoRate
+    // (matches corResolveRate's expectations).
+    if (kind === 'reg') return Number(match.stdCoRate) || 0;
+    if (kind === 'th')  return Number(match.otCoRate)  || 0;
+    if (kind === 'dt')  return Number(match.dtCoRate)  || 0;
+    return 0;
+  }
+
+  sf('normal', 9, [0, 0, 0]);
+  var totReg = 0, totTh = 0, totDt = 0;
+  if (!laborRows.length) {
+    sf('italic', 8, [150, 150, 150]);
+    doc.text('(no labor)', Lcols.cls, y);
+    sf('normal', 9, [0, 0, 0]);
+    y += 12;
+  } else {
+    laborRows.forEach(function(r){
+      y = ensureRoom(14, y);
+      var hReg = (hcol === 'reg') ? r.hours : 0;
+      var hTh  = (hcol === 'th')  ? r.hours : 0;
+      var hDt  = (hcol === 'dt')  ? r.hours : 0;
+      totReg += hReg; totTh += hTh; totDt += hDt;
+      var rReg = rateForCls(r.classification, 'reg') || (hcol === 'reg' ? r.rate : 0);
+      var rTh  = rateForCls(r.classification, 'th')  || (hcol === 'th'  ? r.rate : 0);
+      var rDt  = rateForCls(r.classification, 'dt')  || (hcol === 'dt'  ? r.rate : 0);
+
+      doc.text(_corPdfNum(hReg), Lcols.reg + 16, y, {align:'right'});
+      doc.text(_corPdfNum(hTh),  Lcols.th + 16, y, {align:'right'});
+      doc.text(_corPdfNum(hDt),  Lcols.dt + 16, y, {align:'right'});
+      var clsLines = wrap(r.classification || '', 100);
+      doc.text(clsLines, Lcols.cls, y);
+      doc.text(_corPdfMoney(rReg), Lcols.rateR + 36, y, {align:'right'});
+      doc.text(_corPdfMoney(rTh),  Lcols.rateT + 36, y, {align:'right'});
+      doc.text(_corPdfMoney(rDt),  Lcols.rateD + 36, y, {align:'right'});
+      doc.text(_corPdfMoney(r.total), Lcols.ext, y, {align:'right'});
+      y += clsLines.length * 11 + 2;
+    });
+  }
+  y += 6;
+
+  // Labor sub-total / total
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('LABOR - Sub-total', RM - 100, y, {align:'right'});
+  doc.text(_corPdfMoney(c.totalLabor), Lcols.ext, y, {align:'right'});
+  y += 14;
+  // Per-template "Multipliers" line (always 0 for KMI — markups on labor are not applied)
+  sf('normal', 8, [80, 80, 80]);
+  doc.text('Multipliers: included in rates above (0% of labor sub-total)', LM + 130, y);
+  y += 12;
+  // Hour totals + LABOR Total line
+  sf('bold', 9, [0, 0, 0]);
+  doc.text(_corPdfNum(totReg), Lcols.reg + 16, y, {align:'right'});
+  doc.text(_corPdfNum(totTh),  Lcols.th + 16, y, {align:'right'});
+  doc.text(_corPdfNum(totDt),  Lcols.dt + 16, y, {align:'right'});
+  doc.text('LABOR - Total', RM - 100, y, {align:'right'});
+  sf('normal', 9);
+  doc.text('-------->', RM - 60, y, {align:'right'});
+  sf('bold', 9);
+  doc.text(_corPdfMoney(c.totalLabor), Lcols.ext, y, {align:'right'});
+  y += 18;
+
+  // ── MATERIALS section ─────────────────────────────────────────────
+  y = ensureRoom(60, y);
+  sf('bold', 10);
+  doc.text('MATERIALS:', LM, y);
+  y += 14;
+  var Mcols = {
+    desc: LM,
+    item: LM + 220,
+    unit: LM + 270,
+    rate: LM + 320,
+    ext:  RM - 6
+  };
+  sf('bold', 8, [80, 80, 80]);
+  doc.text('Description', Mcols.desc, y);
+  doc.text('Item', Mcols.item, y);
+  doc.text('Unit', Mcols.unit, y);
+  doc.text('Rate/unit', Mcols.rate, y);
+  doc.text('Extension', Mcols.ext, y, {align:'right'});
+  y += 4;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+
+  sf('normal', 9, [0, 0, 0]);
+  var matRows = _corPdfMaterialRows(c);
+  if (!matRows.length) {
+    sf('italic', 8, [150, 150, 150]);
+    doc.text('(no materials)', Mcols.desc, y);
+    sf('normal', 9, [0, 0, 0]);
+    y += 12;
+  } else {
+    matRows.forEach(function(r){
+      y = ensureRoom(14, y);
+      var dLines = wrap(r.description || '', 210);
+      doc.text(dLines, Mcols.desc, y);
+      doc.text(_corPdfNum(r.quantity), Mcols.item + 30, y, {align:'right'});
+      doc.text('LS', Mcols.unit + 20, y, {align:'right'});
+      doc.text(_corPdfMoney(r.unitPrice), Mcols.rate + 50, y, {align:'right'});
+      doc.text(_corPdfMoney(r.cost), Mcols.ext, y, {align:'right'});
+      y += dLines.length * 11 + 2;
+    });
+  }
+  y += 6;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('Materials / Equipment - Sub-total', RM - 130, y, {align:'right'});
+  doc.text(_corPdfMoney(c.totalMaterial), Mcols.ext, y, {align:'right'});
+  y += 14;
+  sf('normal', 8, [80, 80, 80]);
+  doc.text('Tax (0%)', RM - 130, y, {align:'right'});
+  doc.text(_corPdfMoney(0), Mcols.ext, y, {align:'right'});
+  y += 12;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text("Mat'l.s / Equip. - Sub-total (Taxes inc.)", RM - 160, y, {align:'right'});
+  doc.text(_corPdfMoney(c.totalMaterial), Mcols.ext, y, {align:'right'});
+  y += 14;
+  var matEqPct = Number(c.matEqMarkupPct) || 0;
+  sf('normal', 8, [80, 80, 80]);
+  doc.text('Multipliers: markup by spec ' + matEqPct + '% of material sub-total', LM + 130, y);
+  doc.text(_corPdfMoney(c.mateqOhp), Mcols.ext, y, {align:'right'});
+  y += 14;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('MATERIAL - Total', RM - 100, y, {align:'right'});
+  sf('normal', 9);
+  doc.text('------->', RM - 60, y, {align:'right'});
+  sf('bold', 9);
+  var matTotal = (Number(c.totalMaterial) || 0) + (Number(c.mateqOhp) || 0);
+  doc.text(_corPdfMoney(matTotal), Mcols.ext, y, {align:'right'});
+  y += 18;
+
+  // ── EQUIPMENT section (KMI bundles into Materials — leave empty) ──
+  y = ensureRoom(60, y);
+  sf('bold', 10);
+  doc.text('EQUIPMENT:', LM, y);
+  y += 14;
+  sf('italic', 8, [150, 150, 150]);
+  doc.text('(KMI bundles equipment with materials above)', LM + 80, y);
+  sf('normal', 9, [0, 0, 0]);
+  y += 14;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+  sf('bold', 9);
+  doc.text('Equipment - Sub-total', RM - 130, y, {align:'right'});
+  doc.text(_corPdfMoney(0), Mcols.ext, y, {align:'right'});
+  y += 14;
+  sf('normal', 8, [80, 80, 80]);
+  doc.text('Multipliers: markup by spec 10% of other sub-total', LM + 130, y);
+  doc.text(_corPdfMoney(0), Mcols.ext, y, {align:'right'});
+  y += 14;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('EQUIPMENT - Total', RM - 100, y, {align:'right'});
+  sf('normal', 9);
+  doc.text('-------->', RM - 60, y, {align:'right'});
+  sf('bold', 9);
+  doc.text(_corPdfMoney(0), Mcols.ext, y, {align:'right'});
+  y += 18;
+
+  // ── SUBCONTRACTORS section ────────────────────────────────────────
+  y = ensureRoom(60, y);
+  sf('bold', 10);
+  doc.text('SUBCONTRACTORS', LM, y);
+  y += 14;
+  sf('bold', 8, [80, 80, 80]);
+  doc.text('Name', LM, y);
+  doc.text('Extension', RM - 6, y, {align:'right'});
+  y += 4;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+
+  sf('normal', 9, [0, 0, 0]);
+  var subRows = Array.isArray(c.subRows) ? c.subRows : [];
+  if (!subRows.length) {
+    sf('italic', 8, [150, 150, 150]);
+    doc.text('(none)', LM, y);
+    sf('normal', 9, [0, 0, 0]);
+    y += 12;
+  } else {
+    subRows.forEach(function(r){
+      y = ensureRoom(14, y);
+      var nLines = wrap(r.name || '', 380);
+      doc.text(nLines, LM, y);
+      doc.text(_corPdfMoney(r.total), RM - 6, y, {align:'right'});
+      y += nLines.length * 11 + 2;
+    });
+  }
+  y += 6;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('SUBCONTRACTOR - Subtotal', RM - 130, y, {align:'right'});
+  doc.text(_corPdfMoney(c.totalSub), RM - 6, y, {align:'right'});
+  y += 14;
+  var subPct = Number(c.subMarkupPct) || 0;
+  sf('normal', 8, [80, 80, 80]);
+  doc.text('Multipliers: markup by spec ' + subPct + '% of subcontract', LM + 130, y);
+  doc.text(_corPdfMoney(c.subOhp), RM - 6, y, {align:'right'});
+  y += 14;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('SUBCONTRACTOR - Total', RM - 100, y, {align:'right'});
+  sf('normal', 9);
+  doc.text('-------->', RM - 60, y, {align:'right'});
+  sf('bold', 9);
+  var subTotal = (Number(c.totalSub) || 0) + (Number(c.subOhp) || 0);
+  doc.text(_corPdfMoney(subTotal), RM - 6, y, {align:'right'});
+  y += 18;
+
+  // ── UNIT PRICING section (always empty for KMI) ───────────────────
+  y = ensureRoom(50, y);
+  sf('bold', 10);
+  doc.text('UNIT PRICING', LM, y);
+  y += 14;
+  sf('italic', 8, [150, 150, 150]);
+  doc.text('(not applicable)', LM + 80, y);
+  sf('normal', 9, [0, 0, 0]);
+  y += 14;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+  sf('bold', 9);
+  doc.text('UNIT PRICE - Subtotal', RM - 130, y, {align:'right'});
+  doc.text(_corPdfMoney(0), RM - 6, y, {align:'right'});
+  y += 14;
+  sf('bold', 9);
+  doc.text('UNIT PRICE - Total', RM - 100, y, {align:'right'});
+  sf('normal', 9);
+  doc.text('-------->', RM - 60, y, {align:'right'});
+  sf('bold', 9);
+  doc.text(_corPdfMoney(0), RM - 6, y, {align:'right'});
+  y += 22;
+
+  // ── CHANGE Sub Total / BOND / CHANGE Total ────────────────────────
+  // Reserve enough room for the whole bottom-of-page block: divider +
+  // 3 totals lines + Date/Time-Extension row + bottom contractor block
+  // + space before the WORK SCOPE NARRATIVE sections. If we can't fit,
+  // start fresh on a new page.
+  y = ensureRoom(180, y);
+  // Padding above the divider so it's clearly above the next text. (When
+  // a page break just happened, y is already at top margin and the
+  // divider would otherwise sit right on top of the first total label.)
+  y += 8;
+  ln(LM, y, RM, y, 0.6, [60, 60, 60]);
+  y += 14;
+
+  var changeSubtotal = (Number(c.totalLabor) || 0) +
+                       (Number(c.totalMaterial) || 0) + (Number(c.mateqOhp) || 0) +
+                       (Number(c.totalSub) || 0) + (Number(c.subOhp) || 0);
+  var bondPct = Number(c.bondRatePct) || 0;
+  var bondCost = Number(c.bondCost);
+  if (isNaN(bondCost) || bondCost === null) bondCost = changeSubtotal * (bondPct / 100);
+
+  // Three right-aligned totals stacked. Date / Project Time Extension
+  // are placed after this block on a separate row so they don't collide
+  // with the right-aligned totals labels.
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('CHANGE - Sub Total (Labor, Subs., Material, Other)', RM - 200, y, {align:'right'});
+  sf('normal', 10);
+  doc.text('-------->', RM - 60, y, {align:'right'});
+  sf('bold', 10);
+  doc.text(_corPdfMoney(changeSubtotal), RM - 6, y, {align:'right'});
+  y += 16;
+
+  sf('bold', 10);
+  doc.text('BOND - Rate per Contract (' + bondPct + '%)', RM - 200, y, {align:'right'});
+  sf('normal', 10);
+  doc.text('-------->', RM - 60, y, {align:'right'});
+  sf('bold', 10);
+  doc.text(_corPdfMoney(bondCost), RM - 6, y, {align:'right'});
+  y += 16;
+
+  sf('bold', 10);
+  doc.text('CHANGE - Total (Labor, Subs., Material, Other, Bonds)', RM - 220, y, {align:'right'});
+  sf('normal', 10);
+  doc.text('-------->', RM - 60, y, {align:'right'});
+  sf('bold', 11, [42, 47, 92]);
+  doc.text('$ ' + _corPdfMoney(c.totalAmount), RM - 6, y, {align:'right'});
+  y += 22;
+
+  // Date and Project Time Extension on their own row, on the left, so
+  // the labels can never collide with the totals labels on the right.
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('Date:', LM, y);
+  sf('normal', 9);
+  doc.text(_corPdfFmtDate(c.corDate), LM + 50, y);
+  sf('bold', 9);
+  doc.text('Project Time Extension:', LM + 220, y);
+  sf('normal', 9);
+  var teDays = (c.timeExtensionDays === null || c.timeExtensionDays === undefined || c.timeExtensionDays === '') ? '0 days' : (c.timeExtensionDays + ' days');
+  doc.text(teDays, LM + 350, y);
+  y += 22;
+
+  // ── Bottom contractor block (mirrors top) ─────────────────────────
+  y = ensureRoom(80, y);
+  y += 8;
+  ln(LM, y, RM, y, 0.4, [120, 120, 120]);
+  y += 14;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('Contractor:', LM + 60, y);
+  sf('normal', 9);
+  doc.text('KMI Construction LLC', LM + 160, y);
+  y += 12;
+  sf('bold', 9);
+  doc.text('Work Description:', LM + 60, y);
+  sf('normal', 9);
+  var wdLines2 = wrap(workDesc, RM - (LM + 160) - 10);
+  doc.text(wdLines2, LM + 160, y);
+  y += Math.max(12, wdLines2.length * 11);
+  sf('bold', 9);
+  doc.text('Document Reference Number:', LM + 60, y);
+  sf('normal', 9);
+  doc.text(docRef, LM + 220, y);
+  y += 18;
+
+  // ── WORK SCOPE NARRATIVE — Added Scope ────────────────────────────
+  y = ensureRoom(70, y);
+  sf('bold', 10);
+  doc.text('WORK SCOPE NARRATIVE', LM, y);
+  y += 12;
+  sf('bold', 9);
+  doc.text('Added Scope:', LM, y);
+  y += 12;
+  sf('normal', 9, [0, 0, 0]);
+  var addedLines = wrap(workDesc || '', RM - LM - 6);
+  doc.text(addedLines, LM, y);
+  y += addedLines.length * 11 + 12;
+
+  // ── WORK SCOPE NARRATIVE — Omitted Scope ──────────────────────────
+  y = ensureRoom(50, y);
+  sf('bold', 10);
+  doc.text('WORK SCOPE NARRATIVE', LM, y);
+  y += 12;
+  sf('bold', 9);
+  doc.text('Omitted Scope:', LM, y);
+  y += 12;
+  sf('normal', 9, [0, 0, 0]);
+  var omittedText = (c.omittedScope || '').trim();
+  if (omittedText) {
+    var omittedLines = wrap(omittedText, RM - LM - 6);
+    doc.text(omittedLines, LM, y);
+  } else {
+    sf('italic', 8, [150, 150, 150]);
+    doc.text('(none)', LM, y);
+  }
+
+  return doc;
+}
+
 function showSendCorToCustomerMenu(){ alert('Send-to-customer arrives in Round 4.3.'); }
 function markCorApproved()          { alert('Approval flow arrives in Round 4.3.'); }
 function markCorRejected()          { alert('Reject flow arrives in Round 4.3.'); }
@@ -7774,6 +8784,12 @@ function ncorInitWorking(c) {
     // Snapshotted markup (immutable on the COR; project edits don't disturb)
     matEqMarkupPct: (c.matEqMarkupPct !== null && c.matEqMarkupPct !== undefined) ? c.matEqMarkupPct : 10,
     subMarkupPct:   (c.subMarkupPct   !== null && c.subMarkupPct   !== undefined) ? c.subMarkupPct   : 5,
+    // Bond rate snapshotted on the COR — same pattern as markups (project
+    // edits later don't alter the COR's totals retroactively).
+    bondRatePct:    (c.bondRatePct    !== null && c.bondRatePct    !== undefined) ? c.bondRatePct    : 0,
+    // Hunzinger-specific fields (no-ops on Standard form; harmless to carry)
+    timeExtensionDays: (c.timeExtensionDays !== null && c.timeExtensionDays !== undefined && c.timeExtensionDays !== '') ? c.timeExtensionDays : '',
+    omittedScope:      c.omittedScope || '',
     corType:    c.corType || 'T&M',
     projectId:  c.projectId
   };
@@ -7782,11 +8798,70 @@ function ncorInitWorking(c) {
 // ── Render: master orchestrator (called after every change) ────────────
 function ncorRenderSections() {
   if (!_ncorWorking) return;
+  ncorRenderHunzingerSection();
   ncorRenderTicketsSection();
   ncorRenderLaborSection();
   ncorRenderMaterialsSection();
   ncorRenderSubsSection();
   ncorRenderTotalsSection();
+}
+
+// ── Hunzinger-specific fields: visibility + binding ────────────────────
+// The Hunzinger card is shown only when the parent project has corFormType ===
+// 'Hunzinger'. On Standard projects the card is hidden and its fields don't
+// participate in save. This way the same form serves both, and switching a
+// project's form template later flips the UI without data loss (the values
+// stay in the DOM until next save).
+function ncorRenderHunzingerSection() {
+  var w = _ncorWorking;
+  var card = g('ncor-section-hunzinger');
+  if (!card || !w) return;
+  var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
+  var isHunzinger = !!(p && p.corFormType === 'Hunzinger');
+  card.style.display = isHunzinger ? '' : 'none';
+  if (!isHunzinger) return;
+
+  var canEdit = ncorIsEditable();
+  var teEl = g('ncor-time-ext-days');
+  var osEl = g('ncor-omitted-scope');
+  if (teEl) {
+    teEl.value = (w.timeExtensionDays === null || w.timeExtensionDays === undefined) ? '' : w.timeExtensionDays;
+    teEl.disabled = !canEdit;
+  }
+  if (osEl) {
+    osEl.value = w.omittedScope || '';
+    osEl.disabled = !canEdit;
+  }
+
+  // Update the description label to "Added Scope" on Hunzinger so the
+  // mapping to the printed form is obvious. (Restore on Standard.)
+  var descLbl = g('ncor-desc-label');
+  if (descLbl) {
+    descLbl.textContent = 'Description (Added Scope) *';
+  }
+}
+
+// Read the live values back into the working state. Called from saveCor()
+// before snapshotting totals.
+function ncorReadHunzingerFields() {
+  var w = _ncorWorking;
+  if (!w) return;
+  var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
+  if (!p || p.corFormType !== 'Hunzinger') {
+    // Even on Standard projects, preserve any previously-saved values in
+    // case the project gets switched back to Hunzinger later. We just
+    // don't read from the (hidden) DOM fields.
+    return;
+  }
+  var teEl = g('ncor-time-ext-days');
+  var osEl = g('ncor-omitted-scope');
+  if (teEl) {
+    var raw = (teEl.value || '').trim();
+    w.timeExtensionDays = raw === '' ? '' : (parseInt(raw, 10) || 0);
+  }
+  if (osEl) {
+    w.omittedScope = (osEl.value || '').trim();
+  }
 }
 
 // ── Read-only mode helper: when the COR isn't editable, hide buttons ───
@@ -8547,13 +9622,24 @@ function ncorComputeTotals() {
   var mateqOhp = totalMaterial * (matEqPct / 100);
   var subOhp   = totalSub      * (subPct   / 100);
 
+  // Bond cost — applied on top of the change subtotal (labor + materials +
+  // subs + both OH&P markups). Matches both the KMI Standard form (which
+  // already shows a "Conractor Bond Cost" line) and Hunzinger's form
+  // (which calls it "BOND - Rate per Contract"). Bond is 0 when the
+  // project has no bond rate set, in which case the line still shows on
+  // the totals card but reads $0.
+  var bondPct  = Number(w.bondRatePct) || 0;
+  var subtotal = totalLabor + totalMaterial + totalSub + mateqOhp + subOhp;
+  var bondCost = subtotal * (bondPct / 100);
+
   return {
     totalLabor:    totalLabor,
     totalMaterial: totalMaterial,
     totalSub:      totalSub,
     mateqOhp:      mateqOhp,
     subOhp:        subOhp,
-    totalAmount:   totalLabor + totalMaterial + totalSub + mateqOhp + subOhp
+    bondCost:      bondCost,
+    totalAmount:   subtotal + bondCost
   };
 }
 
@@ -8569,6 +9655,7 @@ function ncorRenderTotalsSection() {
       '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total subcontractor cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalSub) + '</span></div>' +
       '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>Overhead &amp; Profit on Mat/Eq (' + (Number(w.matEqMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.mateqOhp) + '</span></div>' +
       '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>Overhead &amp; Profit on Subcontractors (' + (Number(w.subMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.subOhp) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>Bond cost (' + (Number(w.bondRatePct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.bondCost) + '</span></div>' +
       '<div style="display:flex;justify-content:space-between;padding:10px 8px;border-top:2px solid #ccc;background:#FAF8F0;border-radius:6px;margin-top:4px">' +
         '<strong style="font-size:14px;text-transform:uppercase;letter-spacing:.5px">Total Change Order Request</strong>' +
         '<strong style="font-family:monospace;font-size:18px;color:var(--kmi)">' + corFmtMoney(t.totalAmount) + '</strong>' +
@@ -13307,6 +14394,9 @@ function initNewProject() {
   // Round 4.1: COR markup defaults
   if (g('nprj-mateq-markup')) g('nprj-mateq-markup').value = 10;
   if (g('nprj-sub-markup'))   g('nprj-sub-markup').value   = 5;
+  // Hunzinger COR form defaults: KMI Standard, no bond
+  if (g('nprj-cor-form'))     g('nprj-cor-form').value     = 'Standard';
+  if (g('nprj-bond-rate'))    g('nprj-bond-rate').value    = 0;
   // Foundation setup defaults — payroll dept defaults to 'field'.
   if (g('nprj-payroll-dept'))  g('nprj-payroll-dept').value  = 'field';
   if (g('nprj-cust-job-num'))  g('nprj-cust-job-num').value  = '';
@@ -13364,6 +14454,13 @@ function saveProject() {
   var subMarkupRaw   = g('nprj-sub-markup')   ? g('nprj-sub-markup').value   : '';
   var matEqMarkup = matEqMarkupRaw === '' ? 10 : (parseFloat(matEqMarkupRaw) || 0);
   var subMarkup   = subMarkupRaw   === '' ? 5  : (parseFloat(subMarkupRaw)   || 0);
+  // Hunzinger / Bond addition: COR form template + Bond rate (defaults: Standard / 0%)
+  var corFormEl    = g('nprj-cor-form');
+  var bondRateEl   = g('nprj-bond-rate');
+  var corFormType  = corFormEl ? (corFormEl.value || 'Standard') : 'Standard';
+  if (corFormType !== 'Standard' && corFormType !== 'Hunzinger') corFormType = 'Standard';
+  var bondRateRaw  = bondRateEl ? bondRateEl.value : '';
+  var bondRatePct  = bondRateRaw === '' ? 0 : (parseFloat(bondRateRaw) || 0);
   var payload = {
     number: number,
     name: name,
@@ -13382,6 +14479,9 @@ function saveProject() {
     foundationCustomerNo: fndCustEl  ? (fndCustEl.value     || '').trim() : '',
     matEqMarkupPct: matEqMarkup,
     subMarkupPct:   subMarkup,
+    // Hunzinger COR form addition: template choice + bond rate
+    corFormType:    corFormType,
+    bondRatePct:    bondRatePct,
     // Round 4.4: Foundation CO export defaults
     coDefaultLaborCostCode:    coLaborCcEl ? (coLaborCcEl.value || '').trim() : '',
     coDefaultMaterialCostCode: coMatCcEl   ? (coMatCcEl.value   || '').trim() : '',
@@ -13438,6 +14538,8 @@ function editProject(id) {
   if (g('nprj-cust-job-num')) g('nprj-cust-job-num').value = p.customerJobNumber || '';
   // Round 4.1: COR markup — default to 10/5 if not set on legacy projects
   if (g('nprj-mateq-markup')) g('nprj-mateq-markup').value = (p.matEqMarkupPct !== null && p.matEqMarkupPct !== undefined) ? p.matEqMarkupPct : 10;
+  if (g('nprj-cor-form'))     g('nprj-cor-form').value     = (p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
+  if (g('nprj-bond-rate'))    g('nprj-bond-rate').value    = (p.bondRatePct !== null && p.bondRatePct !== undefined) ? p.bondRatePct : 0;
   if (g('nprj-sub-markup'))   g('nprj-sub-markup').value   = (p.subMarkupPct   !== null && p.subMarkupPct   !== undefined) ? p.subMarkupPct   : 5;
   // Round 4.4: Foundation CO default cost codes (legacy projects default to 4000)
   if (g('nprj-co-labor-cc')) g('nprj-co-labor-cc').value = (p.coDefaultLaborCostCode    || (p.coDefaultLaborCostCode    === '' ? '' : '4000'));
@@ -16356,6 +17458,9 @@ function toSBProject(r) {
     // Round 4.1 — COR markup percentages
     mat_eq_markup_pct: (r.matEqMarkupPct !== undefined && r.matEqMarkupPct !== null && r.matEqMarkupPct !== '') ? r.matEqMarkupPct : null,
     sub_markup_pct:    (r.subMarkupPct   !== undefined && r.subMarkupPct   !== null && r.subMarkupPct   !== '') ? r.subMarkupPct   : null,
+    // Hunzinger COR form: which template to render + bond rate (applies to both forms)
+    cor_form_type:     r.corFormType   || null,
+    bond_rate_pct:     (r.bondRatePct  !== undefined && r.bondRatePct  !== null && r.bondRatePct  !== '') ? r.bondRatePct  : null,
     // Round 4.4 — Default cost codes used when exporting Change Orders to Foundation
     co_default_labor_cost_code:    r.coDefaultLaborCostCode    || null,
     co_default_material_cost_code: r.coDefaultMaterialCostCode || null,
@@ -16394,6 +17499,9 @@ function fromSBProject(r) {
     // Round 4.1 — COR markup percentages (legacy projects fall back to defaults)
     matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
     subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5,
+    // Hunzinger COR form: legacy projects default to Standard, 0% bond
+    corFormType:    (r.cor_form_type === 'Hunzinger') ? 'Hunzinger' : 'Standard',
+    bondRatePct:    (r.bond_rate_pct  !== null && r.bond_rate_pct  !== undefined) ? r.bond_rate_pct  : 0,
     // Round 4.4 — Default cost codes for Foundation CO exports (legacy projects default to 4000)
     coDefaultLaborCostCode:    r.co_default_labor_cost_code    || '4000',
     coDefaultMaterialCostCode: r.co_default_material_cost_code || '4000',
@@ -16513,11 +17621,16 @@ function toSBCor(r) {
     sub_rows:      r.subRows      || [],
     mat_eq_markup_pct: r.matEqMarkupPct,
     sub_markup_pct:    r.subMarkupPct,
+    bond_rate_pct:     (r.bondRatePct !== undefined && r.bondRatePct !== null) ? r.bondRatePct : null,
+    // Hunzinger COR form fields (null when not set or not Hunzinger)
+    time_extension_days: (r.timeExtensionDays !== undefined && r.timeExtensionDays !== null && r.timeExtensionDays !== '') ? r.timeExtensionDays : null,
+    omitted_scope:       r.omittedScope || null,
     total_labor:    r.totalLabor    || 0,
     total_material: r.totalMaterial || 0,
     total_sub:      r.totalSub      || 0,
     mateq_ohp:      r.mateqOhp      || 0,
     sub_ohp:        r.subOhp        || 0,
+    bond_cost:      r.bondCost      || 0,
     total_amount:   r.totalAmount   || 0,
     created_at:        r.createdAt        || null,
     created_by_user_id: r.createdByUserId || null,
@@ -16580,11 +17693,19 @@ function fromSBCor(r) {
     subRows:      Array.isArray(r.sub_rows) ? r.sub_rows : [],
     matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
     subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5,
+    // Bond rate (legacy CORs default to 0). Bond cost is stored on the
+    // COR but we'll also recompute it from totals — this is the
+    // historical-snapshot copy that survives if the totals drift.
+    bondRatePct:    (r.bond_rate_pct !== null && r.bond_rate_pct !== undefined) ? r.bond_rate_pct : 0,
+    // Hunzinger-specific fields (legacy CORs have null)
+    timeExtensionDays: (r.time_extension_days !== null && r.time_extension_days !== undefined) ? r.time_extension_days : '',
+    omittedScope:      r.omitted_scope || '',
     totalLabor:    r.total_labor    || 0,
     totalMaterial: r.total_material || 0,
     totalSub:      r.total_sub      || 0,
     mateqOhp:      r.mateq_ohp      || 0,
     subOhp:        r.sub_ohp        || 0,
+    bondCost:      r.bond_cost      || 0,
     totalAmount:   r.total_amount   || 0,
     createdAt:        r.created_at        || '',
     createdByUserId:  r.created_by_user_id || null,
