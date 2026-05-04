@@ -762,6 +762,16 @@ textarea{resize:vertical;min-height:72px}
       <div class="fgr"><label>Payroll department</label><input id="nprj-payroll-dept" value="field" placeholder="field"></div>
       <div class="fgr"><label>Customer job number</label><input id="nprj-cust-job-num" placeholder="Customer's PO or internal reference"></div>
     </div>
+    <!-- Round 4.4: Default cost codes used when exporting Change Orders to
+         Foundation. Labor and Sub default codes are required (CORs don't
+         carry codes per row). Material default is the fallback for manual
+         material rows that don't match the project material list. -->
+    <div style="font-size:12px;color:#888;margin:14px 0 8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Default cost codes for Change Order exports</div>
+    <div class="fg">
+      <div class="fgr"><label>Default labor cost code</label><input id="nprj-co-labor-cc" value="4000" placeholder="4000" maxlength="20"><div style="font-size:11px;color:#888;margin-top:4px">All labor on a CO posts to this code, class 1.</div></div>
+      <div class="fgr"><label>Default material cost code</label><input id="nprj-co-mat-cc" value="4000" placeholder="4000" maxlength="20"><div style="font-size:11px;color:#888;margin-top:4px">Fallback for materials not in the project list. Class 2.</div></div>
+      <div class="fgr"><label>Default subcontractor cost code</label><input id="nprj-co-sub-cc" value="4000" placeholder="4000" maxlength="20"><div style="font-size:11px;color:#888;margin-top:4px">Fallback for subs not in the project budget. Class 3.</div></div>
+    </div>
   </div>
 
   <!-- Labor rate template (Round 2) -->
@@ -1263,6 +1273,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="ch">
       <span class="ct">Subcontractors</span>
       <button class="btn btn-sm" onclick="ncorAddSubRow()" id="ncor-add-sub-btn">+ Add row</button>
+      <button class="btn btn-sm" onclick="ncorShowFromBudgetSubsModal()" id="ncor-from-budget-btn" style="margin-left:6px">+ From budget</button>
     </div>
     <div id="ncor-subs-body"></div>
   </div>
@@ -1277,6 +1288,8 @@ textarea{resize:vertical;min-height:72px}
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
     <button class="btn" onclick="nav('cors')">Cancel</button>
     <button class="btn" onclick="downloadCorPDF()" id="ncor-pdf-btn" style="display:none" title="PDF generator lands in Round 4.3" disabled>⬇ Download PDF</button>
+    <button class="btn" onclick="corExportFoundationHeaderCsv()" id="ncor-fnd-header-btn" style="display:none" title="Generate the Foundation CO Header CSV (1 row)">⬇ Export Header CSV</button>
+    <button class="btn" onclick="corExportFoundationDetailCsv()" id="ncor-fnd-detail-btn" style="display:none" title="Generate the Foundation CO Detail CSV (cost-code lines)">⬇ Export Detail CSV</button>
     <button class="btn" onclick="showSendCorToCustomerMenu()" id="ncor-send-btn" style="display:none" title="Send-to-customer lands in Round 4.3" disabled>Send to customer ▾</button>
     <button class="btn" onclick="markCorApproved()" id="ncor-approve-btn" style="display:none;background:#3B6D11;color:#fff;border-color:#3B6D11" title="Approve flow lands in Round 4.3" disabled>Mark Approved</button>
     <button class="btn" onclick="markCorRejected()" id="ncor-reject-btn" style="display:none;background:#7A2E2E;color:#fff;border-color:#7A2E2E" title="Reject flow lands in Round 4.3" disabled>Mark Rejected</button>
@@ -1662,7 +1675,11 @@ var PERMISSIONS = {
   'edit-cor':        ['full','full','none','none','none','none'],
   'send-cor':        ['full','full','none','none','none','none'],
   'transition-cor':  ['full','full','none','none','none','none'],
-  'delete-cor':      ['full','none','none','none','none','none']
+  'delete-cor':      ['full','none','none','none','none','none'],
+  // Round 4.4: Foundation CO CSV exports — Admin/PM/Accounting full, others
+  // none. Mirrors export_project_budget since Accounting drives the actual
+  // Foundation upload.
+  'export-cor-foundation': ['full','full','none','full','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -4060,6 +4077,19 @@ function ntmProjectChanged() {
       ntmAddMatRow();  // seed one empty row for friendliness
     }
   }
+  // Same pattern for labor rows: re-render so the classification dropdown
+  // picks up the new project's labor rate snapshot. Preserve typed values.
+  var laborBody = g('ntm-labor-rows');
+  if (laborBody) {
+    var existingLabor = ntmReadLaborRows();
+    laborBody.innerHTML = '';
+    if (existingLabor.length) {
+      existingLabor.forEach(function(r){ ntmAddLaborRow(r); });
+    } else {
+      ntmAddLaborRow();
+    }
+    ntmRefreshLaborTotals();
+  }
 }
 
 // ── Form: open Edit / View ──────────────────────────────────────────────
@@ -4165,6 +4195,56 @@ function _refreshTmActionButtons(t) {
 }
 
 // ── Row builders (form) ────────────────────────────────────────────────
+// Build the <option> HTML for the classification dropdown on a labor row.
+// Source of truth precedence:
+//   1. The currently-selected project's p.laborRates snapshot (the real
+//      classifications priced for THIS project).
+//   2. If no project is selected yet, or the project has no snapshot,
+//      fall back to db.laborRateSets active set's classifications so the
+//      dropdown isn't empty during ticket creation.
+//
+// `currentValue` (optional) — if the existing value isn't in the resolved
+// list (legacy free-text from old tickets, e.g. "Mason Foreman"), it's
+// added at the top as a "(legacy)" option so it stays selected. The user
+// can switch to a proper classification on save.
+function _ntmBuildClassificationOptions(currentValue) {
+  currentValue = (currentValue || '').trim();
+  // Resolve the source list
+  var list = [];
+  var pidEl = g('ntm-project');
+  var pid = pidEl ? pidEl.value : '';
+  if (pid) {
+    var p = db.projects.find(function(x){ return String(x.id) === String(pid); });
+    if (p && Array.isArray(p.laborRates) && p.laborRates.length) {
+      list = p.laborRates.map(function(r){ return (r.classification || '').trim(); }).filter(Boolean);
+    }
+  }
+  // Fallback to global active set if project has no snapshot yet
+  if (!list.length) {
+    var active = _getActiveLaborSet();
+    if (active && Array.isArray(active.rates)) {
+      list = active.rates.map(function(r){ return (r.classification || '').trim(); }).filter(Boolean);
+    }
+  }
+  // De-dupe (case-sensitive — classifications are user-typed in templates)
+  var seen = {};
+  list = list.filter(function(c){ if (seen[c]) return false; seen[c] = true; return true; });
+
+  // Lead with empty placeholder so an unset row is obvious
+  var html = '<option value="">— Select classification —</option>';
+
+  // If the existing value isn't in the resolved list, surface it as legacy
+  if (currentValue && list.indexOf(currentValue) === -1) {
+    html += '<option value="' + tmEsc(currentValue) + '" selected>' + tmEsc(currentValue) + ' (legacy)</option>';
+  }
+
+  list.forEach(function(c){
+    var sel = (c === currentValue) ? ' selected' : '';
+    html += '<option value="' + tmEsc(c) + '"' + sel + '>' + tmEsc(c) + '</option>';
+  });
+  return html;
+}
+
 function ntmAddLaborRow(r) {
   r = r || {};
   var key = 'lab' + (++_ntmRowCounter);
@@ -4173,7 +4253,7 @@ function ntmAddLaborRow(r) {
   tr.setAttribute('data-row', key);
   tr.innerHTML =
     '<td style="padding:4px 6px"><input style="width:100%;padding:5px 7px;font-size:12px" data-fld="name" value="' + tmEsc(r.name || '') + '" placeholder="Worker name"></td>' +
-    '<td style="padding:4px 6px"><input style="width:100%;padding:5px 7px;font-size:12px" data-fld="classification" value="' + tmEsc(r.classification || '') + '" placeholder="e.g. Mason Foreman"></td>' +
+    '<td style="padding:4px 6px"><select style="width:100%;padding:5px 7px;font-size:12px" data-fld="classification">' + _ntmBuildClassificationOptions(r.classification) + '</select></td>' +
     '<td style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="stHours" value="' + (r.stHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
     '<td style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="otHours" value="' + (r.otHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
     '<td style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="dtHours" value="' + (r.dtHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
@@ -6215,9 +6295,16 @@ function renderCorStatusCard(c) {
 function _refreshCorActionButtons(c) {
   // All buttons start hidden; show by status. Round 4.3 will enable them
   // by removing the `disabled` attr added in HTML.
-  var ids = ['ncor-pdf-btn','ncor-send-btn','ncor-approve-btn','ncor-reject-btn','ncor-reopen-btn','ncor-void-btn'];
+  var ids = ['ncor-pdf-btn','ncor-send-btn','ncor-approve-btn','ncor-reject-btn','ncor-reopen-btn','ncor-void-btn','ncor-fnd-header-btn','ncor-fnd-detail-btn'];
   ids.forEach(function(idStr){ var el = g(idStr); if (el) el.style.display = 'none'; });
   if (!c || !c.id) return;
+  // Foundation export buttons: visible on any saved COR (any status), gated
+  // by the export-cor-foundation permission. The workflow is: create/send
+  // the COR → simultaneously hand the two CSVs to Accounting for Foundation.
+  if (hasFull('export-cor-foundation')) {
+    if (g('ncor-fnd-header-btn')) g('ncor-fnd-header-btn').style.display = '';
+    if (g('ncor-fnd-detail-btn')) g('ncor-fnd-detail-btn').style.display = '';
+  }
   var s = c.status || 'Draft';
   if (s === 'Draft') {
     if (g('ncor-pdf-btn'))  g('ncor-pdf-btn').style.display  = '';
@@ -6906,11 +6993,13 @@ function ncorRenderSubsSection() {
 
   var addBtn = g('ncor-add-sub-btn');
   if (addBtn) addBtn.style.display = canEdit ? '' : 'none';
+  var fromBudgetBtn = g('ncor-from-budget-btn');
+  if (fromBudgetBtn) fromBudgetBtn.style.display = canEdit ? '' : 'none';
 
   var rows = w.subRows || [];
   if (!rows.length) {
     bodyEl.innerHTML = '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
-      'No subcontractor lines. ' + (canEdit ? 'Click <strong>+ Add row</strong> if applicable.' : '') +
+      'No subcontractor lines. ' + (canEdit ? 'Click <strong>+ Add row</strong> for a custom row, or <strong>+ From budget</strong> to pick from the project budget.' : '') +
     '</div>';
     return;
   }
@@ -6969,6 +7058,69 @@ function ncorUpdateSub(idx, field, value) {
 
 function ncorRemoveSub(idx) {
   (_ncorWorking.subRows || []).splice(idx, 1);
+  ncorRenderSections();
+}
+
+// Round 4.4: pick subs from the project's latest budget. Class-3 budget
+// lines are treated as the project's "sub list" — read-through to the
+// budget so updates flow naturally without a separate snapshot to maintain.
+function ncorShowFromBudgetSubsModal() {
+  var w = _ncorWorking;
+  if (!w) return;
+  if (!ncorIsEditable()) return;
+  var subLines = corGetBudgetSubLines(w.projectId);
+  if (!subLines.length) {
+    var b = corGetLatestBudgetForProject(w.projectId);
+    var msg = b
+      ? 'The project\'s latest budget has no class-3 (subcontractor) lines. Add some on the Budget page first.'
+      : 'This project has no saved budget yet. Save a budget with class-3 (subcontractor) lines on the Budget page first, then come back.';
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt">From project budget</div>' +
+      '<div class="msb">' + corEsc(msg) + '</div>' +
+      '<div class="mbtns"><button class="btn btn-p" onclick="closeModal()">OK</button></div>'
+    );
+    return;
+  }
+  var rowsHtml = subLines.map(function(s){
+    return '<tr>' +
+      '<td style="padding:5px 8px"><input type="checkbox" name="ncs-budgetlist" value="' + corEsc(s.id) + '"></td>' +
+      '<td style="padding:5px 8px">' + corEsc(s.description) + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;font-family:monospace;color:#666">' + corEsc(s.costCode || '—') + '</td>' +
+    '</tr>';
+  }).join('');
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add subs from project budget</div>' +
+    '<div class="msb">Pick rows. Each becomes a sub line with total = 0 — fill in the actual cost after.</div>' +
+    '<div style="max-height:380px;overflow-y:auto;border:0.5px solid #e5e5e5;border-radius:6px;margin-bottom:14px">' +
+      '<table style="width:100%;font-size:12px"><thead><tr style="background:#fafafa;border-bottom:0.5px solid #eee;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888">' +
+        '<th style="padding:6px 8px;width:30px"><input type="checkbox" onclick="document.querySelectorAll(\'input[name=\\\'ncs-budgetlist\\\']\').forEach(function(cb){cb.checked=this.checked;}.bind(this))"></th>' +
+        '<th style="padding:6px 8px;text-align:left">Description</th>' +
+        '<th style="padding:6px 8px;text-align:right">Cost code</th>' +
+      '</tr></thead><tbody>' + rowsHtml + '</tbody></table>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="ncorAddSelectedBudgetSubs()">Add selected</button>' +
+    '</div>'
+  );
+}
+
+function ncorAddSelectedBudgetSubs() {
+  var w = _ncorWorking;
+  if (!w) { closeModal(); return; }
+  var subLines = corGetBudgetSubLines(w.projectId);
+  var picked = [];
+  document.querySelectorAll('input[name="ncs-budgetlist"]:checked').forEach(function(cb){ picked.push(cb.value); });
+  if (!picked.length) { closeModal(); return; }
+  _ncorWorking.subRows = _ncorWorking.subRows || [];
+  picked.forEach(function(sid){
+    var s = subLines.find(function(x){ return String(x.id) === String(sid); });
+    if (!s) return;
+    _ncorWorking.subRows.push({ name: s.description || '', total: 0 });
+  });
+  closeModal();
   ncorRenderSections();
 }
 
@@ -8721,6 +8873,358 @@ function bgDownloadCSV(csv, filename) {
 
 function showModal(html) { g('modal-body').innerHTML = html; g('overlay').classList.add('show'); }
 function closeModal()    { g('overlay').classList.remove('show'); g('modal-body').innerHTML = ''; }
+
+// ════════════════════════════════════════════════════════════════════════
+// FOUNDATION CHANGE ORDER CSV EXPORTS — Round 4.4
+// ════════════════════════════════════════════════════════════════════════
+// Two file types, both required by Foundation, mirror the budget pattern:
+//   1. CO Header CSV — one row per COR. 8 columns (positional, no header):
+//        Job No, Change Order No, Change Order Seq, Date, Owner CO No,
+//        Status, Income, Cost
+//   2. CO Detail CSV — one+ rows per COR. 6 columns (positional, no header):
+//        Job No, Change Order No, Change Order Seq, Cost Code, Cost Class,
+//        Cost
+// Workflow: KMI runs both exports for a single COR, hands the two CSVs to
+// Accounting, who imports them into Foundation (header file first, then
+// detail). Mirrors how the budget Job File / Estimate exports work.
+//
+// CO Detail row breakdown for a single COR:
+//   - Labor    → 1 row at project.coDefaultLaborCostCode, class 1
+//   - Material → 1 row per matched cost code (via p.materialList lookup);
+//                unmatched rows fall back to coDefaultMaterialCostCode.
+//                All rows class 2.
+//   - Subs     → 1 row per matched cost code (via latest budget class-3
+//                line lookup by name); unmatched rows fall back to
+//                coDefaultSubCostCode. All rows class 3.
+//
+// Header Cost = totalLabor + totalMaterial + totalSub (raw cost, no OH&P)
+// Header Income = totalAmount (raw cost + OH&P markup)
+// ════════════════════════════════════════════════════════════════════════
+
+// Extract just the numeric KMI sequence (e.g. "1001") from a corNumber
+// formatted as "{projectNumber}-COR-{seq}". Falls back to the full
+// corNumber if the format doesn't parse.
+function corExtractKmiSeq(corNumber) {
+  if (!corNumber) return '';
+  var s = String(corNumber);
+  var idx = s.lastIndexOf('-COR-');
+  if (idx === -1) return s;
+  return s.substring(idx + 5);
+}
+
+// Format an ISO date or yyyy-mm-dd string as MM/DD/YYYY for Foundation.
+function corFmtDateForFoundation(d) {
+  if (!d) return '';
+  var s = String(d).slice(0, 10); // strip any time component
+  var parts = s.split('-');
+  if (parts.length !== 3) return s; // already non-iso, pass through
+  return parts[1] + '/' + parts[2] + '/' + parts[0];
+}
+
+// Helper — find the latest saved budget version for a project, or null.
+// "Latest" = highest version number among budgets for this project.
+function corGetLatestBudgetForProject(projectId) {
+  var bs = (db.projectBudgets || []).filter(function(b){ return String(b.projectId) === String(projectId); });
+  if (!bs.length) return null;
+  bs.sort(function(a,b){ return (b.version || 0) - (a.version || 0); });
+  return bs[0];
+}
+
+// Helper — extract class-3 (subs) lines from a project's latest budget.
+// Returns [{ description, costCode }] keyed for description→costCode lookup.
+// Used by both the COR picker and the export aggregator.
+function corGetBudgetSubLines(projectId) {
+  var b = corGetLatestBudgetForProject(projectId);
+  if (!b) return [];
+  return (b.lines || []).filter(function(l){
+    return String(l.costClass || '') === '3' && (l.description || '').trim();
+  }).map(function(l){
+    return {
+      id:          l.id,
+      description: l.description || '',
+      costCode:    String(l.costCode || '').trim()
+    };
+  });
+}
+
+// Build the detail rows for a single COR. Returns:
+//   { rows: [[code, class, cost], ...], unmappedMaterials: [...], unmappedSubs: [...] }
+// Caller is responsible for prepending the Job No / CO No / Seq columns.
+function corBuildFoundationDetailRows(cor, project) {
+  var rows = [];
+  var unmappedMaterials = [];
+  var unmappedSubs = [];
+  if (!cor || !project) return { rows: rows, unmappedMaterials: unmappedMaterials, unmappedSubs: unmappedSubs };
+
+  var laborCc = project.coDefaultLaborCostCode    || '4000';
+  var matCc   = project.coDefaultMaterialCostCode || '4000';
+  var subCc   = project.coDefaultSubCostCode      || '4000';
+
+  // ── LABOR — single row, class 1 ──────────────────────────────────────
+  var totalLabor = Number(cor.totalLabor) || 0;
+  if (Math.abs(totalLabor) > 0.005) {
+    rows.push([laborCc, '1', totalLabor]);
+  }
+
+  // ── MATERIALS — aggregate by cost code via materialList lookup, class 2 ─
+  var matList = (project.materialList || []);
+  // description (lowercase, trimmed) → costCode lookup
+  var descToCode = {};
+  matList.forEach(function(m){
+    var key = String(m.description || '').trim().toLowerCase();
+    if (key && m.costCode) descToCode[key] = String(m.costCode).trim();
+  });
+
+  var materialBuckets = {}; // costCode → cost
+  var allMatRows = (cor.autoMaterialRows || []).concat(cor.manualMaterialRows || []);
+  allMatRows.forEach(function(r){
+    var qty   = Number(r.quantity)  || 0;
+    var price = Number(r.unitPrice) || 0;
+    var amt   = qty * price;
+    if (Math.abs(amt) <= 0.005) return;
+    var desc = String(r.description || '').trim();
+    var key = desc.toLowerCase();
+    var code = descToCode[key];
+    if (!code) {
+      // Unmapped — falls back to project material default. Track it for
+      // the warning panel so the user can decide whether to fix data first.
+      code = matCc;
+      unmappedMaterials.push({ description: desc || '(no description)', cost: amt });
+    }
+    materialBuckets[code] = (materialBuckets[code] || 0) + amt;
+  });
+
+  // Emit material rows sorted by cost code
+  Object.keys(materialBuckets).sort(function(a,b){
+    var an = parseInt(a, 10), bn = parseInt(b, 10);
+    if (!isNaN(an) && !isNaN(bn) && an !== bn) return an - bn;
+    return String(a).localeCompare(String(b));
+  }).forEach(function(code){
+    rows.push([code, '2', materialBuckets[code]]);
+  });
+
+  // ── SUBS — aggregate by cost code via budget class-3 line lookup, class 3 ─
+  // Source of truth is the project's latest budget. Sub rows on the COR
+  // carry only {name, total}; we match by name (case-insensitive trim)
+  // against budget line descriptions. Unmatched names fall back to the
+  // project default sub cost code.
+  var subBudgetLines = corGetBudgetSubLines(project.id);
+  var subDescToCode = {};
+  subBudgetLines.forEach(function(s){
+    var key = (s.description || '').trim().toLowerCase();
+    if (key && s.costCode) subDescToCode[key] = s.costCode;
+  });
+
+  var subBuckets = {}; // costCode → cost
+  (cor.subRows || []).forEach(function(r){
+    var amt = Number(r.total) || 0;
+    if (Math.abs(amt) <= 0.005) return;
+    var name = String(r.name || '').trim();
+    var key = name.toLowerCase();
+    var code = subDescToCode[key];
+    if (!code) {
+      code = subCc;
+      unmappedSubs.push({ name: name || '(no name)', cost: amt });
+    }
+    subBuckets[code] = (subBuckets[code] || 0) + amt;
+  });
+
+  // Emit sub rows sorted by cost code
+  Object.keys(subBuckets).sort(function(a,b){
+    var an = parseInt(a, 10), bn = parseInt(b, 10);
+    if (!isNaN(an) && !isNaN(bn) && an !== bn) return an - bn;
+    return String(a).localeCompare(String(b));
+  }).forEach(function(code){
+    rows.push([code, '3', subBuckets[code]]);
+  });
+
+  return { rows: rows, unmappedMaterials: unmappedMaterials, unmappedSubs: unmappedSubs };
+}
+
+// Validate a COR + its project for Foundation CO export. Returns
+// { ok, errors, warnings } following the same shape as bgValidateForExport.
+function corValidateForFoundationExport(cor, project) {
+  var errors = [];
+  var warnings = [];
+  if (!cor) errors.push('COR not loaded.');
+  if (!project) errors.push('Project not loaded.');
+  if (cor && !cor.id) errors.push('Save the COR before exporting to Foundation.');
+  if (project) {
+    if (!project.number) errors.push('Project has no project number.');
+    if (!project.coDefaultLaborCostCode) {
+      errors.push('Default labor cost code is not set on the project. Edit the project and set it under Foundation Setup → Default cost codes.');
+    }
+    if (!project.coDefaultSubCostCode) {
+      errors.push('Default subcontractor cost code is not set on the project. Edit the project and set it under Foundation Setup → Default cost codes.');
+    }
+    if (!project.coDefaultMaterialCostCode) {
+      warnings.push('Default material cost code is not set. Materials not in the project list will fall through with no code — fix this before exporting.');
+    }
+  }
+
+  // Pre-build detail rows so we can surface unmapped materials/subs as warnings
+  if (cor && project) {
+    var built = corBuildFoundationDetailRows(cor, project);
+    if (built.rows.length === 0) {
+      errors.push('COR has no labor, material, or subcontractor totals to export.');
+    }
+    if (built.unmappedMaterials && built.unmappedMaterials.length) {
+      var sample = built.unmappedMaterials.slice(0, 5).map(function(m){
+        return m.description + ' ($' + bgFmtMoney(m.cost) + ')';
+      }).join('; ');
+      var more = built.unmappedMaterials.length > 5 ? ' and ' + (built.unmappedMaterials.length - 5) + ' more' : '';
+      warnings.push('Some material rows have no match in the project material list and will fall back to the default material cost code (' + (project.coDefaultMaterialCostCode || '—') + '): ' + sample + more + '. Add these to the project material list with the correct cost code if you want them split out separately.');
+    }
+    if (built.unmappedSubs && built.unmappedSubs.length) {
+      var subSample = built.unmappedSubs.slice(0, 5).map(function(s){
+        return s.name + ' ($' + bgFmtMoney(s.cost) + ')';
+      }).join('; ');
+      var subMore = built.unmappedSubs.length > 5 ? ' and ' + (built.unmappedSubs.length - 5) + ' more' : '';
+      var hasBudget = !!corGetLatestBudgetForProject(project.id);
+      var hint = hasBudget
+        ? ' Add these to the project budget as class-3 lines with the correct cost code if you want them split out separately.'
+        : ' This project has no saved budget yet — sub names match against the latest budget version. Save a budget first to enable per-row sub cost code lookup.';
+      warnings.push('Some subcontractor rows have no match in the project budget and will fall back to the default sub cost code (' + (project.coDefaultSubCostCode || '—') + '): ' + subSample + subMore + '.' + hint);
+    }
+  }
+
+  return { ok: errors.length === 0, errors: errors, warnings: warnings };
+}
+
+// Build the single header row for a COR. Returns an array of 8 cell values
+// matching the JC_CO_header_Import_File.xlsx column order.
+function corBuildFoundationHeaderRow(cor, project) {
+  var seq = corExtractKmiSeq(cor.corNumber);
+  var rawCost = (Number(cor.totalLabor) || 0) + (Number(cor.totalMaterial) || 0) + (Number(cor.totalSub) || 0);
+  var income  = Number(cor.totalAmount) || 0;
+  return [
+    project.number || '',                            // Job No
+    seq,                                             // Change Order No (KMI sequence, e.g. "1001")
+    '1',                                             // Change Order Seq (always 1 — revisions would bump this)
+    corFmtDateForFoundation(cor.corDate),            // Date (MM/DD/YYYY)
+    cor.customerCoNumber || '',                      // Owner CO No (blank until customer assigns)
+    'pending',                                       // Status
+    income.toFixed(2),                               // Income (with OH&P markup)
+    rawCost.toFixed(2)                               // Cost (raw — no OH&P)
+  ];
+}
+
+// Build all detail rows for a COR. Returns an array of 6-cell arrays
+// matching the JC_CO_Detail_Import_File.xlsx column order.
+function corBuildFoundationDetailCsvRows(cor, project) {
+  var seq = corExtractKmiSeq(cor.corNumber);
+  var built = corBuildFoundationDetailRows(cor, project);
+  return built.rows.map(function(r){
+    // r = [costCode, costClass, cost]
+    return [
+      project.number || '',                          // Job No
+      seq,                                           // Change Order No
+      '1',                                           // Change Order Seq
+      r[0],                                          // Cost Code
+      r[1],                                          // Cost Class
+      Number(r[2]).toFixed(2)                        // Cost
+    ];
+  });
+}
+
+// Show the validation modal, then run the requested export on confirm.
+// Mirrors bgShowValidationAndRun but uses corBg* function names so we
+// don't collide with the budget version.
+function corShowFoundationValidationAndRun(title, validation, runFn) {
+  var canRun = validation.ok;
+  var content = '';
+  if (validation.errors.length) {
+    content +=
+      '<div class="sb3" style="margin-bottom:12px;background:#FDEBEB;border:1px solid #E24B4A;border-radius:6px;padding:12px">' +
+        '<div style="font-weight:600;color:#A32D2D;margin-bottom:6px;font-size:13px">Cannot export — required fields missing:</div>' +
+        '<ul style="font-size:13px;line-height:1.6;margin:0;padding-left:20px">' +
+          validation.errors.map(function(e){ return '<li>' + bgEsc(e) + '</li>'; }).join('') +
+        '</ul>' +
+      '</div>';
+  }
+  if (validation.warnings.length) {
+    content +=
+      '<div class="sb3" style="margin-bottom:12px;background:#FFF8E1;border:1px solid #C8A84B;border-radius:6px;padding:12px">' +
+        '<div style="font-weight:600;color:#9A7A2E;margin-bottom:6px;font-size:13px">Warnings:</div>' +
+        '<ul style="font-size:13px;line-height:1.6;margin:0;padding-left:20px">' +
+          validation.warnings.map(function(w){ return '<li>' + bgEsc(w) + '</li>'; }).join('') +
+        '</ul>' +
+        (canRun ? '<div style="font-size:12px;color:#666;margin-top:8px">You can proceed — these will fall back to defaults in the CSV.</div>' : '') +
+      '</div>';
+  }
+  if (canRun && !validation.warnings.length) {
+    content += '<div style="font-size:13px;color:#666;margin-bottom:12px">Ready to generate. Click Download to save the CSV.</div>';
+  }
+  var actions = canRun
+    ? '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="closeModal();corRunExport_' + runFn.name + '()">Download CSV</button>'
+    : '<button class="btn" onclick="closeModal()">Close</button>';
+  // Stash the runFn globally so the inline onclick can find it
+  window['corRunExport_' + runFn.name] = runFn;
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">' + bgEsc(title) + '</div>' +
+    '<div class="msb">Pre-export validation</div>' +
+    content +
+    '<div class="mf">' + actions + '</div>'
+  );
+}
+
+// ── CO Header CSV export ───────────────────────────────────────────────
+// Public entry point — wired to the "Export Header CSV" button on the COR
+// detail page. Validates, then on confirm streams the single-row CSV.
+function corExportFoundationHeaderCsv() {
+  if (!hasFull('export-cor-foundation')) { alert('You do not have permission to export change orders.'); return; }
+  if (!_editCorId) { alert('Save the COR before exporting.'); return; }
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
+  if (!c) { alert('COR not found.'); return; }
+  var p = getProj(c.projectId);
+  var v = corValidateForFoundationExport(c, p);
+  // Stash the COR id so the runner picks the right record.
+  window._corExportTargetId = c.id;
+  corShowFoundationValidationAndRun('Export CO Header CSV', v, corRunFoundationHeaderExport);
+}
+
+function corRunFoundationHeaderExport() {
+  var id = window._corExportTargetId;
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(id); });
+  if (!c) { alert('COR not found.'); return; }
+  var p = getProj(c.projectId);
+  if (!p) { alert('Project not found.'); return; }
+  var row = corBuildFoundationHeaderRow(c, p);
+  var csv = bgRowsToCSV([row]);
+  var seq = corExtractKmiSeq(c.corNumber);
+  bgDownloadCSV(csv, (p.number || 'project') + '_CO' + seq + '_Header.csv');
+}
+
+// ── CO Detail CSV export ───────────────────────────────────────────────
+function corExportFoundationDetailCsv() {
+  if (!hasFull('export-cor-foundation')) { alert('You do not have permission to export change orders.'); return; }
+  if (!_editCorId) { alert('Save the COR before exporting.'); return; }
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
+  if (!c) { alert('COR not found.'); return; }
+  var p = getProj(c.projectId);
+  var v = corValidateForFoundationExport(c, p);
+  window._corExportTargetId = c.id;
+  corShowFoundationValidationAndRun('Export CO Detail CSV', v, corRunFoundationDetailExport);
+}
+
+function corRunFoundationDetailExport() {
+  var id = window._corExportTargetId;
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(id); });
+  if (!c) { alert('COR not found.'); return; }
+  var p = getProj(c.projectId);
+  if (!p) { alert('Project not found.'); return; }
+  var rows = corBuildFoundationDetailCsvRows(c, p);
+  if (!rows.length) {
+    alert('No detail rows to export. The COR has no non-zero labor, material, or sub totals.');
+    return;
+  }
+  var csv = bgRowsToCSV(rows);
+  var seq = corExtractKmiSeq(c.corNumber);
+  bgDownloadCSV(csv, (p.number || 'project') + '_CO' + seq + '_Detail.csv');
+}
+
 
 // ── SIDEBAR GROUP COLLAPSE ──────────────────────────────────────
 var SB_GROUP_KEY = 'kmi_crm_sidebar_v1';
@@ -11459,6 +11963,10 @@ function saveProject() {
   var payrollDeptEl = g('nprj-payroll-dept');
   var custJobNumEl  = g('nprj-cust-job-num');
   var fndCustEl     = g('nprj-fnd-cust');
+  // Round 4.4: Default cost codes for Foundation CO exports
+  var coLaborCcEl = g('nprj-co-labor-cc');
+  var coMatCcEl   = g('nprj-co-mat-cc');
+  var coSubCcEl   = g('nprj-co-sub-cc');
   // Round 4.1: COR markup percentages — default to 10/5 if empty/invalid
   var matEqMarkupRaw = g('nprj-mateq-markup') ? g('nprj-mateq-markup').value : '';
   var subMarkupRaw   = g('nprj-sub-markup')   ? g('nprj-sub-markup').value   : '';
@@ -11481,7 +11989,11 @@ function saveProject() {
     customerJobNumber: custJobNumEl  ? (custJobNumEl.value  || '').trim() : '',
     foundationCustomerNo: fndCustEl  ? (fndCustEl.value     || '').trim() : '',
     matEqMarkupPct: matEqMarkup,
-    subMarkupPct:   subMarkup
+    subMarkupPct:   subMarkup,
+    // Round 4.4: Foundation CO export defaults
+    coDefaultLaborCostCode:    coLaborCcEl ? (coLaborCcEl.value || '').trim() : '',
+    coDefaultMaterialCostCode: coMatCcEl   ? (coMatCcEl.value   || '').trim() : '',
+    coDefaultSubCostCode:      coSubCcEl   ? (coSubCcEl.value   || '').trim() : ''
   };
 
   if (_editProjectId) {
@@ -11535,6 +12047,10 @@ function editProject(id) {
   // Round 4.1: COR markup — default to 10/5 if not set on legacy projects
   if (g('nprj-mateq-markup')) g('nprj-mateq-markup').value = (p.matEqMarkupPct !== null && p.matEqMarkupPct !== undefined) ? p.matEqMarkupPct : 10;
   if (g('nprj-sub-markup'))   g('nprj-sub-markup').value   = (p.subMarkupPct   !== null && p.subMarkupPct   !== undefined) ? p.subMarkupPct   : 5;
+  // Round 4.4: Foundation CO default cost codes (legacy projects default to 4000)
+  if (g('nprj-co-labor-cc')) g('nprj-co-labor-cc').value = (p.coDefaultLaborCostCode    || (p.coDefaultLaborCostCode    === '' ? '' : '4000'));
+  if (g('nprj-co-mat-cc'))   g('nprj-co-mat-cc').value   = (p.coDefaultMaterialCostCode || (p.coDefaultMaterialCostCode === '' ? '' : '4000'));
+  if (g('nprj-co-sub-cc'))   g('nprj-co-sub-cc').value   = (p.coDefaultSubCostCode      || (p.coDefaultSubCostCode      === '' ? '' : '4000'));
   populateFoundationCustomerDropdown(p.foundationCustomerNo || '');
   populateProjectCustDropdown(p.customerId);
   populateProjectStateDropdown(p.state || '');
@@ -14447,7 +14963,11 @@ function toSBProject(r) {
     attachments:                   r.attachments                  || [],
     // Round 4.1 — COR markup percentages
     mat_eq_markup_pct: (r.matEqMarkupPct !== undefined && r.matEqMarkupPct !== null && r.matEqMarkupPct !== '') ? r.matEqMarkupPct : null,
-    sub_markup_pct:    (r.subMarkupPct   !== undefined && r.subMarkupPct   !== null && r.subMarkupPct   !== '') ? r.subMarkupPct   : null
+    sub_markup_pct:    (r.subMarkupPct   !== undefined && r.subMarkupPct   !== null && r.subMarkupPct   !== '') ? r.subMarkupPct   : null,
+    // Round 4.4 — Default cost codes used when exporting Change Orders to Foundation
+    co_default_labor_cost_code:    r.coDefaultLaborCostCode    || null,
+    co_default_material_cost_code: r.coDefaultMaterialCostCode || null,
+    co_default_sub_cost_code:      r.coDefaultSubCostCode      || null
   };
 }
 function fromSBProject(r) {
@@ -14481,7 +15001,11 @@ function fromSBProject(r) {
     attachments:                 Array.isArray(r.attachments) ? r.attachments : [],
     // Round 4.1 — COR markup percentages (legacy projects fall back to defaults)
     matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
-    subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5
+    subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5,
+    // Round 4.4 — Default cost codes for Foundation CO exports (legacy projects default to 4000)
+    coDefaultLaborCostCode:    r.co_default_labor_cost_code    || '4000',
+    coDefaultMaterialCostCode: r.co_default_material_cost_code || '4000',
+    coDefaultSubCostCode:      r.co_default_sub_cost_code      || '4000'
   };
 }
 
