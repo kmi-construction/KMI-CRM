@@ -1083,7 +1083,8 @@ textarea{resize:vertical;min-height:72px}
     <input class="si" placeholder="Search by ticket #, project, description..." oninput="filterTmTickets()" id="tm-s">
     <select class="fs" onchange="filterTmTickets()" id="tm-fp"><option value="">All projects</option></select>
     <select class="fs" onchange="filterTmTickets()" id="tm-fs"><option value="">All statuses</option></select>
-    <button class="btn btn-p" style="margin-left:auto" onclick="initNewTmTicket()" id="tm-new-btn">+ New ticket</button>
+    <button class="btn" style="margin-left:auto" onclick="showSmartUploadModal()" id="tm-smart-up-btn" title="Upload a scanned/photographed paper ticket — AI fills in the form, ticket goes straight to Signed (Uploaded)">&#10024; Smart upload</button>
+    <button class="btn btn-p" onclick="initNewTmTicket()" id="tm-new-btn">+ New ticket</button>
   </div>
   <div class="card" style="padding:0;overflow:hidden">
     <table><thead><tr>
@@ -1096,7 +1097,23 @@ textarea{resize:vertical;min-height:72px}
 <div class="pg" id="pg-new-tm-ticket">
   <div class="ph" style="margin-bottom:0">
     <div><h1 id="ntm-heading">New T&amp;M ticket</h1><div class="sub" id="ntm-id-display" style="font-weight:600;color:var(--kmi)"></div><div class="stripe"></div></div>
-    <button class="btn" onclick="nav('tm-tickets')">← Cancel</button>
+    <button class="btn" onclick="_smartUpCancel(); nav('tm-tickets');">← Cancel</button>
+  </div>
+
+  <!-- Smart Upload mode banner — only shown when in the smart-upload review flow.
+       Replaces the normal save button with a "Confirm & save" that uploads the
+       file, flips status to Signed (Uploaded), and emails the PM. -->
+  <div id="ntm-smart-up-banner" class="card" style="display:none;background:#FFF8E1;border:0.5px solid #C8A84B">
+    <div style="display:flex;align-items:flex-start;gap:14px">
+      <div style="font-size:24px;line-height:1">&#10024;</div>
+      <div style="flex:1">
+        <div style="font-weight:600;color:#7A5C00;font-size:13px;margin-bottom:4px">Smart upload mode &mdash; review extracted data</div>
+        <div style="font-size:12px;color:#7A5C00;line-height:1.5">
+          Paper ticket already signed by the customer superintendent. AI has filled in the form below. Review and edit anything that's wrong, then click <strong>Confirm &amp; save</strong> to mark this ticket as <strong>Signed (Uploaded)</strong> and notify the project's PM.
+        </div>
+        <div id="ntm-smart-up-banner-meta" style="font-size:11px;color:#9A7A2E;margin-top:6px"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Round 3: Signature status card — shown only on saved tickets with status > Draft -->
@@ -1172,13 +1189,15 @@ textarea{resize:vertical;min-height:72px}
   </div>
 
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
-    <button class="btn" onclick="nav('tm-tickets')">Cancel</button>
+    <button class="btn" onclick="_smartUpCancel(); nav('tm-tickets');">Cancel</button>
     <button class="btn" onclick="downloadTmTicketPDF()" id="ntm-pdf-btn" style="display:none">⬇ Download PDF</button>
     <!-- Round 3 action buttons (visibility controlled by viewTmTicket based on status + permissions) -->
     <button class="btn" onclick="showSendForSignatureModal()" id="ntm-send-sig-btn" style="display:none;background:var(--kmi);color:#fff;border-color:var(--kmi)">Send for signature</button>
     <button class="btn" onclick="showSendReminderConfirm()" id="ntm-send-reminder-btn" style="display:none">Send reminder</button>
     <button class="btn" onclick="showUploadSignedPdfModal()" id="ntm-upload-signed-btn" style="display:none">↑ Upload signed PDF</button>
     <button class="btn" onclick="approveTmTicket()" id="ntm-approve-btn" style="display:none;background:#3B6D11;color:#fff;border-color:#3B6D11">Approve as PM</button>
+    <!-- Smart Upload mode: replaces the normal save button while _smartUploadMode is true. -->
+    <button class="btn btn-p" onclick="confirmSmartUploadTicket()" id="ntm-smart-up-save-btn" style="display:none;padding:10px 32px;font-size:14px;font-weight:700;background:#3B6D11;border-color:#3B6D11">&#10003; Confirm &amp; save</button>
     <button class="btn btn-p" onclick="saveTmTicket()" style="padding:10px 32px;font-size:14px;font-weight:700" id="ntm-save-btn">Create ticket</button>
   </div>
 </div>
@@ -1666,6 +1685,9 @@ var PERMISSIONS = {
   'send-tm-signature': ['full','full','none','none','none','none'],   // Send for Signature, Send Reminder
   'approve-tm-ticket': ['full','full','none','none','none','none'],   // KMI PM final approval
   'upload-signed-tm':  ['full','full','full','none','none','none'],   // Upload paper-signed PDF
+  // Smart Upload: paper ticket → AI extraction → digital ticket pre-filled & marked Signed (Uploaded).
+  // Mirrors upload-signed-tm — same trust boundary (whoever can attach a signed paper PDF can do this).
+  'smart-upload-tm':   ['full','full','full','none','none','none'],   // Smart Upload paper ticket
   // Round 4: CORs (Change Order Requests). Field roles can't see CORs at all
   // — these are KMI-internal billing artifacts. Coordinator can read for
   // tracking / referencing on customer calls, but only PMs and Admins
@@ -3909,6 +3931,9 @@ function renderTmTickets() {
   // New-button gating
   var newBtn = g('tm-new-btn');
   if (newBtn) newBtn.style.display = hasFull('create-tm-ticket') ? '' : 'none';
+  // Smart upload button — same gate; needs both create-tm-ticket and smart-upload-tm.
+  var suBtn = g('tm-smart-up-btn');
+  if (suBtn) suBtn.style.display = (hasFull('create-tm-ticket') && hasFull('smart-upload-tm')) ? '' : 'none';
 
   filterTmTickets();
 }
@@ -4014,6 +4039,8 @@ function initNewTmTicket() {
     nav('tm-tickets');
     return;
   }
+  // Make sure any leftover smart-upload state from a cancelled flow is cleared.
+  _smartUpCancel();
   _editTmTicketId = null;
   setActivePage('tm-tickets');
   document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
@@ -4100,6 +4127,9 @@ function viewTmTicket(id) {
     alert('You do not have permission to view T&M tickets.');
     return;
   }
+  // Clear any active smart-upload review state (banner, swapped buttons, etc).
+  // Safe to call when state isn't set; it just ensures the form is clean.
+  _smartUpCancel();
   _editTmTicketId = t.id;
   setActivePage('tm-tickets');
   document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
@@ -5515,6 +5545,670 @@ async function viewUploadedSignedPdf() {
     }
   } catch (e) {
     alert('Failed to open signed PDF: ' + (e.message || e));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SMART UPLOAD — paper ticket → AI extraction → digital ticket
+// ═══════════════════════════════════════════════════════════════════════
+// Workflow:
+//   1. User clicks "Smart upload" on the T&M list page → showSmartUploadModal()
+//   2. Picks project + uploads scanned PDF or photo (PDF/JPG/PNG)
+//   3. smartUploadExtract() sends the file to the Anthropic API as a
+//      document/image content block, with the project's labor classifications
+//      and material list as context, asks for strict JSON.
+//   4. On success, the standard New ticket form opens fully pre-populated,
+//      _smartUploadMode is set, the yellow banner is shown, and the normal
+//      "Create ticket" button is replaced with "Confirm & save".
+//   5. User reviews/edits, clicks Confirm & save → confirmSmartUploadTicket():
+//        - creates the ticket record
+//        - uploads the file to tm-tickets/{ticketId}/ in PROJECT_FILES_BUCKET
+//        - sets status = Signed (Uploaded), stamps signedBy* from extracted data
+//        - upserts ticket + project to Supabase (with seq retry, mirrors saveTmTicket)
+//        - emails the project's assigned PM (best-effort, non-blocking)
+//        - clears smart-upload state, navigates to the ticket view
+//
+// State (transient, cleared on cancel/save/error):
+//   _smartUploadFile        — File object held in memory
+//   _smartUploadExtracted   — parsed JSON returned by AI
+//   _smartUploadMode        — boolean flag controlling banner + button visibility
+//   _smartUploadProjectId   — project chosen in the modal
+
+var _smartUploadFile = null;
+var _smartUploadExtracted = null;
+var _smartUploadMode = false;
+var _smartUploadProjectId = null;
+
+// Accepted file types — PDF for scans, JPG/PNG for phone photos.
+var SMART_UP_ACCEPT = 'application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png';
+// Hard size limit: API has its own limits, but anything over ~20MB on a
+// phone photo is unnecessary and slow. We softly warn at this threshold.
+var SMART_UP_MAX_BYTES = 20 * 1024 * 1024;
+
+function _smartUpClear() {
+  _smartUploadFile = null;
+  _smartUploadExtracted = null;
+  _smartUploadMode = false;
+  _smartUploadProjectId = null;
+}
+
+// Show the modal that kicks off the smart-upload flow.
+function showSmartUploadModal() {
+  if (!hasFull('smart-upload-tm') || !hasFull('create-tm-ticket')) {
+    alert('You do not have permission to use Smart Upload.'); return;
+  }
+  if (location.protocol === 'file:') {
+    alert('Smart Upload requires the app to be served from a web URL (e.g. GitHub Pages).\nWhen opened directly from a file, browser security rules block API calls.');
+    return;
+  }
+  if (!db.anthropic_api_key) {
+    alert('No Anthropic API key is configured.\nAsk your admin to add one to the kmi_settings table in Supabase.');
+    return;
+  }
+  if (!supabaseClient) {
+    alert('Not connected to Supabase. Smart Upload needs cloud storage to save the file.');
+    return;
+  }
+
+  // Build project options
+  var projects = db.projects.slice().sort(function(a,b){
+    return String(a.number || '').localeCompare(String(b.number || ''));
+  });
+  var projOpts = '<option value="">Select project...</option>' +
+    projects.map(function(p){
+      return '<option value="' + p.id + '">' + tmEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+    }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">&#10024; Smart upload paper ticket</div>' +
+    '<div class="msb">Upload a scanned PDF or phone photo of a hand-signed paper T&amp;M ticket. AI will read it and pre-fill the ticket form. Once you confirm, the ticket goes straight to <strong>Signed (Uploaded)</strong> and the PM is notified.</div>' +
+    '<div class="fg" style="margin-bottom:12px">' +
+      '<div class="fgr full"><label>Project *</label>' +
+        '<select id="su-project">' + projOpts + '</select>' +
+      '</div>' +
+      '<div class="fgr full"><label>Paper ticket file (PDF, JPG, or PNG) *</label>' +
+        '<input type="file" id="su-file" accept="' + SMART_UP_ACCEPT + '">' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Tip: a sharp, well-lit photo works best. Avoid glare on the signature line.</div>' +
+      '</div>' +
+    '</div>' +
+    '<div id="su-err" style="color:#A32D2D;font-size:12px;margin-bottom:10px;min-height:14px"></div>' +
+    '<div id="su-progress" style="display:none;font-size:12px;color:#666;margin-bottom:10px">' +
+      '<div>&#9201; Sending to AI for extraction&hellip; this can take 15-60 seconds.</div>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()" id="su-cancel-btn">Cancel</button>' +
+      '<button class="btn btn-p" onclick="smartUploadExtract()" id="su-extract-btn">&#10024; Extract &amp; review</button>' +
+    '</div>'
+  );
+}
+
+// Read a File as base64 (no data: prefix) — needed for the API document/image block.
+function _smartUpFileToBase64(file) {
+  return new Promise(function(resolve, reject){
+    var r = new FileReader();
+    r.onload = function(){
+      var s = String(r.result || '');
+      var i = s.indexOf(',');
+      resolve(i >= 0 ? s.substring(i + 1) : s);
+    };
+    r.onerror = function(){ reject(new Error('Could not read file.')); };
+    r.readAsDataURL(file);
+  });
+}
+
+// Resolve which classifications the AI should choose from for this project.
+// Mirrors the logic in _ntmBuildClassificationOptions (project snapshot first,
+// fall back to active rate set).
+function _smartUpResolveClassifications(p) {
+  var list = [];
+  if (p && Array.isArray(p.laborRates) && p.laborRates.length) {
+    list = p.laborRates.map(function(r){ return (r.classification || '').trim(); }).filter(Boolean);
+  }
+  if (!list.length) {
+    var active = (typeof _getActiveLaborSet === 'function') ? _getActiveLaborSet() : null;
+    if (active && Array.isArray(active.rates)) {
+      list = active.rates.map(function(r){ return (r.classification || '').trim(); }).filter(Boolean);
+    }
+  }
+  // De-dupe
+  var seen = {};
+  return list.filter(function(c){ if (seen[c]) return false; seen[c] = true; return true; });
+}
+
+// Resolve which materials the AI should match against. Returns the project's
+// material list (descriptions only — units/codes/prices are looked up later
+// during save by the existing ntmReadMatRows() matching logic).
+function _smartUpResolveMaterials(p) {
+  if (!p || !Array.isArray(p.materialList)) return [];
+  return p.materialList.map(function(m){ return (m.description || '').trim(); }).filter(Boolean);
+}
+
+// Main extract handler — pulls form values, builds API payload, parses JSON,
+// then routes to the New ticket form pre-populated.
+async function smartUploadExtract() {
+  var pidEl = g('su-project');
+  var fileEl = g('su-file');
+  var errEl = g('su-err');
+  var progEl = g('su-progress');
+  var extractBtn = g('su-extract-btn');
+  var cancelBtn = g('su-cancel-btn');
+  errEl.textContent = '';
+
+  var pid = pidEl ? pidEl.value : '';
+  var file = fileEl && fileEl.files && fileEl.files[0];
+
+  if (!pid)  { errEl.textContent = 'Please pick a project.'; return; }
+  if (!file) { errEl.textContent = 'Please choose a PDF or image file.'; return; }
+  if (file.size > SMART_UP_MAX_BYTES) {
+    errEl.textContent = 'File is larger than 20 MB. Try a smaller scan or photo.'; return;
+  }
+
+  var p = db.projects.find(function(x){ return String(x.id) === String(pid); });
+  if (!p) { errEl.textContent = 'Selected project not found.'; return; }
+
+  // Determine media type for the API — fall back to the File's MIME type.
+  var mt = (file.type || '').toLowerCase();
+  var isPdf = mt === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  var isJpg = mt === 'image/jpeg' || /\.jpe?g$/i.test(file.name || '');
+  var isPng = mt === 'image/png'  || /\.png$/i.test(file.name || '');
+  if (!isPdf && !isJpg && !isPng) {
+    errEl.textContent = 'Unsupported file type. Please upload a PDF, JPG, or PNG.'; return;
+  }
+  var apiMedia = isPdf ? 'application/pdf' : (isJpg ? 'image/jpeg' : 'image/png');
+
+  extractBtn.disabled = true; cancelBtn.disabled = true;
+  extractBtn.textContent = 'Extracting…';
+  progEl.style.display = '';
+
+  try {
+    var b64 = await _smartUpFileToBase64(file);
+
+    var classifications = _smartUpResolveClassifications(p);
+    var materials = _smartUpResolveMaterials(p);
+    var classListStr = classifications.length
+      ? classifications.map(function(c){ return '"' + c + '"'; }).join(', ')
+      : '(no classifications defined for this project)';
+    var matListStr = materials.length
+      ? materials.slice(0, 80).map(function(m){ return '"' + m + '"'; }).join(', ')
+      : '(no material list defined for this project)';
+
+    var prompt =
+      'You are reading a hand-filled paper Time & Material (T&M) ticket from a masonry construction project. Extract every field you can identify and return STRICT JSON only — no markdown, no commentary, no code fences.\n\n' +
+      'Project context:\n' +
+      '  Project number: ' + (p.number || '') + '\n' +
+      '  Project name:   ' + (p.name || '') + '\n\n' +
+      'Allowed labor classifications for this project (match each worker to one of these EXACTLY; if none fit, return the value you read on the ticket as-is):\n  [' + classListStr + ']\n\n' +
+      'Project material list (try to match materials EXACTLY to one of these descriptions; if none fit, return the description as written on the ticket):\n  [' + matListStr + ']\n\n' +
+      'Schema (use null for any field you cannot read; never invent values):\n' +
+      '{\n' +
+      '  "ticketDate": "YYYY-MM-DD or null",\n' +
+      '  "workDescription": "string — the work performed and its location",\n' +
+      '  "cmComments": "string or null — any superintendent/CM comments",\n' +
+      '  "laborRows": [{"name": "...", "classification": "...", "stHours": 0, "otHours": 0, "dtHours": 0}],\n' +
+      '  "equipmentRows": [{"description": "...", "hours": 0}],\n' +
+      '  "materialRows": [{"description": "...", "quantity": 0}],\n' +
+      '  "signedByName": "string or null — customer superintendent who signed",\n' +
+      '  "signedByTitle": "string or null — their title (e.g. Site Superintendent)",\n' +
+      '  "signedAt": "YYYY-MM-DD or null — date of signature, falls back to ticketDate if not separately marked"\n' +
+      '}\n\n' +
+      'Rules:\n' +
+      '- Hours must be numbers (use 0 for blank, never null inside hour fields).\n' +
+      '- ST = straight time, OT = overtime (1.5×), DT = double time (2.0×). If only a single "hours" column exists, put it in stHours.\n' +
+      '- Return arrays even if empty — never omit a key.\n' +
+      '- If a field is genuinely unreadable, return null (or 0 for hour fields).';
+
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': db.anthropic_api_key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 4000,
+        messages: [{
+          role: 'user',
+          content: [
+            isPdf
+              ? { type: 'document', source: { type: 'base64', media_type: apiMedia, data: b64 } }
+              : { type: 'image',    source: { type: 'base64', media_type: apiMedia, data: b64 } },
+            { type: 'text', text: prompt }
+          ]
+        }]
+      })
+    });
+
+    if (!resp.ok) {
+      var errText = await resp.text();
+      throw new Error('API ' + resp.status + ': ' + errText.substring(0, 300));
+    }
+
+    var data = await resp.json();
+    // Extract first text block (mirrors handling in scopeExtractWithAI)
+    var reply = '';
+    if (data && Array.isArray(data.content)) {
+      for (var i = 0; i < data.content.length; i++) {
+        if (data.content[i].type === 'text' && data.content[i].text) {
+          reply = data.content[i].text; break;
+        }
+      }
+    }
+    reply = String(reply || '').replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+
+    var parsed;
+    try { parsed = JSON.parse(reply); }
+    catch(e) { throw new Error('Could not parse AI response as JSON. First 300 chars: ' + reply.substring(0, 300)); }
+
+    // Stash file + parsed data, transition into review form
+    _smartUploadFile = file;
+    _smartUploadExtracted = parsed;
+    _smartUploadProjectId = String(pid);
+    _smartUploadMode = true;
+
+    closeModal();
+    _smartUpOpenReviewForm(p, parsed);
+  } catch (e) {
+    console.error('Smart Upload extract error:', e);
+    errEl.textContent = 'Extraction failed: ' + (e.message || String(e));
+    extractBtn.disabled = false; cancelBtn.disabled = false;
+    extractBtn.textContent = '\u2728 Extract & review';
+    progEl.style.display = 'none';
+  }
+}
+
+// Open the standard New ticket form, pre-populated from extracted data.
+// Mirrors initNewTmTicket() but stamps everything from the AI payload and
+// switches the form into "smart upload review" mode.
+function _smartUpOpenReviewForm(project, parsed) {
+  _editTmTicketId = null;
+  setActivePage('tm-tickets');
+  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+  g('pg-new-tm-ticket').classList.add('active');
+
+  // Show the banner; hide the status card (this is a new ticket)
+  var banner = g('ntm-smart-up-banner');
+  if (banner) banner.style.display = '';
+  var bMeta = g('ntm-smart-up-banner-meta');
+  if (bMeta) {
+    var sName = String(parsed.signedByName || '').trim();
+    var sDate = String(parsed.signedAt || parsed.ticketDate || '').trim();
+    var bits = [];
+    bits.push('File: ' + (_smartUploadFile ? _smartUploadFile.name : '(unknown)'));
+    if (sName) bits.push('Signed by: ' + sName);
+    if (sDate) bits.push('Signed: ' + sDate);
+    bMeta.textContent = bits.join('  •  ');
+  }
+  var statusCard = g('ntm-status-card');
+  if (statusCard) statusCard.style.display = 'none';
+
+  g('ntm-heading').textContent  = 'Smart upload — review extracted ticket';
+  g('ntm-id-display').textContent = '';
+  g('ntm-pdf-btn').style.display = 'none';
+
+  // Project dropdown — locked to the chosen project
+  var projects = db.projects.slice().sort(function(a,b){
+    return String(a.number || '').localeCompare(String(b.number || ''));
+  });
+  g('ntm-project').innerHTML = '<option value="">Select project...</option>' +
+    projects.map(function(p){
+      var sel = String(p.id) === String(project.id) ? ' selected' : '';
+      return '<option value="' + p.id + '"' + sel + '>' + tmEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+    }).join('');
+  g('ntm-project').disabled = true;
+  g('ntm-pnum').value  = project.number || '';
+  g('ntm-pname').value = project.name   || '';
+  g('ntm-num').value   = '';  // assigned on save
+
+  // Field-level prefill
+  var dt = String(parsed.ticketDate || '').trim();
+  // Validate as YYYY-MM-DD; otherwise default to today
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) dt = new Date().toISOString().slice(0,10);
+  g('ntm-date').value = dt;
+  g('ntm-desc').value = String(parsed.workDescription || '').trim();
+  g('ntm-cm-comments').value = String(parsed.cmComments || '').trim();
+
+  // Reset rows then add one per extracted entry
+  _ntmRowCounter = 0;
+  g('ntm-labor-rows').innerHTML = '';
+  g('ntm-equip-rows').innerHTML = '';
+  g('ntm-mat-rows').innerHTML = '';
+
+  var labor = Array.isArray(parsed.laborRows) ? parsed.laborRows : [];
+  var equip = Array.isArray(parsed.equipmentRows) ? parsed.equipmentRows : [];
+  var mats  = Array.isArray(parsed.materialRows) ? parsed.materialRows : [];
+
+  if (labor.length) {
+    labor.forEach(function(r){
+      ntmAddLaborRow({
+        name: String(r.name || '').trim(),
+        classification: String(r.classification || '').trim(),
+        stHours: Number(r.stHours) || 0,
+        otHours: Number(r.otHours) || 0,
+        dtHours: Number(r.dtHours) || 0
+      });
+    });
+  } else {
+    ntmAddLaborRow();
+  }
+  if (equip.length) {
+    equip.forEach(function(r){
+      ntmAddEquipRow({
+        description: String(r.description || '').trim(),
+        hours: Number(r.hours) || 0
+      });
+    });
+  } else {
+    ntmAddEquipRow();
+  }
+  if (mats.length) {
+    mats.forEach(function(r){
+      ntmAddMatRow({
+        description: String(r.description || '').trim(),
+        quantity: Number(r.quantity) || 0
+      });
+    });
+  } else {
+    ntmAddMatRow();
+  }
+  ntmRefreshLaborTotals();
+
+  // Swap save buttons: hide the normal one, show Confirm & save
+  var normalSave = g('ntm-save-btn');
+  var confirmSave = g('ntm-smart-up-save-btn');
+  if (normalSave) normalSave.style.display = 'none';
+  if (confirmSave) confirmSave.style.display = '';
+
+  // Hide the Round 3 status-flow buttons (they don't apply pre-save)
+  ['ntm-send-sig-btn','ntm-send-reminder-btn','ntm-upload-signed-btn','ntm-approve-btn'].forEach(function(idStr){
+    var b = g(idStr); if (b) b.style.display = 'none';
+  });
+}
+
+// Cancel button on the review form — clears smart-upload state and returns
+// to the T&M list. Hooked from the existing "Cancel" link on the form header
+// via _smartUpResetIfActive() in nav() interception is overkill; the existing
+// nav('tm-tickets') already navigates away, we just need to clean state.
+// (Called from the form's Cancel link; see edits to nav handling below.)
+function _smartUpCancel() {
+  _smartUpClear();
+  var banner = g('ntm-smart-up-banner');
+  if (banner) banner.style.display = 'none';
+  var normalSave = g('ntm-save-btn');
+  var confirmSave = g('ntm-smart-up-save-btn');
+  if (normalSave) normalSave.style.display = '';
+  if (confirmSave) confirmSave.style.display = 'none';
+  // Re-enable the project dropdown for next normal use
+  var pSel = g('ntm-project'); if (pSel) pSel.disabled = false;
+}
+
+// Confirm & save — the smart-upload version of saveTmTicket. Creates the
+// ticket, uploads the file, marks Signed (Uploaded), pushes to Supabase,
+// and emails the PM. Heavily mirrors saveTmTicket + uploadSignedPdf but
+// fused into a single transaction-ish path.
+async function confirmSmartUploadTicket() {
+  if (!_smartUploadMode || !_smartUploadFile || !_smartUploadProjectId) {
+    alert('Smart Upload state is missing — please start over from the T&M list.');
+    return;
+  }
+  if (!supabaseClient) { alert('Not connected to Supabase.'); return; }
+
+  var pid  = g('ntm-project').value || _smartUploadProjectId;
+  var date = (g('ntm-date').value  || '').trim();
+  var desc = (g('ntm-desc').value  || '').trim();
+
+  if (!pid)  { alert('Project not selected.'); return; }
+  if (!date) { alert('Please enter a ticket date.'); return; }
+  if (!desc) { alert('Please enter a work description.'); return; }
+
+  var labor = ntmReadLaborRows();
+  if (!labor.length) { alert('At least one labor row is required.'); return; }
+
+  var p = db.projects.find(function(x){ return String(x.id) === String(pid); });
+  if (!p) { alert('Project not found.'); return; }
+
+  // Capture extracted signed-by (from AI) — these aren't in the form
+  var ex = _smartUploadExtracted || {};
+  var signedByName  = String(ex.signedByName  || '').trim();
+  var signedByTitle = String(ex.signedByTitle || '').trim();
+  var signedDateStr = String(ex.signedAt || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(signedDateStr)) signedDateStr = date; // fall back to ticket date
+
+  var btn = g('ntm-smart-up-save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+
+  // Phase 1 — create the ticket record & assign a number
+  if (!p.nextTmTicketSeq) p.nextTmTicketSeq = 1;
+  var ticketNumber = tmNextTicketNumber(p);
+  var newId = Date.now();
+  var nowIso = new Date().toISOString();
+  var signedAtIso = new Date(signedDateStr + 'T12:00:00').toISOString();
+
+  var ticket = {
+    id: newId,
+    projectId: p.id,
+    ticketNumber: ticketNumber,
+    ticketDate: date,
+    workDescription: desc,
+    cmComments: (g('ntm-cm-comments').value || '').trim(),
+    laborRows: labor,
+    equipmentRows: ntmReadEquipRows(),
+    materialRows: ntmReadMatRows(),
+    status: 'Signed (Uploaded)',
+    createdAt: nowIso,
+    createdByUserId: _currentUser ? _currentUser.id : null,
+    createdByName: _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '',
+    updatedAt: nowIso,
+    updatedByUserId: _currentUser ? _currentUser.id : null,
+    // Round 3 fields
+    signToken: null, signTokenExpires: null,
+    signedAt: signedAtIso,
+    signedByName: signedByName || null,
+    signedByTitle: signedByTitle || null,
+    signatureImage: null,
+    uploadedSignedFile: null,  // populated after upload below
+    approvedByUserId: null, approvedAt: null,
+    rejectedReason: null,
+    // Round 4
+    corId: null, corNumber: null,
+    // Smart-upload provenance
+    smartUploaded: true,
+    smartUploadedAt: nowIso,
+    smartUploadedByUserId: _currentUser ? _currentUser.id : null
+  };
+
+  if (!Array.isArray(db.tmTickets)) db.tmTickets = [];
+  db.tmTickets.push(ticket);
+  p.nextTmTicketSeq = (p.nextTmTicketSeq || 1) + 1;
+  saveDB();
+
+  // Phase 2 — upload the file. Filename + MIME inferred from File.
+  try {
+    var ts = Date.now();
+    var origName = String(_smartUploadFile.name || 'paper_ticket').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+    if (!/\.[a-z0-9]+$/i.test(origName)) {
+      // Append an extension if missing
+      var t = (_smartUploadFile.type || '').toLowerCase();
+      origName += t === 'application/pdf' ? '.pdf' : (t === 'image/png' ? '.png' : '.jpg');
+    }
+    var path = 'tm-tickets/' + ticket.id + '/' + ts + '_' + origName;
+    var contentType = _smartUploadFile.type || 'application/octet-stream';
+
+    var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).upload(path, _smartUploadFile, {
+      contentType: contentType, upsert: false
+    });
+    if (up && up.error) {
+      if (/Bucket not found/i.test(up.error.message || '')) {
+        throw new Error('Storage bucket "' + PROJECT_FILES_BUCKET + '" not set up. Create it in Supabase Storage first.');
+      }
+      throw new Error(up.error.message);
+    }
+
+    ticket.uploadedSignedFile = {
+      name: _smartUploadFile.name,
+      path: path,
+      size: _smartUploadFile.size,
+      contentType: contentType,
+      uploadedAt: nowIso,
+      uploadedByUserId: _currentUser ? _currentUser.id : null,
+      uploadedByName: _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : ''
+    };
+    saveDB();
+  } catch (e) {
+    // Roll back the local ticket — don't leave an orphaned record without its file
+    db.tmTickets = db.tmTickets.filter(function(x){ return String(x.id) !== String(ticket.id); });
+    p.nextTmTicketSeq = Math.max(1, (p.nextTmTicketSeq || 2) - 1);
+    saveDB();
+    if (btn) { btn.disabled = false; btn.textContent = '\u2713 Confirm & save'; }
+    alert('File upload failed: ' + (e.message || e) + '\nThe ticket was not created. Please try again.');
+    return;
+  }
+
+  // Phase 3 — push ticket + project to Supabase, with seq retry (mirrors saveTmTicket)
+  var syncOk = false;
+  var attempt = 0;
+  var lastErr = null;
+  while (!syncOk && attempt < 5) {
+    attempt++;
+    try {
+      var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(ticket));
+      if (tixRes && tixRes.error) {
+        lastErr = tixRes.error;
+        var msg = tixRes.error.message || '';
+        if (/duplicate key|kmi_tm_tickets_project_ticket_number_uq/i.test(msg)) {
+          var maxRes = await supabaseClient
+            .from('kmi_tm_tickets')
+            .select('ticket_number')
+            .eq('project_id', p.id);
+          if (maxRes && !maxRes.error && Array.isArray(maxRes.data)) {
+            var maxSeq = 0;
+            maxRes.data.forEach(function(row){
+              var m = String(row.ticket_number || '').match(/-(\d+)$/);
+              if (m) { var n = parseInt(m[1], 10); if (n > maxSeq) maxSeq = n; }
+            });
+            p.nextTmTicketSeq = maxSeq + 1;
+            ticket.ticketNumber = tmNextTicketNumber(p);
+            p.nextTmTicketSeq = (p.nextTmTicketSeq || 1) + 1;
+            saveDB();
+            continue;
+          }
+        }
+        break;
+      }
+      syncOk = true;
+    } catch (e) {
+      lastErr = e;
+      break;
+    }
+  }
+  if (syncOk) {
+    try {
+      var prjRes = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+      if (prjRes && prjRes.error) console.warn('Project seq sync warning:', prjRes.error.message);
+    } catch (e) { console.warn('Project seq sync exception:', e); }
+  } else if (lastErr) {
+    var em = (lastErr && lastErr.message) ? lastErr.message : String(lastErr);
+    // The local copy + storage upload succeeded; surface a warning but don't block.
+    showToast('Ticket ' + ticket.ticketNumber + ' saved locally; cloud sync failed and will retry. (' + em + ')', 'error');
+  }
+
+  db.activity.unshift({text: 'T&M ticket ' + ticket.ticketNumber + ' smart-uploaded (Signed)', type: 'won', time: 'Just now'});
+  saveDB();
+
+  // Phase 4 — best-effort: notify the assigned PM. Failure here doesn't
+  // affect ticket success; we just toast.
+  try {
+    await _smartUpNotifyPM(p, ticket);
+  } catch (e) {
+    console.warn('Smart Upload PM notification failed:', e);
+  }
+
+  // Done — clear state, navigate to the new ticket
+  showToast('Smart Upload complete — ticket ' + ticket.ticketNumber + ' saved as Signed (Uploaded).', 'success');
+  _smartUpClear();
+  // Reset banner / save button visibility for next time
+  var banner = g('ntm-smart-up-banner');
+  if (banner) banner.style.display = 'none';
+  if (g('ntm-smart-up-save-btn')) g('ntm-smart-up-save-btn').style.display = 'none';
+  if (g('ntm-save-btn')) g('ntm-save-btn').style.display = '';
+  var pSel = g('ntm-project'); if (pSel) pSel.disabled = false;
+
+  // Open the saved ticket so user can verify / take next action
+  viewTmTicket(ticket.id);
+}
+
+// Email the project's assigned PM with a plain-text summary of the new
+// smart-uploaded ticket. Returns silently on no-PM-found / no-email cases.
+async function _smartUpNotifyPM(project, ticket) {
+  if (!project || !ticket) return;
+
+  // Find the PM assignment on the project
+  var pmAssign = (project.kmiAssignments || []).find(function(a){
+    return a && a.role && /project manager/i.test(a.role);
+  });
+  if (!pmAssign || !pmAssign.userId) return;
+  var pmUser = (db.users || []).find(function(u){ return String(u.id) === String(pmAssign.userId); });
+  if (!pmUser || !pmUser.email) return;
+
+  // Build the plain-text summary
+  var laborTotals = (ticket.laborRows || []).reduce(function(acc, r){
+    acc.st += Number(r.stHours) || 0;
+    acc.ot += Number(r.otHours) || 0;
+    acc.dt += Number(r.dtHours) || 0;
+    return acc;
+  }, {st:0, ot:0, dt:0});
+  var totalHrs = laborTotals.st + laborTotals.ot + laborTotals.dt;
+  var workerCount = (ticket.laborRows || []).length;
+
+  var fromName = _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '';
+  var fromEmail = (_currentUser && _currentUser.email) ? _currentUser.email : null;
+
+  var subject = 'Smart-uploaded T&M ticket: ' + ticket.ticketNumber + ' — ' + (project.number || '') + ' ' + (project.name || '');
+  var lines = [];
+  lines.push('Hi ' + (pmUser.firstName || '') + ',');
+  lines.push('');
+  lines.push('A paper T&M ticket for your project has been smart-uploaded and is ready for review.');
+  lines.push('It is already signed by the customer superintendent (signed copy attached to the ticket in the CRM).');
+  lines.push('');
+  lines.push('Ticket #:        ' + (ticket.ticketNumber || ''));
+  lines.push('Project:         ' + ((project.number || '') + ' — ' + (project.name || '')).trim());
+  lines.push('Date:            ' + (ticket.ticketDate || ''));
+  lines.push('Workers:         ' + workerCount);
+  lines.push('Hours (ST/OT/DT): ' + tmFmtHrs(laborTotals.st) + ' / ' + tmFmtHrs(laborTotals.ot) + ' / ' + tmFmtHrs(laborTotals.dt) + '  (total ' + tmFmtHrs(totalHrs) + ')');
+  if (ticket.signedByName) {
+    lines.push('Signed by:       ' + ticket.signedByName + (ticket.signedByTitle ? ', ' + ticket.signedByTitle : ''));
+  }
+  if (ticket.signedAt) {
+    lines.push('Signed date:     ' + new Date(ticket.signedAt).toLocaleDateString());
+  }
+  lines.push('Uploaded by:     ' + (fromName || (fromEmail || 'Unknown')));
+  lines.push('');
+  lines.push('Work description:');
+  lines.push('  ' + (ticket.workDescription || '').replace(/\r?\n/g, '\n  '));
+  lines.push('');
+  lines.push('Log in to the KMI CRM to review the ticket and roll it into a Change Order Request when ready.');
+  lines.push('');
+  lines.push('— KMI Construction CRM');
+
+  var payload = {
+    to:                pmUser.email,
+    subject:           subject,
+    text:              lines.join('\r\n'),
+    flowType:          'tm_paper_upload',
+    sentBy:            _currentUser ? _currentUser.id : null,
+    sentByEmail:       fromEmail,
+    relatedEntityType: 'tm_ticket',
+    relatedEntityId:   String(ticket.id)
+  };
+  if (fromEmail) payload.replyTo = fromEmail;
+
+  var r = await sendEmail(payload);
+  if (r && r.success) {
+    showToast('PM (' + (pmUser.firstName || pmUser.email) + ') notified by email.', 'success');
+  } else {
+    showToast('PM notification email failed — ticket still saved. (' + ((r && r.error) || 'unknown') + ')', 'error');
   }
 }
 
