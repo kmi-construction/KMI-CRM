@@ -6458,8 +6458,24 @@ function corNextNumber(project) {
 
 // Increment-and-return the project's next COR sequence. Persists the
 // bump on the project record (saved to localStorage by saveDB).
+//
+// Self-healing: we don't blindly trust project.nextCorSeq. We also scan
+// existing CORs on this project (legacy "{projNum}-COR-{seq}" and new
+// "{seq}" formats both parse via _smartUpCorParseSeq) and take the
+// max(stored, max-existing + 1). This protects against:
+//   - Smart-uploaded historical CORs whose bump didn't propagate
+//   - Supabase pulls overwriting a fresher local nextCorSeq
+//   - Multi-device races where two sessions bump in parallel
+//   - Any future drift between the counter and the actual data
 function corBumpProjectSeq(project) {
-  var seq = Number(project.nextCorSeq || 1001);
+  var stored = Number(project.nextCorSeq || 1001);
+  var maxExistingSeq = 0;
+  (db.cors || []).forEach(function(c){
+    if (String(c.projectId) !== String(project.id)) return;
+    var n = _smartUpCorParseSeq(c.corNumber);
+    if (n !== null && n > maxExistingSeq) maxExistingSeq = n;
+  });
+  var seq = Math.max(stored, maxExistingSeq + 1);
   project.nextCorSeq = seq + 1;
   return seq;
 }
@@ -7789,8 +7805,8 @@ async function confirmSmartUploadCor() {
     // Roll back the local COR — don't leave an orphaned record without its file
     db.cors = (db.cors || []).filter(function(x){ return String(x.id) !== String(newCor.id); });
     // Best-effort rewind nextCorSeq if we bumped it for this import
-    if (importedSeq !== null && p.nextCorSeq === importedSeq + 1) {
-      p.nextCorSeq = importedSeq;
+    if (newSeq !== null && p.nextCorSeq === newSeq + 1) {
+      p.nextCorSeq = newSeq;
     }
     saveDB();
     if (btn) { btn.disabled = false; btn.textContent = '\u2713 Confirm & save (Pending)'; }
