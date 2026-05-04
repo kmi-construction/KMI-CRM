@@ -3907,9 +3907,11 @@ var _ntmRowCounter = 0;  // unique key for ephemeral form rows (labor/equip/mat)
 // for COR-rolled tickets we display "COR-{n}" derived from corNumber.
 function tmStatusBadge(t) {
   var s = t.status || 'Draft';
-  // If rolled into a COR, prefer the COR badge regardless of stored status
+  // If rolled into a COR, prefer the COR badge regardless of stored status.
+  // Run through corExtractKmiSeq so legacy "{projNum}-COR-{seq}" CORs
+  // render as a clean "COR-1001" instead of "COR-25161-COR-1001".
   if (t.corId && t.corNumber) {
-    return '<span class="bdg bd-won" title="Rolled into Change Order Request">COR-' + tmEsc(t.corNumber) + '</span>';
+    return '<span class="bdg bd-won" title="Rolled into Change Order Request">COR-' + tmEsc(corExtractKmiSeq(t.corNumber) || t.corNumber) + '</span>';
   }
   var map = {
     'Draft':                 ['bd-draft', 'Draft'],
@@ -6444,11 +6446,14 @@ function corTypeBadge(c) {
   return '<span class="bdg bd-pending" title="' + corEsc(t) + '">' + corEsc(compact[t] || t) + '</span>';
 }
 
-// Per-project COR counter. Number stored on the COR as corNumber (e.g.
-// "26100-COR-1001"). Counter lives on the project as nextCorSeq.
+// Per-project COR counter. Number stored on the COR as corNumber — just
+// the seq (e.g. "1001"). Counter lives on the project as nextCorSeq.
+// (Pre-existing CORs stored as "{projNum}-COR-{seq}" still display
+// correctly because all read-side display points run the value through
+// corExtractKmiSeq() which strips the legacy prefix.)
 function corNextNumber(project) {
   var seq = Number(project.nextCorSeq || 1001);
-  return (project.number || 'PROJ') + '-COR-' + seq;
+  return String(seq);
 }
 
 // Increment-and-return the project's next COR sequence. Persists the
@@ -6563,7 +6568,7 @@ function filterCors() {
     }
 
     return '<tr>' +
-      '<td><strong style="color:var(--kmi)">' + corEsc(c.corNumber || '') + '</strong></td>' +
+      '<td><strong style="color:var(--kmi)">' + corEsc(corExtractKmiSeq(c.corNumber) || '') + '</strong></td>' +
       '<td>' + corEsc(c.corDate || '') + '</td>' +
       '<td>' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</td>' +
       '<td>' + corTypeBadge(c) + '</td>' +
@@ -6723,7 +6728,7 @@ function viewCor(id) {
 
   var canEdit = corCanEdit(c);
   g('ncor-heading').textContent     = canEdit ? 'Edit Change Order Request' : 'View Change Order Request';
-  g('ncor-id-display').textContent  = c.corNumber || '';
+  g('ncor-id-display').textContent  = corExtractKmiSeq(c.corNumber) || '';
   g('ncor-save-btn').textContent    = 'Save changes';
   g('ncor-save-btn').style.display  = canEdit ? '' : 'none';
 
@@ -6742,7 +6747,7 @@ function viewCor(id) {
   g('ncor-type-display').value = c.corType || 'T&M';
   g('ncor-type-display').dataset.corType = c.corType || 'T&M';
 
-  g('ncor-num').value  = c.corNumber || '';
+  g('ncor-num').value  = corExtractKmiSeq(c.corNumber) || '';
   g('ncor-date').value = c.corDate   || '';
   g('ncor-desc').value = c.description || '';
   // Customer CO# — populate from the record
@@ -6964,8 +6969,10 @@ async function saveCor() {
   }
 
   // ── Create — assign next number from the project's sequence ──
+  // Stored as just the seq (e.g. "1001"). All display points run through
+  // corExtractKmiSeq() so legacy "{projNum}-COR-{seq}" CORs still render.
   var seqAssigned = corBumpProjectSeq(p);
-  var corNumber = (p.number || 'PROJ') + '-COR-' + seqAssigned;
+  var corNumber = String(seqAssigned);
   var nowIso = new Date().toISOString();
   var newCor = {
     id: Date.now(),
@@ -7501,11 +7508,15 @@ function _smartUpCorApplyPrefill(project, parsed) {
   }
   g('ncor-heading').textContent = 'Smart upload — review extracted COR';
 
-  // Header: COR # — preserve original. Enable the input so it's visible
-  // (initNewCor disables it; we want the user to see the preserved value).
+  // Header: COR # — preserve the seq from the original doc, but strip
+  // any legacy "{projNum}-COR-" prefix so the saved record stays in the
+  // current "1001" format. The AI may extract either format from a
+  // historical doc; we normalize down to seq-only here.
   var numEl = g('ncor-num');
   if (numEl) {
-    numEl.value = String(parsed.corNumber || '').trim();
+    var rawCorNum = String(parsed.corNumber || '').trim();
+    var parsedSeq = _smartUpCorParseSeq(rawCorNum);
+    numEl.value = parsedSeq !== null ? String(parsedSeq) : rawCorNum;
     numEl.disabled = false;
     numEl.style.background = '#fff';
     numEl.style.color = '';
@@ -7648,10 +7659,19 @@ async function confirmSmartUploadCor() {
   var p = db.projects.find(function(x){ return String(x.id) === String(pid); });
   if (!p) { alert('Project not found.'); return; }
 
-  // Duplicate check — same corNumber on the same project
+  // Duplicate check — same corNumber on the same project. Compare by
+  // parsed seq so legacy "25161-COR-1001" and the new "1001" format are
+  // recognized as the same COR.
+  var newSeq = _smartUpCorParseSeq(corNumber);
   var dup = (db.cors || []).find(function(c){
-    return String(c.projectId) === String(p.id) &&
-           String(c.corNumber || '').trim() === corNumber;
+    if (String(c.projectId) !== String(p.id)) return false;
+    var existing = String(c.corNumber || '').trim();
+    if (existing === corNumber) return true;
+    if (newSeq !== null) {
+      var existingSeq = _smartUpCorParseSeq(existing);
+      if (existingSeq !== null && existingSeq === newSeq) return true;
+    }
+    return false;
   });
   if (dup) {
     alert('A COR with number "' + corNumber + '" already exists on this project. Edit the COR # to make it unique, or void the existing one first.');
@@ -7659,11 +7679,10 @@ async function confirmSmartUploadCor() {
   }
 
   // Bump nextCorSeq if the imported number has a parseable seq >= current
-  var importedSeq = _smartUpCorParseSeq(corNumber);
-  if (importedSeq !== null) {
+  if (newSeq !== null) {
     var currentSeq = Number(p.nextCorSeq || 1001);
-    if (importedSeq >= currentSeq) {
-      p.nextCorSeq = importedSeq + 1;
+    if (newSeq >= currentSeq) {
+      p.nextCorSeq = newSeq + 1;
     }
   }
 
@@ -8779,7 +8798,7 @@ async function deleteCor(id) {
   var c = (db.cors || []).find(function(x){ return String(x.id) === String(id); });
   if (!c) return;
   if (!corCanDelete(c)) { alert('Only Draft CORs can be deleted. Use Void instead.'); return; }
-  if (!confirm('Delete COR ' + (c.corNumber || '') + '?\n\nThis cannot be undone. (Pending/Approved/Rejected CORs can\'t be deleted — Void them instead.)')) return;
+  if (!confirm('Delete COR ' + (corExtractKmiSeq(c.corNumber) || c.corNumber || '') + '?\n\nThis cannot be undone. (Pending/Approved/Rejected CORs can\'t be deleted — Void them instead.)')) return;
 
   db.cors = (db.cors || []).filter(function(x){ return String(x.id) !== String(id); });
   saveDB();
@@ -9636,7 +9655,7 @@ function ncorAddSelectedBudgetSubs() {
 // ─────────────────────────────────────────────────────────────────────
 function ncorComputeTotals() {
   var w = _ncorWorking;
-  if (!w) return { totalLabor:0, totalMaterial:0, totalSub:0, mateqOhp:0, subOhp:0, totalAmount:0 };
+  if (!w) return { totalLabor:0, totalMaterial:0, totalSub:0, mateqOhp:0, subOhp:0, bondCost:0, totalAmount:0 };
 
   // Labor
   var autoLabor = ncorComputeAutoLaborRows();
@@ -9672,14 +9691,25 @@ function ncorComputeTotals() {
   var subtotal = totalLabor + totalMaterial + totalSub + mateqOhp + subOhp;
   var bondCost = subtotal * (bondPct / 100);
 
+  // Round every category up to the next whole dollar so customer-facing
+  // CORs (form, PDF, Foundation CSV) always show clean dollar amounts.
+  // totalAmount is recomputed as the sum of the rounded parts so the
+  // grand total exactly equals the line items shown above it on the PDF.
+  var rTotalLabor    = Math.ceil(totalLabor);
+  var rTotalMaterial = Math.ceil(totalMaterial);
+  var rTotalSub      = Math.ceil(totalSub);
+  var rMateqOhp      = Math.ceil(mateqOhp);
+  var rSubOhp        = Math.ceil(subOhp);
+  var rBondCost      = Math.ceil(bondCost);
+
   return {
-    totalLabor:    totalLabor,
-    totalMaterial: totalMaterial,
-    totalSub:      totalSub,
-    mateqOhp:      mateqOhp,
-    subOhp:        subOhp,
-    bondCost:      bondCost,
-    totalAmount:   subtotal + bondCost
+    totalLabor:    rTotalLabor,
+    totalMaterial: rTotalMaterial,
+    totalSub:      rTotalSub,
+    mateqOhp:      rMateqOhp,
+    subOhp:        rSubOhp,
+    bondCost:      rBondCost,
+    totalAmount:   rTotalLabor + rTotalMaterial + rTotalSub + rMateqOhp + rSubOhp + rBondCost
   };
 }
 
