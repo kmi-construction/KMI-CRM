@@ -1218,7 +1218,8 @@ textarea{resize:vertical;min-height:72px}
     <select class="fs" onchange="filterCors()" id="cor-fp"><option value="">All projects</option></select>
     <select class="fs" onchange="filterCors()" id="cor-ft"><option value="">All types</option></select>
     <select class="fs" onchange="filterCors()" id="cor-fs"><option value="">All statuses</option></select>
-    <button class="btn btn-p" style="margin-left:auto" onclick="showNewCorModal()" id="cor-new-btn">+ New COR</button>
+    <button class="btn" style="margin-left:auto" onclick="showSmartUploadCorModal()" id="cor-smart-up-btn" title="Upload a historical COR PDF (e.g. exported from Excel) — AI fills in the form, COR goes straight to Pending for PM disposition">&#10024; Smart upload</button>
+    <button class="btn btn-p" onclick="showNewCorModal()" id="cor-new-btn">+ New COR</button>
   </div>
   <div class="card" style="padding:0;overflow:hidden">
     <table><thead><tr>
@@ -1238,6 +1239,22 @@ textarea{resize:vertical;min-height:72px}
     <button class="btn" onclick="nav('cors')">← Cancel</button>
   </div>
 
+  <!-- Smart Upload mode banner — only shown when in the COR smart-upload review flow.
+       Replaces the normal save button with a "Confirm & save (Pending)" that uploads
+       the file to storage, marks status = Pending, and saves the COR record. -->
+  <div id="ncor-smart-up-banner" class="card" style="display:none;background:#FFF8E1;border:0.5px solid #C8A84B">
+    <div style="display:flex;align-items:flex-start;gap:14px">
+      <div style="font-size:24px;line-height:1">&#10024;</div>
+      <div style="flex:1">
+        <div style="font-weight:600;color:#7A5C00;font-size:13px;margin-bottom:4px">Smart upload mode &mdash; review extracted COR</div>
+        <div style="font-size:12px;color:#7A5C00;line-height:1.5">
+          AI has extracted the historical COR from the uploaded file. Review every field below &mdash; especially totals and customer CO #. When ready, click <strong>Confirm &amp; save (Pending)</strong> and the COR will be saved with the original file attached for reference. From there, mark it Approved or Rejected via the existing transitions when those land.
+        </div>
+        <div id="ncor-smart-up-banner-meta" style="font-size:11px;color:#9A7A2E;margin-top:6px"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Status info card (shown only after first save) -->
   <div id="ncor-status-card" class="card" style="display:none;background:#FAF8F0;border:0.5px solid var(--ac)">
     <div id="ncor-status-card-body"></div>
@@ -1253,6 +1270,7 @@ textarea{resize:vertical;min-height:72px}
       <div class="fgr"><label>Type</label><input id="ncor-type-display" disabled style="background:#f5f5f5;color:#666;font-weight:600"></div>
       <div class="fgr"><label>Customer</label><input id="ncor-customer-display" disabled style="background:#f5f5f5;color:#666"></div>
       <div class="fgr"><label>Attention *</label><select id="ncor-attention"><option value="">Select contact...</option></select></div>
+      <div class="fgr"><label>Customer CO #</label><input id="ncor-customer-co-num" placeholder="Customer's CO reference number (optional)"><div style="font-size:11px;color:#888;margin-top:4px">Set this when the customer issues their own CO number against this COR.</div></div>
       <div class="fgr full"><label>Description *</label><textarea id="ncor-desc" rows="3" placeholder="Describe the change being requested..."></textarea></div>
     </div>
   </div>
@@ -1305,7 +1323,7 @@ textarea{resize:vertical;min-height:72px}
 
   <!-- Action buttons. Most are placeholders that wire up in Round 4.3. -->
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
-    <button class="btn" onclick="nav('cors')">Cancel</button>
+    <button class="btn" onclick="_smartUpCorCancel(); nav('cors');">Cancel</button>
     <button class="btn" onclick="downloadCorPDF()" id="ncor-pdf-btn" style="display:none" title="PDF generator lands in Round 4.3" disabled>⬇ Download PDF</button>
     <button class="btn" onclick="corExportFoundationHeaderCsv()" id="ncor-fnd-header-btn" style="display:none" title="Generate the Foundation CO Header CSV (1 row)">⬇ Export Header CSV</button>
     <button class="btn" onclick="corExportFoundationDetailCsv()" id="ncor-fnd-detail-btn" style="display:none" title="Generate the Foundation CO Detail CSV (cost-code lines)">⬇ Export Detail CSV</button>
@@ -1314,6 +1332,8 @@ textarea{resize:vertical;min-height:72px}
     <button class="btn" onclick="markCorRejected()" id="ncor-reject-btn" style="display:none;background:#7A2E2E;color:#fff;border-color:#7A2E2E" title="Reject flow lands in Round 4.3" disabled>Mark Rejected</button>
     <button class="btn" onclick="reopenCorAsDraft()" id="ncor-reopen-btn" style="display:none" title="Re-open flow lands in Round 4.3" disabled>Re-open as Draft</button>
     <button class="btn" onclick="voidCor()" id="ncor-void-btn" style="display:none;color:#7A2E2E;border-color:#7A2E2E" title="Void flow lands in Round 4.3" disabled>Void COR</button>
+    <!-- Smart Upload mode: replaces the normal save button while _smartUpCorMode is true. -->
+    <button class="btn btn-p" onclick="confirmSmartUploadCor()" id="ncor-smart-up-save-btn" style="display:none;padding:10px 32px;font-size:14px;font-weight:700;background:#3B6D11;border-color:#3B6D11">&#10003; Confirm &amp; save (Pending)</button>
     <button class="btn btn-p" onclick="saveCor()" style="padding:10px 32px;font-size:14px;font-weight:700" id="ncor-save-btn">Create COR</button>
   </div>
 </div>
@@ -1688,6 +1708,9 @@ var PERMISSIONS = {
   // Smart Upload: paper ticket → AI extraction → digital ticket pre-filled & marked Signed (Uploaded).
   // Mirrors upload-signed-tm — same trust boundary (whoever can attach a signed paper PDF can do this).
   'smart-upload-tm':   ['full','full','full','none','none','none'],   // Smart Upload paper ticket
+  // Smart Upload (CORs): historical CORs imported from PDF → marked Pending for PM disposition.
+  // Mirrors create-cor (Admin + PM only).
+  'smart-upload-cor':  ['full','full','none','none','none','none'],   // Smart Upload historical COR PDF
   // Round 4: CORs (Change Order Requests). Field roles can't see CORs at all
   // — these are KMI-internal billing artifacts. Coordinator can read for
   // tracking / referencing on customer calls, but only PMs and Admins
@@ -6110,7 +6133,6 @@ async function confirmSmartUploadTicket() {
     } catch (e) { console.warn('Project seq sync exception:', e); }
   } else if (lastErr) {
     var em = (lastErr && lastErr.message) ? lastErr.message : String(lastErr);
-    // The local copy + storage upload succeeded; surface a warning but don't block.
     showToast('Ticket ' + ticket.ticketNumber + ' saved locally; cloud sync failed and will retry. (' + em + ')', 'error');
   }
 
@@ -6128,14 +6150,12 @@ async function confirmSmartUploadTicket() {
   // Done — clear state, navigate to the new ticket
   showToast('Smart Upload complete — ticket ' + ticket.ticketNumber + ' saved as Signed (Uploaded).', 'success');
   _smartUpClear();
-  // Reset banner / save button visibility for next time
   var banner = g('ntm-smart-up-banner');
   if (banner) banner.style.display = 'none';
   if (g('ntm-smart-up-save-btn')) g('ntm-smart-up-save-btn').style.display = 'none';
   if (g('ntm-save-btn')) g('ntm-save-btn').style.display = '';
   var pSel = g('ntm-project'); if (pSel) pSel.disabled = false;
 
-  // Open the saved ticket so user can verify / take next action
   viewTmTicket(ticket.id);
 }
 
@@ -6144,7 +6164,6 @@ async function confirmSmartUploadTicket() {
 async function _smartUpNotifyPM(project, ticket) {
   if (!project || !ticket) return;
 
-  // Find the PM assignment on the project
   var pmAssign = (project.kmiAssignments || []).find(function(a){
     return a && a.role && /project manager/i.test(a.role);
   });
@@ -6152,7 +6171,6 @@ async function _smartUpNotifyPM(project, ticket) {
   var pmUser = (db.users || []).find(function(u){ return String(u.id) === String(pmAssign.userId); });
   if (!pmUser || !pmUser.email) return;
 
-  // Build the plain-text summary
   var laborTotals = (ticket.laborRows || []).reduce(function(acc, r){
     acc.st += Number(r.stHours) || 0;
     acc.ot += Number(r.otHours) || 0;
@@ -6442,6 +6460,9 @@ function renderCors() {
   // New-button gating
   var newBtn = g('cor-new-btn');
   if (newBtn) newBtn.style.display = hasFull('create-cor') ? '' : 'none';
+  // Smart upload button — needs both create-cor and smart-upload-cor.
+  var suBtn = g('cor-smart-up-btn');
+  if (suBtn) suBtn.style.display = (hasFull('create-cor') && hasFull('smart-upload-cor')) ? '' : 'none';
 
   filterCors();
 }
@@ -6569,6 +6590,11 @@ function newCorContinue() {
 // ── Init: new COR form ────────────────────────────────────────────────
 function initNewCor() {
   if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); nav('cors'); return; }
+  // Clear any leftover smart-upload state from a cancelled flow (safe no-op
+  // when state isn't set; just resets the banner + button visibility).
+  // Skipped if we're entering FROM the smart-upload flow (mode is set
+  // before nav and consumed by _smartUpCorApplyPrefill).
+  if (!_smartUpCorMode) _smartUpCorCancel();
   _editCorId = null;
   g('ncor-heading').textContent     = 'New Change Order Request';
   g('ncor-id-display').textContent  = '';
@@ -6602,6 +6628,8 @@ function initNewCor() {
   g('ncor-num').value  = '';                         // assigned at save
   g('ncor-date').value = new Date().toISOString().slice(0,10);
   g('ncor-desc').value = '';
+  // Customer CO# (added with the smart-upload work) — empty on new
+  if (g('ncor-customer-co-num')) g('ncor-customer-co-num').value = '';
 
   // Trigger project-changed handler to populate customer + attention
   ncorProjectChanged();
@@ -6630,6 +6658,9 @@ function viewCor(id) {
   var c = (db.cors || []).find(function(x){ return String(x.id) === String(id); });
   if (!c) { alert('COR not found.'); return; }
   if (!hasRead('view-cors')) { alert('You do not have permission to view CORs.'); return; }
+
+  // Clear any active smart-upload review state. Safe no-op when state is unset.
+  _smartUpCorCancel();
 
   _editCorId = c.id;
   setActivePage('cors');
@@ -6661,6 +6692,11 @@ function viewCor(id) {
   g('ncor-num').value  = c.corNumber || '';
   g('ncor-date').value = c.corDate   || '';
   g('ncor-desc').value = c.description || '';
+  // Customer CO# — populate from the record
+  if (g('ncor-customer-co-num')) {
+    g('ncor-customer-co-num').value = c.customerCoNumber || '';
+    g('ncor-customer-co-num').disabled = !canEdit;
+  }
 
   // Disable inputs if read-only
   ['ncor-date','ncor-desc'].forEach(function(idStr){
@@ -6742,6 +6778,8 @@ async function saveCor() {
   var corType   = g('ncor-type-display').dataset.corType || g('ncor-type-display').value || 'T&M';
   var attnId    = g('ncor-attention').value;
   var description = (g('ncor-desc').value || '').trim();
+  // Customer CO# — added with smart-upload work; optional for any COR
+  var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
 
   if (!projectId) { alert('Please select a project.'); return; }
   if (!corDate)   { alert('Please pick a date.'); return; }
@@ -6817,6 +6855,8 @@ async function saveCor() {
     existingCor.corDate     = corDate;
     existingCor.attentionContactId = attnId;
     existingCor.description = description;
+    // Customer CO# — empty string normalized to null
+    existingCor.customerCoNumber = customerCoNumber || null;
     existingCor.rolledUpTicketIds = newRolledIds;
     existingCor.laborRows         = snapshotAutoLabor;       // auto-pivot snapshot
     existingCor.manualLaborRows   = newManualLabor;
@@ -6887,7 +6927,7 @@ async function saveCor() {
     decisionAt: null, decisionByUserId: null,
     voidedAt: null, voidedByUserId: null,
     voidReason: null,
-    customerCoNumber: null
+    customerCoNumber: customerCoNumber || null
   };
 
   // Lock all rolled-up tickets onto the new COR
@@ -7016,6 +7056,664 @@ function _refreshCorActionButtons(c) {
   } else if (s === 'Approved' || s === 'Voided') {
     if (g('ncor-pdf-btn'))  g('ncor-pdf-btn').style.display  = '';
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SMART UPLOAD (CORs) — historical COR PDF → digital COR record
+// ═══════════════════════════════════════════════════════════════════════
+// For backfilling CORs that were originally compiled in Excel and emailed
+// to customers, before the digital flow existed. The PDF is preserved as
+// an attachment for record-keeping; AI populates the form for PM review.
+//
+// Workflow:
+//   1. User clicks "Smart upload" on the COR list page → showSmartUploadCorModal()
+//   2. Picks project + uploads COR PDF
+//   3. smartUploadCorExtract() sends the file as a document content block,
+//      with the project's labor classifications + material list as context,
+//      asks for strict JSON: header, manual labor/material/sub rows,
+//      markups, customer CO#, decision date.
+//   4. On success the standard New COR form opens fully pre-populated.
+//      _smartUpCorMode is set; banner + Confirm-save button replace the
+//      normal save button. Project + type are locked.
+//   5. PM reviews and edits anything wrong, then clicks "Confirm & save (Pending)":
+//        - creates the COR record with status = Pending and the original
+//          COR number preserved from the document
+//        - bumps project.nextCorSeq if imported seq >= current
+//        - uploads the file to cors/{corId}/ in PROJECT_FILES_BUCKET
+//        - upserts COR + project to Supabase (best-effort sync warning)
+//        - clears smart-upload state, navigates to the saved COR view
+//
+// Lifecycle gap: imported CORs land in Pending. The transitions
+// (markCorApproved/Rejected/Voided) are placeholders — Round 4.3 work.
+// Once those land, imported CORs use the same flow as native ones.
+
+var _smartUpCorFile = null;
+var _smartUpCorExtracted = null;
+var _smartUpCorMode = false;
+var _smartUpCorProjectId = null;
+
+// Accepted file types: PDF only (per Mike's choice — Excel→PDF is a
+// one-click save in Excel, so we don't pull in SheetJS).
+var SMART_UP_COR_ACCEPT = 'application/pdf,.pdf';
+var SMART_UP_COR_MAX_BYTES = 25 * 1024 * 1024;  // 25MB; CORs are usually 1-2 pages
+
+function _smartUpCorClearState() {
+  _smartUpCorFile = null;
+  _smartUpCorExtracted = null;
+  _smartUpCorMode = false;
+  _smartUpCorProjectId = null;
+}
+
+// Cancel button handler / cleanup. Safe to call when state is unset.
+function _smartUpCorCancel() {
+  _smartUpCorClearState();
+  var banner = g('ncor-smart-up-banner');
+  if (banner) banner.style.display = 'none';
+  var normalSave = g('ncor-save-btn');
+  var confirmSave = g('ncor-smart-up-save-btn');
+  if (normalSave) normalSave.style.display = '';
+  if (confirmSave) confirmSave.style.display = 'none';
+}
+
+// Show the entry modal — project + file picker.
+function showSmartUploadCorModal() {
+  if (!hasFull('smart-upload-cor') || !hasFull('create-cor')) {
+    alert('You do not have permission to use COR Smart Upload.'); return;
+  }
+  if (location.protocol === 'file:') {
+    alert('COR Smart Upload requires the app to be served from a web URL.\nWhen opened directly from a file, browser security rules block API calls.');
+    return;
+  }
+  if (!db.anthropic_api_key) {
+    alert('No Anthropic API key is configured.\nAsk your admin to add one to the kmi_settings table in Supabase.');
+    return;
+  }
+  if (!supabaseClient) {
+    alert('Not connected to Supabase. Smart Upload needs cloud storage to save the file.');
+    return;
+  }
+
+  var projects = db.projects.slice().sort(function(a,b){
+    return String(a.number || '').localeCompare(String(b.number || ''));
+  });
+  var projOpts = '<option value="">Select project...</option>' +
+    projects.map(function(p){
+      return '<option value="' + p.id + '">' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+    }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">&#10024; Smart upload historical COR</div>' +
+    '<div class="msb">Upload a PDF of a historical Change Order Request (e.g. an Excel-compiled COR you previously sent to a customer). AI will extract the header, line items, and totals into a draft for your review. After you confirm, the COR is saved with status <strong>Pending</strong> and the original PDF attached.</div>' +
+    '<div class="fg" style="margin-bottom:12px">' +
+      '<div class="fgr full"><label>Project *</label>' +
+        '<select id="suc-project">' + projOpts + '</select>' +
+      '</div>' +
+      '<div class="fgr full"><label>COR PDF *</label>' +
+        '<input type="file" id="suc-file" accept="' + SMART_UP_COR_ACCEPT + '">' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">For Excel CORs: open in Excel → File → Save as PDF → upload here.</div>' +
+      '</div>' +
+    '</div>' +
+    '<div id="suc-err" style="color:#A32D2D;font-size:12px;margin-bottom:10px;min-height:14px"></div>' +
+    '<div id="suc-progress" style="display:none;font-size:12px;color:#666;margin-bottom:10px">' +
+      '<div>&#9201; Sending to AI for extraction&hellip; this can take 30-90 seconds for multi-page CORs.</div>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()" id="suc-cancel-btn">Cancel</button>' +
+      '<button class="btn btn-p" onclick="smartUploadCorExtract()" id="suc-extract-btn">&#10024; Extract &amp; review</button>' +
+    '</div>'
+  );
+}
+
+// File → base64 helper (no data: prefix)
+function _smartUpCorFileToBase64(file) {
+  return new Promise(function(resolve, reject){
+    var r = new FileReader();
+    r.onload = function(){
+      var s = String(r.result || '');
+      var i = s.indexOf(',');
+      resolve(i >= 0 ? s.substring(i + 1) : s);
+    };
+    r.onerror = function(){ reject(new Error('Could not read file.')); };
+    r.readAsDataURL(file);
+  });
+}
+
+// Extract COR seq number from a preserved corNumber string.
+// Accepts formats like "26100-COR-1001", "COR-1001", "1001", "1,005",
+// "Change Order #1001". Returns the integer seq, or null if it can't
+// be parsed. Used both for nextCorSeq bumping and duplicate detection.
+function _smartUpCorParseSeq(corNumber) {
+  if (!corNumber) return null;
+  var s = String(corNumber).replace(/[,\s]/g, '');
+  var m = s.match(/(\d+)$/);
+  if (!m) return null;
+  var n = parseInt(m[1], 10);
+  return isNaN(n) ? null : n;
+}
+
+// Main extract handler — sends PDF to Anthropic API and routes to review form.
+async function smartUploadCorExtract() {
+  var pidEl = g('suc-project');
+  var fileEl = g('suc-file');
+  var errEl = g('suc-err');
+  var progEl = g('suc-progress');
+  var extractBtn = g('suc-extract-btn');
+  var cancelBtn = g('suc-cancel-btn');
+  errEl.textContent = '';
+
+  var pid = pidEl ? pidEl.value : '';
+  var file = fileEl && fileEl.files && fileEl.files[0];
+
+  if (!pid)  { errEl.textContent = 'Please pick a project.'; return; }
+  if (!file) { errEl.textContent = 'Please choose a PDF file.'; return; }
+  if (file.size > SMART_UP_COR_MAX_BYTES) {
+    errEl.textContent = 'File is larger than 25 MB. Try compressing the PDF.'; return;
+  }
+  var mt = (file.type || '').toLowerCase();
+  var isPdf = mt === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  if (!isPdf) {
+    errEl.textContent = 'Only PDF files are supported. (Save Excel as PDF first.)'; return;
+  }
+
+  var p = db.projects.find(function(x){ return String(x.id) === String(pid); });
+  if (!p) { errEl.textContent = 'Selected project not found.'; return; }
+
+  extractBtn.disabled = true; cancelBtn.disabled = true;
+  extractBtn.textContent = 'Extracting…';
+  progEl.style.display = '';
+
+  try {
+    var b64 = await _smartUpCorFileToBase64(file);
+
+    // Pull contextual lists for the AI prompt
+    var laborList = corGetProjectLaborRates(p);
+    var classifications = laborList.map(function(r){ return (r.classification || '').trim(); }).filter(Boolean);
+    if (!classifications.length && typeof _getActiveLaborSet === 'function') {
+      var active = _getActiveLaborSet();
+      if (active && Array.isArray(active.rates)) {
+        classifications = active.rates.map(function(r){ return (r.classification || '').trim(); }).filter(Boolean);
+      }
+    }
+    // De-dupe
+    var seen = {}; classifications = classifications.filter(function(c){ if (seen[c]) return false; seen[c] = true; return true; });
+
+    var matList = (Array.isArray(p.materialList) ? p.materialList : [])
+      .map(function(m){ return (m.description || '').trim(); }).filter(Boolean);
+
+    var classListStr = classifications.length
+      ? classifications.map(function(c){ return '"' + c + '"'; }).join(', ')
+      : '(no classifications defined for this project)';
+    var matListStr = matList.length
+      ? matList.slice(0, 100).map(function(m){ return '"' + m + '"'; }).join(', ')
+      : '(no material list defined for this project)';
+
+    // Available customer-side contacts (for attention extraction)
+    var contactNames = [];
+    var custObj = p.customerId ? db.customers.find(function(c){ return String(c.id) === String(p.customerId); }) : null;
+    if (custObj && Array.isArray(custObj.contacts)) {
+      contactNames = custObj.contacts.map(function(c){ return (c.name || '').trim(); }).filter(Boolean);
+    }
+    // Also project-level contact assignments
+    if (Array.isArray(p.contactAssignments)) {
+      p.contactAssignments.forEach(function(a){
+        if (a && a.name) contactNames.push(String(a.name).trim());
+      });
+    }
+    var contactListStr = contactNames.length
+      ? contactNames.slice(0, 30).map(function(n){ return '"' + n + '"'; }).join(', ')
+      : '(no customer contacts available)';
+
+    var prompt =
+      'You are reading a Change Order Request (COR) PDF from a masonry construction company. The COR was originally compiled in Excel and sent to a customer; we are now backfilling it into our CRM. Extract everything you can identify and return STRICT JSON only — no markdown, no commentary, no code fences.\n\n' +
+      'Project context (the COR belongs to this project):\n' +
+      '  Project number: ' + (p.number || '') + '\n' +
+      '  Project name:   ' + (p.name || '') + '\n\n' +
+      'Allowed COR types (pick the one that best matches; the document may use varied terminology):\n' +
+      '  ["T&M", "Overtime", "Double Time", "Premium Time OT", "Premium Time DT", "Fixed Fee"]\n' +
+      '  - "T&M" — full Time & Material billing of all hours\n' +
+      '  - "Overtime" / "Double Time" — billing OT/DT hours at premium rates\n' +
+      '  - "Premium Time OT" / "Premium Time DT" — billing only the premium delta over straight-time on those hours\n' +
+      '  - "Fixed Fee" — lump-sum amount with no hourly breakdown\n\n' +
+      'Allowed labor classifications (match each labor row EXACTLY to one of these; if none fit, return the value as written):\n  [' + classListStr + ']\n\n' +
+      'Project material list (try to match each material EXACTLY to one of these descriptions; if none fit, return the description as written):\n  [' + matListStr + ']\n\n' +
+      'Customer-side contacts on this project (match the "attention" / addressee to one of these names if possible; otherwise return the name as written):\n  [' + contactListStr + ']\n\n' +
+      'Schema (use null for unknown values; never invent):\n' +
+      '{\n' +
+      '  "corNumber":         "string — the COR number as written on the document, e.g. \'26100-COR-1001\' or just \'1005\'",\n' +
+      '  "corDate":           "YYYY-MM-DD or null",\n' +
+      '  "corType":           "one of the allowed types above",\n' +
+      '  "description":       "string — the work or change being requested",\n' +
+      '  "attentionContactName": "string or null — name of the customer-side person the COR is addressed to",\n' +
+      '  "customerCoNumber":  "string or null — the customer\'s own CO reference number, if present (often labeled \'Owner CO\' or similar)",\n' +
+      '  "decisionDate":      "YYYY-MM-DD or null — date the customer accepted/rejected, if shown",\n' +
+      '  "manualLaborRows":   [{"classification": "...", "hours": 0, "rate": 0}],\n' +
+      '  "manualMaterialRows":[{"description": "...", "quantity": 0, "unitPrice": 0}],\n' +
+      '  "subRows":           [{"name": "...", "total": 0}],\n' +
+      '  "matEqMarkupPct":    "number or null — Materials & Equipment OH&P markup percent (often 10)",\n' +
+      '  "subMarkupPct":      "number or null — Subcontractor OH&P markup percent (often 5)",\n' +
+      '  "totalLabor":        "number or null — labor subtotal as printed on the doc",\n' +
+      '  "totalMaterial":     "number or null — material subtotal",\n' +
+      '  "totalSub":          "number or null — sub subtotal",\n' +
+      '  "totalAmount":       "number or null — grand total including OH&P"\n' +
+      '}\n\n' +
+      'Rules:\n' +
+      '- All numbers must be numbers (no commas, no $ signs, no parentheses for negatives).\n' +
+      '- Return arrays even when empty — never omit a key.\n' +
+      '- For manualLaborRows: rate is the customer-billing rate, not cost rate.\n' +
+      '- For manualMaterialRows: unitPrice is what the customer was billed per unit.\n' +
+      '- For subRows: total is the marked-up amount the customer was billed.\n' +
+      '- If markup percentages aren\'t printed but you can infer them (e.g. mat-OHP / matSubtotal), set them; otherwise null and the form will use project defaults.\n' +
+      '- Preserve the original COR number text as-is (don\'t reformat).';
+
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': db.anthropic_api_key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 8000,  // larger ceiling — CORs can have many line items
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+            { type: 'text', text: prompt }
+          ]
+        }]
+      })
+    });
+
+    if (!resp.ok) {
+      var errText = await resp.text();
+      throw new Error('API ' + resp.status + ': ' + errText.substring(0, 300));
+    }
+
+    var data = await resp.json();
+    var reply = '';
+    if (data && Array.isArray(data.content)) {
+      for (var i = 0; i < data.content.length; i++) {
+        if (data.content[i].type === 'text' && data.content[i].text) {
+          reply = data.content[i].text; break;
+        }
+      }
+    }
+    reply = String(reply || '').replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+
+    var parsed;
+    try { parsed = JSON.parse(reply); }
+    catch(e) { throw new Error('Could not parse AI response as JSON. First 300 chars: ' + reply.substring(0, 300)); }
+
+    // Validate required-ish fields and normalize defaults
+    var cType = String(parsed.corType || '').trim();
+    if (COR_TYPES.indexOf(cType) === -1) {
+      // Loose match — try to pick the closest type
+      var lc = cType.toLowerCase();
+      if (/fixed|lump/.test(lc)) cType = 'Fixed Fee';
+      else if (/premium.*ot|prem.*ot/.test(lc)) cType = 'Premium Time OT';
+      else if (/premium.*dt|prem.*dt/.test(lc)) cType = 'Premium Time DT';
+      else if (/double.*time|dt/.test(lc)) cType = 'Double Time';
+      else if (/over.?time|ot/.test(lc)) cType = 'Overtime';
+      else cType = 'T&M';
+      parsed.corType = cType;
+    }
+
+    // Stash and route to review form
+    _smartUpCorFile = file;
+    _smartUpCorExtracted = parsed;
+    _smartUpCorProjectId = String(pid);
+    _smartUpCorMode = true;
+
+    closeModal();
+    _smartUpCorOpenReviewForm(p, parsed);
+  } catch (e) {
+    console.error('COR Smart Upload extract error:', e);
+    errEl.textContent = 'Extraction failed: ' + (e.message || String(e));
+    extractBtn.disabled = false; cancelBtn.disabled = false;
+    extractBtn.textContent = '\u2728 Extract & review';
+    progEl.style.display = 'none';
+  }
+}
+
+// Open the New COR form pre-populated. Sets _newCorPrefill so initNewCor
+// uses our project + type, then layers on the rest of the extracted data
+// after init runs.
+function _smartUpCorOpenReviewForm(project, parsed) {
+  // Wire up the pieces initNewCor expects
+  _newCorPrefill = { projectId: project.id, corType: parsed.corType || 'T&M' };
+
+  // Navigate. _smartUpCorMode is already true so initNewCor skips the
+  // _smartUpCorCancel call and preserves our state.
+  setActivePage('cors');
+  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+  g('pg-new-cor').classList.add('active');
+  initNewCor();
+
+  // Now layer the smart-upload-specific prefills on top
+  _smartUpCorApplyPrefill(project, parsed);
+}
+
+// Apply extracted data to the form + working state. Runs after initNewCor
+// has set up the empty shell.
+function _smartUpCorApplyPrefill(project, parsed) {
+  if (!_ncorWorking) {
+    // Defensive — initNewCor should have built it
+    console.warn('Smart Upload: _ncorWorking not initialized');
+    return;
+  }
+
+  // Show banner with extraction provenance
+  var banner = g('ncor-smart-up-banner');
+  if (banner) banner.style.display = '';
+  var bMeta = g('ncor-smart-up-banner-meta');
+  if (bMeta) {
+    var bits = [];
+    bits.push('File: ' + (_smartUpCorFile ? _smartUpCorFile.name : '(unknown)'));
+    if (parsed.corNumber) bits.push('Original COR #: ' + parsed.corNumber);
+    if (parsed.corDate)   bits.push('Date: ' + parsed.corDate);
+    if (parsed.corType)   bits.push('Type: ' + parsed.corType);
+    bMeta.textContent = bits.join('  •  ');
+  }
+  g('ncor-heading').textContent = 'Smart upload — review extracted COR';
+
+  // Header: COR # — preserve original. Enable the input so it's visible
+  // (initNewCor disables it; we want the user to see the preserved value).
+  var numEl = g('ncor-num');
+  if (numEl) {
+    numEl.value = String(parsed.corNumber || '').trim();
+    numEl.disabled = false;
+    numEl.style.background = '#fff';
+    numEl.style.color = '';
+    numEl.style.fontWeight = '600';
+  }
+
+  // Date
+  var dt = String(parsed.corDate || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) dt = new Date().toISOString().slice(0,10);
+  if (g('ncor-date')) g('ncor-date').value = dt;
+
+  // Description
+  if (g('ncor-desc')) g('ncor-desc').value = String(parsed.description || '').trim();
+
+  // Customer CO #
+  if (g('ncor-customer-co-num')) {
+    g('ncor-customer-co-num').value = String(parsed.customerCoNumber || '').trim();
+  }
+
+  // Project + type are locked in initNewCor — the project dropdown is
+  // already populated and the type display is read-only. Force-lock the
+  // project dropdown explicitly (initNewCor leaves it editable for new
+  // CORs by default).
+  var projSel = g('ncor-project');
+  if (projSel) projSel.disabled = true;
+
+  // Attention contact: try to match the extracted name to one of the
+  // dropdown options (case-insensitive trim). The dropdown was populated
+  // by ncorProjectChanged() during initNewCor.
+  var attnEl = g('ncor-attention');
+  var attnName = String(parsed.attentionContactName || '').trim().toLowerCase();
+  if (attnEl && attnName) {
+    var opts = attnEl.querySelectorAll('option');
+    for (var i = 0; i < opts.length; i++) {
+      var label = String(opts[i].textContent || '').trim().toLowerCase();
+      // Match if extracted name appears within the option label (handles
+      // "John Smith — Site Super" style labels)
+      if (label && label.indexOf(attnName) !== -1) {
+        attnEl.value = opts[i].value;
+        break;
+      }
+    }
+  }
+
+  // Working state: manual rows + markup percentages
+  // (Auto rows stay empty — historical CORs have no T&M tickets to roll up)
+  _ncorWorking.manualLaborRows = (Array.isArray(parsed.manualLaborRows) ? parsed.manualLaborRows : [])
+    .map(function(r){
+      return {
+        classification: String((r && r.classification) || '').trim(),
+        hours: Number(r && r.hours) || 0,
+        rate:  Number(r && r.rate)  || 0
+      };
+    });
+  _ncorWorking.manualMaterialRows = (Array.isArray(parsed.manualMaterialRows) ? parsed.manualMaterialRows : [])
+    .map(function(r){
+      return {
+        description: String((r && r.description) || '').trim(),
+        quantity:    Number(r && r.quantity)  || 0,
+        unitPrice:   Number(r && r.unitPrice) || 0
+      };
+    });
+  _ncorWorking.subRows = (Array.isArray(parsed.subRows) ? parsed.subRows : [])
+    .map(function(r){
+      return {
+        name:  String((r && r.name) || '').trim(),
+        total: Number(r && r.total) || 0
+      };
+    });
+
+  // Markup overrides — use extracted values if present, otherwise leave
+  // the project defaults that initNewCor stamped on.
+  if (typeof parsed.matEqMarkupPct === 'number' && !isNaN(parsed.matEqMarkupPct)) {
+    _ncorWorking.matEqMarkupPct = parsed.matEqMarkupPct;
+  }
+  if (typeof parsed.subMarkupPct === 'number' && !isNaN(parsed.subMarkupPct)) {
+    _ncorWorking.subMarkupPct = parsed.subMarkupPct;
+  }
+
+  // Re-render all sections to show the populated rows
+  ncorRenderSections();
+
+  // Swap save buttons: hide Create, show Confirm & save
+  var normalSave = g('ncor-save-btn');
+  var confirmSave = g('ncor-smart-up-save-btn');
+  if (normalSave) normalSave.style.display = 'none';
+  if (confirmSave) confirmSave.style.display = '';
+
+  // Hide the lifecycle buttons (they're for existing saved CORs)
+  ['ncor-pdf-btn','ncor-fnd-header-btn','ncor-fnd-detail-btn','ncor-send-btn',
+   'ncor-approve-btn','ncor-reject-btn','ncor-reopen-btn','ncor-void-btn'].forEach(function(idStr){
+    var b = g(idStr); if (b) b.style.display = 'none';
+  });
+}
+
+// Confirm & save handler. Validates, creates the record at status=Pending,
+// uploads the file, syncs to Supabase. Mirrors saveCor's create path with
+// adjustments: status='Pending', preserve original corNumber, smart-upload
+// fields, file upload step.
+async function confirmSmartUploadCor() {
+  if (!_smartUpCorMode || !_smartUpCorFile || !_smartUpCorProjectId) {
+    alert('Smart Upload state is missing — please start over from the COR list.');
+    return;
+  }
+  if (!supabaseClient) { alert('Not connected to Supabase.'); return; }
+
+  // Read the form
+  var pid     = _smartUpCorProjectId;
+  var corDate = (g('ncor-date').value || '').trim();
+  var corType = g('ncor-type-display').dataset.corType || g('ncor-type-display').value || 'T&M';
+  var attnId  = (g('ncor-attention').value || '').trim();
+  var description = (g('ncor-desc').value || '').trim();
+  var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
+  var corNumber = g('ncor-num') ? (g('ncor-num').value || '').trim() : '';
+
+  if (!corNumber) { alert('Please enter or confirm the COR # from the original document.'); return; }
+  if (!corDate)   { alert('Please pick a date.'); return; }
+  if (COR_TYPES.indexOf(corType) === -1) { alert('Invalid COR type. Edit the type before saving.'); return; }
+  if (!attnId)    { alert('Please pick an Attention contact. If none are listed, assign customer contacts on the Project edit page first, then re-open this Smart Upload review.'); return; }
+  if (!description) { alert('Please enter a description.'); return; }
+
+  var p = db.projects.find(function(x){ return String(x.id) === String(pid); });
+  if (!p) { alert('Project not found.'); return; }
+
+  // Duplicate check — same corNumber on the same project
+  var dup = (db.cors || []).find(function(c){
+    return String(c.projectId) === String(p.id) &&
+           String(c.corNumber || '').trim() === corNumber;
+  });
+  if (dup) {
+    alert('A COR with number "' + corNumber + '" already exists on this project. Edit the COR # to make it unique, or void the existing one first.');
+    return;
+  }
+
+  // Bump nextCorSeq if the imported number has a parseable seq >= current
+  var importedSeq = _smartUpCorParseSeq(corNumber);
+  if (importedSeq !== null) {
+    var currentSeq = Number(p.nextCorSeq || 1001);
+    if (importedSeq >= currentSeq) {
+      p.nextCorSeq = importedSeq + 1;
+    }
+  }
+
+  var btn = g('ncor-smart-up-save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+
+  // Snapshot row state from the working copy
+  var w = _ncorWorking || {};
+  var newManualLabor = (w.manualLaborRows || []).map(function(r){
+    return { classification: r.classification || '', hours: Number(r.hours) || 0, rate: Number(r.rate) || 0 };
+  });
+  var newManualMat = (w.manualMaterialRows || []).map(function(r){
+    return { description: r.description || '', quantity: Number(r.quantity) || 0, unitPrice: Number(r.unitPrice) || 0 };
+  });
+  var newSubs = (w.subRows || []).map(function(r){
+    return { name: r.name || '', total: Number(r.total) || 0 };
+  });
+
+  // Compute totals (uses _ncorWorking — same engine the form already uses)
+  var totals = ncorComputeTotals();
+
+  var ex = _smartUpCorExtracted || {};
+  var nowIso = new Date().toISOString();
+  var decisionAt = null;
+  if (ex.decisionDate && /^\d{4}-\d{2}-\d{2}$/.test(String(ex.decisionDate).trim())) {
+    decisionAt = new Date(String(ex.decisionDate).trim() + 'T12:00:00').toISOString();
+  }
+
+  var newCor = {
+    id: Date.now(),
+    corNumber: corNumber,
+    corDate: corDate,
+    corType: corType,
+    projectId: Number(p.id),
+    attentionContactId: attnId,
+    description: description,
+    status: 'Pending',
+    rolledUpTicketIds: [],   // historical CORs have no digital tickets
+    laborRows: [],            // no auto rows for imports
+    manualLaborRows:   newManualLabor,
+    autoMaterialRows:  [],
+    manualMaterialRows: newManualMat,
+    subRows: newSubs,
+    matEqMarkupPct: (w.matEqMarkupPct !== null && w.matEqMarkupPct !== undefined) ? w.matEqMarkupPct : 10,
+    subMarkupPct:   (w.subMarkupPct   !== null && w.subMarkupPct   !== undefined) ? w.subMarkupPct   : 5,
+    totalLabor:    totals.totalLabor,
+    totalMaterial: totals.totalMaterial,
+    totalSub:      totals.totalSub,
+    mateqOhp:      totals.mateqOhp,
+    subOhp:        totals.subOhp,
+    totalAmount:   totals.totalAmount,
+    createdAt: nowIso,
+    createdByUserId: _currentUser ? _currentUser.id : null,
+    createdByName:   _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '',
+    updatedAt: nowIso,
+    updatedByUserId: _currentUser ? _currentUser.id : null,
+    sentAt: null, sentByUserId: null,
+    decisionAt: decisionAt, decisionByUserId: null,
+    voidedAt: null, voidedByUserId: null,
+    voidReason: null,
+    customerCoNumber: customerCoNumber || null,
+    // Smart Upload provenance — synced if the SQL migration ran, local-only otherwise
+    smartUploaded: true,
+    smartUploadedAt: nowIso,
+    smartUploadedByUserId: _currentUser ? _currentUser.id : null,
+    smartUploadedFile: null  // populated after upload below
+  };
+
+  if (!Array.isArray(db.cors)) db.cors = [];
+  db.cors.unshift(newCor);
+  saveDB();
+
+  // Phase 2 — upload the file to storage at cors/{corId}/
+  try {
+    var ts = Date.now();
+    var origName = String(_smartUpCorFile.name || 'cor.pdf').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+    if (!/\.[a-z0-9]+$/i.test(origName)) origName += '.pdf';
+    var path = 'cors/' + newCor.id + '/' + ts + '_' + origName;
+
+    var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).upload(path, _smartUpCorFile, {
+      contentType: 'application/pdf', upsert: false
+    });
+    if (up && up.error) {
+      if (/Bucket not found/i.test(up.error.message || '')) {
+        throw new Error('Storage bucket "' + PROJECT_FILES_BUCKET + '" not set up. Create it in Supabase Storage first.');
+      }
+      throw new Error(up.error.message);
+    }
+
+    newCor.smartUploadedFile = {
+      name: _smartUpCorFile.name,
+      path: path,
+      size: _smartUpCorFile.size,
+      contentType: 'application/pdf',
+      uploadedAt: nowIso,
+      uploadedByUserId: _currentUser ? _currentUser.id : null,
+      uploadedByName: _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : ''
+    };
+    saveDB();
+  } catch (e) {
+    // Roll back the local COR — don't leave an orphaned record without its file
+    db.cors = (db.cors || []).filter(function(x){ return String(x.id) !== String(newCor.id); });
+    // Best-effort rewind nextCorSeq if we bumped it for this import
+    if (importedSeq !== null && p.nextCorSeq === importedSeq + 1) {
+      p.nextCorSeq = importedSeq;
+    }
+    saveDB();
+    if (btn) { btn.disabled = false; btn.textContent = '\u2713 Confirm & save (Pending)'; }
+    alert('File upload failed: ' + (e.message || e) + '\nThe COR was not created. Please try again.');
+    return;
+  }
+
+  // Phase 3 — push to Supabase
+  try {
+    if (supabaseClient) {
+      var corRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(newCor));
+      if (corRes && corRes.error) {
+        // Common case: the smart_uploaded* columns don't exist yet (migration
+        // not run). Surface that clearly to the user without bricking the save.
+        var em = corRes.error.message || '';
+        if (/smart_uploaded/i.test(em) || /column .* does not exist/i.test(em)) {
+          showToast('COR saved locally. Run the smart-upload SQL migration in Supabase to enable cloud sync of provenance fields.', 'info');
+        } else {
+          showToast('COR ' + newCor.corNumber + ' saved locally; cloud sync failed (' + em + '). Will retry next push.', 'error');
+        }
+      }
+      // Best-effort project sync (for nextCorSeq bump)
+      try {
+        var prjRes = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+        if (prjRes && prjRes.error) console.warn('Project nextCorSeq sync warning:', prjRes.error.message);
+      } catch (e) { console.warn('Project sync exception:', e); }
+    }
+  } catch (e) {
+    console.warn('COR sync exception:', e);
+  }
+
+  db.activity.unshift({text: 'COR ' + newCor.corNumber + ' smart-uploaded (Pending)', type: 'won', time: 'Just now'});
+  saveDB();
+
+  showToast('Smart Upload complete — COR ' + newCor.corNumber + ' saved as Pending.', 'success');
+
+  // Clean up state
+  _smartUpCorClearState();
+  var banner = g('ncor-smart-up-banner');
+  if (banner) banner.style.display = 'none';
+  if (g('ncor-smart-up-save-btn')) g('ncor-smart-up-save-btn').style.display = 'none';
+  if (g('ncor-save-btn')) g('ncor-save-btn').style.display = '';
+
+  // Show the saved COR
+  viewCor(newCor.id);
 }
 
 // ── Round 4.3 placeholder no-ops (so onclick handlers don't ReferenceError) ─
@@ -15833,7 +16531,16 @@ function toSBCor(r) {
     voided_at:         r.voidedAt         || null,
     voided_by_user_id: r.voidedByUserId   || null,
     void_reason:       r.voidReason       || null,
-    customer_co_number: r.customerCoNumber || null
+    customer_co_number: r.customerCoNumber || null,
+    // Smart Upload provenance — added with COR Smart Upload feature.
+    // Requires a SQL migration to add these four columns. Until the
+    // migration is run these fields will fail-silent on upsert; the
+    // feature still works, just without cloud-side persistence of
+    // the original-file pointer (file is in storage either way).
+    smart_uploaded:           !!r.smartUploaded,
+    smart_uploaded_file:      r.smartUploadedFile      || null,
+    smart_uploaded_at:        r.smartUploadedAt        || null,
+    smart_uploaded_by_user_id: r.smartUploadedByUserId || null
   };
 }
 function fromSBCor(r) {
@@ -15891,7 +16598,12 @@ function fromSBCor(r) {
     voidedAt:         r.voided_at         || null,
     voidedByUserId:   r.voided_by_user_id || null,
     voidReason:       r.void_reason       || null,
-    customerCoNumber: r.customer_co_number || null
+    customerCoNumber: r.customer_co_number || null,
+    // Smart Upload provenance (only present after the SQL migration runs)
+    smartUploaded:         !!r.smart_uploaded,
+    smartUploadedFile:     r.smart_uploaded_file        || null,
+    smartUploadedAt:       r.smart_uploaded_at          || null,
+    smartUploadedByUserId: r.smart_uploaded_by_user_id  || null
   };
 }
 
