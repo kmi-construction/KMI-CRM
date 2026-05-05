@@ -1295,7 +1295,8 @@ textarea{resize:vertical;min-height:72px}
     </div>
     <div class="fg">
       <div class="fgr"><label>Project Time Extension (days)</label><input type="number" id="ncor-time-ext-days" min="0" step="1" placeholder="0"><div style="font-size:11px;color:#888;margin-top:4px">Number of additional contract days requested by this change. Leave blank or 0 if no extension.</div></div>
-      <div class="fgr full"><label>Omitted Scope</label><textarea id="ncor-omitted-scope" rows="2" placeholder="Describe any scope being omitted by this change (optional)..."></textarea><div style="font-size:11px;color:#888;margin-top:4px">Hunzinger&apos;s form has a separate &ldquo;Omitted Scope&rdquo; narrative box at the bottom. The Description above maps to &ldquo;Added Scope&rdquo;.</div></div>
+      <div class="fgr full"><label>Added Scope (narrative)</label><textarea id="ncor-added-scope" rows="2" placeholder="Describe the scope being added by this change (optional — leave blank to fall back to the Description above)..."></textarea><div style="font-size:11px;color:#888;margin-top:4px">Hunzinger&apos;s form has a separate &ldquo;Added Scope&rdquo; narrative box at the bottom. If left blank, the Description above is used as the Added Scope text on the printed PDF.</div></div>
+      <div class="fgr full"><label>Omitted Scope</label><textarea id="ncor-omitted-scope" rows="2" placeholder="Describe any scope being omitted by this change (optional)..."></textarea><div style="font-size:11px;color:#888;margin-top:4px">Hunzinger&apos;s form has a separate &ldquo;Omitted Scope&rdquo; narrative box at the bottom.</div></div>
     </div>
   </div>
 
@@ -1322,11 +1323,21 @@ textarea{resize:vertical;min-height:72px}
   <!-- Materials & Equipment -->
   <div class="card" id="ncor-section-materials">
     <div class="ch">
-      <span class="ct">Materials &amp; Equipment</span>
+      <span class="ct">Materials</span>
       <button class="btn btn-sm" onclick="ncorAddMaterialRow()" id="ncor-add-mat-btn">+ Add row</button>
       <button class="btn btn-sm" onclick="ncorShowFromMaterialListModal()" id="ncor-from-list-btn" style="margin-left:6px">+ From list</button>
     </div>
     <div id="ncor-materials-body"></div>
+  </div>
+
+  <!-- Equipment (Hunzinger COR worksheet shows this as its own section
+       with an independent markup percent — separate from Materials) -->
+  <div class="card" id="ncor-section-equipment">
+    <div class="ch">
+      <span class="ct">Equipment</span>
+      <button class="btn btn-sm" onclick="ncorAddEquipmentRow()" id="ncor-add-eq-btn">+ Add row</button>
+    </div>
+    <div id="ncor-equipment-body"></div>
   </div>
 
   <!-- Subcontractors -->
@@ -1337,6 +1348,16 @@ textarea{resize:vertical;min-height:72px}
       <button class="btn btn-sm" onclick="ncorShowFromBudgetSubsModal()" id="ncor-from-budget-btn" style="margin-left:6px">+ From budget</button>
     </div>
     <div id="ncor-subs-body"></div>
+  </div>
+
+  <!-- Unit Pricing (Hunzinger-style fixed-rate line items, e.g. per-LF, per-EA;
+       markup is typically already included in the unit rate so default markup is 0%) -->
+  <div class="card" id="ncor-section-unit-pricing">
+    <div class="ch">
+      <span class="ct">Unit Pricing</span>
+      <button class="btn btn-sm" onclick="ncorAddUnitPriceRow()" id="ncor-add-up-btn">+ Add row</button>
+    </div>
+    <div id="ncor-unit-pricing-body"></div>
   </div>
 
   <!-- Grand total -->
@@ -7043,10 +7064,15 @@ function initNewCor() {
     manualMaterialRows: [],
     autoMaterialRows:   [],
     subRows:            [],
+    equipmentRows:      [],
+    unitPriceRows:      [],
     matEqMarkupPct: prefillProj ? ((prefillProj.matEqMarkupPct !== null && prefillProj.matEqMarkupPct !== undefined) ? prefillProj.matEqMarkupPct : 10) : 10,
     subMarkupPct:   prefillProj ? ((prefillProj.subMarkupPct   !== null && prefillProj.subMarkupPct   !== undefined) ? prefillProj.subMarkupPct   : 5)  : 5,
+    equipmentMarkupPct: 10,
+    unitPriceMarkupPct: 0,
     bondRatePct:    prefillProj ? ((prefillProj.bondRatePct   !== null && prefillProj.bondRatePct   !== undefined) ? prefillProj.bondRatePct   : 0)  : 0,
     timeExtensionDays: '',
+    addedScope:     '',
     omittedScope:   '',
     corType:    corType,
     projectId:  prefillProjectIdNum
@@ -7280,16 +7306,26 @@ async function saveCor() {
     existingCor.autoMaterialRows  = newAutoMat;
     existingCor.manualMaterialRows = newManualMat;
     existingCor.subRows           = newSubs;
-    existingCor.totalLabor    = totals.totalLabor;
-    existingCor.totalMaterial = totals.totalMaterial;
-    existingCor.totalSub      = totals.totalSub;
-    existingCor.mateqOhp      = totals.mateqOhp;
-    existingCor.subOhp        = totals.subOhp;
-    existingCor.bondCost      = totals.bondCost;
-    existingCor.totalAmount   = totals.totalAmount;
+    // Equipment + Unit Pricing rows (Hunzinger COR worksheet sections)
+    existingCor.equipmentRows     = Array.isArray(w.equipmentRows) ? JSON.parse(JSON.stringify(w.equipmentRows)) : [];
+    existingCor.unitPriceRows     = Array.isArray(w.unitPriceRows) ? JSON.parse(JSON.stringify(w.unitPriceRows)) : [];
+    existingCor.equipmentMarkupPct = (w.equipmentMarkupPct !== null && w.equipmentMarkupPct !== undefined) ? Number(w.equipmentMarkupPct) : 10;
+    existingCor.unitPriceMarkupPct = (w.unitPriceMarkupPct !== null && w.unitPriceMarkupPct !== undefined) ? Number(w.unitPriceMarkupPct) : 0;
+    existingCor.totalLabor      = totals.totalLabor;
+    existingCor.totalMaterial   = totals.totalMaterial;
+    existingCor.totalSub        = totals.totalSub;
+    existingCor.totalEquipment  = totals.totalEquipment;
+    existingCor.totalUnitPrice  = totals.totalUnitPrice;
+    existingCor.mateqOhp        = totals.mateqOhp;
+    existingCor.subOhp          = totals.subOhp;
+    existingCor.equipmentOhp    = totals.equipmentOhp;
+    existingCor.unitPriceOhp    = totals.unitPriceOhp;
+    existingCor.bondCost        = totals.bondCost;
+    existingCor.totalAmount     = totals.totalAmount;
     // Hunzinger-specific fields. Carry working-state values regardless of
     // form type so a later flip back to Hunzinger doesn't lose the data.
     existingCor.timeExtensionDays = (w.timeExtensionDays === '' || w.timeExtensionDays === null || w.timeExtensionDays === undefined) ? null : Number(w.timeExtensionDays);
+    existingCor.addedScope        = w.addedScope   || '';
     existingCor.omittedScope      = w.omittedScope || '';
     existingCor.updatedAt     = new Date().toISOString();
     existingCor.updatedByUserId = _currentUser ? _currentUser.id : null;
@@ -7334,19 +7370,29 @@ async function saveCor() {
     autoMaterialRows:  newAutoMat,
     manualMaterialRows: newManualMat,
     subRows:           newSubs,
+    // Equipment + Unit Pricing rows (Hunzinger COR worksheet sections)
+    equipmentRows:     Array.isArray(w.equipmentRows) ? JSON.parse(JSON.stringify(w.equipmentRows)) : [],
+    unitPriceRows:     Array.isArray(w.unitPriceRows) ? JSON.parse(JSON.stringify(w.unitPriceRows)) : [],
     matEqMarkupPct: (p.matEqMarkupPct !== null && p.matEqMarkupPct !== undefined) ? p.matEqMarkupPct : 10,
     subMarkupPct:   (p.subMarkupPct   !== null && p.subMarkupPct   !== undefined) ? p.subMarkupPct   : 5,
+    equipmentMarkupPct: (w.equipmentMarkupPct !== null && w.equipmentMarkupPct !== undefined) ? Number(w.equipmentMarkupPct) : 10,
+    unitPriceMarkupPct: (w.unitPriceMarkupPct !== null && w.unitPriceMarkupPct !== undefined) ? Number(w.unitPriceMarkupPct) : 0,
     // Bond rate snapshot at create time (same pattern as the markups above).
     bondRatePct:    (p.bondRatePct !== null && p.bondRatePct !== undefined) ? p.bondRatePct : 0,
     // Hunzinger-specific fields (carried even on Standard projects so a
     // later switch doesn't lose data; null/empty if not set)
     timeExtensionDays: (w.timeExtensionDays === '' || w.timeExtensionDays === null || w.timeExtensionDays === undefined) ? null : Number(w.timeExtensionDays),
+    addedScope:     w.addedScope   || '',
     omittedScope:   w.omittedScope || '',
     totalLabor:    totals.totalLabor,
     totalMaterial: totals.totalMaterial,
     totalSub:      totals.totalSub,
+    totalEquipment: totals.totalEquipment,
+    totalUnitPrice: totals.totalUnitPrice,
     mateqOhp:      totals.mateqOhp,
     subOhp:        totals.subOhp,
+    equipmentOhp:  totals.equipmentOhp,
+    unitPriceOhp:  totals.unitPriceOhp,
     bondCost:      totals.bondCost,
     totalAmount:   totals.totalAmount,
     createdAt: nowIso,
@@ -7725,11 +7771,16 @@ async function smartUploadCorExtract() {
       '  "decisionDate":      "YYYY-MM-DD or null — date the customer accepted/rejected, if shown",\n' +
       '  "manualLaborRows":   [{"classification": "...", "hours": 0, "rate": 0}],\n' +
       '  "manualMaterialRows":[{"description": "...", "quantity": 0, "unitPrice": 0}],\n' +
+      '  "equipmentRows":     [{"description": "...", "quantity": 0, "unit": "DAY", "unitPrice": 0}],\n' +
+      '  "unitPriceRows":     [{"description": "...", "quantity": 0, "unit": "...", "unitPrice": 0}],\n' +
       '  "subRows":           [{"name": "...", "total": 0}],\n' +
-      '  "matEqMarkupPct":    "number or null — Materials & Equipment OH&P markup percent (often 10)",\n' +
+      '  "matEqMarkupPct":    "number or null — Materials OH&P markup percent (often 10)",\n' +
+      '  "equipmentMarkupPct":"number or null — Equipment OH&P markup percent (often 10 — Hunzinger lists Equipment separately from Materials)",\n' +
+      '  "unitPriceMarkupPct":"number or null — Unit Price OH&P markup percent (often 0 — markup typically already included in the unit rate)",\n' +
       '  "subMarkupPct":      "number or null — Subcontractor OH&P markup percent (often 5)",\n' +
       '  "bondRatePct":       "number or null — bond cost percent applied to subtotal (often 0 or 1.5)",\n' +
       '  "timeExtensionDays": "integer or null — number of additional days requested (Hunzinger forms specifically)",\n' +
+      '  "addedScope":        "string or null — text from the \"Added Scope\" narrative box if the form has one (Hunzinger forms specifically). Distinct from the top-of-form Work Description; may be left empty.",\n' +
       '  "omittedScope":      "string or null — text from the \"Omitted Scope\" narrative box if the form has one (Hunzinger forms specifically)",\n' +
       '  "totalLabor":        "number or null — labor subtotal as printed on the doc",\n' +
       '  "totalMaterial":     "number or null — material subtotal",\n' +
@@ -7945,6 +7996,33 @@ function _smartUpCorApplyPrefill(project, parsed) {
   if (typeof parsed.subMarkupPct === 'number' && !isNaN(parsed.subMarkupPct)) {
     _ncorWorking.subMarkupPct = parsed.subMarkupPct;
   }
+  if (typeof parsed.equipmentMarkupPct === 'number' && !isNaN(parsed.equipmentMarkupPct)) {
+    _ncorWorking.equipmentMarkupPct = parsed.equipmentMarkupPct;
+  }
+  if (typeof parsed.unitPriceMarkupPct === 'number' && !isNaN(parsed.unitPriceMarkupPct)) {
+    _ncorWorking.unitPriceMarkupPct = parsed.unitPriceMarkupPct;
+  }
+  // Equipment + Unit Pricing rows from extraction
+  if (Array.isArray(parsed.equipmentRows)) {
+    _ncorWorking.equipmentRows = parsed.equipmentRows.map(function(r){
+      return {
+        description: String(r.description || ''),
+        quantity:    Number(r.quantity)  || 0,
+        unit:        String(r.unit || ''),
+        unitPrice:   Number(r.unitPrice) || 0
+      };
+    });
+  }
+  if (Array.isArray(parsed.unitPriceRows)) {
+    _ncorWorking.unitPriceRows = parsed.unitPriceRows.map(function(r){
+      return {
+        description: String(r.description || ''),
+        quantity:    Number(r.quantity)  || 0,
+        unit:        String(r.unit || ''),
+        unitPrice:   Number(r.unitPrice) || 0
+      };
+    });
+  }
   // Bond rate + Hunzinger-only fields. Values default to project / blank
   // unless the document supplies something usable.
   if (typeof parsed.bondRatePct === 'number' && !isNaN(parsed.bondRatePct)) {
@@ -7952,6 +8030,9 @@ function _smartUpCorApplyPrefill(project, parsed) {
   }
   if (typeof parsed.timeExtensionDays === 'number' && !isNaN(parsed.timeExtensionDays)) {
     _ncorWorking.timeExtensionDays = parsed.timeExtensionDays;
+  }
+  if (typeof parsed.addedScope === 'string' && parsed.addedScope.trim()) {
+    _ncorWorking.addedScope = parsed.addedScope.trim();
   }
   if (typeof parsed.omittedScope === 'string' && parsed.omittedScope.trim()) {
     _ncorWorking.omittedScope = parsed.omittedScope.trim();
@@ -8693,17 +8774,32 @@ function buildHunzingerCorPDF(c, p) {
   var jsPDF = window.jspdf.jsPDF;
   var doc = new jsPDF({unit:'pt', format:'letter'});
 
-  var LM = 36, RM = 576, PAGE_W = 612, PAGE_H = 792;
-  var FOOTER_TOP = 720;
+  // Hunzinger's "Change Request Worksheet" form. Layout matches the form
+  // they fax/scan back, NOT the KMI letterhead. Page numbering ("X of N")
+  // is added at the very end once the final page count is known.
 
-  function letterhead() {
-    if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
-      try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 90); } catch(e) {}
-    }
-    if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
-      try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 60, PAGE_W, 60); } catch(e) {}
-    }
+  var LM = 36, RM = 576, PAGE_W = 612, PAGE_H = 792;
+  var TOP_OF_BODY = 90;          // y where content starts after the title
+  var FOOTER_TOP  = 760;         // bottom safe area for page-number footer
+
+  // ── Resolve printable values ──────────────────────────────────────
+  var seq = corExtractKmiSeq(c.corNumber) || c.corNumber || '';
+  var docRef = 'KMI COR ' + seq;
+  var workDesc = c.description || '';
+  var addedScopeText = (c.addedScope && String(c.addedScope).trim()) || workDesc || '';
+  var omittedScopeText = (c.omittedScope || '').trim();
+
+  // Determine which hour column to populate based on COR type. Hunzinger's
+  // columns are Reg | T&H | DT.
+  function hourCol(corType) {
+    var t = (corType || '').toLowerCase();
+    if (t.indexOf('double') !== -1 || t === 'premium time dt' || t === 'dt') return 'dt';
+    if (t.indexOf('overtime') !== -1 || t === 'premium time ot' || t.indexOf('t&h') !== -1) return 'th';
+    return 'reg';
   }
+  var hcol = hourCol(c.corType);
+
+  // ── Style helpers ─────────────────────────────────────────────────
   function sf(st, sz, col) {
     doc.setFont('helvetica', st);
     doc.setFontSize(sz);
@@ -8717,99 +8813,114 @@ function buildHunzingerCorPDF(c, p) {
   function wrap(text, maxW) {
     return doc.splitTextToSize(String(text || ''), maxW);
   }
+
+  // Format a multiplier as "X.XX%" (always 2 decimals, like the form)
+  function pctFmt(n) {
+    var v = Number(n) || 0;
+    return v.toFixed(2) + '%';
+  }
+
+  // Page top: title and 3-line header (Contractor / Work Description / Doc Ref)
+  function renderPageHeader() {
+    sf('bold', 11, [0, 0, 0]);
+    doc.text('Change Request Worksheet', PAGE_W / 2, 36, {align: 'center'});
+    var y = 56;
+    sf('bold', 9.5, [0, 0, 0]);
+    doc.text('Contractor:', LM, y);
+    sf('normal', 9.5);
+    doc.text('KMI Construction LLC', LM + 90, y);
+    y += 12;
+    sf('bold', 9.5);
+    doc.text('Work Description:', LM, y);
+    sf('normal', 9.5);
+    var wdLines = wrap(workDesc, RM - LM - 110);
+    doc.text(wdLines, LM + 110, y);
+    y += Math.max(12, wdLines.length * 11);
+    sf('bold', 9.5);
+    doc.text('Document Reference Number:', LM, y);
+    sf('normal', 9.5);
+    doc.text(docRef, LM + 175, y);
+  }
+
   function ensureRoom(yNeeded, currentY) {
-    if (currentY + yNeeded > FOOTER_TOP - 12) {
+    if (currentY + yNeeded > FOOTER_TOP - 20) {
       doc.addPage();
-      letterhead();
-      return 110;
+      renderPageHeader();
+      return TOP_OF_BODY + 20;
     }
     return currentY;
   }
 
-  letterhead();
-
-  var seq = corExtractKmiSeq(c.corNumber) || c.corNumber || '';
-  var docRef = 'KMI COR ' + seq;
-  var workDesc = c.description || '';
-  var contractor = _corPdfResolveContractorBlock(c, p);
-  var contractorName = contractor.name || 'KMI Construction LLC';
-
-  // ── Top header block: 3 fields right-aligned on left side of page ─
-  var y = 104;
-  sf('bold', 10, [0, 0, 0]);
-  doc.text('Contractor:', LM + 60, y);
-  sf('normal', 10);
-  doc.text('KMI Construction LLC', LM + 160, y);
-  y += 14;
-  sf('bold', 10);
-  doc.text('Work Description:', LM + 60, y);
-  sf('normal', 10);
-  var wdLines = wrap(workDesc, RM - (LM + 160) - 10);
-  doc.text(wdLines, LM + 160, y);
-  y += Math.max(14, wdLines.length * 12);
-  sf('bold', 10);
-  doc.text('Document Reference Number:', LM + 60, y);
-  sf('normal', 10);
-  doc.text(docRef, LM + 220, y);
-  y += 18;
-
-  // Determine which hour column to populate based on COR type.
-  // Hunzinger's columns are: Reg | T&H | DT
-  // KMI COR types map as follows:
-  //   "T&M", "Fixed Fee"              → Reg (full T&M billing)
-  //   "Overtime", "Premium Time OT"   → T&H
-  //   "Double Time", "Premium Time DT" → DT
-  function hourCol(corType) {
-    var t = (corType || '').toLowerCase();
-    if (t.indexOf('double') !== -1 || t === 'premium time dt' || t === 'dt') return 'dt';
-    if (t.indexOf('overtime') !== -1 || t === 'premium time ot' || t.indexOf('t&h') !== -1) return 'th';
-    return 'reg';
+  // Render multiplier sub-table block. Used by all four sections that have
+  // an OH&P line. Columns:
+  //   leftLabel (~LM+90)  | "Multipliers" header / value (~LM+220) | "%" header / pct (~LM+290)
+  //   "of X sub-total" (~LM+340) | extension value (right edge)
+  // Returns the new y after rendering.
+  function renderMultiplierBlock(y, leftLabel, pctValue, ofWhat, extensionValue) {
+    var midX = LM + 220;
+    var pctX = LM + 320;
+    sf('bold', 8, [80, 80, 80]);
+    doc.text('Multipliers', midX, y);
+    doc.text('%', pctX, y);
+    y += 11;
+    sf('normal', 9, [0, 0, 0]);
+    doc.text(leftLabel, LM + 90, y);
+    doc.text(pctFmt(pctValue), pctX + 25, y, {align: 'right'});
+    sf('normal', 9, [80, 80, 80]);
+    doc.text('of ' + ofWhat, pctX + 35, y);
+    if (extensionValue !== null && extensionValue !== undefined) {
+      sf('normal', 9, [0, 0, 0]);
+      doc.text('$' + _corPdfMoney(extensionValue), RM, y, {align: 'right'});
+    }
+    return y + 14;
   }
-  var hcol = hourCol(c.corType);
 
-  // ── LABOR COST section ────────────────────────────────────────────
-  y += 6;
+  // ── Page 1 ────────────────────────────────────────────────────────
+  renderPageHeader();
+  var y = TOP_OF_BODY + 14;
+
+  // ── LABOR COST ────────────────────────────────────────────────────
   sf('bold', 10, [0, 0, 0]);
   doc.text('LABOR COST:', LM, y);
   y += 14;
 
-  // Table header row 1: Hours | Classification | Rate/hr per contract
   var Lcols = {
-    reg:   LM + 12,    // header cell ~30pt
+    reg:   LM + 16,
     th:    LM + 50,
-    dt:    LM + 88,
-    cls:   LM + 130,
-    rateR: LM + 240,
-    rateT: LM + 290,
-    rateD: LM + 340,
-    ext:   RM - 6
+    dt:    LM + 84,
+    cls:   LM + 122,
+    rateR: LM + 248,
+    rateT: LM + 308,
+    rateD: LM + 368,
+    ext:   RM
   };
-
+  // Group headers: "Hours" centered above Reg/T&H/DT; "Rate/hr per contract" above the 3 rate cols
   sf('bold', 8, [80, 80, 80]);
-  doc.text('Hours', LM + 50, y);
-  doc.text('Rate/hr per contract', LM + 280, y);
+  doc.text('Hours', LM + 50, y, {align: 'center'});
+  doc.text('Rate/hr per contract', LM + 308, y, {align: 'center'});
   y += 10;
-  doc.text('Reg.', Lcols.reg, y);
-  doc.text('T&H', Lcols.th, y);
-  doc.text('DT', Lcols.dt, y);
-  doc.text('Classification', Lcols.cls, y);
-  doc.text('Reg.', Lcols.rateR, y);
-  doc.text('T&H', Lcols.rateT, y);
-  doc.text('DT', Lcols.rateD, y);
-  doc.text('Extension', Lcols.ext, y, {align:'right'});
+  // Sub-headers
+  doc.text('Reg.',          Lcols.reg,   y, {align: 'right'});
+  doc.text('T&H',           Lcols.th,    y, {align: 'right'});
+  doc.text('DT',            Lcols.dt,    y, {align: 'right'});
+  doc.text('Classification',Lcols.cls,   y);
+  doc.text('Reg.',          Lcols.rateR, y, {align: 'right'});
+  doc.text('T&H',           Lcols.rateT, y, {align: 'right'});
+  doc.text('DT',            Lcols.rateD, y, {align: 'right'});
+  doc.text('Extension',     Lcols.ext,   y, {align: 'right'});
   y += 4;
   ln(LM, y, RM, y, 0.3, [180, 180, 180]);
   y += 12;
 
   var laborRows = _corPdfLaborRows(c);
-  // Pull rate triplet (Reg/OT/DT) from project's labor rate snapshot
-  // when available, so Hunzinger sees full rate context per row.
-  var laborRates = (typeof corGetProjectLaborRates === 'function') ? corGetProjectLaborRates(p) : (Array.isArray(p.laborRates) ? p.laborRates : []);
+  var laborRates = (typeof corGetProjectLaborRates === 'function')
+    ? corGetProjectLaborRates(p)
+    : (Array.isArray(p && p.laborRates) ? p.laborRates : []);
   function rateForCls(cls, kind) {
-    var match = (laborRates || []).find(function(rr){ return ((rr.classification || '').trim().toLowerCase()) === ((cls || '').trim().toLowerCase()); });
+    var match = (laborRates || []).find(function(rr){
+      return ((rr.classification || '').trim().toLowerCase()) === ((cls || '').trim().toLowerCase());
+    });
     if (!match) return 0;
-    // Project labor rate snapshots use stdCoRate / otCoRate / dtCoRate
-    // (matches corResolveRate's expectations).
     if (kind === 'reg') return Number(match.stdCoRate) || 0;
     if (kind === 'th')  return Number(match.otCoRate)  || 0;
     if (kind === 'dt')  return Number(match.dtCoRate)  || 0;
@@ -8834,61 +8945,62 @@ function buildHunzingerCorPDF(c, p) {
       var rTh  = rateForCls(r.classification, 'th')  || (hcol === 'th'  ? r.rate : 0);
       var rDt  = rateForCls(r.classification, 'dt')  || (hcol === 'dt'  ? r.rate : 0);
 
-      doc.text(_corPdfNum(hReg), Lcols.reg + 16, y, {align:'right'});
-      doc.text(_corPdfNum(hTh),  Lcols.th + 16, y, {align:'right'});
-      doc.text(_corPdfNum(hDt),  Lcols.dt + 16, y, {align:'right'});
-      var clsLines = wrap(r.classification || '', 100);
+      doc.text(_corPdfNum(hReg), Lcols.reg, y, {align: 'right'});
+      doc.text(_corPdfNum(hTh),  Lcols.th,  y, {align: 'right'});
+      doc.text(_corPdfNum(hDt),  Lcols.dt,  y, {align: 'right'});
+      var clsLines = wrap(r.classification || '', 110);
       doc.text(clsLines, Lcols.cls, y);
-      doc.text(_corPdfMoney(rReg), Lcols.rateR + 36, y, {align:'right'});
-      doc.text(_corPdfMoney(rTh),  Lcols.rateT + 36, y, {align:'right'});
-      doc.text(_corPdfMoney(rDt),  Lcols.rateD + 36, y, {align:'right'});
-      doc.text(_corPdfMoney(r.total), Lcols.ext, y, {align:'right'});
+      // "@" separator before rates (matches Hunzinger's form layout)
+      doc.text('@', Lcols.cls + 115, y);
+      doc.text('$' + _corPdfMoney(rReg), Lcols.rateR, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(rTh),  Lcols.rateT, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(rDt),  Lcols.rateD, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(r.total), Lcols.ext, y, {align: 'right'});
       y += clsLines.length * 11 + 2;
     });
   }
-  y += 6;
+  y += 4;
 
-  // Labor sub-total / total
+  // Labor sub-total
   ln(LM, y, RM, y, 0.3, [180, 180, 180]);
   y += 12;
   sf('bold', 9, [0, 0, 0]);
-  doc.text('LABOR - Sub-total', RM - 100, y, {align:'right'});
-  doc.text(_corPdfMoney(c.totalLabor), Lcols.ext, y, {align:'right'});
-  y += 14;
-  // Per-template "Multipliers" line (always 0 for KMI — markups on labor are not applied)
-  sf('normal', 8, [80, 80, 80]);
-  doc.text('Multipliers: included in rates above (0% of labor sub-total)', LM + 130, y);
-  y += 12;
-  // Hour totals + LABOR Total line
+  doc.text('LABOR - Sub-total', RM - 110, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalLabor), Lcols.ext, y, {align: 'right'});
+  y += 16;
+  // Labor multipliers (always 0% for KMI — markups are baked into rates)
+  y = renderMultiplierBlock(y, 'included in rates above', 0, 'labor sub-total', null);
+  // LABOR Total row, with hour totals on the left
   sf('bold', 9, [0, 0, 0]);
-  doc.text(_corPdfNum(totReg), Lcols.reg + 16, y, {align:'right'});
-  doc.text(_corPdfNum(totTh),  Lcols.th + 16, y, {align:'right'});
-  doc.text(_corPdfNum(totDt),  Lcols.dt + 16, y, {align:'right'});
-  doc.text('LABOR - Total', RM - 100, y, {align:'right'});
+  doc.text(_corPdfNum(totReg), Lcols.reg, y, {align: 'right'});
+  doc.text(_corPdfNum(totTh),  Lcols.th,  y, {align: 'right'});
+  doc.text(_corPdfNum(totDt),  Lcols.dt,  y, {align: 'right'});
+  doc.text('LABOR - Total', RM - 110, y, {align: 'right'});
   sf('normal', 9);
-  doc.text('-------->', RM - 60, y, {align:'right'});
+  doc.text('-------->', RM - 60, y, {align: 'right'});
   sf('bold', 9);
-  doc.text(_corPdfMoney(c.totalLabor), Lcols.ext, y, {align:'right'});
+  doc.text('$' + _corPdfMoney(c.totalLabor), Lcols.ext, y, {align: 'right'});
   y += 18;
 
-  // ── MATERIALS section ─────────────────────────────────────────────
-  y = ensureRoom(60, y);
-  sf('bold', 10);
+  // ── MATERIALS ─────────────────────────────────────────────────────
+  y = ensureRoom(80, y);
+  sf('bold', 10, [0, 0, 0]);
   doc.text('MATERIALS:', LM, y);
   y += 14;
+  // Columns: Description | Item (qty) | Unit | Rate/unit | Extension
   var Mcols = {
     desc: LM,
-    item: LM + 220,
-    unit: LM + 270,
-    rate: LM + 320,
-    ext:  RM - 6
+    qty:  LM + 240,
+    unit: LM + 290,
+    rate: LM + 360,
+    ext:  RM
   };
   sf('bold', 8, [80, 80, 80]);
   doc.text('Description', Mcols.desc, y);
-  doc.text('Item', Mcols.item, y);
-  doc.text('Unit', Mcols.unit, y);
-  doc.text('Rate/unit', Mcols.rate, y);
-  doc.text('Extension', Mcols.ext, y, {align:'right'});
+  doc.text('Item',        Mcols.qty,  y, {align: 'right'});
+  doc.text('Unit',        Mcols.unit, y, {align: 'right'});
+  doc.text('Rate/unit',   Mcols.rate, y, {align: 'right'});
+  doc.text('Extension',   Mcols.ext,  y, {align: 'right'});
   y += 4;
   ln(LM, y, RM, y, 0.3, [180, 180, 180]);
   y += 12;
@@ -8903,79 +9015,122 @@ function buildHunzingerCorPDF(c, p) {
   } else {
     matRows.forEach(function(r){
       y = ensureRoom(14, y);
-      var dLines = wrap(r.description || '', 210);
+      var dLines = wrap(r.description || '', 230);
       doc.text(dLines, Mcols.desc, y);
-      doc.text(_corPdfNum(r.quantity), Mcols.item + 30, y, {align:'right'});
-      doc.text('LS', Mcols.unit + 20, y, {align:'right'});
-      doc.text(_corPdfMoney(r.unitPrice), Mcols.rate + 50, y, {align:'right'});
-      doc.text(_corPdfMoney(r.cost), Mcols.ext, y, {align:'right'});
+      doc.text(_corPdfNum(r.quantity), Mcols.qty, y, {align: 'right'});
+      doc.text('@', Mcols.qty + 8, y);
+      // Material unit defaults to LS unless user typed something else
+      // (the legacy data model only stored quantity; 'LS' is a safe default)
+      doc.text((r.unit || 'LS'), Mcols.unit, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(r.unitPrice), Mcols.rate, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(r.cost), Mcols.ext, y, {align: 'right'});
       y += dLines.length * 11 + 2;
     });
   }
-  y += 6;
+  y += 4;
   ln(LM, y, RM, y, 0.3, [180, 180, 180]);
   y += 12;
+
   sf('bold', 9, [0, 0, 0]);
-  doc.text('Materials / Equipment - Sub-total', RM - 130, y, {align:'right'});
-  doc.text(_corPdfMoney(c.totalMaterial), Mcols.ext, y, {align:'right'});
+  doc.text('Materials / Equipment - Sub-total', RM - 110, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalMaterial), Mcols.ext, y, {align: 'right'});
   y += 14;
+  // Tax row (tax label on left, "0.000% tax %" mirroring the target form)
   sf('normal', 8, [80, 80, 80]);
-  doc.text('Tax (0%)', RM - 130, y, {align:'right'});
-  doc.text(_corPdfMoney(0), Mcols.ext, y, {align:'right'});
+  doc.text('0.000% tax %', LM, y);
+  sf('normal', 9, [0, 0, 0]);
+  doc.text('Applicable Taxes', RM - 110, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(0), Mcols.ext, y, {align: 'right'});
   y += 12;
   sf('bold', 9, [0, 0, 0]);
-  doc.text("Mat'l.s / Equip. - Sub-total (Taxes inc.)", RM - 160, y, {align:'right'});
-  doc.text(_corPdfMoney(c.totalMaterial), Mcols.ext, y, {align:'right'});
-  y += 14;
+  doc.text("Mat'l.s / Equip. - Sub-total (Taxes inc.)", RM - 110, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalMaterial), Mcols.ext, y, {align: 'right'});
+  y += 16;
   var matEqPct = Number(c.matEqMarkupPct) || 0;
-  sf('normal', 8, [80, 80, 80]);
-  doc.text('Multipliers: markup by spec ' + matEqPct + '% of material sub-total', LM + 130, y);
-  doc.text(_corPdfMoney(c.mateqOhp), Mcols.ext, y, {align:'right'});
-  y += 14;
+  y = renderMultiplierBlock(y, 'markup by spec', matEqPct, 'material sub-total', c.mateqOhp);
+  // MATERIAL Total
   sf('bold', 9, [0, 0, 0]);
-  doc.text('MATERIAL - Total', RM - 100, y, {align:'right'});
+  doc.text('MATERIAL - Total', RM - 110, y, {align: 'right'});
   sf('normal', 9);
-  doc.text('------->', RM - 60, y, {align:'right'});
+  doc.text('------->', RM - 60, y, {align: 'right'});
   sf('bold', 9);
   var matTotal = (Number(c.totalMaterial) || 0) + (Number(c.mateqOhp) || 0);
-  doc.text(_corPdfMoney(matTotal), Mcols.ext, y, {align:'right'});
+  doc.text('$' + _corPdfMoney(matTotal), Mcols.ext, y, {align: 'right'});
   y += 18;
 
-  // ── EQUIPMENT section (KMI bundles into Materials — leave empty) ──
-  y = ensureRoom(60, y);
-  sf('bold', 10);
+  // ── EQUIPMENT ─────────────────────────────────────────────────────
+  y = ensureRoom(80, y);
+  sf('bold', 10, [0, 0, 0]);
   doc.text('EQUIPMENT:', LM, y);
   y += 14;
-  sf('italic', 8, [150, 150, 150]);
-  doc.text('(KMI bundles equipment with materials above)', LM + 80, y);
-  sf('normal', 9, [0, 0, 0]);
-  y += 14;
+  // Columns: Hrs/Cnt | Classification | Unit | Rate/unit | Extension
+  var Ecols = {
+    qty:  LM + 30,
+    cls:  LM + 50,
+    unit: LM + 290,
+    rate: LM + 360,
+    ext:  RM
+  };
+  sf('bold', 8, [80, 80, 80]);
+  doc.text('Hrs/Cnt',       Ecols.qty,  y, {align: 'right'});
+  doc.text('Classification',Ecols.cls,  y);
+  doc.text('Unit',          Ecols.unit, y, {align: 'right'});
+  doc.text('Rate/unit',     Ecols.rate, y, {align: 'right'});
+  doc.text('Extension',     Ecols.ext,  y, {align: 'right'});
+  y += 4;
   ln(LM, y, RM, y, 0.3, [180, 180, 180]);
   y += 12;
-  sf('bold', 9);
-  doc.text('Equipment - Sub-total', RM - 130, y, {align:'right'});
-  doc.text(_corPdfMoney(0), Mcols.ext, y, {align:'right'});
-  y += 14;
-  sf('normal', 8, [80, 80, 80]);
-  doc.text('Multipliers: markup by spec 10% of other sub-total', LM + 130, y);
-  doc.text(_corPdfMoney(0), Mcols.ext, y, {align:'right'});
-  y += 14;
+
+  sf('normal', 9, [0, 0, 0]);
+  var equipRows = Array.isArray(c.equipmentRows) ? c.equipmentRows : [];
+  if (!equipRows.length) {
+    sf('italic', 8, [150, 150, 150]);
+    doc.text('(no equipment)', Ecols.cls, y);
+    sf('normal', 9, [0, 0, 0]);
+    y += 12;
+  } else {
+    equipRows.forEach(function(r){
+      y = ensureRoom(14, y);
+      var qty = Number(r.quantity)  || 0;
+      var pr  = Number(r.unitPrice) || 0;
+      var ext = qty * pr;
+      var dLines = wrap(r.description || '', 230);
+      doc.text(_corPdfNum(qty), Ecols.qty, y, {align: 'right'});
+      doc.text(dLines, Ecols.cls, y);
+      doc.text('@', Ecols.cls + 235, y);
+      doc.text((r.unit || 'DAY'), Ecols.unit, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(pr), Ecols.rate, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(ext), Ecols.ext, y, {align: 'right'});
+      y += dLines.length * 11 + 2;
+    });
+  }
+  y += 4;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
   sf('bold', 9, [0, 0, 0]);
-  doc.text('EQUIPMENT - Total', RM - 100, y, {align:'right'});
+  doc.text('Equipment - Sub-total', RM - 110, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalEquipment || 0), Ecols.ext, y, {align: 'right'});
+  y += 16;
+  var equipPct = (c.equipmentMarkupPct !== null && c.equipmentMarkupPct !== undefined) ? Number(c.equipmentMarkupPct) : 10;
+  y = renderMultiplierBlock(y, 'markup by spec', equipPct, 'other sub-total', c.equipmentOhp);
+  // EQUIPMENT Total
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('EQUIPMENT - Total', RM - 110, y, {align: 'right'});
   sf('normal', 9);
-  doc.text('-------->', RM - 60, y, {align:'right'});
+  doc.text('-------->', RM - 60, y, {align: 'right'});
   sf('bold', 9);
-  doc.text(_corPdfMoney(0), Mcols.ext, y, {align:'right'});
+  var equipTotal = (Number(c.totalEquipment) || 0) + (Number(c.equipmentOhp) || 0);
+  doc.text('$' + _corPdfMoney(equipTotal), Ecols.ext, y, {align: 'right'});
   y += 18;
 
-  // ── SUBCONTRACTORS section ────────────────────────────────────────
-  y = ensureRoom(60, y);
-  sf('bold', 10);
+  // ── SUBCONTRACTORS ────────────────────────────────────────────────
+  y = ensureRoom(70, y);
+  sf('bold', 10, [0, 0, 0]);
   doc.text('SUBCONTRACTORS', LM, y);
   y += 14;
   sf('bold', 8, [80, 80, 80]);
   doc.text('Name', LM, y);
-  doc.text('Extension', RM - 6, y, {align:'right'});
+  doc.text('Extension', RM, y, {align: 'right'});
   y += 4;
   ln(LM, y, RM, y, 0.3, [180, 180, 180]);
   y += 12;
@@ -8983,174 +9138,202 @@ function buildHunzingerCorPDF(c, p) {
   sf('normal', 9, [0, 0, 0]);
   var subRows = Array.isArray(c.subRows) ? c.subRows : [];
   if (!subRows.length) {
-    sf('italic', 8, [150, 150, 150]);
-    doc.text('(none)', LM, y);
-    sf('normal', 9, [0, 0, 0]);
-    y += 12;
+    // Empty rows like the form template (just blank lines for $0)
+    for (var sbi = 0; sbi < 2; sbi++) {
+      doc.text('$' + _corPdfMoney(0), RM, y, {align: 'right'});
+      y += 12;
+    }
   } else {
     subRows.forEach(function(r){
       y = ensureRoom(14, y);
       var nLines = wrap(r.name || '', 380);
       doc.text(nLines, LM, y);
-      doc.text(_corPdfMoney(r.total), RM - 6, y, {align:'right'});
+      doc.text('$' + _corPdfMoney(r.total), RM, y, {align: 'right'});
       y += nLines.length * 11 + 2;
     });
   }
-  y += 6;
+  y += 4;
   ln(LM, y, RM, y, 0.3, [180, 180, 180]);
   y += 12;
   sf('bold', 9, [0, 0, 0]);
-  doc.text('SUBCONTRACTOR - Subtotal', RM - 130, y, {align:'right'});
-  doc.text(_corPdfMoney(c.totalSub), RM - 6, y, {align:'right'});
-  y += 14;
+  doc.text('SUBCONTRACTOR - Subtotal', RM - 110, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalSub), RM, y, {align: 'right'});
+  y += 16;
   var subPct = Number(c.subMarkupPct) || 0;
-  sf('normal', 8, [80, 80, 80]);
-  doc.text('Multipliers: markup by spec ' + subPct + '% of subcontract', LM + 130, y);
-  doc.text(_corPdfMoney(c.subOhp), RM - 6, y, {align:'right'});
-  y += 14;
+  y = renderMultiplierBlock(y, 'markup by spec', subPct, 'subcontract', c.subOhp);
   sf('bold', 9, [0, 0, 0]);
-  doc.text('SUBCONTRACTOR - Total', RM - 100, y, {align:'right'});
+  doc.text('SUBCONTRACTOR - Total', RM - 110, y, {align: 'right'});
   sf('normal', 9);
-  doc.text('-------->', RM - 60, y, {align:'right'});
+  doc.text('-------->', RM - 60, y, {align: 'right'});
   sf('bold', 9);
   var subTotal = (Number(c.totalSub) || 0) + (Number(c.subOhp) || 0);
-  doc.text(_corPdfMoney(subTotal), RM - 6, y, {align:'right'});
+  doc.text('$' + _corPdfMoney(subTotal), RM, y, {align: 'right'});
   y += 18;
 
-  // ── UNIT PRICING section (always empty for KMI) ───────────────────
-  y = ensureRoom(50, y);
-  sf('bold', 10);
+  // ── UNIT PRICING ──────────────────────────────────────────────────
+  y = ensureRoom(70, y);
+  sf('bold', 10, [0, 0, 0]);
   doc.text('UNIT PRICING', LM, y);
   y += 14;
-  sf('italic', 8, [150, 150, 150]);
-  doc.text('(not applicable)', LM + 80, y);
-  sf('normal', 9, [0, 0, 0]);
-  y += 14;
+  // Columns: UP # | Quantity | Unit | Unit Rate | Extension
+  var Ucols = {
+    upn:  LM,
+    qty:  LM + 130,
+    unit: LM + 220,
+    rate: LM + 320,
+    ext:  RM
+  };
+  sf('bold', 8, [80, 80, 80]);
+  doc.text('UP #',        Ucols.upn,  y);
+  doc.text('Quantity',    Ucols.qty,  y, {align: 'right'});
+  doc.text('Unit',        Ucols.unit, y, {align: 'right'});
+  doc.text('Unit Rate',   Ucols.rate, y, {align: 'right'});
+  doc.text('Extension',   Ucols.ext,  y, {align: 'right'});
+  y += 4;
   ln(LM, y, RM, y, 0.3, [180, 180, 180]);
   y += 12;
-  sf('bold', 9);
-  doc.text('UNIT PRICE - Subtotal', RM - 130, y, {align:'right'});
-  doc.text(_corPdfMoney(0), RM - 6, y, {align:'right'});
-  y += 14;
-  sf('bold', 9);
-  doc.text('UNIT PRICE - Total', RM - 100, y, {align:'right'});
+
+  sf('normal', 9, [0, 0, 0]);
+  var unitPriceRows = Array.isArray(c.unitPriceRows) ? c.unitPriceRows : [];
+  if (!unitPriceRows.length) {
+    // Empty placeholder rows — matches the form's layout when blank
+    for (var upi = 0; upi < 2; upi++) {
+      doc.text('@', Ucols.qty + 8, y);
+      doc.text('$' + _corPdfMoney(0), Ucols.rate, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(0), Ucols.ext,  y, {align: 'right'});
+      y += 12;
+    }
+  } else {
+    unitPriceRows.forEach(function(r, i){
+      y = ensureRoom(14, y);
+      var qty = Number(r.quantity)  || 0;
+      var pr  = Number(r.unitPrice) || 0;
+      var ext = qty * pr;
+      doc.text(String(i + 1) + '. ' + (r.description || ''), Ucols.upn, y);
+      doc.text(_corPdfNum(qty), Ucols.qty, y, {align: 'right'});
+      doc.text('@', Ucols.qty + 8, y);
+      doc.text((r.unit || ''), Ucols.unit, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(pr), Ucols.rate, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(ext), Ucols.ext, y, {align: 'right'});
+      y += 12;
+    });
+  }
+  y += 4;
+  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
+  y += 12;
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('UNIT PRICE - Subtotal', RM - 110, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalUnitPrice || 0), RM, y, {align: 'right'});
+  y += 16;
+  var unitPricePct = (c.unitPriceMarkupPct !== null && c.unitPriceMarkupPct !== undefined) ? Number(c.unitPriceMarkupPct) : 0;
+  y = renderMultiplierBlock(y, 'markup included', unitPricePct, 'subcontract', c.unitPriceOhp);
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('UNIT PRICE - Total', RM - 110, y, {align: 'right'});
   sf('normal', 9);
-  doc.text('-------->', RM - 60, y, {align:'right'});
+  doc.text('-------->', RM - 60, y, {align: 'right'});
   sf('bold', 9);
-  doc.text(_corPdfMoney(0), RM - 6, y, {align:'right'});
+  var unitPriceTotal = (Number(c.totalUnitPrice) || 0) + (Number(c.unitPriceOhp) || 0);
+  doc.text('$' + _corPdfMoney(unitPriceTotal), RM, y, {align: 'right'});
   y += 22;
 
-  // ── CHANGE Sub Total / BOND / CHANGE Total ────────────────────────
-  // Reserve enough room for the whole bottom-of-page block: divider +
-  // 3 totals lines + Date/Time-Extension row + bottom contractor block
-  // + space before the WORK SCOPE NARRATIVE sections. If we can't fit,
-  // start fresh on a new page.
-  y = ensureRoom(180, y);
-  // Padding above the divider so it's clearly above the next text. (When
-  // a page break just happened, y is already at top margin and the
-  // divider would otherwise sit right on top of the first total label.)
-  y += 8;
+  // ── BOTTOM TOTALS ─────────────────────────────────────────────────
+  // Reserve room for the divider + 3 totals lines + Date/PTE row
+  y = ensureRoom(120, y);
+  y += 4;
   ln(LM, y, RM, y, 0.6, [60, 60, 60]);
   y += 14;
 
-  var changeSubtotal = (Number(c.totalLabor) || 0) +
-                       (Number(c.totalMaterial) || 0) + (Number(c.mateqOhp) || 0) +
-                       (Number(c.totalSub) || 0) + (Number(c.subOhp) || 0);
+  // Compute change subtotal from the rounded category totals (matches
+  // the value displayed elsewhere in the app).
+  var changeSubtotal = (Number(c.totalLabor)     || 0) +
+                       (Number(c.totalMaterial)  || 0) + (Number(c.mateqOhp)     || 0) +
+                       (Number(c.totalEquipment) || 0) + (Number(c.equipmentOhp) || 0) +
+                       (Number(c.totalSub)       || 0) + (Number(c.subOhp)       || 0) +
+                       (Number(c.totalUnitPrice) || 0) + (Number(c.unitPriceOhp) || 0);
   var bondPct = Number(c.bondRatePct) || 0;
   var bondCost = Number(c.bondCost);
   if (isNaN(bondCost) || bondCost === null) bondCost = changeSubtotal * (bondPct / 100);
 
-  // Three right-aligned totals stacked. Date / Project Time Extension
-  // are placed after this block on a separate row so they don't collide
-  // with the right-aligned totals labels.
+  // CHANGE Sub Total (right-aligned label + value)
   sf('bold', 10, [0, 0, 0]);
-  doc.text('CHANGE - Sub Total (Labor, Subs., Material, Other)', RM - 200, y, {align:'right'});
+  doc.text('CHANGE - Sub Total (Labor, Subs., Material, Other)', RM - 130, y, {align: 'right'});
   sf('normal', 10);
-  doc.text('-------->', RM - 60, y, {align:'right'});
+  doc.text('-------->', RM - 60, y, {align: 'right'});
   sf('bold', 10);
-  doc.text(_corPdfMoney(changeSubtotal), RM - 6, y, {align:'right'});
+  doc.text('$' + _corPdfMoney(changeSubtotal), RM, y, {align: 'right'});
   y += 16;
 
-  sf('bold', 10);
-  doc.text('BOND - Rate per Contract (' + bondPct + '%)', RM - 200, y, {align:'right'});
-  sf('normal', 10);
-  doc.text('-------->', RM - 60, y, {align:'right'});
-  sf('bold', 10);
-  doc.text(_corPdfMoney(bondCost), RM - 6, y, {align:'right'});
-  y += 16;
-
-  sf('bold', 10);
-  doc.text('CHANGE - Total (Labor, Subs., Material, Other, Bonds)', RM - 220, y, {align:'right'});
-  sf('normal', 10);
-  doc.text('-------->', RM - 60, y, {align:'right'});
-  sf('bold', 11, [42, 47, 92]);
-  doc.text('$ ' + _corPdfMoney(c.totalAmount), RM - 6, y, {align:'right'});
-  y += 22;
-
-  // Date and Project Time Extension on their own row, on the left, so
-  // the labels can never collide with the totals labels on the right.
+  // Date (left) + BOND row (right) — Date and the BOND line share a row
+  // in the target. Date label/value on the left, BOND with pct on left of label
+  // on the right.
   sf('bold', 9, [0, 0, 0]);
   doc.text('Date:', LM, y);
   sf('normal', 9);
-  doc.text(_corPdfFmtDate(c.corDate), LM + 50, y);
-  sf('bold', 9);
-  doc.text('Project Time Extension:', LM + 220, y);
-  sf('normal', 9);
-  var teDays = (c.timeExtensionDays === null || c.timeExtensionDays === undefined || c.timeExtensionDays === '') ? '0 days' : (c.timeExtensionDays + ' days');
-  doc.text(teDays, LM + 350, y);
-  y += 22;
+  doc.text(_corPdfFmtDate(c.corDate), LM + 35, y);
+  // BOND - Rate per Contract — pct is on the LEFT of the label per the target
+  sf('bold', 10, [0, 0, 0]);
+  doc.text(pctFmt(bondPct) + ' BOND - Rate per Contract (%)', RM - 130, y, {align: 'right'});
+  sf('normal', 10);
+  doc.text('-------->', RM - 60, y, {align: 'right'});
+  sf('bold', 10);
+  doc.text('$' + _corPdfMoney(bondCost), RM, y, {align: 'right'});
+  y += 16;
 
-  // ── Bottom contractor block (mirrors top) ─────────────────────────
-  y = ensureRoom(80, y);
-  y += 8;
-  ln(LM, y, RM, y, 0.4, [120, 120, 120]);
-  y += 14;
+  // Project Time Extension (left) + CHANGE Total (right)
   sf('bold', 9, [0, 0, 0]);
-  doc.text('Contractor:', LM + 60, y);
+  doc.text('Project Time Extension:', LM, y);
   sf('normal', 9);
-  doc.text('KMI Construction LLC', LM + 160, y);
-  y += 12;
-  sf('bold', 9);
-  doc.text('Work Description:', LM + 60, y);
-  sf('normal', 9);
-  var wdLines2 = wrap(workDesc, RM - (LM + 160) - 10);
-  doc.text(wdLines2, LM + 160, y);
-  y += Math.max(12, wdLines2.length * 11);
-  sf('bold', 9);
-  doc.text('Document Reference Number:', LM + 60, y);
-  sf('normal', 9);
-  doc.text(docRef, LM + 220, y);
-  y += 18;
+  var teDays = (c.timeExtensionDays === null || c.timeExtensionDays === undefined || c.timeExtensionDays === '') ? '0' : String(c.timeExtensionDays);
+  doc.text(teDays + ' days', LM + 130, y);
 
-  // ── WORK SCOPE NARRATIVE — Added Scope ────────────────────────────
-  y = ensureRoom(70, y);
   sf('bold', 10);
+  doc.text('CHANGE - Total (Labor, Subs., Material, Other, Bonds)', RM - 130, y, {align: 'right'});
+  sf('normal', 10);
+  doc.text('-------->', RM - 60, y, {align: 'right'});
+  sf('bold', 11, [42, 47, 92]);
+  doc.text('$' + _corPdfMoney(c.totalAmount), RM, y, {align: 'right'});
+
+  // ── Page 2: WORK SCOPE NARRATIVE ──────────────────────────────────
+  doc.addPage();
+  renderPageHeader();
+  y = TOP_OF_BODY + 24;
+
+  // Added Scope
+  sf('bold', 10, [0, 0, 0]);
   doc.text('WORK SCOPE NARRATIVE', LM, y);
-  y += 12;
-  sf('bold', 9);
+  y += 14;
+  sf('bold', 9.5);
   doc.text('Added Scope:', LM, y);
-  y += 12;
-  sf('normal', 9, [0, 0, 0]);
-  var addedLines = wrap(workDesc || '', RM - LM - 6);
-  doc.text(addedLines, LM, y);
-  y += addedLines.length * 11 + 12;
+  y += 14;
+  sf('normal', 9.5, [0, 0, 0]);
+  if (addedScopeText) {
+    var addedLines = wrap(addedScopeText, RM - LM);
+    doc.text(addedLines, LM, y);
+    y += addedLines.length * 11;
+  }
+  y += 24;
 
-  // ── WORK SCOPE NARRATIVE — Omitted Scope ──────────────────────────
-  y = ensureRoom(50, y);
+  // Omitted Scope
+  y = ensureRoom(80, y);
   sf('bold', 10);
   doc.text('WORK SCOPE NARRATIVE', LM, y);
-  y += 12;
-  sf('bold', 9);
+  y += 14;
+  sf('bold', 9.5);
   doc.text('Omitted Scope:', LM, y);
-  y += 12;
-  sf('normal', 9, [0, 0, 0]);
-  var omittedText = (c.omittedScope || '').trim();
-  if (omittedText) {
-    var omittedLines = wrap(omittedText, RM - LM - 6);
+  y += 14;
+  sf('normal', 9.5, [0, 0, 0]);
+  if (omittedScopeText) {
+    var omittedLines = wrap(omittedScopeText, RM - LM);
     doc.text(omittedLines, LM, y);
-  } else {
-    sf('italic', 8, [150, 150, 150]);
-    doc.text('(none)', LM, y);
+  }
+
+  // ── Page-number footer ("X of N") on every page ──────────────────
+  // Done at the end so we know the final page count.
+  var pageCount = doc.internal.getNumberOfPages();
+  for (var pn = 1; pn <= pageCount; pn++) {
+    doc.setPage(pn);
+    sf('normal', 9, [0, 0, 0]);
+    doc.text(String(pn) + ' of ' + pageCount, RM, FOOTER_TOP + 14, {align: 'right'});
   }
 
   return doc;
@@ -9808,11 +9991,20 @@ function ncorInitWorking(c) {
     // Snapshotted markup (immutable on the COR; project edits don't disturb)
     matEqMarkupPct: (c.matEqMarkupPct !== null && c.matEqMarkupPct !== undefined) ? c.matEqMarkupPct : 10,
     subMarkupPct:   (c.subMarkupPct   !== null && c.subMarkupPct   !== undefined) ? c.subMarkupPct   : 5,
+    // Equipment + Unit Pricing markups (Hunzinger COR worksheet shows these
+    // as separate sections with independent multipliers — Equipment is
+    // typically 10% (matches Materials), Unit Pricing is "markup included" 0%)
+    equipmentMarkupPct:  (c.equipmentMarkupPct  !== null && c.equipmentMarkupPct  !== undefined) ? c.equipmentMarkupPct  : 10,
+    unitPriceMarkupPct:  (c.unitPriceMarkupPct  !== null && c.unitPriceMarkupPct  !== undefined) ? c.unitPriceMarkupPct  : 0,
     // Bond rate snapshotted on the COR — same pattern as markups (project
     // edits later don't alter the COR's totals retroactively).
     bondRatePct:    (c.bondRatePct    !== null && c.bondRatePct    !== undefined) ? c.bondRatePct    : 0,
+    // Equipment + Unit Pricing rows (parallel to manualMaterialRows / subRows)
+    equipmentRows: Array.isArray(c.equipmentRows) ? JSON.parse(JSON.stringify(c.equipmentRows)) : [],
+    unitPriceRows: Array.isArray(c.unitPriceRows) ? JSON.parse(JSON.stringify(c.unitPriceRows)) : [],
     // Hunzinger-specific fields (no-ops on Standard form; harmless to carry)
     timeExtensionDays: (c.timeExtensionDays !== null && c.timeExtensionDays !== undefined && c.timeExtensionDays !== '') ? c.timeExtensionDays : '',
+    addedScope:        c.addedScope   || '',
     omittedScope:      c.omittedScope || '',
     corType:    c.corType || 'T&M',
     projectId:  c.projectId
@@ -9826,7 +10018,9 @@ function ncorRenderSections() {
   ncorRenderTicketsSection();
   ncorRenderLaborSection();
   ncorRenderMaterialsSection();
+  ncorRenderEquipmentSection();
   ncorRenderSubsSection();
+  ncorRenderUnitPricingSection();
   ncorRenderTotalsSection();
 }
 
@@ -9847,21 +10041,28 @@ function ncorRenderHunzingerSection() {
 
   var canEdit = ncorIsEditable();
   var teEl = g('ncor-time-ext-days');
+  var asEl = g('ncor-added-scope');
   var osEl = g('ncor-omitted-scope');
   if (teEl) {
     teEl.value = (w.timeExtensionDays === null || w.timeExtensionDays === undefined) ? '' : w.timeExtensionDays;
     teEl.disabled = !canEdit;
+  }
+  if (asEl) {
+    asEl.value = w.addedScope || '';
+    asEl.disabled = !canEdit;
   }
   if (osEl) {
     osEl.value = w.omittedScope || '';
     osEl.disabled = !canEdit;
   }
 
-  // Update the description label to "Added Scope" on Hunzinger so the
-  // mapping to the printed form is obvious. (Restore on Standard.)
+  // Description on the editor maps to the COR's Work Description (top of
+  // form). Added Scope is a separate optional narrative shown near
+  // Omitted Scope. Label restored to plain "Description *" — no longer
+  // implies it doubles as Added Scope.
   var descLbl = g('ncor-desc-label');
   if (descLbl) {
-    descLbl.textContent = 'Description (Added Scope) *';
+    descLbl.textContent = 'Description (Work Description) *';
   }
 }
 
@@ -9878,10 +10079,14 @@ function ncorReadHunzingerFields() {
     return;
   }
   var teEl = g('ncor-time-ext-days');
+  var asEl = g('ncor-added-scope');
   var osEl = g('ncor-omitted-scope');
   if (teEl) {
     var raw = (teEl.value || '').trim();
     w.timeExtensionDays = raw === '' ? '' : (parseInt(raw, 10) || 0);
+  }
+  if (asEl) {
+    w.addedScope = (asEl.value || '').trim();
   }
   if (osEl) {
     w.omittedScope = (osEl.value || '').trim();
@@ -10615,12 +10820,197 @@ function ncorAddSelectedBudgetSubs() {
   ncorRenderSections();
 }
 
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 4b — Equipment (Hunzinger COR worksheet section, separate
+// from Materials with its own markup percent)
+// ─────────────────────────────────────────────────────────────────────
+function ncorRenderEquipmentSection() {
+  var w = _ncorWorking;
+  var bodyEl = g('ncor-equipment-body');
+  if (!bodyEl) return;
+  var canEdit = ncorIsEditable();
+
+  var addBtn = g('ncor-add-eq-btn');
+  if (addBtn) addBtn.style.display = canEdit ? '' : 'none';
+
+  var rows = w.equipmentRows || [];
+  if (!rows.length) {
+    bodyEl.innerHTML = '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No equipment lines. ' + (canEdit ? 'Click <strong>+ Add row</strong> to add equipment (e.g. lift, scaffold) at a daily/hourly rate.' : '') +
+    '</div>';
+    return;
+  }
+
+  var rowsHtml = rows.map(function(r, idx){
+    var descCell = canEdit
+      ? '<input type="text" value="' + corEsc(r.description || '') + '" onchange="ncorUpdateEquip(' + idx + ',\'description\',this.value)" style="width:100%;font-size:12px;padding:3px 4px">'
+      : corEsc(r.description || '');
+    var qtyCell = canEdit
+      ? '<input type="number" step="0.01" min="0" value="' + (Number(r.quantity) || 0) + '" onchange="ncorUpdateEquip(' + idx + ',\'quantity\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
+      : '<span style="font-family:monospace">' + tmFmtHrs(r.quantity) + '</span>';
+    var unitCell = canEdit
+      ? '<input type="text" value="' + corEsc(r.unit || '') + '" onchange="ncorUpdateEquip(' + idx + ',\'unit\',this.value)" placeholder="DAY/HR/EA" style="width:70px;text-align:center;font-size:12px;padding:3px 4px">'
+      : corEsc(r.unit || '');
+    var priceCell = canEdit
+      ? '<input type="number" step="0.01" min="0" value="' + (Number(r.unitPrice) || 0) + '" onchange="ncorUpdateEquip(' + idx + ',\'unitPrice\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
+      : '<span style="font-family:monospace">' + corFmtMoney(r.unitPrice) + '</span>';
+    var cost = (Number(r.quantity) || 0) * (Number(r.unitPrice) || 0);
+    var removeCell = canEdit
+      ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="ncorRemoveEquip(' + idx + ')">×</button>'
+      : '';
+    return '<tr>' +
+      '<td style="padding:5px 8px">' + descCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + qtyCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:center">' + unitCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + priceCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;font-family:monospace;font-weight:600">' + corFmtMoney(cost) + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;width:40px">' + removeCell + '</td>' +
+    '</tr>';
+  }).join('');
+
+  var subtotal = rows.reduce(function(s, r){
+    return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
+  }, 0);
+  var markupPct = Number(w.equipmentMarkupPct) || 0;
+  var markup = subtotal * (markupPct / 100);
+
+  bodyEl.innerHTML =
+    '<table style="width:100%;font-size:12px"><thead><tr style="border-bottom:0.5px solid #eee;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px">' +
+      '<th style="text-align:left;padding:6px 8px">Description</th>' +
+      '<th style="text-align:right;padding:6px 8px">Qty / Hours</th>' +
+      '<th style="text-align:center;padding:6px 8px">Unit</th>' +
+      '<th style="text-align:right;padding:6px 8px">Rate / unit</th>' +
+      '<th style="text-align:right;padding:6px 8px">Cost</th>' +
+      '<th style="padding:6px 8px"></th>' +
+    '</tr></thead><tbody>' + rowsHtml +
+    '<tr style="border-top:1px solid #ccc;background:#FAF8F0">' +
+      '<td colspan="4" style="padding:6px 8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Equipment sub-total</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace;font-weight:700">' + corFmtMoney(subtotal) + '</td>' +
+      '<td></td>' +
+    '</tr>' +
+    '<tr style="background:#FAF8F0">' +
+      '<td colspan="4" style="padding:6px 8px;text-align:right;color:#666;font-size:11px">Overhead &amp; Profit (' + markupPct + '%)</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace">' + corFmtMoney(markup) + '</td>' +
+      '<td></td>' +
+    '</tr></tbody></table>';
+}
+
+function ncorAddEquipmentRow() {
+  _ncorWorking.equipmentRows = _ncorWorking.equipmentRows || [];
+  _ncorWorking.equipmentRows.push({ description: '', quantity: 1, unit: 'DAY', unitPrice: 0 });
+  ncorRenderSections();
+}
+function ncorUpdateEquip(idx, field, value) {
+  var r = (_ncorWorking.equipmentRows || [])[idx]; if (!r) return;
+  if (field === 'description' || field === 'unit') r[field] = value;
+  else if (field === 'quantity' || field === 'unitPrice') r[field] = Number(value) || 0;
+  ncorRenderSections();
+}
+function ncorRemoveEquip(idx) {
+  (_ncorWorking.equipmentRows || []).splice(idx, 1);
+  ncorRenderSections();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 4c — Unit Pricing (fixed-rate line items: per-LF, per-EA, etc)
+// ─────────────────────────────────────────────────────────────────────
+function ncorRenderUnitPricingSection() {
+  var w = _ncorWorking;
+  var bodyEl = g('ncor-unit-pricing-body');
+  if (!bodyEl) return;
+  var canEdit = ncorIsEditable();
+
+  var addBtn = g('ncor-add-up-btn');
+  if (addBtn) addBtn.style.display = canEdit ? '' : 'none';
+
+  var rows = w.unitPriceRows || [];
+  if (!rows.length) {
+    bodyEl.innerHTML = '<div style="padding:16px;color:#aaa;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No unit pricing lines. ' + (canEdit ? 'Click <strong>+ Add row</strong> to add a unit-priced line item (e.g. \'Cut and patch openings - 12x12\' @ EA).' : '') +
+    '</div>';
+    return;
+  }
+
+  var rowsHtml = rows.map(function(r, idx){
+    var descCell = canEdit
+      ? '<input type="text" value="' + corEsc(r.description || '') + '" onchange="ncorUpdateUp(' + idx + ',\'description\',this.value)" style="width:100%;font-size:12px;padding:3px 4px">'
+      : corEsc(r.description || '');
+    var qtyCell = canEdit
+      ? '<input type="number" step="0.01" min="0" value="' + (Number(r.quantity) || 0) + '" onchange="ncorUpdateUp(' + idx + ',\'quantity\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
+      : '<span style="font-family:monospace">' + tmFmtHrs(r.quantity) + '</span>';
+    var unitCell = canEdit
+      ? '<input type="text" value="' + corEsc(r.unit || '') + '" onchange="ncorUpdateUp(' + idx + ',\'unit\',this.value)" placeholder="LF/EA/SF" style="width:70px;text-align:center;font-size:12px;padding:3px 4px">'
+      : corEsc(r.unit || '');
+    var priceCell = canEdit
+      ? '<input type="number" step="0.01" min="0" value="' + (Number(r.unitPrice) || 0) + '" onchange="ncorUpdateUp(' + idx + ',\'unitPrice\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
+      : '<span style="font-family:monospace">' + corFmtMoney(r.unitPrice) + '</span>';
+    var cost = (Number(r.quantity) || 0) * (Number(r.unitPrice) || 0);
+    var removeCell = canEdit
+      ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="ncorRemoveUp(' + idx + ')">×</button>'
+      : '';
+    return '<tr>' +
+      '<td style="padding:5px 8px">' + descCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + qtyCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:center">' + unitCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">' + priceCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;font-family:monospace;font-weight:600">' + corFmtMoney(cost) + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;width:40px">' + removeCell + '</td>' +
+    '</tr>';
+  }).join('');
+
+  var subtotal = rows.reduce(function(s, r){
+    return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
+  }, 0);
+  var markupPct = Number(w.unitPriceMarkupPct) || 0;
+  var markup = subtotal * (markupPct / 100);
+
+  bodyEl.innerHTML =
+    '<table style="width:100%;font-size:12px"><thead><tr style="border-bottom:0.5px solid #eee;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px">' +
+      '<th style="text-align:left;padding:6px 8px">Description</th>' +
+      '<th style="text-align:right;padding:6px 8px">Quantity</th>' +
+      '<th style="text-align:center;padding:6px 8px">Unit</th>' +
+      '<th style="text-align:right;padding:6px 8px">Unit rate</th>' +
+      '<th style="text-align:right;padding:6px 8px">Extension</th>' +
+      '<th style="padding:6px 8px"></th>' +
+    '</tr></thead><tbody>' + rowsHtml +
+    '<tr style="border-top:1px solid #ccc;background:#FAF8F0">' +
+      '<td colspan="4" style="padding:6px 8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Unit price sub-total</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace;font-weight:700">' + corFmtMoney(subtotal) + '</td>' +
+      '<td></td>' +
+    '</tr>' +
+    '<tr style="background:#FAF8F0">' +
+      '<td colspan="4" style="padding:6px 8px;text-align:right;color:#666;font-size:11px">Overhead &amp; Profit (' + markupPct + '% — markup typically already included in unit rate)</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace">' + corFmtMoney(markup) + '</td>' +
+      '<td></td>' +
+    '</tr></tbody></table>';
+}
+
+function ncorAddUnitPriceRow() {
+  _ncorWorking.unitPriceRows = _ncorWorking.unitPriceRows || [];
+  _ncorWorking.unitPriceRows.push({ description: '', quantity: 1, unit: 'EA', unitPrice: 0 });
+  ncorRenderSections();
+}
+function ncorUpdateUp(idx, field, value) {
+  var r = (_ncorWorking.unitPriceRows || [])[idx]; if (!r) return;
+  if (field === 'description' || field === 'unit') r[field] = value;
+  else if (field === 'quantity' || field === 'unitPrice') r[field] = Number(value) || 0;
+  ncorRenderSections();
+}
+function ncorRemoveUp(idx) {
+  (_ncorWorking.unitPriceRows || []).splice(idx, 1);
+  ncorRenderSections();
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // SECTION 5 — Grand total (auto-calculated)
 // ─────────────────────────────────────────────────────────────────────
 function ncorComputeTotals() {
   var w = _ncorWorking;
-  if (!w) return { totalLabor:0, totalMaterial:0, totalSub:0, mateqOhp:0, subOhp:0, bondCost:0, totalAmount:0 };
+  if (!w) return {
+    totalLabor:0, totalMaterial:0, totalSub:0, totalEquipment:0, totalUnitPrice:0,
+    mateqOhp:0, subOhp:0, equipmentOhp:0, unitPriceOhp:0, bondCost:0, totalAmount:0
+  };
 
   // Labor
   var autoLabor = ncorComputeAutoLaborRows();
@@ -10631,50 +11021,68 @@ function ncorComputeTotals() {
     autoLabor.reduce(function(s, r){ return s + (Number(r.total) || 0); }, 0) +
     manualLabor.reduce(function(s, r){ return s + (r.hours * r.rate); }, 0);
 
-  // Materials
+  // Materials (does NOT include equipment anymore — equipment has its
+  // own section/markup on Hunzinger's worksheet)
   var allMat = (w.autoMaterialRows || []).concat(w.manualMaterialRows || []);
   var totalMaterial = allMat.reduce(function(s, r){
+    return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
+  }, 0);
+
+  // Equipment (Hunzinger's worksheet section, separate from Materials)
+  var totalEquipment = (w.equipmentRows || []).reduce(function(s, r){
+    return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
+  }, 0);
+
+  // Unit Pricing (fixed-rate line items)
+  var totalUnitPrice = (w.unitPriceRows || []).reduce(function(s, r){
     return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
   }, 0);
 
   // Subs
   var totalSub = (w.subRows || []).reduce(function(s, r){ return s + (Number(r.total) || 0); }, 0);
 
-  // Markups (snapshotted on the COR)
-  var matEqPct = Number(w.matEqMarkupPct) || 0;
-  var subPct   = Number(w.subMarkupPct)   || 0;
-  var mateqOhp = totalMaterial * (matEqPct / 100);
-  var subOhp   = totalSub      * (subPct   / 100);
+  // Markups (snapshotted on the COR). Each category has its own pct.
+  var matEqPct      = Number(w.matEqMarkupPct)     || 0;  // applies to Materials only
+  var equipmentPct  = Number(w.equipmentMarkupPct) || 0;
+  var unitPricePct  = Number(w.unitPriceMarkupPct) || 0;
+  var subPct        = Number(w.subMarkupPct)       || 0;
+  var mateqOhp      = totalMaterial  * (matEqPct     / 100);
+  var equipmentOhp  = totalEquipment * (equipmentPct / 100);
+  var unitPriceOhp  = totalUnitPrice * (unitPricePct / 100);
+  var subOhp        = totalSub       * (subPct       / 100);
 
-  // Bond cost — applied on top of the change subtotal (labor + materials +
-  // subs + both OH&P markups). Matches both the KMI Standard form (which
-  // already shows a "Conractor Bond Cost" line) and Hunzinger's form
-  // (which calls it "BOND - Rate per Contract"). Bond is 0 when the
-  // project has no bond rate set, in which case the line still shows on
-  // the totals card but reads $0.
+  // Bond cost — applied on top of the full change subtotal.
   var bondPct  = Number(w.bondRatePct) || 0;
-  var subtotal = totalLabor + totalMaterial + totalSub + mateqOhp + subOhp;
+  var subtotal = totalLabor + totalMaterial + totalEquipment + totalUnitPrice + totalSub
+               + mateqOhp + equipmentOhp + unitPriceOhp + subOhp;
   var bondCost = subtotal * (bondPct / 100);
 
   // Round every category up to the next whole dollar so customer-facing
   // CORs (form, PDF, Foundation CSV) always show clean dollar amounts.
-  // totalAmount is recomputed as the sum of the rounded parts so the
-  // grand total exactly equals the line items shown above it on the PDF.
-  var rTotalLabor    = Math.ceil(totalLabor);
-  var rTotalMaterial = Math.ceil(totalMaterial);
-  var rTotalSub      = Math.ceil(totalSub);
-  var rMateqOhp      = Math.ceil(mateqOhp);
-  var rSubOhp        = Math.ceil(subOhp);
-  var rBondCost      = Math.ceil(bondCost);
+  var rTotalLabor     = Math.ceil(totalLabor);
+  var rTotalMaterial  = Math.ceil(totalMaterial);
+  var rTotalEquipment = Math.ceil(totalEquipment);
+  var rTotalUnitPrice = Math.ceil(totalUnitPrice);
+  var rTotalSub       = Math.ceil(totalSub);
+  var rMateqOhp       = Math.ceil(mateqOhp);
+  var rEquipmentOhp   = Math.ceil(equipmentOhp);
+  var rUnitPriceOhp   = Math.ceil(unitPriceOhp);
+  var rSubOhp         = Math.ceil(subOhp);
+  var rBondCost       = Math.ceil(bondCost);
 
   return {
-    totalLabor:    rTotalLabor,
-    totalMaterial: rTotalMaterial,
-    totalSub:      rTotalSub,
-    mateqOhp:      rMateqOhp,
-    subOhp:        rSubOhp,
-    bondCost:      rBondCost,
-    totalAmount:   rTotalLabor + rTotalMaterial + rTotalSub + rMateqOhp + rSubOhp + rBondCost
+    totalLabor:     rTotalLabor,
+    totalMaterial:  rTotalMaterial,
+    totalEquipment: rTotalEquipment,
+    totalUnitPrice: rTotalUnitPrice,
+    totalSub:       rTotalSub,
+    mateqOhp:       rMateqOhp,
+    equipmentOhp:   rEquipmentOhp,
+    unitPriceOhp:   rUnitPriceOhp,
+    subOhp:         rSubOhp,
+    bondCost:       rBondCost,
+    totalAmount:    rTotalLabor + rTotalMaterial + rTotalEquipment + rTotalUnitPrice + rTotalSub +
+                    rMateqOhp + rEquipmentOhp + rUnitPriceOhp + rSubOhp + rBondCost
   };
 }
 
@@ -10687,9 +11095,13 @@ function ncorRenderTotalsSection() {
     '<div style="display:flex;flex-direction:column;gap:6px;font-size:13px">' +
       '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total labor cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalLabor) + '</span></div>' +
       '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total material cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalMaterial) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total equipment cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalEquipment) + '</span></div>' +
       '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total subcontractor cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalSub) + '</span></div>' +
-      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>Overhead &amp; Profit on Mat/Eq (' + (Number(w.matEqMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.mateqOhp) + '</span></div>' +
-      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>Overhead &amp; Profit on Subcontractors (' + (Number(w.subMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.subOhp) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total unit-price cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalUnitPrice) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>OH&amp;P on Materials (' + (Number(w.matEqMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.mateqOhp) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>OH&amp;P on Equipment (' + (Number(w.equipmentMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.equipmentOhp) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>OH&amp;P on Subcontractors (' + (Number(w.subMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.subOhp) + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>OH&amp;P on Unit Pricing (' + (Number(w.unitPriceMarkupPct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.unitPriceOhp) + '</span></div>' +
       '<div style="display:flex;justify-content:space-between;padding:4px 8px;color:#666"><span>Bond cost (' + (Number(w.bondRatePct) || 0) + '%)</span><span style="font-family:monospace">' + corFmtMoney(t.bondCost) + '</span></div>' +
       '<div style="display:flex;justify-content:space-between;padding:10px 8px;border-top:2px solid #ccc;background:#FAF8F0;border-radius:6px;margin-top:4px">' +
         '<strong style="font-size:14px;text-transform:uppercase;letter-spacing:.5px">Total Change Order Request</strong>' +
@@ -18663,19 +19075,29 @@ function toSBCor(r) {
     labor_rows:    laborEnvelope,
     material_rows: materialEnvelope,
     sub_rows:      r.subRows      || [],
-    mat_eq_markup_pct: r.matEqMarkupPct,
-    sub_markup_pct:    r.subMarkupPct,
-    bond_rate_pct:     (r.bondRatePct !== undefined && r.bondRatePct !== null) ? r.bondRatePct : null,
+    // Equipment + Unit Pricing rows (Hunzinger COR worksheet sections)
+    equipment_rows:  Array.isArray(r.equipmentRows) ? r.equipmentRows : [],
+    unit_price_rows: Array.isArray(r.unitPriceRows) ? r.unitPriceRows : [],
+    mat_eq_markup_pct:    r.matEqMarkupPct,
+    sub_markup_pct:       r.subMarkupPct,
+    equipment_markup_pct: (r.equipmentMarkupPct !== undefined && r.equipmentMarkupPct !== null) ? r.equipmentMarkupPct : 10,
+    unit_price_markup_pct:(r.unitPriceMarkupPct !== undefined && r.unitPriceMarkupPct !== null) ? r.unitPriceMarkupPct : 0,
+    bond_rate_pct:        (r.bondRatePct !== undefined && r.bondRatePct !== null) ? r.bondRatePct : null,
     // Hunzinger COR form fields (null when not set or not Hunzinger)
     time_extension_days: (r.timeExtensionDays !== undefined && r.timeExtensionDays !== null && r.timeExtensionDays !== '') ? r.timeExtensionDays : null,
+    added_scope:         r.addedScope   || null,
     omitted_scope:       r.omittedScope || null,
-    total_labor:    r.totalLabor    || 0,
-    total_material: r.totalMaterial || 0,
-    total_sub:      r.totalSub      || 0,
-    mateq_ohp:      r.mateqOhp      || 0,
-    sub_ohp:        r.subOhp        || 0,
-    bond_cost:      r.bondCost      || 0,
-    total_amount:   r.totalAmount   || 0,
+    total_labor:     r.totalLabor     || 0,
+    total_material:  r.totalMaterial  || 0,
+    total_sub:       r.totalSub       || 0,
+    total_equipment: r.totalEquipment || 0,
+    total_unit_price:r.totalUnitPrice || 0,
+    mateq_ohp:       r.mateqOhp       || 0,
+    sub_ohp:         r.subOhp         || 0,
+    equipment_ohp:   r.equipmentOhp   || 0,
+    unit_price_ohp:  r.unitPriceOhp   || 0,
+    bond_cost:       r.bondCost       || 0,
+    total_amount:    r.totalAmount    || 0,
     created_at:        r.createdAt        || null,
     created_by_user_id: r.createdByUserId || null,
     created_by_name:    r.createdByName   || '',
@@ -18738,20 +19160,31 @@ function fromSBCor(r) {
     subRows:      Array.isArray(r.sub_rows) ? r.sub_rows : [],
     matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
     subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5,
+    // Equipment + Unit Pricing rows + their markups. Legacy CORs (before the
+    // SQL migration) will have these as undefined → defaulted to []/10/0.
+    equipmentRows: Array.isArray(r.equipment_rows)  ? r.equipment_rows  : [],
+    unitPriceRows: Array.isArray(r.unit_price_rows) ? r.unit_price_rows : [],
+    equipmentMarkupPct: (r.equipment_markup_pct  !== null && r.equipment_markup_pct  !== undefined) ? r.equipment_markup_pct  : 10,
+    unitPriceMarkupPct: (r.unit_price_markup_pct !== null && r.unit_price_markup_pct !== undefined) ? r.unit_price_markup_pct : 0,
     // Bond rate (legacy CORs default to 0). Bond cost is stored on the
     // COR but we'll also recompute it from totals — this is the
     // historical-snapshot copy that survives if the totals drift.
     bondRatePct:    (r.bond_rate_pct !== null && r.bond_rate_pct !== undefined) ? r.bond_rate_pct : 0,
     // Hunzinger-specific fields (legacy CORs have null)
     timeExtensionDays: (r.time_extension_days !== null && r.time_extension_days !== undefined) ? r.time_extension_days : '',
+    addedScope:        r.added_scope   || '',
     omittedScope:      r.omitted_scope || '',
-    totalLabor:    r.total_labor    || 0,
-    totalMaterial: r.total_material || 0,
-    totalSub:      r.total_sub      || 0,
-    mateqOhp:      r.mateq_ohp      || 0,
-    subOhp:        r.sub_ohp        || 0,
-    bondCost:      r.bond_cost      || 0,
-    totalAmount:   r.total_amount   || 0,
+    totalLabor:     r.total_labor     || 0,
+    totalMaterial:  r.total_material  || 0,
+    totalSub:       r.total_sub       || 0,
+    totalEquipment: r.total_equipment || 0,
+    totalUnitPrice: r.total_unit_price|| 0,
+    mateqOhp:       r.mateq_ohp       || 0,
+    subOhp:         r.sub_ohp         || 0,
+    equipmentOhp:   r.equipment_ohp   || 0,
+    unitPriceOhp:   r.unit_price_ohp  || 0,
+    bondCost:       r.bond_cost       || 0,
+    totalAmount:    r.total_amount    || 0,
     createdAt:        r.created_at        || '',
     createdByUserId:  r.created_by_user_id || null,
     createdByName:    r.created_by_name   || '',
