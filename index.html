@@ -6840,9 +6840,11 @@ function corCanEdit(c) {
 }
 
 function corCanDelete(c) {
-  // Hard-delete only allowed for Draft CORs (no impact on tickets, since
-  // ticket-locking happens on save; pre-save Drafts have no rollup yet).
-  // Pending+ CORs must be Voided instead, which unlocks tickets cleanly.
+  // Hard-delete only allowed for Draft CORs. Saved Draft CORs MAY have
+  // rolled-up tickets locked to them (locking happens on every save,
+  // including the first Draft save), so deleteCor must unlock those
+  // tickets — same pattern as voidCor. Pending+ CORs must be Voided
+  // instead so the customer-facing audit trail is preserved.
   if (!c) return false;
   if ((c.status || 'Draft') !== 'Draft') return false;
   return hasFull('delete-cor');
@@ -9942,20 +9944,79 @@ async function confirmVoidCor() {
 }
 
 // ── deleteCor: hard delete for Draft CORs ─────────────────────────────
+// Unlocks any rolled-up tickets first (clearing corId/corNumber and
+// resetting status to 'Approved by KMI PM' so they show up in the
+// "available to roll up" pool again). Mirrors voidCor's unlock pattern,
+// which is the only other place CORs release their tickets.
 async function deleteCor(id) {
   var c = (db.cors || []).find(function(x){ return String(x.id) === String(id); });
   if (!c) return;
   if (!corCanDelete(c)) { alert('Only Draft CORs can be deleted. Use Void instead.'); return; }
-  if (!confirm('Delete COR ' + (corExtractKmiSeq(c.corNumber) || c.corNumber || '') + '?\n\nThis cannot be undone. (Pending/Approved/Rejected CORs can\'t be deleted — Void them instead.)')) return;
+  var seqOnly = corExtractKmiSeq(c.corNumber) || c.corNumber || '';
+  // Count locked tickets up-front so the confirm dialog can warn the user
+  // that tickets will be freed (otherwise it's surprising — a Draft COR
+  // looks "empty" but the tickets attached to it are very much locked).
+  var lockedCount = (c.rolledUpTicketIds || []).filter(function(tid){
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    return t && String(t.corId) === String(c.id);
+  }).length;
+  var confirmMsg = 'Delete COR ' + seqOnly + '?\n\nThis cannot be undone. (Pending/Approved/Rejected CORs can\'t be deleted — Void them instead.)';
+  if (lockedCount > 0) {
+    confirmMsg += '\n\n' + lockedCount + ' rolled-up T&M ticket' + (lockedCount === 1 ? '' : 's') +
+                  ' will be unlocked and become available for other CORs.';
+  }
+  if (!confirm(confirmMsg)) return;
 
+  // Unlock rolled-up tickets — back to "Approved by KMI PM" (rollable again).
+  // Same defensive pattern as voidCor: only touch tickets whose corId
+  // actually points at THIS COR (a ticket re-locked to a different COR via
+  // some race shouldn't be touched).
+  var nowIso = new Date().toISOString();
+  var unlockedTickets = [];
+  (c.rolledUpTicketIds || []).forEach(function(tid){
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    if (t && String(t.corId) === String(c.id)) {
+      t.corId = null;
+      t.corNumber = null;
+      t.status = 'Approved by KMI PM';
+      t.updatedAt = nowIso;
+      t.updatedByUserId = _currentUser ? _currentUser.id : null;
+      unlockedTickets.push(t);
+    }
+  });
+
+  // Remove the COR itself
   db.cors = (db.cors || []).filter(function(x){ return String(x.id) !== String(id); });
+
+  // Activity log breadcrumb (hard-deletes are otherwise unrecoverable, so
+  // at least leave a trace in the activity feed).
+  db.activity = db.activity || [];
+  db.activity.unshift({
+    text: 'COR ' + seqOnly + ' deleted' + (unlockedTickets.length ? ' (' + unlockedTickets.length + ' ticket(s) unlocked)' : ''),
+    type: 'lost',
+    time: 'Just now'
+  });
   saveDB();
+
+  // Push to Supabase: delete the COR, upsert the unlocked tickets in the
+  // same transaction shape as voidCor uses. Best-effort — local state is
+  // the source of truth; sync warnings don't block the user.
   try {
     if (supabaseClient) {
       var delRes = await supabaseClient.from('kmi_cors').delete().eq('id', c.id);
       if (delRes && delRes.error) console.warn('COR delete sync error:', delRes.error.message);
+      if (unlockedTickets.length) {
+        var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(unlockedTickets.map(toSBTmTicket));
+        if (tixRes && tixRes.error) console.warn('Ticket unlock sync error:', tixRes.error.message);
+      }
     }
   } catch (e) { console.warn('COR delete exception:', e); }
+
+  var msg = 'COR ' + seqOnly + ' deleted.';
+  if (unlockedTickets.length) {
+    msg += ' ' + unlockedTickets.length + ' ticket' + (unlockedTickets.length === 1 ? ' was' : 's were') + ' unlocked.';
+  }
+  if (typeof showToast === 'function') showToast(msg, 'info');
   renderCors();
 }
 
