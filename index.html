@@ -427,6 +427,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="sb-group-items">
       <div class="ni" onclick="nav('users')"><span class="nico">◑</span>Users</div>
       <div class="ni" onclick="nav('templates')"><span class="nico">◫</span>Templates</div>
+      <div class="ni" onclick="nav('product-library')"><span class="nico">▣</span>Product Library</div>
       <div class="ni" onclick="nav('email-log')"><span class="nico">&#9993;</span>Email log</div>
       <div class="ni" onclick="nav('email-settings')"><span class="nico">&#9881;</span>Email settings</div>
     </div>
@@ -1395,6 +1396,81 @@ textarea{resize:vertical;min-height:72px}
   <div id="es-content"></div>
 </div>
 
+<!-- PRODUCT LIBRARY (Round 1) — manufacturers + products + documents -->
+<div class="pg" id="pg-product-library">
+  <div class="ph"><div><h1>Product Library</h1><div class="sub">Manufacturers, products, and the data sheets / test reports we submit</div><div class="stripe"></div></div></div>
+  <div class="tabs">
+    <div class="tab active" onclick="plSwTab('products', this)">Products</div>
+    <div class="tab" onclick="plSwTab('manufacturers', this)">Manufacturers</div>
+  </div>
+
+  <!-- Products tab -->
+  <div id="pl-tab-products">
+    <div class="ab">
+      <input class="si" placeholder="Search by name, manufacturer, model..." oninput="renderProducts()" id="pl-prod-s">
+      <select class="fs" onchange="renderProducts()" id="pl-prod-fmfg"><option value="">All manufacturers</option></select>
+      <select class="fs" onchange="renderProducts()" id="pl-prod-fcat"><option value="">All categories</option></select>
+      <select class="fs" onchange="renderProducts()" id="pl-prod-fcsi"><option value="">All CSI sections</option></select>
+      <button class="btn btn-p" style="margin-left:auto" onclick="initNewProduct()">+ Add product</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Product</th><th>Manufacturer</th><th>Category</th><th>CSI Section</th><th>Size / Model</th><th>Documents</th><th>Actions</th></tr></thead>
+        <tbody id="pl-prod-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Manufacturers tab -->
+  <div id="pl-tab-manufacturers" style="display:none">
+    <div class="ab">
+      <input class="si" placeholder="Search manufacturers..." oninput="renderManufacturers()" id="pl-mfg-s">
+      <button class="btn btn-p" style="margin-left:auto" onclick="showAddManufacturer()">+ Add manufacturer</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px" id="pl-mfg-grid"></div>
+  </div>
+</div>
+
+<!-- EDIT PRODUCT — full page (modal-based file uploads have been
+     unreliable, so editing + document management lives on its own page,
+     same pattern as new project / new T&M ticket). -->
+<div class="pg" id="pg-edit-product">
+  <div class="ph"><div><h1 id="ep-title">Add product</h1><div class="sub" id="ep-sub">New product in the master library</div><div class="stripe"></div></div></div>
+  <div style="display:flex;gap:10px;margin-bottom:14px">
+    <button class="btn" onclick="nav('product-library')">&larr; Back to library</button>
+  </div>
+
+  <div class="card">
+    <div class="ch"><span class="ct">Product details</span></div>
+    <div class="fg">
+      <div class="fgr full"><label>Product name *</label><input id="ep-name" placeholder="e.g. Medium Ironspot 46 Smooth Modular"></div>
+      <div class="fgr"><label>Manufacturer *</label><select id="ep-mfg"><option value="">— Select —</option></select></div>
+      <div class="fgr"><label>Category</label><select id="ep-cat"><option value="">— Select —</option></select></div>
+      <div class="fgr"><label>Default CSI section</label><select id="ep-csi"><option value="">— Select —</option></select></div>
+      <div class="fgr"><label>Size / Model</label><input id="ep-size" placeholder='e.g. 3-5/8&quot; x 2-1/4&quot; x 7-5/8&quot; Modular'></div>
+      <div class="fgr full"><label>Description</label><textarea id="ep-desc" rows="2" placeholder="Short product description"></textarea></div>
+      <div class="fgr"><label>Active</label>
+        <select id="ep-active"><option value="true">Active</option><option value="false">Inactive (don't show in pickers)</option></select>
+      </div>
+      <div class="fgr full"><label>Notes</label><textarea id="ep-notes" rows="2" placeholder="Internal notes, color variants, special handling, etc."></textarea></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn" onclick="nav('product-library')">Cancel</button>
+      <button class="btn btn-p" onclick="saveProduct()" id="ep-save-btn">Save product</button>
+      <button class="btn" onclick="deleteProduct()" id="ep-del-btn" style="color:#A32D2D;display:none">Delete</button>
+    </div>
+  </div>
+
+  <!-- Documents — only shown after the product has been saved at least once -->
+  <div class="card" id="ep-docs-card" style="display:none">
+    <div class="ch">
+      <span class="ct">Documents</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Product data, test reports, letters of compliance — what you ship in submittals</span>
+    </div>
+    <div id="ep-docs-section"></div>
+  </div>
+</div>
+
 <!-- IMPORT DATA -->
 <div class="pg" id="pg-import">
   <div class="ph" style="margin-bottom:0"><div><h1>Import Data</h1><div class="sub">Upload CSV files to import customers, project managers, users, or opportunities</div><div class="stripe"></div></div></div>
@@ -1555,6 +1631,13 @@ var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,
 var DB_DEFAULTS = {
   customers: [], pms: [], users: [], opportunities: [], proposals: [], projects: [], activity: [],
   vendors: [], vendorContacts: [],
+  // Product Library (Round 1) — manufacturers, their products, and the
+  // documents (product data, test reports, etc.) attached to each product.
+  // Documents live in Supabase Storage bucket 'kmi-product-library';
+  // metadata rides on db.productDocuments. See SUBMITTAL plan for context.
+  manufacturers:    [],
+  products:         [],
+  productDocuments: [],
   // T&M Tickets — daily field tickets created by foremen, signed by customer
   // superintendent, approved by KMI PM, then rolled into a Change Order Request.
   // See the COR module (separate) for how rolled-up tickets feed CORs.
@@ -1655,6 +1738,9 @@ function loadDB() {
         activity:     p.activity     || [],
         vendors:        p.vendors        || [],
         vendorContacts: p.vendorContacts || [],
+        manufacturers:    p.manufacturers    || [],
+        products:         p.products         || [],
+        productDocuments: p.productDocuments || [],
         tmTickets:      p.tmTickets      || [],
         cors:           p.cors           || [],
         costCodes:           p.costCodes           || [],
@@ -1770,7 +1856,18 @@ var PERMISSIONS = {
   // Round 4.4: Foundation CO CSV exports — Admin/PM/Accounting full, others
   // none. Mirrors export_project_budget since Accounting drives the actual
   // Foundation upload.
-  'export-cor-foundation': ['full','full','none','full','none','none']
+  'export-cor-foundation': ['full','full','none','full','none','none'],
+  // Product Library (Round 1) — master library of manufacturers, products,
+  // and their attached documents (product data sheets, test reports, etc.)
+  // Admin / PM / Project Coordinator have full create+edit+delete; Accounting
+  // is read-only; Field roles can't see it (not relevant to their work).
+  'view-product-library':   ['full','full','full','read','none','none'],
+  'edit-product-library':   ['full','full','full','none','none','none'],
+  'delete-product-library': ['full','full','full','none','none','none'],
+  // Confirming a stale document is "still valid" follows the same trust
+  // boundary as edit — pulled out so we can tighten it later (e.g.
+  // PM-only) without touching every call site.
+  'confirm-product-document': ['full','full','full','none','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -1824,7 +1921,9 @@ var PAGE_ACTION_MAP = {
   'tm-tickets':     'view-tm-tickets',
   'new-tm-ticket':  'create-tm-ticket',
   'email-log':      'email-log',
-  'email-settings': 'email-settings'
+  'email-settings': 'email-settings',
+  'product-library': 'view-product-library',
+  'edit-product':    'edit-product-library'
 };
 function canAccess(action) {
   if (!_currentUser) return 'none';
@@ -2857,7 +2956,9 @@ function nav(page) {
     cors:             renderCors,
     'new-cor':        initNewCor,
     'email-log':      renderEmailLog,
-    'email-settings': renderEmailSettings
+    'email-settings': renderEmailSettings,
+    'product-library': renderProductLibrary,
+    'edit-product':    renderEditProductPage
   };
   if (fns[page]) fns[page]();
 }
@@ -3901,6 +4002,986 @@ async function rmProjectAttachment(attId) {
     console.warn('project attachment metadata push warning:', e);
   }
   renderProjectAttachments();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PRODUCT LIBRARY — Round 1
+// ═══════════════════════════════════════════════════════════════════════
+// Master library of manufacturers + products + their attached documents
+// (product data sheets, test reports, letters of compliance, etc.).
+// Submittal lists in Round 2 will reference products from this library so
+// the coordinator can compile packages without hunting down PDFs each time.
+//
+// Storage: documents live in Supabase Storage bucket 'kmi-product-library'.
+// Bucket setup (one-time, in Supabase Console):
+//   Storage → New bucket → name 'kmi-product-library' → Private.
+// Path scheme: '<productId>/<timestamp>_<safeName>'
+//
+// Staleness rule: documents older than DOC_STALENESS_YEARS (3) from their
+// effective date show an amber pill until someone clicks "Confirm still
+// valid", which resets the clock. Effective date = lastConfirmedAt ||
+// issueDate || uploadedAt.
+
+var PRODUCT_LIBRARY_BUCKET = 'kmi-product-library';
+
+var PRODUCT_DOC_TYPES = [
+  'Product Data Sheet',
+  'Test Report',
+  'Letter of Compliance',
+  'Mill Test Report',
+  'Cleaning Recommendations',
+  'MSDS/SDS',
+  'Sample Photo',
+  'Shop Drawing',
+  'Other'
+];
+
+var PRODUCT_CATEGORIES = [
+  'Brick',
+  'CMU',
+  'Mortar',
+  'Grout',
+  'Stone',
+  'Anchor & Tie',
+  'Joint Reinforcement',
+  'Flashing',
+  'Insulation',
+  'Sealant',
+  'Control Joint',
+  'Weep / Vent',
+  'Accessory',
+  'Other'
+];
+
+// MasterFormat sections most relevant to KMI's masonry work. Editable
+// later via Templates if needed.
+var CSI_SECTIONS = [
+  '04 05 00 — Common Work Results for Masonry',
+  '04 20 00 — Unit Masonry',
+  '04 21 00 — Clay Unit Masonry',
+  '04 22 00 — Concrete Unit Masonry',
+  '04 23 00 — Glass Unit Masonry',
+  '04 27 00 — Multiple-Wythe Unit Masonry',
+  '04 40 00 — Stone Assemblies',
+  '04 41 00 — Dry-Placed Stone',
+  '04 42 00 — Exterior Stone Cladding',
+  '04 43 00 — Stone Masonry',
+  '04 70 00 — Manufactured Masonry',
+  '04 73 00 — Manufactured Stone Masonry',
+  '07 21 00 — Thermal Insulation',
+  '07 26 00 — Vapor Retarders',
+  '07 27 00 — Air Barriers',
+  '07 62 00 — Sheet Metal Flashing and Trim',
+  '07 65 00 — Flexible Flashing',
+  '07 84 00 — Firestopping',
+  '07 92 00 — Joint Sealants'
+];
+
+var DOC_STALENESS_YEARS = 3;
+
+// ── Module state ─────────────────────────────────────────────────────
+var _editManufacturerId = null;
+var _editProductId      = null;
+var _editProductDocId   = null;  // for editing doc metadata
+var _plActiveTab        = 'products';
+
+function plEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function getManufacturer(id) {
+  return (db.manufacturers || []).find(function(m){ return String(m.id) === String(id); });
+}
+function getProduct(id) {
+  return (db.products || []).find(function(p){ return String(p.id) === String(id); });
+}
+function getProductDocument(id) {
+  return (db.productDocuments || []).find(function(d){ return String(d.id) === String(id); });
+}
+
+// ── Top-level renderer ───────────────────────────────────────────────
+function renderProductLibrary() {
+  // Restore the previously-active tab on re-entry
+  if (_plActiveTab === 'manufacturers') {
+    plSwTab('manufacturers', null);
+  } else {
+    plSwTab('products', null);
+  }
+}
+
+function plSwTab(tab, el) {
+  _plActiveTab = tab;
+  // Toggle tab header active state
+  var heads = document.querySelectorAll('#pg-product-library .tabs .tab');
+  heads.forEach(function(h){ h.classList.remove('active'); });
+  if (el) {
+    el.classList.add('active');
+  } else {
+    // Re-derive the active header from the tab name
+    var idx = (tab === 'manufacturers') ? 1 : 0;
+    if (heads[idx]) heads[idx].classList.add('active');
+  }
+  // Toggle tab body visibility
+  var pTab = g('pl-tab-products');
+  var mTab = g('pl-tab-manufacturers');
+  if (pTab) pTab.style.display = (tab === 'products')      ? '' : 'none';
+  if (mTab) mTab.style.display = (tab === 'manufacturers') ? '' : 'none';
+  // Render the active tab's contents
+  if (tab === 'products')      renderProducts();
+  if (tab === 'manufacturers') renderManufacturers();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// MANUFACTURERS — modal-based CRUD (no file uploads, simple)
+// ════════════════════════════════════════════════════════════════════
+
+function renderManufacturers() {
+  var s = ((g('pl-mfg-s') || {}).value || '').toLowerCase();
+  var list = (db.manufacturers || []).slice().sort(function(a,b){
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  var f = list.filter(function(m){
+    if (!s) return true;
+    var hay = (m.name || '') + ' ' + (m.contact || '') + ' ' + (m.cityState || '') + ' ' + (m.email || '');
+    return hay.toLowerCase().includes(s);
+  });
+  var grid = g('pl-mfg-grid');
+  if (!grid) return;
+  if (!f.length) {
+    grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:#aaa;font-size:13px">' +
+      'No manufacturers yet — ' +
+      (canAccess('edit-product-library') === 'full'
+        ? '<button class="btn btn-sm btn-p" onclick="showAddManufacturer()">Add your first manufacturer</button>'
+        : 'ask an admin to add one.') +
+      '</div>';
+    return;
+  }
+  grid.innerHTML = f.map(function(m){
+    var prodCount = (db.products || []).filter(function(p){ return String(p.manufacturerId) === String(m.id); }).length;
+    var ini = (m.name || '?')[0].toUpperCase();
+    var canEdit = canAccess('edit-product-library') === 'full';
+    return '<div class="card" style="cursor:pointer;position:relative" onclick="viewManufacturer(' + m.id + ')">' +
+      (canEdit ? '<button class="btn btn-sm" title="Edit manufacturer" onclick="event.stopPropagation();showEditManufacturer(' + m.id + ')" style="position:absolute;top:10px;right:10px;padding:4px 8px;font-size:12px">✎ Edit</button>' : '') +
+      '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">' +
+        '<div style="width:42px;height:42px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;color:#fff">' + plEsc(ini) + '</div>' +
+        '<div><div style="font-weight:600;font-size:14px">' + plEsc(m.name) + '</div>' +
+        '<div style="font-size:12px;color:#888">' + plEsc(m.cityState || '') + '</div></div></div>' +
+      '<div style="display:flex;gap:14px;font-size:12px">' +
+        '<div><span style="color:#888">Products: </span><strong>' + prodCount + '</strong></div>' +
+        (m.contact ? '<div><span style="color:#888">Contact: </span>' + plEsc(m.contact) + '</div>' : '') +
+      '</div></div>';
+  }).join('');
+}
+
+function viewManufacturer(id) {
+  var m = getManufacturer(id);
+  if (!m) { alert('Manufacturer not found.'); return; }
+  var products = (db.products || []).filter(function(p){ return String(p.manufacturerId) === String(id); });
+  var canEdit = canAccess('edit-product-library') === 'full';
+  var canDel  = canAccess('delete-product-library') === 'full';
+  var ini = (m.name || '?')[0].toUpperCase();
+  var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">' +
+      '<div style="width:50px;height:50px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#fff">' + plEsc(ini) + '</div>' +
+      '<div><div class="mt" style="margin-bottom:2px">' + plEsc(m.name) + '</div>' +
+      '<div style="font-size:13px;color:#888">' + plEsc(m.cityState || '') + '</div></div></div>';
+  if (m.contact || m.email || m.phone || m.website || m.address) {
+    html += '<div class="sb3"><h4>Contact info</h4>' +
+      (m.contact ? '<div style="font-size:13px"><strong>Contact:</strong> ' + plEsc(m.contact) + '</div>' : '') +
+      (m.email   ? '<div style="font-size:13px"><strong>Email:</strong> ' + plEsc(m.email) + '</div>' : '') +
+      (m.phone   ? '<div style="font-size:13px"><strong>Phone:</strong> ' + plEsc(m.phone) + '</div>' : '') +
+      (m.website ? '<div style="font-size:13px"><strong>Website:</strong> <a href="' + plEsc(m.website) + '" target="_blank" style="color:var(--kmi)">' + plEsc(m.website) + '</a></div>' : '') +
+      (m.address ? '<div style="font-size:13px;margin-top:4px">' + plEsc(m.address) + (m.cityState ? ', ' + plEsc(m.cityState) : '') + '</div>' : '') +
+    '</div>';
+  }
+  if (m.notes) html += '<div class="sb3"><h4>Notes</h4><div style="font-size:13px;line-height:1.5;white-space:pre-wrap">' + plEsc(m.notes) + '</div></div>';
+  if (products.length) {
+    html += '<div class="stl-div">Products (' + products.length + ')</div><table><thead><tr><th>Name</th><th>Category</th><th>CSI Section</th><th>Size / Model</th></tr></thead><tbody>' +
+      products.map(function(p){
+        return '<tr style="cursor:pointer" onclick="closeModal();editProduct(' + p.id + ')">' +
+          '<td style="font-weight:600">' + plEsc(p.name) + '</td>' +
+          '<td>' + plEsc(p.category || '') + '</td>' +
+          '<td style="font-size:12px">' + plEsc(p.csiSection || '') + '</td>' +
+          '<td style="font-size:12px">' + plEsc(p.sizeOrModel || '') + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  } else {
+    html += '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center;font-style:italic">No products linked to this manufacturer yet.</div>';
+  }
+  html += '<div class="mf"><button class="btn" onclick="closeModal()">Close</button>' +
+    (canEdit ? '<button class="btn" onclick="closeModal();showEditManufacturer(' + m.id + ')">✎ Edit</button>' : '') +
+    (canDel  ? '<button class="btn" style="color:#A32D2D" onclick="closeModal();deleteManufacturer(' + m.id + ')">Delete</button>' : '') +
+    '</div>';
+  showModal(html);
+}
+
+function _mfgFormHtml(m) {
+  m = m || {};
+  return '<div class="fg">' +
+      '<div class="fgr full"><label>Manufacturer name *</label><input id="mf-n" value="' + plEsc(m.name || '') + '" placeholder="e.g. Endicott Clay Products"></div>' +
+      '<div class="fgr"><label>Primary contact <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional)</span></label><input id="mf-c" value="' + plEsc(m.contact || '') + '" placeholder="Full name"></div>' +
+      '<div class="fgr"><label>Email</label><input id="mf-e" type="email" value="' + plEsc(m.email || '') + '" placeholder="contact@manufacturer.com"></div>' +
+      '<div class="fgr"><label>Phone</label><input id="mf-p" value="' + plEsc(m.phone || '') + '" placeholder="(555) 555-0000"></div>' +
+      '<div class="fgr"><label>Website</label><input id="mf-w" value="' + plEsc(m.website || '') + '" placeholder="https://..."></div>' +
+      '<div class="fgr full"><label>Street address</label><input id="mf-a" value="' + plEsc(m.address || '') + '" placeholder="Street address"></div>' +
+      '<div class="fgr"><label>City, State ZIP</label><input id="mf-cs" value="' + plEsc(m.cityState || '') + '" placeholder="Fairbury, NE 68352"></div>' +
+      '<div class="fgr full"><label>Notes</label><textarea id="mf-notes" placeholder="Any notes about this manufacturer...">' + plEsc(m.notes || '') + '</textarea></div>' +
+    '</div>';
+}
+
+function showAddManufacturer() {
+  if (!requireFull('edit-product-library', 'add manufacturers')) return;
+  _editManufacturerId = null;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add manufacturer</div>' +
+    '<div class="msb">Add a new manufacturer to the master library</div>' +
+    _mfgFormHtml(null) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" onclick="saveManufacturer()">Add manufacturer</button></div>');
+}
+
+function showEditManufacturer(id) {
+  if (!requireFull('edit-product-library', 'edit manufacturers')) return;
+  var m = getManufacturer(id); if (!m) { alert('Manufacturer not found.'); return; }
+  _editManufacturerId = id;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Edit manufacturer</div>' +
+    '<div class="msb">' + plEsc(m.name) + '</div>' +
+    _mfgFormHtml(m) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" onclick="saveManufacturer()">Save changes</button></div>');
+}
+
+async function saveManufacturer() {
+  var n = (g('mf-n').value || '').trim();
+  if (!n) { alert('Please enter a manufacturer name.'); return; }
+  // Dedupe by name (case-insensitive). A clean library is the whole point.
+  var nLc = n.toLowerCase();
+  var clash = (db.manufacturers || []).find(function(x){
+    return String(x.id) !== String(_editManufacturerId) && (x.name || '').toLowerCase() === nLc;
+  });
+  if (clash) {
+    alert('A manufacturer named "' + clash.name + '" already exists. Use a different name or edit the existing record instead.');
+    return;
+  }
+  var data = {
+    name:      n,
+    contact:   (g('mf-c').value     || '').trim(),
+    email:     (g('mf-e').value     || '').trim(),
+    phone:     (g('mf-p').value     || '').trim(),
+    website:   (g('mf-w').value     || '').trim(),
+    address:   (g('mf-a').value     || '').trim(),
+    cityState: (g('mf-cs').value    || '').trim(),
+    notes:     (g('mf-notes').value || '').trim()
+  };
+  if (!Array.isArray(db.manufacturers)) db.manufacturers = [];
+  var record;
+  if (_editManufacturerId) {
+    record = getManufacturer(_editManufacturerId);
+    if (record) Object.assign(record, data);
+  } else {
+    record = data;
+    record.id = Date.now();
+    record.createdAt = new Date().toISOString();
+    record.createdByUserId = _currentUser ? _currentUser.id : null;
+    db.manufacturers.push(record);
+  }
+  saveDB();
+
+  if (supabaseClient && record) {
+    try {
+      var r = await supabaseClient.from('kmi_manufacturers').upsert(toSBManufacturer(record));
+      if (r && r.error) console.warn('manufacturer push warning:', r.error.message);
+    } catch (e) {
+      console.warn('manufacturer push threw:', e);
+    }
+  }
+
+  closeModal();
+  _editManufacturerId = null;
+  // Refresh whichever view is active
+  var activePg = document.querySelector('.pg.active');
+  if (activePg && activePg.id === 'pg-product-library') {
+    if (_plActiveTab === 'manufacturers') renderManufacturers();
+    else renderProducts();  // products tab shows manufacturer column
+  }
+  if (activePg && activePg.id === 'pg-edit-product') {
+    _populateProductSelects();  // refresh manufacturer dropdown on edit page
+  }
+}
+
+async function deleteManufacturer(id) {
+  if (!requireFull('delete-product-library', 'delete manufacturers')) return;
+  var m = getManufacturer(id); if (!m) return;
+  var prodCount = (db.products || []).filter(function(p){ return String(p.manufacturerId) === String(id); }).length;
+  var msg = 'Delete manufacturer "' + m.name + '"?';
+  if (prodCount) {
+    msg += '\n\nThis manufacturer has ' + prodCount + ' product' + (prodCount === 1 ? '' : 's') +
+           ' linked to it. The products will be kept but their manufacturer will be cleared.';
+  }
+  if (!confirm(msg)) return;
+
+  // Cascade: orphan the linked products (keeps their docs / history)
+  (db.products || []).forEach(function(p){
+    if (String(p.manufacturerId) === String(id)) {
+      p.manufacturerId = null;
+    }
+  });
+  db.manufacturers = (db.manufacturers || []).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      // Push the orphaned products first, then delete the manufacturer row
+      var orphaned = (db.products || []).filter(function(p){ return p.manufacturerId === null; });
+      if (orphaned.length) {
+        await supabaseClient.from('kmi_products').upsert(orphaned.map(toSBProduct));
+      }
+      var r = await supabaseClient.from('kmi_manufacturers').delete().eq('id', id);
+      if (r && r.error) console.warn('manufacturer delete warning:', r.error.message);
+    } catch (e) {
+      console.warn('manufacturer delete threw:', e);
+    }
+  }
+
+  var activePg = document.querySelector('.pg.active');
+  if (activePg && activePg.id === 'pg-product-library') {
+    if (_plActiveTab === 'manufacturers') renderManufacturers();
+    else renderProducts();
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PRODUCTS — list table + dedicated edit page (with documents)
+// ════════════════════════════════════════════════════════════════════
+
+function renderProducts() {
+  // Populate filter dropdowns from current data
+  var mfgSel = g('pl-prod-fmfg');
+  var catSel = g('pl-prod-fcat');
+  var csiSel = g('pl-prod-fcsi');
+  if (mfgSel) {
+    var prevMfg = mfgSel.value;
+    var mfgList = (db.manufacturers || []).slice().sort(function(a,b){
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+    mfgSel.innerHTML = '<option value="">All manufacturers</option>' +
+      mfgList.map(function(m){ return '<option value="' + plEsc(m.id) + '">' + plEsc(m.name) + '</option>'; }).join('');
+    mfgSel.value = prevMfg;
+  }
+  if (catSel) {
+    var prevCat = catSel.value;
+    catSel.innerHTML = '<option value="">All categories</option>' +
+      PRODUCT_CATEGORIES.map(function(c){ return '<option>' + plEsc(c) + '</option>'; }).join('');
+    catSel.value = prevCat;
+  }
+  if (csiSel) {
+    var prevCsi = csiSel.value;
+    csiSel.innerHTML = '<option value="">All CSI sections</option>' +
+      CSI_SECTIONS.map(function(s){ return '<option value="' + plEsc(s) + '">' + plEsc(s) + '</option>'; }).join('');
+    csiSel.value = prevCsi;
+  }
+
+  var s   = ((g('pl-prod-s')    || {}).value || '').toLowerCase();
+  var fm  =  (g('pl-prod-fmfg') || {}).value || '';
+  var fc  =  (g('pl-prod-fcat') || {}).value || '';
+  var fcs =  (g('pl-prod-fcsi') || {}).value || '';
+  var f = (db.products || []).filter(function(p){
+    var mfg = getManufacturer(p.manufacturerId);
+    var hay = (p.name || '') + ' ' + ((mfg && mfg.name) || '') + ' ' +
+              (p.sizeOrModel || '') + ' ' + (p.description || '') + ' ' + (p.csiSection || '');
+    if (s   && !hay.toLowerCase().includes(s))                     return false;
+    if (fm  && String(p.manufacturerId) !== String(fm))            return false;
+    if (fc  && (p.category || '') !== fc)                          return false;
+    if (fcs && (p.csiSection || '') !== fcs)                       return false;
+    return true;
+  }).sort(function(a,b){ return String(a.name || '').localeCompare(String(b.name || '')); });
+
+  var canEdit = canAccess('edit-product-library') === 'full';
+  var tbody = g('pl-prod-tbody');
+  if (!tbody) return;
+  if (!f.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:#aaa;font-size:13px">' +
+      ((db.products || []).length === 0
+        ? 'No products yet — ' + (canEdit ? '<button class="btn btn-sm btn-p" onclick="initNewProduct()">Add your first product</button>' : 'ask an admin to add one.')
+        : 'No products match the current filters.') +
+      '</td></tr>';
+    return;
+  }
+  tbody.innerHTML = f.map(function(p){
+    var mfg = getManufacturer(p.manufacturerId);
+    var docs = (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(p.id); });
+    var docSummary = _productDocSummary(docs);
+    var inactiveTag = (p.isActive === false) ? ' <span class="bdg bd-draft" style="font-size:10px">Inactive</span>' : '';
+    return '<tr style="cursor:pointer" onclick="editProduct(' + p.id + ')">' +
+      '<td style="font-weight:600">' + plEsc(p.name) + inactiveTag + '</td>' +
+      '<td>' + plEsc((mfg && mfg.name) || '—') + '</td>' +
+      '<td>' + plEsc(p.category || '') + '</td>' +
+      '<td style="font-size:12px">' + plEsc(p.csiSection || '') + '</td>' +
+      '<td style="font-size:12px">' + plEsc(p.sizeOrModel || '') + '</td>' +
+      '<td style="font-size:12px">' + docSummary + '</td>' +
+      '<td onclick="event.stopPropagation()">' +
+        '<button class="btn btn-sm" onclick="editProduct(' + p.id + ')">' + (canEdit ? '✎ Edit' : 'View') + '</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+// Compact summary of doc counts + worst-status pill for the product row.
+function _productDocSummary(docs) {
+  if (!docs || !docs.length) {
+    return '<span style="color:#aaa">No docs</span>';
+  }
+  var worst = 'green';
+  docs.forEach(function(d){
+    var st = _docStaleStatus(d);
+    if (st === 'amber' && worst === 'green') worst = 'amber';
+  });
+  var pill = (worst === 'amber')
+    ? '<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:#FBE9C5;color:#9A7A2E;font-size:10px;font-weight:600;margin-left:6px">Review</span>'
+    : '<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:#DDEDC8;color:#3B6D11;font-size:10px;font-weight:600;margin-left:6px">Current</span>';
+  return docs.length + ' doc' + (docs.length === 1 ? '' : 's') + pill;
+}
+
+function initNewProduct() {
+  if (!requireFull('edit-product-library', 'add products')) return;
+  _editProductId = null;
+  nav('edit-product');
+}
+
+function editProduct(id) {
+  // Read-only roles can still drill in to view docs
+  if (canAccess('view-product-library') === 'none') {
+    alert('You do not have permission to view the product library.');
+    return;
+  }
+  _editProductId = id;
+  nav('edit-product');
+}
+
+// Populate the manufacturer/category/CSI dropdowns on the edit page.
+// Called by renderEditProductPage AND after manufacturer add/edit so the
+// dropdown stays current.
+function _populateProductSelects() {
+  var mfgSel = g('ep-mfg');
+  var catSel = g('ep-cat');
+  var csiSel = g('ep-csi');
+  if (!mfgSel || !catSel || !csiSel) return;
+  var mfgList = (db.manufacturers || []).slice().sort(function(a,b){
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  var p = _editProductId ? getProduct(_editProductId) : null;
+
+  mfgSel.innerHTML = '<option value="">— Select —</option>' +
+    mfgList.map(function(m){
+      var sel = (p && String(p.manufacturerId) === String(m.id)) ? ' selected' : '';
+      return '<option value="' + plEsc(m.id) + '"' + sel + '>' + plEsc(m.name) + '</option>';
+    }).join('');
+
+  catSel.innerHTML = '<option value="">— Select —</option>' +
+    PRODUCT_CATEGORIES.map(function(c){
+      var sel = (p && p.category === c) ? ' selected' : '';
+      return '<option' + sel + '>' + plEsc(c) + '</option>';
+    }).join('');
+
+  csiSel.innerHTML = '<option value="">— Select —</option>' +
+    CSI_SECTIONS.map(function(s){
+      var sel = (p && p.csiSection === s) ? ' selected' : '';
+      return '<option value="' + plEsc(s) + '"' + sel + '>' + plEsc(s) + '</option>';
+    }).join('');
+}
+
+function renderEditProductPage() {
+  var p = _editProductId ? getProduct(_editProductId) : null;
+  var canEdit = canAccess('edit-product-library') === 'full';
+  var canDel  = canAccess('delete-product-library') === 'full';
+
+  var titleEl = g('ep-title'); if (titleEl) titleEl.textContent = p ? 'Edit product' : 'Add product';
+  var subEl   = g('ep-sub');   if (subEl)   subEl.textContent   = p ? p.name : 'New product in the master library';
+
+  // Populate dropdowns
+  _populateProductSelects();
+
+  // Fill form fields
+  var nameEl   = g('ep-name');   if (nameEl)   nameEl.value   = (p && p.name)        || '';
+  var sizeEl   = g('ep-size');   if (sizeEl)   sizeEl.value   = (p && p.sizeOrModel) || '';
+  var descEl   = g('ep-desc');   if (descEl)   descEl.value   = (p && p.description) || '';
+  var notesEl  = g('ep-notes');  if (notesEl)  notesEl.value  = (p && p.notes)       || '';
+  var activeEl = g('ep-active'); if (activeEl) activeEl.value = (p && p.isActive === false) ? 'false' : 'true';
+
+  // Disable form for read-only roles
+  if (!canEdit) {
+    ['ep-name','ep-mfg','ep-cat','ep-csi','ep-size','ep-desc','ep-notes','ep-active'].forEach(function(id){
+      var el = g(id); if (el) el.disabled = true;
+    });
+    var saveBtn = g('ep-save-btn'); if (saveBtn) saveBtn.style.display = 'none';
+  } else {
+    var saveBtn2 = g('ep-save-btn'); if (saveBtn2) saveBtn2.style.display = '';
+  }
+
+  // Delete button — only on existing records and only if permitted
+  var delBtn = g('ep-del-btn');
+  if (delBtn) delBtn.style.display = (p && canDel) ? '' : 'none';
+
+  // Documents card — only meaningful once the product has been saved
+  var docsCard = g('ep-docs-card');
+  if (docsCard) docsCard.style.display = p ? '' : 'none';
+  if (p) renderProductDocuments();
+}
+
+async function saveProduct() {
+  if (!requireFull('edit-product-library', 'save products')) return;
+  var name = (g('ep-name').value || '').trim();
+  var mfgId = (g('ep-mfg').value || '').trim();
+  if (!name) { alert('Please enter a product name.'); return; }
+  if (!mfgId) { alert('Please pick a manufacturer.'); return; }
+
+  // Dedupe within manufacturer — same product name under same mfg blocks save
+  var nLc = name.toLowerCase();
+  var clash = (db.products || []).find(function(x){
+    return String(x.id) !== String(_editProductId) &&
+           String(x.manufacturerId) === String(mfgId) &&
+           (x.name || '').toLowerCase() === nLc;
+  });
+  if (clash) {
+    alert('A product named "' + clash.name + '" already exists for that manufacturer.\n\nUse a different name or edit the existing product.');
+    return;
+  }
+
+  var nowIso = new Date().toISOString();
+  var data = {
+    manufacturerId: Number(mfgId) || mfgId,
+    name:           name,
+    category:       (g('ep-cat').value   || '').trim(),
+    csiSection:     (g('ep-csi').value   || '').trim(),
+    sizeOrModel:    (g('ep-size').value  || '').trim(),
+    description:    (g('ep-desc').value  || '').trim(),
+    notes:          (g('ep-notes').value || '').trim(),
+    isActive:       (g('ep-active').value !== 'false'),
+    updatedAt:      nowIso,
+    updatedByUserId: _currentUser ? _currentUser.id : null
+  };
+  if (!Array.isArray(db.products)) db.products = [];
+  var record;
+  if (_editProductId) {
+    record = getProduct(_editProductId);
+    if (record) Object.assign(record, data);
+  } else {
+    record = data;
+    record.id = Date.now();
+    record.createdAt = nowIso;
+    record.createdByUserId = _currentUser ? _currentUser.id : null;
+    db.products.push(record);
+    _editProductId = record.id;
+  }
+  saveDB();
+
+  if (supabaseClient && record) {
+    try {
+      var r = await supabaseClient.from('kmi_products').upsert(toSBProduct(record));
+      if (r && r.error) console.warn('product push warning:', r.error.message);
+    } catch (e) {
+      console.warn('product push threw:', e);
+    }
+  }
+
+  // Re-render the page so the docs card becomes visible (for a new product)
+  // and the title flips to "Edit product".
+  renderEditProductPage();
+}
+
+async function deleteProduct() {
+  if (!_editProductId) return;
+  if (!requireFull('delete-product-library', 'delete products')) return;
+  var p = getProduct(_editProductId); if (!p) return;
+  var docs = (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(_editProductId); });
+  var msg = 'Delete product "' + p.name + '"?';
+  if (docs.length) msg += '\n\nThis will also delete ' + docs.length + ' attached document' +
+                          (docs.length === 1 ? '' : 's') + ' from storage.';
+  if (!confirm(msg)) return;
+
+  // Best-effort: remove all storage files first
+  if (supabaseClient && docs.length) {
+    var paths = docs.map(function(d){ return d.filePath; }).filter(Boolean);
+    if (paths.length) {
+      try {
+        var del = await supabaseClient.storage.from(PRODUCT_LIBRARY_BUCKET).remove(paths);
+        if (del && del.error) console.warn('product files remove warning:', del.error.message);
+      } catch (e) {
+        console.warn('product files remove threw:', e);
+      }
+    }
+  }
+
+  // Remove doc records + the product itself from local state
+  db.productDocuments = (db.productDocuments || []).filter(function(d){
+    return String(d.productId) !== String(_editProductId);
+  });
+  db.products = (db.products || []).filter(function(x){ return String(x.id) !== String(_editProductId); });
+  saveDB();
+
+  // Push removals to Supabase (CASCADE on FK takes the docs, but be explicit)
+  if (supabaseClient) {
+    try {
+      await supabaseClient.from('kmi_product_documents').delete().eq('product_id', _editProductId);
+      await supabaseClient.from('kmi_products').delete().eq('id', _editProductId);
+    } catch (e) {
+      console.warn('product delete threw:', e);
+    }
+  }
+
+  _editProductId = null;
+  nav('product-library');
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PRODUCT DOCUMENTS — uploads, staleness pills, confirm-still-valid
+// ════════════════════════════════════════════════════════════════════
+
+// Effective date used for staleness math: confirmation > issue > upload.
+function _docEffectiveDate(d) {
+  if (!d) return null;
+  if (d.lastConfirmedAt) return d.lastConfirmedAt;
+  if (d.issueDate)        return d.issueDate;
+  if (d.uploadedAt)       return d.uploadedAt;
+  return null;
+}
+
+// Returns 'green' (current) or 'amber' (>= DOC_STALENESS_YEARS old, needs
+// confirmation). Mike asked for a single-threshold flag in Round 1.
+function _docStaleStatus(d) {
+  var ed = _docEffectiveDate(d);
+  if (!ed) return 'amber';  // no dates at all → flag for review
+  var t = new Date(ed).getTime();
+  if (isNaN(t)) return 'amber';
+  var ageMs = Date.now() - t;
+  var ageYears = ageMs / (365.25 * 24 * 60 * 60 * 1000);
+  return (ageYears >= DOC_STALENESS_YEARS) ? 'amber' : 'green';
+}
+
+function _docStalePill(d) {
+  var st = _docStaleStatus(d);
+  if (st === 'green') {
+    return '<span style="display:inline-block;padding:2px 8px;border-radius:3px;background:#DDEDC8;color:#3B6D11;font-size:10px;font-weight:600">Current</span>';
+  }
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:3px;background:#FBE9C5;color:#9A7A2E;font-size:10px;font-weight:600" title="Older than 3 years — please confirm it is still valid">Review</span>';
+}
+
+function _docDocTypeOpts(selected) {
+  return PRODUCT_DOC_TYPES.map(function(t){
+    return '<option' + (t === selected ? ' selected' : '') + '>' + plEsc(t) + '</option>';
+  }).join('');
+}
+
+function renderProductDocuments() {
+  var el = g('ep-docs-section');
+  if (!el || !_editProductId) return;
+  var p = getProduct(_editProductId);
+  var docs = (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(_editProductId); });
+  var canEdit = canAccess('edit-product-library') === 'full';
+  var canConfirm = canAccess('confirm-product-document') === 'full';
+
+  // Sort: amber first, then by issue date desc
+  docs.sort(function(a, b){
+    var sa = _docStaleStatus(a), sb = _docStaleStatus(b);
+    if (sa !== sb) return sa === 'amber' ? -1 : 1;
+    var da = new Date(_docEffectiveDate(a) || 0).getTime() || 0;
+    var dbb = new Date(_docEffectiveDate(b) || 0).getTime() || 0;
+    return dbb - da;
+  });
+
+  var html = '';
+
+  // Upload row (only for editors)
+  if (canEdit) {
+    html +=
+      '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
+        'Documents are stored in the <code>kmi-product-library</code> bucket and reused across submittals. ' +
+        'Pick the document type and (if known) the issue date — the issue date drives the 3-year staleness flag.' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:170px 1fr 130px 90px;gap:8px;align-items:end;margin-bottom:14px">' +
+        '<div><label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;display:block">Document type</label>' +
+          '<select id="epd-type" style="width:100%"><option value="">— Select —</option>' + _docDocTypeOpts('') + '</select></div>' +
+        '<div><label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;display:block">Title (optional)</label>' +
+          '<input id="epd-title" placeholder="e.g. Test Report 8326-19161" style="width:100%"></div>' +
+        '<div><label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;display:block">Issue date</label>' +
+          '<input id="epd-issue" type="date" style="width:100%"></div>' +
+        '<div><label class="btn btn-p btn-sm" style="cursor:pointer;display:inline-block;margin:0;width:100%;text-align:center">' +
+          '↑ Upload' +
+          '<input type="file" id="epd-file" style="display:none" onchange="onProductDocSelected(event)">' +
+        '</label></div>' +
+      '</div>' +
+      '<div id="epd-status" style="font-size:11px;color:#888;min-height:16px;margin-bottom:8px"></div>';
+  }
+
+  if (!docs.length) {
+    html += '<div style="padding:18px;color:#aaa;font-size:13px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No documents attached yet.</div>';
+    el.innerHTML = html;
+    return;
+  }
+
+  html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px">' +
+    '<thead style="background:#fafafa"><tr>' +
+      '<th style="padding:6px 8px;text-align:left;width:90px">Status</th>' +
+      '<th style="padding:6px 8px;text-align:left">Document</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:130px">Type</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:110px">Issue date</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:140px">Last confirmed</th>' +
+      '<th style="padding:6px 8px;text-align:right;width:80px">Size</th>' +
+      '<th style="padding:6px 8px;width:240px"></th>' +
+    '</tr></thead><tbody>';
+
+  docs.forEach(function(d){
+    var pill = _docStalePill(d);
+    var stale = (_docStaleStatus(d) === 'amber');
+    var issue = d.issueDate ? d.issueDate.slice(0, 10) : '—';
+    var conf  = d.lastConfirmedAt ? d.lastConfirmedAt.slice(0, 10) : '—';
+    var titleStr = d.title || d.fileName || '—';
+    html += '<tr>' +
+      '<td style="padding:6px 8px">' + pill + '</td>' +
+      '<td style="padding:6px 8px;word-break:break-all">' + plEsc(titleStr) +
+        (d.title && d.fileName && d.title !== d.fileName ? '<div style="font-size:10px;color:#aaa">' + plEsc(d.fileName) + '</div>' : '') +
+      '</td>' +
+      '<td style="padding:6px 8px">' + plEsc(d.documentType || '—') + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px">' + plEsc(issue) + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px">' + plEsc(conf) + '</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace;color:#888">' + _fmtFileSize(d.fileSize) + '</td>' +
+      '<td style="padding:6px 8px;text-align:right">' +
+        '<button type="button" class="btn btn-sm" onclick="viewProductDocument(\'' + plEsc(d.id) + '\')">⬇ Open</button> ' +
+        (canConfirm && stale ? '<button type="button" class="btn btn-sm" onclick="confirmProductDocument(\'' + plEsc(d.id) + '\')" title="Confirm this document is still valid; resets the 3-year clock">✓ Confirm</button> ' : '') +
+        (canEdit ? '<button type="button" class="btn btn-sm" onclick="editProductDocumentMeta(\'' + plEsc(d.id) + '\')">✎</button> ' : '') +
+        (canEdit ? '<button type="button" class="btn btn-sm" onclick="rmProductDocument(\'' + plEsc(d.id) + '\')" style="color:#A32D2D">×</button>' : '') +
+      '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  // Suppress the obsolete `p is unused` warning we'd get from a strict linter — p is intentionally
+  // not referenced by the template above; we just needed the lookup at the top to validate access.
+  void p;
+
+  el.innerHTML = html;
+}
+
+async function onProductDocSelected(ev) {
+  var fileEl = ev && ev.target;
+  var file = fileEl && fileEl.files && fileEl.files[0];
+  if (!file) return;
+  if (!_editProductId) { alert('Save the product first.'); return; }
+  if (!supabaseClient) {
+    alert('Not connected to Supabase. Connect first, then upload.');
+    fileEl.value = '';
+    return;
+  }
+  if (!hasFull('edit-product-library')) { alert('You do not have permission to upload documents.'); fileEl.value = ''; return; }
+
+  var docType = (g('epd-type').value  || '').trim();
+  var title   = (g('epd-title').value || '').trim();
+  var issue   = (g('epd-issue').value || '').trim();  // 'YYYY-MM-DD' or ''
+  if (!docType) {
+    alert('Please pick a document type before uploading.');
+    fileEl.value = '';
+    return;
+  }
+  if (issue && !/^\d{4}-\d{2}-\d{2}$/.test(issue)) {
+    alert('Issue date is not a valid date.');
+    fileEl.value = '';
+    return;
+  }
+
+  var status = g('epd-status');
+  if (file.size > 25 * 1024 * 1024) {
+    if (!confirm('This file is ' + _fmtFileSize(file.size) + '. Large uploads may be slow or fail. Continue?')) {
+      fileEl.value = '';
+      return;
+    }
+  }
+
+  if (status) status.textContent = 'Uploading…';
+  try {
+    var ts = Date.now();
+    var safeName = _safeFileName(file.name);
+    var path = String(_editProductId) + '/' + ts + '_' + safeName;
+
+    var up = await supabaseClient.storage.from(PRODUCT_LIBRARY_BUCKET)
+      .upload(path, file, {
+        contentType: file.type || 'application/octet-stream',
+        upsert: false
+      });
+    if (up && up.error) {
+      if (/Bucket not found/i.test(up.error.message || '')) {
+        throw new Error("Storage bucket '" + PRODUCT_LIBRARY_BUCKET + "' doesn't exist yet. " +
+          "Create it in the Supabase Console (Storage → New bucket → name '" + PRODUCT_LIBRARY_BUCKET + "', private), then try again.");
+      }
+      throw new Error(up.error.message);
+    }
+
+    var nowIso = new Date().toISOString();
+    var doc = {
+      id: 'pdoc' + ts + '_' + Math.random().toString(36).slice(2, 8),
+      productId:    _editProductId,
+      documentType: docType,
+      title:        title,
+      filePath:     path,
+      fileName:     file.name,
+      fileSize:     file.size,
+      contentType:  file.type || 'application/octet-stream',
+      issueDate:    issue || null,
+      isConfirmedValid: false,
+      lastConfirmedAt: null,
+      lastConfirmedByUserId: null,
+      uploadedAt: nowIso,
+      uploadedByUserId: _currentUser ? _currentUser.id : null,
+      uploadedByName:   _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '',
+      notes: ''
+    };
+    db.productDocuments = Array.isArray(db.productDocuments) ? db.productDocuments : [];
+    db.productDocuments.push(doc);
+    saveDB();
+
+    try {
+      var r = await supabaseClient.from('kmi_product_documents').upsert(toSBProductDocument(doc));
+      if (r && r.error) console.warn('product_document push warning:', r.error.message);
+    } catch (e) {
+      console.warn('product_document push threw:', e);
+    }
+
+    // Reset the upload row inputs
+    var typeEl  = g('epd-type');  if (typeEl)  typeEl.value  = '';
+    var titleEl = g('epd-title'); if (titleEl) titleEl.value = '';
+    var issueEl = g('epd-issue'); if (issueEl) issueEl.value = '';
+
+    if (status) status.textContent = 'Uploaded ✓';
+    setTimeout(function(){ if (status) status.textContent = ''; }, 3000);
+    renderProductDocuments();
+    // Update the product list summary too (in case user navigates back)
+  } catch (e) {
+    if (status) status.textContent = '';
+    alert('Upload failed: ' + (e && e.message ? e.message : String(e)));
+  } finally {
+    fileEl.value = '';
+  }
+}
+
+async function viewProductDocument(docId) {
+  var d = getProductDocument(docId);
+  if (!d) { alert('Document not found.'); return; }
+  if (!supabaseClient) { alert('Not connected to Supabase.'); return; }
+  try {
+    var r = await supabaseClient.storage.from(PRODUCT_LIBRARY_BUCKET)
+      .createSignedUrl(d.filePath, 300);  // 5 min
+    if (r && r.error) throw new Error(r.error.message);
+    if (r && r.data && r.data.signedUrl) {
+      window.open(r.data.signedUrl, '_blank');
+    } else {
+      alert('Could not generate a download link.');
+    }
+  } catch (e) {
+    alert('Failed to open document: ' + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function rmProductDocument(docId) {
+  if (!hasFull('edit-product-library')) { alert('You do not have permission to remove documents.'); return; }
+  var d = getProductDocument(docId);
+  if (!d) return;
+  if (!confirm('Remove "' + (d.title || d.fileName || 'this document') + '" from the library?\n\nThis will delete the file from storage and cannot be undone.')) return;
+  if (!supabaseClient) { alert('Not connected to Supabase.'); return; }
+
+  try {
+    var del = await supabaseClient.storage.from(PRODUCT_LIBRARY_BUCKET).remove([d.filePath]);
+    if (del && del.error) console.warn('product doc storage remove warning:', del.error.message);
+  } catch (e) {
+    console.warn('product doc storage remove threw:', e);
+  }
+
+  db.productDocuments = (db.productDocuments || []).filter(function(x){ return String(x.id) !== String(docId); });
+  saveDB();
+
+  try {
+    await supabaseClient.from('kmi_product_documents').delete().eq('id', docId);
+  } catch (e) {
+    console.warn('product doc delete threw:', e);
+  }
+
+  renderProductDocuments();
+}
+
+async function confirmProductDocument(docId) {
+  if (!hasFull('confirm-product-document')) { alert('You do not have permission to confirm documents.'); return; }
+  var d = getProductDocument(docId);
+  if (!d) return;
+  if (!confirm('Confirm "' + (d.title || d.fileName || 'this document') + '" is still valid?\n\nThis resets the 3-year clock and clears the Review flag.')) return;
+  d.isConfirmedValid = true;
+  d.lastConfirmedAt  = new Date().toISOString();
+  d.lastConfirmedByUserId = _currentUser ? _currentUser.id : null;
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_product_documents').upsert(toSBProductDocument(d));
+      if (r && r.error) console.warn('product_document confirm push warning:', r.error.message);
+    } catch (e) {
+      console.warn('product_document confirm push threw:', e);
+    }
+  }
+  renderProductDocuments();
+}
+
+// Edit document metadata (type, title, issue date) without re-uploading
+function editProductDocumentMeta(docId) {
+  if (!hasFull('edit-product-library')) { alert('You do not have permission to edit documents.'); return; }
+  var d = getProductDocument(docId);
+  if (!d) return;
+  _editProductDocId = docId;
+  var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Edit document</div>' +
+    '<div class="msb">' + plEsc(d.fileName || '') + '</div>' +
+    '<div class="fg">' +
+      '<div class="fgr"><label>Document type</label>' +
+        '<select id="epd-edit-type"><option value="">— Select —</option>' + _docDocTypeOpts(d.documentType || '') + '</select></div>' +
+      '<div class="fgr"><label>Issue date</label><input id="epd-edit-issue" type="date" value="' + plEsc(d.issueDate ? d.issueDate.slice(0,10) : '') + '"></div>' +
+      '<div class="fgr full"><label>Title</label><input id="epd-edit-title" value="' + plEsc(d.title || '') + '" placeholder="Display title"></div>' +
+      '<div class="fgr full"><label>Notes</label><textarea id="epd-edit-notes" rows="2">' + plEsc(d.notes || '') + '</textarea></div>' +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveProductDocumentMeta()">Save</button>' +
+    '</div>';
+  showModal(html);
+}
+
+async function saveProductDocumentMeta() {
+  if (!_editProductDocId) return;
+  var d = getProductDocument(_editProductDocId);
+  if (!d) { closeModal(); return; }
+  var issue = (g('epd-edit-issue').value || '').trim();
+  if (issue && !/^\d{4}-\d{2}-\d{2}$/.test(issue)) {
+    alert('Issue date is not a valid date.');
+    return;
+  }
+  d.documentType = (g('epd-edit-type').value  || '').trim();
+  d.title        = (g('epd-edit-title').value || '').trim();
+  d.issueDate    = issue || null;
+  d.notes        = (g('epd-edit-notes').value || '').trim();
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_product_documents').upsert(toSBProductDocument(d));
+      if (r && r.error) console.warn('product_document meta push warning:', r.error.message);
+    } catch (e) {
+      console.warn('product_document meta push threw:', e);
+    }
+  }
+
+  closeModal();
+  _editProductDocId = null;
+  renderProductDocuments();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -18922,6 +20003,106 @@ function fromSBVendorContact(r) {
   };
 }
 
+// ── Product Library mappers (Round 1) ───────────────────────────
+function toSBManufacturer(r) {
+  return {
+    id:r.id, name:r.name||'',
+    contact:r.contact||'',
+    email:r.email||'', phone:r.phone||'',
+    address:r.address||'', city_state:r.cityState||'',
+    website:r.website||'', notes:r.notes||'',
+    created_at:r.createdAt||null,
+    created_by_user_id:r.createdByUserId||null
+  };
+}
+function fromSBManufacturer(r) {
+  return {
+    id:r.id, name:r.name||'',
+    contact:r.contact||'',
+    email:r.email||'', phone:r.phone||'',
+    address:r.address||'', cityState:r.city_state||'',
+    website:r.website||'', notes:r.notes||'',
+    createdAt:r.created_at||null,
+    createdByUserId:r.created_by_user_id||null
+  };
+}
+
+function toSBProduct(r) {
+  return {
+    id:r.id,
+    manufacturer_id:r.manufacturerId||null,
+    name:r.name||'',
+    category:r.category||'',
+    csi_section:r.csiSection||'',
+    size_or_model:r.sizeOrModel||'',
+    description:r.description||'',
+    is_active:(r.isActive !== false),
+    notes:r.notes||'',
+    created_at:r.createdAt||null,
+    created_by_user_id:r.createdByUserId||null,
+    updated_at:r.updatedAt||null,
+    updated_by_user_id:r.updatedByUserId||null
+  };
+}
+function fromSBProduct(r) {
+  return {
+    id:r.id,
+    manufacturerId:r.manufacturer_id||null,
+    name:r.name||'',
+    category:r.category||'',
+    csiSection:r.csi_section||'',
+    sizeOrModel:r.size_or_model||'',
+    description:r.description||'',
+    isActive:(r.is_active !== false),
+    notes:r.notes||'',
+    createdAt:r.created_at||null,
+    createdByUserId:r.created_by_user_id||null,
+    updatedAt:r.updated_at||null,
+    updatedByUserId:r.updated_by_user_id||null
+  };
+}
+
+function toSBProductDocument(r) {
+  return {
+    id:r.id,
+    product_id:r.productId||null,
+    document_type:r.documentType||'',
+    title:r.title||'',
+    file_path:r.filePath||'',
+    file_name:r.fileName||'',
+    file_size:r.fileSize||0,
+    content_type:r.contentType||'',
+    issue_date:r.issueDate||null,
+    is_confirmed_valid:!!r.isConfirmedValid,
+    last_confirmed_at:r.lastConfirmedAt||null,
+    last_confirmed_by_user_id:r.lastConfirmedByUserId||null,
+    uploaded_at:r.uploadedAt||null,
+    uploaded_by_user_id:r.uploadedByUserId||null,
+    uploaded_by_name:r.uploadedByName||'',
+    notes:r.notes||''
+  };
+}
+function fromSBProductDocument(r) {
+  return {
+    id:r.id,
+    productId:r.product_id||null,
+    documentType:r.document_type||'',
+    title:r.title||'',
+    filePath:r.file_path||'',
+    fileName:r.file_name||'',
+    fileSize:r.file_size||0,
+    contentType:r.content_type||'',
+    issueDate:r.issue_date||null,
+    isConfirmedValid:!!r.is_confirmed_valid,
+    lastConfirmedAt:r.last_confirmed_at||null,
+    lastConfirmedByUserId:r.last_confirmed_by_user_id||null,
+    uploadedAt:r.uploaded_at||null,
+    uploadedByUserId:r.uploaded_by_user_id||null,
+    uploadedByName:r.uploaded_by_name||'',
+    notes:r.notes||''
+  };
+}
+
 function toSBUser(r)    {
   return {
     id:r.id, first_name:r.firstName||'', last_name:r.lastName||'',
@@ -19441,6 +20622,20 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_vendor_contacts').upsert(db.vendorContacts.map(toSBVendorContact));
       if (r.error) errs.push('vendor_contacts: ' + r.error.message);
     }
+    // Product Library (Round 1) — non-fatal if tables missing on older
+    // Supabase projects (they get created via the round1 migration).
+    if ((db.manufacturers || []).length) {
+      var r = await supabaseClient.from('kmi_manufacturers').upsert(db.manufacturers.map(toSBManufacturer));
+      if (r && r.error) errs.push('manufacturers: ' + r.error.message);
+    }
+    if ((db.products || []).length) {
+      var r = await supabaseClient.from('kmi_products').upsert(db.products.map(toSBProduct));
+      if (r && r.error) errs.push('products: ' + r.error.message);
+    }
+    if ((db.productDocuments || []).length) {
+      var r = await supabaseClient.from('kmi_product_documents').upsert(db.productDocuments.map(toSBProductDocument));
+      if (r && r.error) errs.push('product_documents: ' + r.error.message);
+    }
     // Users
     if (db.users.length) {
       var r = await supabaseClient.from('kmi_users').upsert(db.users.map(toSBUser));
@@ -19545,7 +20740,8 @@ async function pullFromSupabase() {
   setSyncStatus('syncing', 'Loading\u2026');
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
-         ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes] = await Promise.all([
+         ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
+         mfgsRes, prodsRes, pdocsRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -19562,7 +20758,10 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_budget_template_lines').select('*').order('sort_order', {ascending:true}),
       supabaseClient.from('kmi_project_budgets').select('*').order('created_at', {ascending:false}),
       supabaseClient.from('kmi_tm_tickets').select('*'),
-      supabaseClient.from('kmi_cors').select('*')
+      supabaseClient.from('kmi_cors').select('*'),
+      supabaseClient.from('kmi_manufacturers').select('*'),
+      supabaseClient.from('kmi_products').select('*'),
+      supabaseClient.from('kmi_product_documents').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -19668,6 +20867,28 @@ async function pullFromSupabase() {
       if (!Array.isArray(db.cors)) db.cors = [];
     }
 
+    // Product Library (Round 1) — same preserve-on-missing pattern.
+    // If the round1 migration hasn't run yet on this Supabase project, keep
+    // whatever the user has built locally instead of wiping it.
+    if (mfgsRes && !mfgsRes.error) {
+      db.manufacturers = (mfgsRes.data || []).map(fromSBManufacturer);
+    } else if (mfgsRes && mfgsRes.error) {
+      console.warn('kmi_manufacturers load error (table missing?):', mfgsRes.error.message);
+      if (!Array.isArray(db.manufacturers)) db.manufacturers = [];
+    }
+    if (prodsRes && !prodsRes.error) {
+      db.products = (prodsRes.data || []).map(fromSBProduct);
+    } else if (prodsRes && prodsRes.error) {
+      console.warn('kmi_products load error (table missing?):', prodsRes.error.message);
+      if (!Array.isArray(db.products)) db.products = [];
+    }
+    if (pdocsRes && !pdocsRes.error) {
+      db.productDocuments = (pdocsRes.data || []).map(fromSBProductDocument);
+    } else if (pdocsRes && pdocsRes.error) {
+      console.warn('kmi_product_documents load error (table missing?):', pdocsRes.error.message);
+      if (!Array.isArray(db.productDocuments)) db.productDocuments = [];
+    }
+
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
 
     // Settings — copy known setting rows into db. Includes runtime-config
@@ -19696,7 +20917,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget, 'product-library':renderProductLibrary};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
