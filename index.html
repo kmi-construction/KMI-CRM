@@ -16039,6 +16039,134 @@ async function sendEstimatorNotification(usr, o, cust, assignedBy, action) {
   }
 }
 
+// ── NEW PROJECT NOTIFICATION ────────────────────────────────────
+// Fires after a Won bid opportunity has been "set up" as a project
+// (i.e. the new-project form was submitted and a project record was
+// created with a sourcing opportunityId). Notifies every Admin and
+// Accounting user with an email address on file. Best-effort —
+// failures on individual sends are logged but never block the
+// project-creation flow. Skips inactive users.
+async function notifyProjectSetupComplete(project, opportunity) {
+  if (!project) return;
+
+  // Build recipient list: all active Admin + Accounting users with email
+  var recipients = (db.users || []).filter(function(u){
+    if (!u || !u.email) return false;
+    if (u.status === 'inactive') return false;
+    var role = normalizeRole(u.role);
+    return role === 'Admin' || role === 'Accounting';
+  });
+
+  if (!recipients.length) {
+    console.warn('[project_setup_alert] no Admin/Accounting recipients on file \u2014 skipping notification');
+    return;
+  }
+
+  var cust     = getCust(project.customerId);
+  var custName = cust ? cust.name : '';
+
+  // Address: prefer project's own address fields, fall back to opp address
+  var addrParts = [];
+  if (project.address) addrParts.push(project.address);
+  var cityState = [project.city, project.state].filter(Boolean).join(', ');
+  if (cityState) addrParts.push(cityState);
+  if (project.zip) addrParts.push(project.zip);
+  var addr = addrParts.join(' ');
+  if (!addr && opportunity && typeof formatOppAddress === 'function') {
+    addr = formatOppAddress(opportunity) || '';
+  }
+
+  var typeStr = (Array.isArray(project.types) && project.types.length)
+    ? project.types.join(', ')
+    : (project.type || '');
+
+  var setupBy = _currentUser || null;
+  var setupByName = setupBy
+    ? (((setupBy.firstName || '') + ' ' + (setupBy.lastName || '')).trim() || setupBy.email || '')
+    : '';
+
+  var subject = 'New Project Set Up: ' + (project.number || '') + ' \u2014 ' + (project.name || '');
+
+  var sentCount   = 0;
+  var failedCount = 0;
+  var lastError   = '';
+
+  for (var i = 0; i < recipients.length; i++) {
+    var usr = recipients[i];
+    var lines = [];
+    lines.push('Hi ' + (usr.firstName || '') + ',');
+    lines.push('');
+    lines.push('A bid opportunity has been won and a new project has been set up in the KMI CRM:');
+    lines.push('');
+    lines.push('Project Number:   ' + (project.number || ''));
+    lines.push('Project Name:     ' + (project.name || ''));
+    if (custName)         lines.push('Customer:         ' + custName);
+    if (typeStr)          lines.push('Project Type:     ' + typeStr);
+    if (addr)             lines.push('Project Address:  ' + addr);
+    lines.push('Contract Amount:  $' + Number(project.contractAmount || 0).toLocaleString());
+    if (opportunity && opportunity.id) {
+      lines.push('Source Bid Opp:   ' + opportunity.id);
+    }
+    if (setupByName) {
+      lines.push('Set Up By:        ' + setupByName + (setupBy && setupBy.email ? ' <' + setupBy.email + '>' : ''));
+    }
+    lines.push('');
+    lines.push('Please log in to the KMI CRM for full project details.');
+    lines.push('');
+    lines.push('\u2014 KMI Construction');
+    lines.push('  2880 S. 171st Street, New Berlin, WI 53151');
+    lines.push('  T 262-548-0632 | KMI-Construction.com');
+
+    var payload = {
+      to:                usr.email,
+      subject:           subject,
+      text:              lines.join('\r\n'),
+      flowType:          'project_setup_alert',
+      sentBy:            setupBy ? setupBy.id    : null,
+      sentByEmail:       setupBy ? setupBy.email : null,
+      relatedEntityType: 'project',
+      relatedEntityId:   String(project.id)
+    };
+    if (setupBy && setupBy.email) payload.replyTo = setupBy.email;
+
+    try {
+      var result = await sendEmail(payload);
+      var name = ((usr.firstName || '') + ' ' + (usr.lastName || '')).trim() || usr.email;
+      if (result && result.success) {
+        sentCount++;
+        console.log('[project_setup_alert] sent to ' + name);
+      } else {
+        failedCount++;
+        lastError = (result && result.error) || 'Unknown error';
+        console.warn('[project_setup_alert] send failed', { user: usr.email, project: project.number, error: lastError });
+      }
+    } catch (e) {
+      failedCount++;
+      lastError = (e && e.message) ? e.message : String(e);
+      console.error('[project_setup_alert] error for ' + usr.email, e);
+    }
+  }
+
+  // Single summary toast for the whole batch
+  if (sentCount > 0 && failedCount === 0) {
+    showToast(
+      'Notified ' + sentCount + ' Admin/Accounting user' + (sentCount === 1 ? '' : 's') +
+      ' of new project ' + (project.number || ''),
+      'success'
+    );
+  } else if (sentCount > 0 && failedCount > 0) {
+    showToast(
+      'Project ' + (project.number || '') + ' notifications: ' + sentCount + ' sent, ' + failedCount + ' failed',
+      'info'
+    );
+  } else if (sentCount === 0 && failedCount > 0) {
+    showToast(
+      'Could not notify Admin/Accounting of new project \u2014 ' + lastError,
+      'error'
+    );
+  }
+}
+
 // ── NEW / EDIT OPPORTUNITY ──────────────────────────────────────
 function initNewOpp() {
   _editOppId = null;
@@ -17851,6 +17979,11 @@ function saveProject() {
     var o = getOpp(oppId);
     if (o) { o.projectId = newId; }
     db.activity.unshift({text: 'Project ' + number + ' created from ' + oppId, type: 'won', time: 'Just now'});
+    // Notify Admin & Accounting that a Won bid has been set up as a project.
+    // Fire-and-forget — do not await; failures are handled inside the function
+    // and must not block the save / navigation flow.
+    try { notifyProjectSetupComplete(payload, o || null); }
+    catch (e) { console.error('[project_setup_alert] dispatch failed', e); }
   } else {
     db.activity.unshift({text: 'Project ' + number + ' created', type: 'won', time: 'Just now'});
   }
@@ -20574,7 +20707,7 @@ function initSupabase(url, key) {
 //   { to, from?, fromName?, replyTo?, cc?, bcc?, subject, text?, html?,
 //     attachments?: [{filename, content (base64)}],
 //     sentBy?, sentByEmail?,
-//     flowType: 'password_reset' | 'assignment_alert' | 'proposal' | 'welcome',
+//     flowType: 'password_reset' | 'assignment_alert' | 'proposal' | 'welcome' | 'project_setup_alert',
 //     relatedEntityType?, relatedEntityId? }
 async function sendEmail(payload) {
   // Resolve Supabase creds: saved → defaults baked into the file
