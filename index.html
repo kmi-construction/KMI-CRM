@@ -1570,6 +1570,16 @@ textarea{resize:vertical;min-height:72px}
     </div>
     <div id="esb-custom-docs-section"></div>
   </div>
+
+  <!-- Response from customer (Round 2C) — stamped / marked-up versions we
+       receive back. Visible for any saved submittal regardless of source. -->
+  <div class="card" id="esb-response-docs-card" style="display:none">
+    <div class="ch">
+      <span class="ct">Response from customer</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Stamped or marked-up files we received back — keeps the audit trail of what was approved and any conditions noted</span>
+    </div>
+    <div id="esb-response-docs-section"></div>
+  </div>
 </div>
 
 <!-- IMPORT DATA -->
@@ -5324,7 +5334,11 @@ function renderSubmittals() {
       '<td style="font-size:12px">' + prodCell + '</td>' +
       '<td style="font-size:12px">' + dueCell + '</td>' +
       '<td style="font-size:12px">' + subEsc(r.sentDate || '') + '</td>' +
-      '<td style="font-size:12px">' + subEsc(r.responseDate || '') + '</td>' +
+      '<td style="font-size:12px">' + subEsc(r.responseDate || '') +
+        ((r.responseDocuments && r.responseDocuments.length)
+          ? ' <span title="' + r.responseDocuments.length + ' response document' + (r.responseDocuments.length === 1 ? '' : 's') + ' attached" style="color:#888;font-size:11px">📎' + (r.responseDocuments.length > 1 ? r.responseDocuments.length : '') + '</span>'
+          : '') +
+      '</td>' +
       '<td onclick="event.stopPropagation()">' +
         '<button class="btn btn-sm" onclick="editSubmittal(' + r.id + ')">' + (canEdit ? '✎ Edit' : 'View') + '</button>' +
       '</td></tr>';
@@ -5460,6 +5474,8 @@ function renderEditSubmittalPage() {
   renderSubmittalDocsPreview();
   // Custom documents card — only for custom, saved submittals
   renderSubmittalCustomDocs();
+  // Response documents card — for any saved submittal
+  renderSubmittalResponseDocs();
 }
 
 function onSubmittalSrcChange() {
@@ -6217,6 +6233,208 @@ async function rmSubmittalCustomDoc(docId) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// RESPONSE DOCUMENTS (Round 2C)
+// ════════════════════════════════════════════════════════════════════
+// Stamped / marked-up files we receive back from the customer. Same
+// shape as customDocuments but with a 'response/' subfolder in the path
+// so they're cleanly separated from the outgoing artifacts.
+// One submittal may accumulate multiple response docs over its life
+// (initial reject → revise & resubmit → final approval), so this is an
+// array, not a single file.
+
+function renderSubmittalResponseDocs() {
+  var card = g('esb-response-docs-card');
+  var sec  = g('esb-response-docs-section');
+  if (!card || !sec) return;
+
+  // Visible only after the submittal has been saved at least once
+  // (we need a submittalId to namespace the storage path).
+  var r = _editSubmittalId ? getSubmittal(_editSubmittalId) : null;
+  if (!r) {
+    card.style.display = 'none';
+    sec.innerHTML = '';
+    return;
+  }
+  card.style.display = '';
+
+  var docs = Array.isArray(r.responseDocuments) ? r.responseDocuments : [];
+  var canEdit = canAccess('edit-submittals') === 'full';
+
+  var html = '';
+  if (canEdit) {
+    html += '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
+      'Upload the stamped / returned PDF the customer sent back. Multiple files welcome — ' +
+      'use this for the initial response, any Revise &amp; Resubmit returns, and the final approved copy.' +
+    '</div>' +
+    '<div style="margin-bottom:14px"><label class="btn btn-p btn-sm" style="cursor:pointer;display:inline-block">' +
+      '↑ Upload response file' +
+      '<input type="file" id="esb-rd-file" style="display:none" onchange="onSubmittalResponseDocSelected(event)">' +
+    '</label>' +
+    '<span id="esb-rd-status" style="margin-left:10px;font-size:11px;color:#888"></span></div>';
+  }
+
+  if (!docs.length) {
+    html += '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No response documents yet. Upload the stamped copy when it comes back.' +
+      '</div>';
+    sec.innerHTML = html;
+    return;
+  }
+
+  // Newest first — most recent response is what people usually need
+  var sorted = docs.slice().sort(function(a, b){
+    var ta = new Date(a.uploadedAt || 0).getTime() || 0;
+    var tb = new Date(b.uploadedAt || 0).getTime() || 0;
+    return tb - ta;
+  });
+
+  html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+    '<th style="padding:6px 8px;text-align:left">Filename</th>' +
+    '<th style="padding:6px 8px;text-align:left;width:140px">Received</th>' +
+    '<th style="padding:6px 8px;text-align:right;width:80px">Size</th>' +
+    '<th style="padding:6px 8px;text-align:right;width:140px"></th>' +
+    '</tr></thead><tbody>';
+  sorted.forEach(function(d){
+    var when = d.uploadedAt ? d.uploadedAt.slice(0,10) : '';
+    html += '<tr>' +
+      '<td style="padding:6px 8px;word-break:break-all">' + subEsc(d.fileName || '—') + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px">' + subEsc(when) +
+        (d.uploadedByName ? '<div style="font-size:10px;color:#aaa">by ' + subEsc(d.uploadedByName) + '</div>' : '') +
+      '</td>' +
+      '<td style="padding:6px 8px;text-align:right;font-family:monospace;color:#888">' + _fmtFileSize(d.fileSize) + '</td>' +
+      '<td style="padding:6px 8px;text-align:right">' +
+        '<button type="button" class="btn btn-sm" onclick="viewSubmittalResponseDoc(\'' + subEsc(d.id) + '\')">⬇ Open</button> ' +
+        (canEdit ? '<button type="button" class="btn btn-sm" onclick="rmSubmittalResponseDoc(\'' + subEsc(d.id) + '\')" style="color:#A32D2D">×</button>' : '') +
+      '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+  sec.innerHTML = html;
+}
+
+async function onSubmittalResponseDocSelected(ev) {
+  var fileEl = ev && ev.target;
+  var file = fileEl && fileEl.files && fileEl.files[0];
+  if (!file) return;
+  if (!_editSubmittalId) { alert('Save the submittal first.'); fileEl.value = ''; return; }
+  if (!supabaseClient)   { alert('Not connected to Supabase.'); fileEl.value = ''; return; }
+  if (!hasFull('edit-submittals')) { alert('You do not have permission to upload documents.'); fileEl.value = ''; return; }
+
+  var r = getSubmittal(_editSubmittalId);
+  if (!r) { fileEl.value = ''; return; }
+  if (!r.projectId) { alert('This submittal has no project assigned. Save it with a project, then try again.'); fileEl.value = ''; return; }
+
+  var status = g('esb-rd-status');
+  if (file.size > 25 * 1024 * 1024) {
+    if (!confirm('This file is ' + _fmtFileSize(file.size) + '. Large uploads may be slow. Continue?')) {
+      fileEl.value = '';
+      return;
+    }
+  }
+
+  if (status) status.textContent = 'Uploading…';
+  try {
+    var ts = Date.now();
+    var safeName = _safeFileName(file.name);
+    // 'response/' subfolder separates incoming from outgoing custom docs
+    var path = String(r.projectId) + '/submittals/' + String(_editSubmittalId) + '/response/' + ts + '_' + safeName;
+
+    var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+      .upload(path, file, {
+        contentType: file.type || 'application/octet-stream',
+        upsert: false
+      });
+    if (up && up.error) throw new Error(up.error.message);
+
+    var doc = {
+      id: 'rdoc' + ts + '_' + Math.random().toString(36).slice(2, 8),
+      fileName:    file.name,
+      filePath:    path,
+      fileSize:    file.size,
+      contentType: file.type || 'application/octet-stream',
+      uploadedAt:  new Date().toISOString(),
+      uploadedByUserId: _currentUser ? _currentUser.id : null,
+      uploadedByName:   _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '',
+      notes: ''
+    };
+    r.responseDocuments = Array.isArray(r.responseDocuments) ? r.responseDocuments : [];
+    r.responseDocuments.push(doc);
+    r.updatedAt = new Date().toISOString();
+    r.updatedByUserId = _currentUser ? _currentUser.id : null;
+    saveDB();
+
+    try {
+      var resp = await supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(r));
+      if (resp && resp.error) console.warn('submittal responseDocs push warning:', resp.error.message);
+    } catch (e) {
+      console.warn('submittal responseDocs push threw:', e);
+    }
+
+    if (status) status.textContent = 'Uploaded ✓';
+    setTimeout(function(){ if (status) status.textContent = ''; }, 3000);
+    renderSubmittalResponseDocs();
+  } catch (e) {
+    if (status) status.textContent = '';
+    alert('Upload failed: ' + (e && e.message ? e.message : String(e)));
+  } finally {
+    fileEl.value = '';
+  }
+}
+
+async function viewSubmittalResponseDoc(docId) {
+  if (!_editSubmittalId) return;
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+  var d = (r.responseDocuments || []).find(function(x){ return String(x.id) === String(docId); });
+  if (!d) { alert('Document not found.'); return; }
+  if (!supabaseClient) { alert('Not connected to Supabase.'); return; }
+  try {
+    var sr = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+      .createSignedUrl(d.filePath, 300);
+    if (sr && sr.error) throw new Error(sr.error.message);
+    if (sr && sr.data && sr.data.signedUrl) {
+      window.open(sr.data.signedUrl, '_blank');
+    } else {
+      alert('Could not generate a download link.');
+    }
+  } catch (e) {
+    alert('Failed to open document: ' + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function rmSubmittalResponseDoc(docId) {
+  if (!hasFull('edit-submittals')) { alert('You do not have permission to remove documents.'); return; }
+  if (!_editSubmittalId) return;
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+  var d = (r.responseDocuments || []).find(function(x){ return String(x.id) === String(docId); });
+  if (!d) return;
+  if (!confirm('Remove "' + (d.fileName || 'this response document') + '"?\n\nThis deletes the file from storage and cannot be undone.')) return;
+
+  if (supabaseClient) {
+    try {
+      var del = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([d.filePath]);
+      if (del && del.error) console.warn('response doc storage remove warning:', del.error.message);
+    } catch (e) {
+      console.warn('response doc storage remove threw:', e);
+    }
+  }
+
+  r.responseDocuments = (r.responseDocuments || []).filter(function(x){ return String(x.id) !== String(docId); });
+  r.updatedAt = new Date().toISOString();
+  r.updatedByUserId = _currentUser ? _currentUser.id : null;
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      await supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(r));
+    } catch (e) {
+      console.warn('submittal responseDocs delete-push threw:', e);
+    }
+  }
+
+  renderSubmittalResponseDocs();
+}
+
+// ════════════════════════════════════════════════════════════════════
 // PROJECT-DETAIL EMBEDDED VIEW (Round 2B)
 // ════════════════════════════════════════════════════════════════════
 // Returns an HTML string with a compact submittals table for the given
@@ -6282,7 +6500,11 @@ function renderProjectSubmittalsBlock(projectId) {
         '<td style="padding:5px 8px;font-weight:600;font-size:12px">' + subEsc(s.itemName || '') + '</td>' +
         '<td style="padding:5px 8px;font-size:12px">' + prodCell + '</td>' +
         '<td style="padding:5px 8px;font-size:12px">' + dueCell + '</td>' +
-        '<td style="padding:5px 8px;font-size:12px">' + subEsc(s.responseDate || '') + '</td>' +
+        '<td style="padding:5px 8px;font-size:12px">' + subEsc(s.responseDate || '') +
+          ((s.responseDocuments && s.responseDocuments.length)
+            ? ' <span title="' + s.responseDocuments.length + ' response document' + (s.responseDocuments.length === 1 ? '' : 's') + ' attached" style="color:#888;font-size:11px">📎' + (s.responseDocuments.length > 1 ? s.responseDocuments.length : '') + '</span>'
+            : '') +
+        '</td>' +
       '</tr>';
     });
   });
@@ -21483,6 +21705,7 @@ function toSBSubmittal(r) {
     response_notes:r.responseNotes||'',
     notes:r.notes||'',
     custom_documents: Array.isArray(r.customDocuments) ? r.customDocuments : [],
+    response_documents: Array.isArray(r.responseDocuments) ? r.responseDocuments : [],
     created_at:r.createdAt||null,
     created_by_user_id:r.createdByUserId||null,
     updated_at:r.updatedAt||null,
@@ -21508,6 +21731,7 @@ function fromSBSubmittal(r) {
     responseNotes:r.response_notes||'',
     notes:r.notes||'',
     customDocuments: Array.isArray(r.custom_documents) ? r.custom_documents : [],
+    responseDocuments: Array.isArray(r.response_documents) ? r.response_documents : [],
     createdAt:r.created_at||null,
     createdByUserId:r.created_by_user_id||null,
     updatedAt:r.updated_at||null,
