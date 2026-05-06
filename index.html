@@ -5803,79 +5803,125 @@ async function onSubmittalImportFile(ev) {
     var buf = await file.arrayBuffer();
     var wb = XLSX.read(buf, {type:'array'});
     if (!wb.SheetNames.length) throw new Error('Workbook has no sheets.');
-    var ws = wb.Sheets[wb.SheetNames[0]];
-    // Read as array-of-arrays so we can detect headers ourselves rather
-    // than trusting whatever XLSX.utils picks for column names. defval:''
-    // ensures we get blanks back instead of undefineds.
-    var aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
-    if (aoa.length < 2) throw new Error('Sheet has no data rows.');
 
-    // Find the header row — first row that has at least 3 non-empty cells
-    var headerIdx = -1;
-    for (var i = 0; i < Math.min(aoa.length, 5); i++) {
-      var nonEmpty = aoa[i].filter(function(c){ return String(c || '').trim(); }).length;
-      if (nonEmpty >= 3) { headerIdx = i; break; }
-    }
-    if (headerIdx === -1) throw new Error('Could not find a header row in the first 5 rows.');
-    var headers = aoa[headerIdx].map(function(c){ return String(c || '').trim(); });
+    // Try every sheet, keep the one that yields the most rows. KMI's
+    // 25163 file has a "Submittal Data" sheet plus a blank "Submittal
+    // Chart Template" sheet; without this, picking the wrong one returns
+    // zero rows and the import looks broken.
+    var bestRows = [];
+    var bestHeaders = [];
+    var bestCol = null;
+    var bestSheetName = '';
+    var bestNameFromDesc = false;
 
-    var col = {
-      csi:    _detectImportColumn(headers, [/spec.*section/i, /\bcsi\b/i, /specification/i]),
-      kmiNo:  _detectImportColumn(headers, [/submittal.*(?:no|number|#)/i, /\bno\.?\b/i]),
-      name:   _detectImportColumn(headers, [/submittal.*name/i, /^name$/i, /^item/i]),
-      desc:   _detectImportColumn(headers, [/^description/i, /\bdesc/i]),
-      pkg:    _detectImportColumn(headers, [/submittal.*folder/i, /\bfolder/i, /\bpackage/i]),
-      status: _detectImportColumn(headers, [/^status$/i])
-    };
-    if (col.name === -1) {
-      throw new Error('Could not find a "Submittal Name" or "Item" column. Headers I saw: ' + headers.filter(Boolean).join(', '));
+    for (var si = 0; si < wb.SheetNames.length; si++) {
+      var sheetName = wb.SheetNames[si];
+      var ws = wb.Sheets[sheetName];
+      var aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+      if (aoa.length < 2) continue;
+
+      // Find the header row — first row in the first 5 with 3+ non-empty cells
+      var headerIdx = -1;
+      for (var i = 0; i < Math.min(aoa.length, 5); i++) {
+        var nonEmpty = aoa[i].filter(function(c){ return String(c || '').trim(); }).length;
+        if (nonEmpty >= 3) { headerIdx = i; break; }
+      }
+      if (headerIdx === -1) continue;
+
+      var headers = aoa[headerIdx].map(function(c){ return String(c || '').trim(); });
+      var col = {
+        csi:    _detectImportColumn(headers, [/spec.*section/i, /\bcsi\b/i, /specification/i]),
+        kmiNo:  _detectImportColumn(headers, [/submittal.*(?:no|number|#)/i, /\bno\.?\b/i]),
+        name:   _detectImportColumn(headers, [/submittal.*name/i, /^name$/i, /^item/i]),
+        desc:   _detectImportColumn(headers, [/^description/i, /\bdesc/i]),
+        pkg:    _detectImportColumn(headers, [/submittal.*folder/i, /\bfolder/i, /\bpackage/i]),
+        status: _detectImportColumn(headers, [/^status$/i])
+      };
+      // Need at least either name OR description, plus we tolerate
+      // missing everything else.
+      if (col.name === -1 && col.desc === -1) continue;
+
+      var sheetRows = [];
+      var nameFromDescCount = 0;
+      for (var r = headerIdx + 1; r < aoa.length; r++) {
+        var raw = aoa[r];
+        var nameRaw = col.name >= 0 ? String(raw[col.name] || '').trim() : '';
+        var descRaw = col.desc >= 0 ? String(raw[col.desc] || '').trim() : '';
+        // Fall back to Description when Submittal Name is empty —
+        // matches the 25163 file where Description carries the
+        // actual item names.
+        var itemName, descUsed;
+        if (nameRaw) {
+          itemName = nameRaw;
+          descUsed = descRaw;
+        } else if (descRaw) {
+          itemName = descRaw;
+          descUsed = '';  // already used as the name
+          nameFromDescCount++;
+        } else {
+          continue;  // truly blank row
+        }
+        sheetRows.push({
+          csiSection:     col.csi    >= 0 ? _normalizeImportCsi(raw[col.csi]) : '',
+          kmiSubmittalNo: col.kmiNo  >= 0 ? String(raw[col.kmiNo]  || '').trim() : '',
+          itemName:       itemName,
+          description:    descUsed,
+          packageName:    col.pkg    >= 0 ? String(raw[col.pkg]    || '').trim() : '',
+          status:         col.status >= 0 ? _normalizeImportStatus(raw[col.status]) : 'draft'
+        });
+      }
+
+      if (sheetRows.length > bestRows.length) {
+        bestRows = sheetRows;
+        bestHeaders = headers;
+        bestCol = col;
+        bestSheetName = sheetName;
+        bestNameFromDesc = (nameFromDescCount > 0 && nameFromDescCount === sheetRows.length);
+      }
     }
 
-    var rows = [];
-    for (var r = headerIdx + 1; r < aoa.length; r++) {
-      var raw = aoa[r];
-      var name = col.name >= 0 ? String(raw[col.name] || '').trim() : '';
-      if (!name) continue;  // skip blank rows
-      rows.push({
-        csiSection:     col.csi    >= 0 ? _normalizeImportCsi(raw[col.csi]) : '',
-        kmiSubmittalNo: col.kmiNo  >= 0 ? String(raw[col.kmiNo]  || '').trim() : '',
-        itemName:       name,
-        description:    col.desc   >= 0 ? String(raw[col.desc]   || '').trim() : '',
-        packageName:    col.pkg    >= 0 ? String(raw[col.pkg]    || '').trim() : '',
-        status:         col.status >= 0 ? _normalizeImportStatus(raw[col.status]) : 'draft'
-      });
+    if (!bestRows.length) {
+      throw new Error('No data rows found in any sheet. Make sure the spreadsheet has either a "Submittal Name" or "Description" column with values.');
     }
-    _importParsedRows = rows;
+
+    _importParsedRows = bestRows;
+    var headers = bestHeaders;
+    var col = bestCol;
 
     if (!preview) return;
-    if (!rows.length) {
-      preview.innerHTML = '<div style="padding:10px;background:#fcebeb;color:#A32D2D;border-radius:4px;font-size:12px">No data rows found below the header.</div>';
-      if (btn) { btn.disabled = true; btn.textContent = 'Import 0 rows'; }
-      return;
-    }
 
     // Show what columns we matched + a sample of the first 5 rows
     var matched = [];
     if (col.csi    >= 0) matched.push('Spec Section ← <em>' + subEsc(headers[col.csi])    + '</em>');
     if (col.kmiNo  >= 0) matched.push('Submittal # ← <em>'  + subEsc(headers[col.kmiNo])  + '</em>');
-    if (col.name   >= 0) matched.push('Item Name ← <em>'    + subEsc(headers[col.name])   + '</em>');
-    if (col.desc   >= 0) matched.push('Description ← <em>'  + subEsc(headers[col.desc])   + '</em>');
+    // If the Submittal Name column was empty for every row, the import
+    // used Description as the item name. Surface that explicitly.
+    if (bestNameFromDesc && col.desc >= 0) {
+      matched.push('Item Name ← <em>' + subEsc(headers[col.desc]) + '</em> <span style="color:#9A7A2E">(Submittal Name column was empty)</span>');
+    } else {
+      if (col.name   >= 0) matched.push('Item Name ← <em>' + subEsc(headers[col.name])  + '</em>');
+      if (col.desc   >= 0) matched.push('Description ← <em>' + subEsc(headers[col.desc]) + '</em>');
+    }
     if (col.pkg    >= 0) matched.push('Package ← <em>'      + subEsc(headers[col.pkg])    + '</em>');
     if (col.status >= 0) matched.push('Status ← <em>'       + subEsc(headers[col.status]) + '</em>');
 
-    var sampleRows = rows.slice(0, 5).map(function(r){
+    var sampleRows = bestRows.slice(0, 5).map(function(r){
       return '<tr>' +
         '<td style="padding:4px 6px;font-size:11px">' + subEsc(_csiPrefix(r.csiSection) || r.csiSection || '') + '</td>' +
-        '<td style="padding:4px 6px;font-size:11px;font-family:monospace">' + subEsc(r.kmiSubmittalNo || '<i style="color:#aaa">auto</i>') + '</td>' +
+        '<td style="padding:4px 6px;font-size:11px;font-family:monospace">' + (r.kmiSubmittalNo ? subEsc(r.kmiSubmittalNo) : '<i style="color:#aaa">auto</i>') + '</td>' +
         '<td style="padding:4px 6px;font-size:12px;font-weight:600">' + subEsc(r.itemName) + '</td>' +
         '<td style="padding:4px 6px;font-size:11px">' + subEsc(r.packageName || '') + '</td>' +
         '<td style="padding:4px 6px">' + subStatusBadge(r.status) + '</td>' +
       '</tr>';
     }).join('');
 
+    var sheetNote = (wb.SheetNames.length > 1)
+      ? ' (from sheet <em>' + subEsc(bestSheetName) + '</em>)'
+      : '';
+
     preview.innerHTML =
       '<div style="font-size:12px;color:#444;margin-bottom:8px">' +
-        '<strong>' + rows.length + '</strong> row' + (rows.length === 1 ? '' : 's') + ' parsed. Column mapping detected:</div>' +
+        '<strong>' + bestRows.length + '</strong> row' + (bestRows.length === 1 ? '' : 's') + ' parsed' + sheetNote + '. Column mapping detected:</div>' +
       '<div style="padding:8px 10px;background:#f5f6fa;border-radius:4px;font-size:11px;color:#444;margin-bottom:10px;line-height:1.6">' +
         matched.join(' &nbsp; · &nbsp; ') +
       '</div>' +
@@ -5887,11 +5933,11 @@ async function onSubmittalImportFile(ev) {
         '<th style="padding:4px 6px;text-align:left">Package</th>' +
         '<th style="padding:4px 6px;text-align:left">Status</th>' +
       '</tr></thead><tbody>' + sampleRows + '</tbody></table>' +
-      (rows.length > 5 ? '<div style="font-size:11px;color:#888;margin-top:6px">… and ' + (rows.length - 5) + ' more</div>' : '');
+      (bestRows.length > 5 ? '<div style="font-size:11px;color:#888;margin-top:6px">… and ' + (bestRows.length - 5) + ' more</div>' : '');
 
     if (btn) {
       btn.disabled = false;
-      btn.textContent = 'Import ' + rows.length + ' row' + (rows.length === 1 ? '' : 's');
+      btn.textContent = 'Import ' + bestRows.length + ' row' + (bestRows.length === 1 ? '' : 's');
     }
   } catch (e) {
     _importParsedRows = [];
