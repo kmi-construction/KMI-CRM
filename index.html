@@ -411,6 +411,7 @@ textarea{resize:vertical;min-height:72px}
       <div class="ni" onclick="nav('budget')"><span class="nico">$</span>Budget</div>
       <div class="ni" onclick="nav('tm-tickets')"><span class="nico">⏱</span>T&amp;M Tickets</div>
       <div class="ni" onclick="nav('cors')"><span class="nico">◇</span>CORs</div>
+      <div class="ni" onclick="nav('submittals')"><span class="nico">▤</span>Submittals</div>
     </div>
   </div>
   <div class="sb-group" data-group="directory">
@@ -1471,6 +1472,91 @@ textarea{resize:vertical;min-height:72px}
   </div>
 </div>
 
+<!-- SUBMITTALS (Round 2A) — global list filterable by project -->
+<div class="pg" id="pg-submittals">
+  <div class="ph" style="margin-bottom:0"><div><h1>Submittals</h1><div class="sub">Per-project tracking list — what we owe the customer and where each item stands</div><div class="stripe"></div></div><button class="btn btn-p" onclick="initNewSubmittal()">+ Add submittal</button></div>
+  <div class="ab">
+    <input class="si" placeholder="Search by item name, package, product..." oninput="renderSubmittals()" id="sb-s">
+    <select class="fs" onchange="renderSubmittals()" id="sb-fproj"><option value="">All projects</option></select>
+    <select class="fs" onchange="renderSubmittals()" id="sb-fstatus"><option value="">All statuses</option></select>
+    <select class="fs" onchange="renderSubmittals()" id="sb-fpackage"><option value="">All packages</option></select>
+    <select class="fs" onchange="renderSubmittals()" id="sb-fdue">
+      <option value="">All due dates</option>
+      <option value="overdue">Overdue</option>
+      <option value="this-week">Due this week</option>
+      <option value="this-month">Due this month</option>
+      <option value="no-date">No due date</option>
+    </select>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table>
+      <thead><tr>
+        <th>Status</th><th>Project</th><th>KMI #</th><th>CSI</th><th>Item</th><th>Package</th><th>Product</th><th>Due</th><th>Sent</th><th>Actions</th>
+      </tr></thead>
+      <tbody id="sb-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- EDIT SUBMITTAL — dedicated page (modal pattern is fragile with file
+     uploads; even though Round 2A doesn't have custom-doc upload, Round 2B
+     will, so building on a page from the start avoids a rebuild). -->
+<div class="pg" id="pg-edit-submittal">
+  <div class="ph"><div><h1 id="esb-title">Add submittal</h1><div class="sub" id="esb-sub">New submittal item</div><div class="stripe"></div></div></div>
+  <div style="display:flex;gap:10px;margin-bottom:14px">
+    <button class="btn" onclick="nav('submittals')">&larr; Back to submittals</button>
+  </div>
+
+  <div class="card">
+    <div class="ch"><span class="ct">Submittal details</span></div>
+    <div class="fg">
+      <div class="fgr"><label>Project *</label><select id="esb-proj"><option value="">— Select —</option></select></div>
+      <div class="fgr"><label>Status</label><select id="esb-status"></select></div>
+      <div class="fgr"><label>CSI section</label><select id="esb-csi" onchange="onSubmittalCsiChange()"><option value="">— Select —</option></select></div>
+      <div class="fgr"><label>KMI submittal #</label><input id="esb-kno" placeholder="Auto-generated from CSI section"></div>
+      <div class="fgr"><label>Customer submittal #</label><input id="esb-cno" placeholder="If the GC assigned one"></div>
+      <div class="fgr"><label>Package name</label><input id="esb-pkg" list="esb-pkg-list" placeholder="e.g. CMU Test Reports"><datalist id="esb-pkg-list"></datalist></div>
+      <div class="fgr full"><label>Item name *</label><input id="esb-name" placeholder="e.g. County Materials CMU Block Data &amp; Test Reports"></div>
+      <div class="fgr full"><label>Description</label><textarea id="esb-desc" rows="2" placeholder="Anything specific about this item"></textarea></div>
+
+      <div class="fgr full">
+        <label>Source</label>
+        <div style="display:flex;gap:18px;align-items:center;padding:6px 0">
+          <label style="font-size:12px;color:#444;display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="radio" name="esb-src" value="library" id="esb-src-lib" onchange="onSubmittalSrcChange()"> Pick from product library
+          </label>
+          <label style="font-size:12px;color:#444;display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="radio" name="esb-src" value="custom" id="esb-src-cus" onchange="onSubmittalSrcChange()"> Custom item (shop drawing, sample, RFI)
+          </label>
+        </div>
+      </div>
+      <div class="fgr full" id="esb-prod-wrap"><label>Product</label><select id="esb-prod"><option value="">— Select a product —</option></select></div>
+
+      <div class="fgr"><label>Due date</label><input id="esb-due" type="date"></div>
+      <div class="fgr"><label>Sent date</label><input id="esb-sent" type="date"></div>
+      <div class="fgr"><label>Response date</label><input id="esb-resp" type="date"></div>
+
+      <div class="fgr full"><label>Response notes</label><textarea id="esb-rnotes" rows="2" placeholder="What the GC said when they returned it (Approved as Noted comments, Revise &amp; Resubmit reasons, etc.)"></textarea></div>
+      <div class="fgr full"><label>Internal notes</label><textarea id="esb-notes" rows="2" placeholder="Notes for the team"></textarea></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn" onclick="nav('submittals')">Cancel</button>
+      <button class="btn btn-p" onclick="saveSubmittal()" id="esb-save-btn">Save submittal</button>
+      <button class="btn" onclick="deleteSubmittal()" id="esb-del-btn" style="color:#A32D2D;display:none">Delete</button>
+    </div>
+  </div>
+
+  <!-- Document preview — only meaningful for library-linked submittals.
+       Read-only in Round 2A; Round 3 turns this into the compile manifest. -->
+  <div class="card" id="esb-docs-card" style="display:none">
+    <div class="ch">
+      <span class="ct">Documents that will go in the package</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Live preview — pulled from the linked product's library entry</span>
+    </div>
+    <div id="esb-docs-section"></div>
+  </div>
+</div>
+
 <!-- IMPORT DATA -->
 <div class="pg" id="pg-import">
   <div class="ph" style="margin-bottom:0"><div><h1>Import Data</h1><div class="sub">Upload CSV files to import customers, project managers, users, or opportunities</div><div class="stripe"></div></div></div>
@@ -1638,6 +1724,12 @@ var DB_DEFAULTS = {
   manufacturers:    [],
   products:         [],
   productDocuments: [],
+  // Submittals (Round 2A) — per-project tracking list. Each row is a
+  // single line item that the customer expects (one row per product or
+  // shop drawing). Items group into delivered packages by packageName.
+  // Library-linked items reference a product (productId); custom items
+  // (shop drawings, samples, RFI placeholders) set isCustom=true.
+  submittals: [],
   // T&M Tickets — daily field tickets created by foremen, signed by customer
   // superintendent, approved by KMI PM, then rolled into a Change Order Request.
   // See the COR module (separate) for how rolled-up tickets feed CORs.
@@ -1741,6 +1833,7 @@ function loadDB() {
         manufacturers:    p.manufacturers    || [],
         products:         p.products         || [],
         productDocuments: p.productDocuments || [],
+        submittals:       p.submittals       || [],
         tmTickets:      p.tmTickets      || [],
         cors:           p.cors           || [],
         costCodes:           p.costCodes           || [],
@@ -1867,7 +1960,13 @@ var PERMISSIONS = {
   // Confirming a stale document is "still valid" follows the same trust
   // boundary as edit — pulled out so we can tighten it later (e.g.
   // PM-only) without touching every call site.
-  'confirm-product-document': ['full','full','full','none','none','none']
+  'confirm-product-document': ['full','full','full','none','none','none'],
+  // Submittals (Round 2A) — per-project tracking list. Same trust shape
+  // as the Product Library: Admin / PM / PC create+edit+delete; Accounting
+  // is read-only; field roles don't see this module at all.
+  'view-submittals':   ['full','full','full','read','none','none'],
+  'edit-submittals':   ['full','full','full','none','none','none'],
+  'delete-submittals': ['full','full','full','none','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -1923,7 +2022,9 @@ var PAGE_ACTION_MAP = {
   'email-log':      'email-log',
   'email-settings': 'email-settings',
   'product-library': 'view-product-library',
-  'edit-product':    'edit-product-library'
+  'edit-product':    'edit-product-library',
+  'submittals':      'view-submittals',
+  'edit-submittal':  'edit-submittals'
 };
 function canAccess(action) {
   if (!_currentUser) return 'none';
@@ -2958,7 +3059,9 @@ function nav(page) {
     'email-log':      renderEmailLog,
     'email-settings': renderEmailSettings,
     'product-library': renderProductLibrary,
-    'edit-product':    renderEditProductPage
+    'edit-product':    renderEditProductPage,
+    'submittals':      renderSubmittalsPage,
+    'edit-submittal':  renderEditSubmittalPage
   };
   if (fns[page]) fns[page]();
 }
@@ -4982,6 +5085,584 @@ async function saveProductDocumentMeta() {
   closeModal();
   _editProductDocId = null;
   renderProductDocuments();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUBMITTALS — Round 2A
+// ═══════════════════════════════════════════════════════════════════════
+// Per-project tracking list. Each row = one item the customer expects
+// (e.g. "County Materials CMU Test Reports"). Rows group into delivered
+// packages by packageName (free text — same shape as the existing
+// 25163-spreadsheet "Submittal Folder" column). Round 3 will turn a
+// package into a compiled PDF; Round 2A is just the tracking list.
+//
+// Items either link to a product from the Product Library (productId),
+// or are "custom" items (shop drawings, samples, RFI placeholders).
+// Library-linked items show a live preview of the product's documents
+// — those are the docs that will go in the package once Round 3 lands.
+//
+// Numbering scheme: kmiSubmittalNo auto-fills as '{csi-prefix}-{seq}.0'
+// where seq is the per-project, per-CSI count. The field stays editable
+// so the PM can override.
+
+var _editSubmittalId = null;
+var _subSrcMode      = 'library';  // 'library' | 'custom'
+
+function subEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function getSubmittal(id) {
+  return (db.submittals || []).find(function(s){ return String(s.id) === String(id); });
+}
+
+function getProjectName(id) {
+  var p = (db.projects || []).find(function(x){ return String(x.id) === String(id); });
+  if (!p) return '—';
+  // Projects in this app are keyed by either name or projectName depending
+  // on era; cover both. Most rows use .name.
+  return p.name || p.projectName || ('Project ' + p.id);
+}
+
+// ── Status workflow ──────────────────────────────────────────────────
+var SUBMITTAL_STATUSES = [
+  {key:'draft',             label:'Draft',              cls:'bd-draft',      terminal:false},
+  {key:'pending-rfi',       label:'Pending RFI',        cls:'bd-pending',    terminal:false},
+  {key:'submitted',         label:'Submitted',          cls:'bd-sent',       terminal:false},
+  {key:'approved',          label:'Approved',           cls:'bd-won',        terminal:true},
+  {key:'approved-as-noted', label:'Approved as Noted',  cls:'bd-budget',     terminal:true},
+  {key:'revise-resubmit',   label:'Revise & Resubmit',  cls:'bd-review',     terminal:false},
+  {key:'rejected',          label:'Rejected',           cls:'bd-lost',       terminal:true},
+  {key:'closed',            label:'Closed',             cls:'bd-pending',    terminal:true}
+];
+
+function subStatusMeta(key) {
+  return SUBMITTAL_STATUSES.find(function(s){ return s.key === key; }) || SUBMITTAL_STATUSES[0];
+}
+
+function subStatusBadge(key) {
+  var m = subStatusMeta(key);
+  return '<span class="bdg ' + m.cls + '">' + subEsc(m.label) + '</span>';
+}
+
+function subStatusOptionsHtml(selected) {
+  return SUBMITTAL_STATUSES.map(function(s){
+    return '<option value="' + s.key + '"' + (s.key === selected ? ' selected' : '') + '>' + subEsc(s.label) + '</option>';
+  }).join('');
+}
+
+// ── KMI submittal number generator ───────────────────────────────────
+// Format: '04 21 00-1.0' = '<csi-prefix>-<sequence>.<rev>'
+// Sequence is per-project, per-CSI-prefix. Rev always starts at 0.
+function _csiPrefix(csi) {
+  if (!csi) return '';
+  var m = String(csi).match(/^(\d{2}\s+\d{2}\s+\d{2})/);
+  return m ? m[1] : '';
+}
+function generateKmiSubmittalNo(projectId, csiSection, excludeId) {
+  var prefix = _csiPrefix(csiSection);
+  if (!prefix || !projectId) return '';
+  var existing = (db.submittals || []).filter(function(s){
+    return String(s.projectId) === String(projectId) &&
+           String(s.id) !== String(excludeId) &&
+           _csiPrefix(s.csiSection) === prefix;
+  });
+  var nextSeq = existing.length + 1;
+  return prefix + '-' + nextSeq + '.0';
+}
+
+// ════════════════════════════════════════════════════════════════════
+// LIST PAGE
+// ════════════════════════════════════════════════════════════════════
+
+function renderSubmittalsPage() {
+  // Populate the project filter from current data
+  var projSel = g('sb-fproj');
+  if (projSel) {
+    var prevProj = projSel.value;
+    var projs = (db.projects || []).slice().sort(function(a,b){
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+    projSel.innerHTML = '<option value="">All projects</option>' +
+      projs.map(function(p){ return '<option value="' + subEsc(p.id) + '">' + subEsc(p.name || ('Project ' + p.id)) + '</option>'; }).join('');
+    projSel.value = prevProj;
+  }
+  // Status filter
+  var statusSel = g('sb-fstatus');
+  if (statusSel) {
+    var prevSt = statusSel.value;
+    statusSel.innerHTML = '<option value="">All statuses</option>' +
+      SUBMITTAL_STATUSES.map(function(s){ return '<option value="' + s.key + '">' + subEsc(s.label) + '</option>'; }).join('');
+    statusSel.value = prevSt;
+  }
+  // Package filter — derived from existing submittals
+  var pkgSel = g('sb-fpackage');
+  if (pkgSel) {
+    var prevPkg = pkgSel.value;
+    var packages = {};
+    (db.submittals || []).forEach(function(s){
+      if (s.packageName) packages[s.packageName] = true;
+    });
+    var pkgList = Object.keys(packages).sort();
+    pkgSel.innerHTML = '<option value="">All packages</option>' +
+      pkgList.map(function(p){ return '<option value="' + subEsc(p) + '">' + subEsc(p) + '</option>'; }).join('');
+    pkgSel.value = prevPkg;
+  }
+  renderSubmittals();
+}
+
+function _isWithinThisWeek(dateStr) {
+  if (!dateStr) return false;
+  var d = new Date(dateStr).getTime();
+  if (isNaN(d)) return false;
+  var now = Date.now();
+  var weekMs = 7 * 24 * 60 * 60 * 1000;
+  return d >= now && d <= (now + weekMs);
+}
+function _isWithinThisMonth(dateStr) {
+  if (!dateStr) return false;
+  var d = new Date(dateStr).getTime();
+  if (isNaN(d)) return false;
+  var now = Date.now();
+  var monthMs = 30 * 24 * 60 * 60 * 1000;
+  return d >= now && d <= (now + monthMs);
+}
+function _isOverdue(dateStr) {
+  if (!dateStr) return false;
+  var d = new Date(dateStr).getTime();
+  if (isNaN(d)) return false;
+  // strip time of day from "now" so a same-day due date isn't immediately overdue
+  var startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  return d < startOfToday.getTime();
+}
+
+function renderSubmittals() {
+  var s   = ((g('sb-s')        || {}).value || '').toLowerCase();
+  var fp  =  (g('sb-fproj')    || {}).value || '';
+  var fs  =  (g('sb-fstatus')  || {}).value || '';
+  var fpk =  (g('sb-fpackage') || {}).value || '';
+  var fd  =  (g('sb-fdue')     || {}).value || '';
+
+  var rows = (db.submittals || []).filter(function(r){
+    if (fp  && String(r.projectId) !== String(fp))           return false;
+    if (fs  && (r.status || 'draft') !== fs)                  return false;
+    if (fpk && (r.packageName || '') !== fpk)                 return false;
+    if (fd === 'overdue'   && !_isOverdue(r.dueDate))         return false;
+    if (fd === 'this-week' && !_isWithinThisWeek(r.dueDate))  return false;
+    if (fd === 'this-month'&& !_isWithinThisMonth(r.dueDate)) return false;
+    if (fd === 'no-date'   && r.dueDate)                       return false;
+    if (s) {
+      var prod = r.productId ? getProduct(r.productId) : null;
+      var hay = (r.itemName || '') + ' ' + (r.description || '') + ' ' +
+                (r.packageName || '') + ' ' + (r.kmiSubmittalNo || '') + ' ' +
+                (r.customerSubmittalNo || '') + ' ' + (r.csiSection || '') + ' ' +
+                ((prod && prod.name) || '');
+      if (!hay.toLowerCase().includes(s)) return false;
+    }
+    return true;
+  });
+
+  // Sort: overdue first, then by due date asc, then by status group, then by KMI #
+  rows.sort(function(a, b){
+    var oa = _isOverdue(a.dueDate) ? 0 : 1;
+    var ob = _isOverdue(b.dueDate) ? 0 : 1;
+    if (oa !== ob) return oa - ob;
+    var da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+    var dbb = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+    if (da !== dbb) return da - dbb;
+    return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
+  });
+
+  var canEdit = canAccess('edit-submittals') === 'full';
+  var tbody = g('sb-tbody');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:30px;color:#aaa;font-size:13px">' +
+      ((db.submittals || []).length === 0
+        ? 'No submittals yet — ' + (canEdit ? '<button class="btn btn-sm btn-p" onclick="initNewSubmittal()">Add your first submittal</button>' : 'ask an admin to add one.')
+        : 'No submittals match the current filters.') +
+      '</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(r){
+    var prod = r.productId ? getProduct(r.productId) : null;
+    var prodCell = r.isCustom
+      ? '<span style="color:#888;font-style:italic">Custom item</span>'
+      : (prod ? subEsc(prod.name) : '<span style="color:#A32D2D">Missing product</span>');
+    var dueCell = r.dueDate || '—';
+    if (_isOverdue(r.dueDate) && (r.status || 'draft') !== 'submitted' && !subStatusMeta(r.status).terminal) {
+      dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
+    }
+    return '<tr style="cursor:pointer" onclick="editSubmittal(' + r.id + ')">' +
+      '<td>' + subStatusBadge(r.status || 'draft') + '</td>' +
+      '<td style="font-size:12px">' + subEsc(getProjectName(r.projectId)) + '</td>' +
+      '<td style="font-family:monospace;font-size:11px">' + subEsc(r.kmiSubmittalNo || '—') + '</td>' +
+      '<td style="font-size:11px">' + subEsc(_csiPrefix(r.csiSection) || '—') + '</td>' +
+      '<td style="font-weight:600">' + subEsc(r.itemName || '') + '</td>' +
+      '<td style="font-size:12px">' + subEsc(r.packageName || '') + '</td>' +
+      '<td style="font-size:12px">' + prodCell + '</td>' +
+      '<td style="font-size:12px">' + dueCell + '</td>' +
+      '<td style="font-size:12px">' + subEsc(r.sentDate || '') + '</td>' +
+      '<td onclick="event.stopPropagation()">' +
+        '<button class="btn btn-sm" onclick="editSubmittal(' + r.id + ')">' + (canEdit ? '✎ Edit' : 'View') + '</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+// ════════════════════════════════════════════════════════════════════
+// EDIT PAGE
+// ════════════════════════════════════════════════════════════════════
+
+function initNewSubmittal() {
+  if (!requireFull('edit-submittals', 'add submittals')) return;
+  _editSubmittalId = null;
+  _subSrcMode = 'library';
+  nav('edit-submittal');
+}
+
+function editSubmittal(id) {
+  if (canAccess('view-submittals') === 'none') {
+    alert('You do not have permission to view submittals.');
+    return;
+  }
+  _editSubmittalId = id;
+  var existing = getSubmittal(id);
+  _subSrcMode = (existing && existing.isCustom) ? 'custom' : 'library';
+  nav('edit-submittal');
+}
+
+function renderEditSubmittalPage() {
+  var r = _editSubmittalId ? getSubmittal(_editSubmittalId) : null;
+  var canEdit = canAccess('edit-submittals') === 'full';
+  var canDel  = canAccess('delete-submittals') === 'full';
+
+  var titleEl = g('esb-title'); if (titleEl) titleEl.textContent = r ? 'Edit submittal' : 'Add submittal';
+  var subEl   = g('esb-sub');   if (subEl)   subEl.textContent   = r ? (r.itemName || '') : 'New submittal item';
+
+  // Project dropdown
+  var projSel = g('esb-proj');
+  if (projSel) {
+    var projs = (db.projects || []).slice().sort(function(a,b){
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+    projSel.innerHTML = '<option value="">— Select —</option>' +
+      projs.map(function(p){
+        var sel = (r && String(r.projectId) === String(p.id)) ? ' selected' : '';
+        return '<option value="' + subEsc(p.id) + '"' + sel + '>' + subEsc(p.name || ('Project ' + p.id)) + '</option>';
+      }).join('');
+  }
+  // Status dropdown
+  var statSel = g('esb-status');
+  if (statSel) {
+    statSel.innerHTML = subStatusOptionsHtml((r && r.status) || 'draft');
+  }
+  // CSI dropdown — use the same constant the Product Library uses
+  var csiSel = g('esb-csi');
+  if (csiSel) {
+    csiSel.innerHTML = '<option value="">— Select —</option>' +
+      CSI_SECTIONS.map(function(c){
+        var sel = (r && r.csiSection === c) ? ' selected' : '';
+        return '<option value="' + subEsc(c) + '"' + sel + '>' + subEsc(c) + '</option>';
+      }).join('');
+  }
+  // Product dropdown — only active products + show manufacturer name
+  var prodSel = g('esb-prod');
+  if (prodSel) {
+    var prods = (db.products || []).filter(function(p){ return p.isActive !== false; }).slice().sort(function(a,b){
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+    prodSel.innerHTML = '<option value="">— Select a product —</option>' +
+      prods.map(function(p){
+        var mfg = getManufacturer(p.manufacturerId);
+        var label = (mfg && mfg.name ? mfg.name + ' — ' : '') + (p.name || '') + (p.sizeOrModel ? ' (' + p.sizeOrModel + ')' : '');
+        var sel = (r && String(r.productId) === String(p.id)) ? ' selected' : '';
+        return '<option value="' + subEsc(p.id) + '"' + sel + '>' + subEsc(label) + '</option>';
+      }).join('');
+  }
+  // Package datalist — autocomplete from existing packages on the same project
+  var pkgList = g('esb-pkg-list');
+  if (pkgList) {
+    var pkgs = {};
+    var projId = (r && r.projectId) || (projSel && projSel.value);
+    (db.submittals || []).forEach(function(x){
+      if (projId && String(x.projectId) === String(projId) && x.packageName) {
+        pkgs[x.packageName] = true;
+      }
+    });
+    pkgList.innerHTML = Object.keys(pkgs).sort().map(function(p){
+      return '<option value="' + subEsc(p) + '"></option>';
+    }).join('');
+  }
+
+  // Fill scalar fields
+  ['esb-kno','esb-cno','esb-pkg','esb-name','esb-desc','esb-due','esb-sent','esb-resp','esb-rnotes','esb-notes'].forEach(function(){});
+  function _set(id, v) { var e = g(id); if (e) e.value = (v == null ? '' : v); }
+  _set('esb-kno',    r && r.kmiSubmittalNo);
+  _set('esb-cno',    r && r.customerSubmittalNo);
+  _set('esb-pkg',    r && r.packageName);
+  _set('esb-name',   r && r.itemName);
+  _set('esb-desc',   r && r.description);
+  _set('esb-due',    r && r.dueDate);
+  _set('esb-sent',   r && r.sentDate);
+  _set('esb-resp',   r && r.responseDate);
+  _set('esb-rnotes', r && r.responseNotes);
+  _set('esb-notes',  r && r.notes);
+
+  // Source radio
+  var srcLib = g('esb-src-lib');
+  var srcCus = g('esb-src-cus');
+  if (srcLib) srcLib.checked = (_subSrcMode === 'library');
+  if (srcCus) srcCus.checked = (_subSrcMode === 'custom');
+  onSubmittalSrcChange();
+
+  // Disable all inputs for read-only roles
+  if (!canEdit) {
+    ['esb-proj','esb-status','esb-csi','esb-kno','esb-cno','esb-pkg','esb-name','esb-desc',
+     'esb-prod','esb-due','esb-sent','esb-resp','esb-rnotes','esb-notes',
+     'esb-src-lib','esb-src-cus'].forEach(function(id){
+      var el = g(id); if (el) el.disabled = true;
+    });
+    var saveBtn = g('esb-save-btn'); if (saveBtn) saveBtn.style.display = 'none';
+  } else {
+    var saveBtn2 = g('esb-save-btn'); if (saveBtn2) saveBtn2.style.display = '';
+  }
+  var delBtn = g('esb-del-btn');
+  if (delBtn) delBtn.style.display = (r && canDel) ? '' : 'none';
+
+  // Document preview — only for library-linked, saved submittals
+  renderSubmittalDocsPreview();
+}
+
+function onSubmittalSrcChange() {
+  var srcLib = g('esb-src-lib');
+  var srcCus = g('esb-src-cus');
+  var mode = (srcCus && srcCus.checked) ? 'custom' : 'library';
+  _subSrcMode = mode;
+  var prodWrap = g('esb-prod-wrap');
+  if (prodWrap) prodWrap.style.display = (mode === 'library') ? '' : 'none';
+  // If switching to custom, clear any selected product
+  if (mode === 'custom') {
+    var prodSel = g('esb-prod');
+    if (prodSel) prodSel.value = '';
+  }
+  renderSubmittalDocsPreview();
+}
+
+function onSubmittalCsiChange() {
+  // Auto-fill the KMI # if the field is empty (don't clobber an explicit value)
+  var knoEl = g('esb-kno');
+  var projEl = g('esb-proj');
+  var csiEl  = g('esb-csi');
+  if (!knoEl || !projEl || !csiEl) return;
+  if (knoEl.value && knoEl.value.trim()) return;  // user already set one
+  var projId = projEl.value;
+  var csi    = csiEl.value;
+  var generated = generateKmiSubmittalNo(projId, csi, _editSubmittalId);
+  if (generated) knoEl.value = generated;
+}
+
+function renderSubmittalDocsPreview() {
+  var card = g('esb-docs-card');
+  var sec  = g('esb-docs-section');
+  if (!card || !sec) return;
+
+  // Show only when we're library-linked AND a product is selected
+  var prodSel = g('esb-prod');
+  var prodId  = prodSel ? prodSel.value : '';
+  if (_subSrcMode !== 'library' || !prodId) {
+    card.style.display = 'none';
+    sec.innerHTML = '';
+    return;
+  }
+  card.style.display = '';
+
+  var prod = getProduct(prodId);
+  if (!prod) {
+    sec.innerHTML = '<div style="padding:14px;color:#A32D2D;font-size:12px">Product not found in library.</div>';
+    return;
+  }
+  var docs = (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(prod.id); });
+  if (!docs.length) {
+    sec.innerHTML = '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No documents on this product yet. Open the Product Library and add the data sheet / test report there — they will appear here automatically.' +
+      '</div>';
+    return;
+  }
+  // Sort: amber (stale) first
+  docs.sort(function(a, b){
+    var sa = _docStaleStatus(a), sb = _docStaleStatus(b);
+    if (sa !== sb) return sa === 'amber' ? -1 : 1;
+    return 0;
+  });
+  var html = '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
+    'These documents currently live on <strong>' + subEsc(prod.name) + '</strong> in the Product Library. ' +
+    'Round 3 will compile them into a single PDF along with a KMI transmittal cover.' +
+    '</div>';
+  html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+    '<th style="padding:6px 8px;text-align:left;width:90px">Status</th>' +
+    '<th style="padding:6px 8px;text-align:left">Document</th>' +
+    '<th style="padding:6px 8px;text-align:left;width:130px">Type</th>' +
+    '<th style="padding:6px 8px;text-align:left;width:110px">Issue date</th>' +
+    '<th style="padding:6px 8px;width:90px"></th>' +
+    '</tr></thead><tbody>';
+  docs.forEach(function(d){
+    var pill = _docStalePill(d);
+    var titleStr = d.title || d.fileName || '—';
+    html += '<tr>' +
+      '<td style="padding:6px 8px">' + pill + '</td>' +
+      '<td style="padding:6px 8px;word-break:break-all">' + subEsc(titleStr) + '</td>' +
+      '<td style="padding:6px 8px">' + subEsc(d.documentType || '—') + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px">' + subEsc((d.issueDate || '').slice(0,10) || '—') + '</td>' +
+      '<td style="padding:6px 8px;text-align:right">' +
+        '<button type="button" class="btn btn-sm" onclick="viewProductDocument(\'' + subEsc(d.id) + '\')">⬇ Open</button>' +
+      '</td></tr>';
+  });
+  html += '</tbody></table>';
+  sec.innerHTML = html;
+}
+
+// Re-render the preview whenever the product picker changes
+document.addEventListener('change', function(ev){
+  if (ev.target && ev.target.id === 'esb-prod') {
+    renderSubmittalDocsPreview();
+  }
+  // When project changes, refresh the package datalist + offer to regenerate KMI #
+  if (ev.target && ev.target.id === 'esb-proj') {
+    var pkgList = g('esb-pkg-list');
+    if (pkgList) {
+      var pkgs = {};
+      var projId = ev.target.value;
+      (db.submittals || []).forEach(function(x){
+        if (projId && String(x.projectId) === String(projId) && x.packageName) {
+          pkgs[x.packageName] = true;
+        }
+      });
+      pkgList.innerHTML = Object.keys(pkgs).sort().map(function(p){
+        return '<option value="' + subEsc(p) + '"></option>';
+      }).join('');
+    }
+    onSubmittalCsiChange();
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+// SAVE / DELETE
+// ════════════════════════════════════════════════════════════════════
+
+async function saveSubmittal() {
+  if (!requireFull('edit-submittals', 'save submittals')) return;
+  var projId = (g('esb-proj').value || '').trim();
+  var name   = (g('esb-name').value || '').trim();
+  if (!projId) { alert('Please pick a project.'); return; }
+  if (!name)   { alert('Please enter an item name.'); return; }
+
+  var srcCus = g('esb-src-cus');
+  var isCustom = !!(srcCus && srcCus.checked);
+  var prodIdRaw = (g('esb-prod').value || '').trim();
+  var prodId = (!isCustom && prodIdRaw) ? (Number(prodIdRaw) || prodIdRaw) : null;
+  if (!isCustom && !prodId) {
+    if (!confirm('No product selected from the library. Save anyway?\n\nIf this is a shop drawing or sample, switch to "Custom item" instead.')) return;
+  }
+
+  var status = (g('esb-status').value || 'draft').trim();
+  var dueDate      = (g('esb-due').value  || '').trim()  || null;
+  var sentDate     = (g('esb-sent').value || '').trim() || null;
+  var responseDate = (g('esb-resp').value || '').trim() || null;
+
+  // Auto-fill date helpers when status changes (if user didn't manually pick)
+  var existing = _editSubmittalId ? getSubmittal(_editSubmittalId) : null;
+  var prevStatus = existing ? (existing.status || 'draft') : null;
+  var todayStr = (new Date()).toISOString().slice(0,10);
+  if (status === 'submitted' && prevStatus !== 'submitted' && !sentDate) {
+    sentDate = todayStr;
+  }
+  var meta = subStatusMeta(status);
+  if (meta.terminal && !responseDate && prevStatus !== status) {
+    responseDate = todayStr;
+  }
+
+  var nowIso = new Date().toISOString();
+  var data = {
+    projectId:           Number(projId) || projId,
+    kmiSubmittalNo:      (g('esb-kno').value    || '').trim(),
+    customerSubmittalNo: (g('esb-cno').value    || '').trim(),
+    csiSection:          (g('esb-csi').value    || '').trim(),
+    itemName:            name,
+    description:         (g('esb-desc').value   || '').trim(),
+    packageName:         (g('esb-pkg').value    || '').trim(),
+    productId:           prodId,
+    isCustom:            isCustom,
+    status:              status,
+    dueDate:             dueDate,
+    sentDate:            sentDate,
+    responseDate:        responseDate,
+    responseNotes:       (g('esb-rnotes').value || '').trim(),
+    notes:               (g('esb-notes').value  || '').trim(),
+    updatedAt:           nowIso,
+    updatedByUserId:     _currentUser ? _currentUser.id : null
+  };
+
+  // If KMI # is still empty, generate one now (keeps the field auto-filled
+  // even if the user typed the CSI section before this edit cycle's listener
+  // fired, or pasted from XLSX in Round 2B)
+  if (!data.kmiSubmittalNo) {
+    data.kmiSubmittalNo = generateKmiSubmittalNo(data.projectId, data.csiSection, _editSubmittalId);
+  }
+
+  if (!Array.isArray(db.submittals)) db.submittals = [];
+  var record;
+  if (_editSubmittalId) {
+    record = getSubmittal(_editSubmittalId);
+    if (record) Object.assign(record, data);
+  } else {
+    record = data;
+    record.id = Date.now();
+    record.createdAt = nowIso;
+    record.createdByUserId = _currentUser ? _currentUser.id : null;
+    db.submittals.push(record);
+    _editSubmittalId = record.id;
+  }
+  saveDB();
+
+  if (supabaseClient && record) {
+    try {
+      var resp = await supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(record));
+      if (resp && resp.error) console.warn('submittal push warning:', resp.error.message);
+    } catch (e) {
+      console.warn('submittal push threw:', e);
+    }
+  }
+
+  // Re-render the page so the title/delete-button/dates update in place,
+  // and the auto-filled dates (sent/response) become visible.
+  renderEditSubmittalPage();
+}
+
+async function deleteSubmittal() {
+  if (!_editSubmittalId) return;
+  if (!requireFull('delete-submittals', 'delete submittals')) return;
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+  if (!confirm('Delete submittal "' + (r.itemName || '') + '"?\n\nThis only removes the tracking record. Any product documents in the Library are unaffected.')) return;
+
+  db.submittals = (db.submittals || []).filter(function(x){ return String(x.id) !== String(_editSubmittalId); });
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      await supabaseClient.from('kmi_submittals').delete().eq('id', _editSubmittalId);
+    } catch (e) {
+      console.warn('submittal delete threw:', e);
+    }
+  }
+
+  _editSubmittalId = null;
+  nav('submittals');
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -20103,6 +20784,56 @@ function fromSBProductDocument(r) {
   };
 }
 
+// ── Submittal mappers (Round 2A) ────────────────────────────────
+function toSBSubmittal(r) {
+  return {
+    id:r.id,
+    project_id:r.projectId||null,
+    kmi_submittal_no:r.kmiSubmittalNo||'',
+    customer_submittal_no:r.customerSubmittalNo||'',
+    csi_section:r.csiSection||'',
+    item_name:r.itemName||'',
+    description:r.description||'',
+    package_name:r.packageName||'',
+    product_id:r.productId||null,
+    is_custom:!!r.isCustom,
+    status:r.status||'draft',
+    due_date:r.dueDate||null,
+    sent_date:r.sentDate||null,
+    response_date:r.responseDate||null,
+    response_notes:r.responseNotes||'',
+    notes:r.notes||'',
+    created_at:r.createdAt||null,
+    created_by_user_id:r.createdByUserId||null,
+    updated_at:r.updatedAt||null,
+    updated_by_user_id:r.updatedByUserId||null
+  };
+}
+function fromSBSubmittal(r) {
+  return {
+    id:r.id,
+    projectId:r.project_id||null,
+    kmiSubmittalNo:r.kmi_submittal_no||'',
+    customerSubmittalNo:r.customer_submittal_no||'',
+    csiSection:r.csi_section||'',
+    itemName:r.item_name||'',
+    description:r.description||'',
+    packageName:r.package_name||'',
+    productId:r.product_id||null,
+    isCustom:!!r.is_custom,
+    status:r.status||'draft',
+    dueDate:r.due_date||null,
+    sentDate:r.sent_date||null,
+    responseDate:r.response_date||null,
+    responseNotes:r.response_notes||'',
+    notes:r.notes||'',
+    createdAt:r.created_at||null,
+    createdByUserId:r.created_by_user_id||null,
+    updatedAt:r.updated_at||null,
+    updatedByUserId:r.updated_by_user_id||null
+  };
+}
+
 function toSBUser(r)    {
   return {
     id:r.id, first_name:r.firstName||'', last_name:r.lastName||'',
@@ -20636,6 +21367,11 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_product_documents').upsert(db.productDocuments.map(toSBProductDocument));
       if (r && r.error) errs.push('product_documents: ' + r.error.message);
     }
+    // Submittals (Round 2A) — non-fatal if table missing
+    if ((db.submittals || []).length) {
+      var r = await supabaseClient.from('kmi_submittals').upsert(db.submittals.map(toSBSubmittal));
+      if (r && r.error) errs.push('submittals: ' + r.error.message);
+    }
     // Users
     if (db.users.length) {
       var r = await supabaseClient.from('kmi_users').upsert(db.users.map(toSBUser));
@@ -20741,7 +21477,7 @@ async function pullFromSupabase() {
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
-         mfgsRes, prodsRes, pdocsRes] = await Promise.all([
+         mfgsRes, prodsRes, pdocsRes, subsRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -20761,7 +21497,8 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_cors').select('*'),
       supabaseClient.from('kmi_manufacturers').select('*'),
       supabaseClient.from('kmi_products').select('*'),
-      supabaseClient.from('kmi_product_documents').select('*')
+      supabaseClient.from('kmi_product_documents').select('*'),
+      supabaseClient.from('kmi_submittals').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -20888,6 +21625,13 @@ async function pullFromSupabase() {
       console.warn('kmi_product_documents load error (table missing?):', pdocsRes.error.message);
       if (!Array.isArray(db.productDocuments)) db.productDocuments = [];
     }
+    // Submittals (Round 2A) — same preserve-on-missing pattern
+    if (subsRes && !subsRes.error) {
+      db.submittals = (subsRes.data || []).map(fromSBSubmittal);
+    } else if (subsRes && subsRes.error) {
+      console.warn('kmi_submittals load error (table missing?):', subsRes.error.message);
+      if (!Array.isArray(db.submittals)) db.submittals = [];
+    }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
 
@@ -20917,7 +21661,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget, 'product-library':renderProductLibrary};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget, 'product-library':renderProductLibrary, submittals:renderSubmittalsPage};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
