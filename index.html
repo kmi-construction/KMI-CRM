@@ -8339,17 +8339,40 @@ async function confirmSmartUploadCor() {
 // markups, bond, totals). The distinction is purely the rendered layout
 // and the labels Hunzinger expects.
 
-function downloadCorPDF() {
+// Download the full COR PDF: bare COR form + every rolled-up T&M ticket
+// (form + source file) appended. For smart-uploaded CORs the base is
+// the original PDF instead of the generated form. Async because the
+// appending step fetches files from Supabase storage and rasterises
+// them via pdf.js. Mirrors the email-PDF path exactly (both call
+// _corBuildFullPDF) so the downloaded file matches what the customer
+// would receive by email.
+async function downloadCorPDF() {
   if (!_editCorId) { alert('Save the COR first, then generate the PDF.'); return; }
   var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
   if (!c) { alert('COR not found.'); return; }
   var p = getProj(c.projectId) || {};
-  var formType = (p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
-  var doc = (formType === 'Hunzinger') ? buildHunzingerCorPDF(c, p) : buildStandardCorPDF(c, p);
-  if (!doc) return;
-  var seqOnly = corExtractKmiSeq(c.corNumber) || c.corNumber || c.id;
-  var fname = 'COR_' + seqOnly + (formType === 'Hunzinger' ? '_Hunzinger' : '') + '.pdf';
-  doc.save(fname);
+
+  // Best-effort grab of the trigger button so we can show a brief loading
+  // state — the appending step can take a few seconds for CORs with many
+  // tickets and large source files.
+  var btn = null;
+  try { if (typeof event !== 'undefined' && event && event.target) btn = event.target; } catch (e) {}
+  var origLabel = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Building PDF\u2026'; }
+
+  try {
+    var doc = await _corBuildFullPDF(c, p);
+    if (!doc) return;
+    var formType = (p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
+    var seqOnly = corExtractKmiSeq(c.corNumber) || c.corNumber || c.id;
+    var fname = 'COR_' + seqOnly + (formType === 'Hunzinger' ? '_Hunzinger' : '') + '.pdf';
+    doc.save(fname);
+  } catch (e) {
+    console.error('COR PDF download failed:', e);
+    alert('Could not build the PDF: ' + (e.message || e));
+  } finally {
+    if (btn && origLabel != null) { btn.disabled = false; btn.textContent = origLabel; }
+  }
 }
 
 // ── Helpers shared by both PDF builders ────────────────────────────────
@@ -9428,23 +9451,31 @@ function _corAfterTransition(c) {
 // ticket's generated PDF and its uploadedSignedFile (if any) as additional
 // pages. The result is one combined attachment containing the COR plus
 // all backup tickets.
-async function _corPdfBase64(c, p) {
+// Build the full COR PDF as a jsPDF doc — the bare COR form, plus each
+// rolled-up T&M ticket form, plus each ticket's source file. For
+// smart-uploaded CORs the original PDF is used as the base instead of a
+// freshly-generated form (since the original IS the COR). Returns the
+// jsPDF doc; callers serialize it however they need (save() for download,
+// output('datauristring') for email base64).
+//
+// Used by BOTH downloadCorPDF and _corPdfBase64 — they used to diverge,
+// causing downloaded PDFs to be missing all annexes. Refactored so the
+// behavior matches everywhere.
+async function _corBuildFullPDF(c, p) {
   if (!window.jspdf) throw new Error('PDF library not loaded.');
   var jsPDF = window.jspdf.jsPDF;
   var doc;
 
   // ── Base document: smart-uploaded original, or freshly generated ──────
   if (c && c.smartUploaded && c.smartUploadedFile && c.smartUploadedFile.path) {
-    // Use the original PDF as the base. Start with an empty jsPDF doc, drop
-    // its initial blank page, and rasterise the original onto it.
+    // Use the original PDF as the base. Start with an empty jsPDF doc,
+    // rasterise the original onto it, then drop the auto-created leading
+    // blank page so the original starts on page 1.
     doc = new jsPDF({unit:'pt', format:'letter'});
     try {
       var ab = await _fetchUploadedFileBytes(c.smartUploadedFile);
       if (!ab) throw new Error('Original COR file not found in storage.');
-      // Drop the auto-created first blank page so the original starts on page 1
       var addedPages = 0;
-      // _appendPdfBytesToJsPdf calls doc.addPage() before each page;
-      // we'll delete the leading blank afterwards.
       var ct = (c.smartUploadedFile.contentType || '').toLowerCase();
       var nm = (c.smartUploadedFile.name || '').toLowerCase();
       var isPdf   = ct.indexOf('pdf')    !== -1 || /\.pdf$/i.test(nm);
@@ -9458,12 +9489,11 @@ async function _corPdfBase64(c, p) {
         catch (e) { addedPages = await _appendImageBytesToJsPdf(doc, ab, 'image/jpeg'); }
       }
       if (addedPages > 0) {
-        // Remove the original blank page jsPDF creates on construction
         doc.deletePage(1);
       }
     } catch (e) {
       // Fallback: if fetch/append of the original fails, generate the form
-      // so the user still has something to send rather than failing outright.
+      // so the user still has something rather than failing outright.
       console.warn('Smart-uploaded COR original could not be loaded; generating form as fallback:', e);
       var formType0 = (p && p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
       doc = (formType0 === 'Hunzinger') ? buildHunzingerCorPDF(c, p) : buildStandardCorPDF(c, p);
@@ -9476,18 +9506,16 @@ async function _corPdfBase64(c, p) {
   }
 
   // ── Append each rolled-up T&M ticket: generated form + source file ────
+  // We build each ticket on a temp jsPDF doc, dump it to bytes, then
+  // pdf.js-rasterize those bytes onto our main doc. This costs us the
+  // ticket's selectable text (it becomes raster) but keeps the appending
+  // logic uniform with smart-upload bases and ticket source files.
   var ticketIds = Array.isArray(c && c.rolledUpTicketIds) ? c.rolledUpTicketIds : [];
   for (var i = 0; i < ticketIds.length; i++) {
     var tid = ticketIds[i];
     var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
     if (!t) continue;
 
-    // Build the ticket's own PDF on a temp doc, then copy each page into
-    // the main doc by re-rendering. Easier alternative: re-run the same
-    // build logic but on the main doc. Simpler still: render the ticket
-    // doc to a Blob, read it back as bytes, and pdf.js-render those pages
-    // onto the main doc — this reuses _appendPdfBytesToJsPdf and keeps
-    // formatting identical.
     try {
       var ticketDoc = buildTmTicketPDF(t.id);
       if (ticketDoc) {
@@ -9508,6 +9536,13 @@ async function _corPdfBase64(c, p) {
     }
   }
 
+  return doc;
+}
+
+// Email path — wraps _corBuildFullPDF, returns the doc as a base64 data
+// payload (no leading 'data:application/pdf;base64,' prefix).
+async function _corPdfBase64(c, p) {
+  var doc = await _corBuildFullPDF(c, p);
   var dataUri = doc.output('datauristring');
   var commaIdx = dataUri.indexOf(',');
   return (commaIdx > 0) ? dataUri.substring(commaIdx + 1) : '';
