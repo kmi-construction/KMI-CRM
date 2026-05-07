@@ -7000,16 +7000,38 @@ function _gatherCompileDocsForSubmittal(s) {
   if (!s) return out;
   if (s.isCustom) {
     (s.customDocuments || []).forEach(function(d){
-      out.push({bucket: PROJECT_FILES_BUCKET, doc: d, kind: 'custom'});
+      // Round 7: Format = derived from filename when no explicit type.
+      // Custom docs are typically shop drawings or RFI responses, so the
+      // default "Documents" matches Procore's generic categorization.
+      var fmt = d.documentType || _guessCompileFormat(d.fileName) || 'Documents';
+      out.push({
+        bucket:      PROJECT_FILES_BUCKET,
+        doc:         d,
+        kind:        'custom',
+        format:      fmt,
+        fileName:    d.fileName || '—',
+        // Custom docs have no "issue date" concept — use upload date so
+        // the items table has something meaningful in the Date column.
+        dateStr:     _formatProcoreDate(d.uploadedAt) || _formatProcoreDate(new Date().toISOString())
+      });
     });
   } else {
-    // Round 6: gather across every linked product. Falls back to legacy
-    // single productId for any submittal that hasn't been migrated yet.
     var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
     pids.forEach(function(pid){
       (db.productDocuments || []).forEach(function(d){
         if (String(d.productId) === String(pid)) {
-          out.push({bucket: PRODUCT_LIBRARY_BUCKET, doc: d, kind: 'library', productId: pid});
+          out.push({
+            bucket:      PRODUCT_LIBRARY_BUCKET,
+            doc:         d,
+            kind:        'library',
+            productId:   pid,
+            // documentType comes from the Product Library — values like
+            // "Sample", "Product Data Sheet", "Test Report", "Letter of
+            // Compliance". These map directly to Procore's Format column.
+            format:      d.documentType || 'Documents',
+            fileName:    d.fileName || d.title || '—',
+            dateStr:     _formatProcoreDate(d.issueDate) || _formatProcoreDate(d.uploadedAt) || _formatProcoreDate(new Date().toISOString())
+          });
         }
       });
     });
@@ -7017,7 +7039,57 @@ function _gatherCompileDocsForSubmittal(s) {
   return out;
 }
 
-// ── Dialog ───────────────────────────────────────────────────────────
+// Format an ISO date as "Mon DD, YYYY" to match Procore. Returns ''
+// for falsy inputs so the caller can chain || fallbacks.
+function _formatProcoreDate(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', {year:'numeric', month:'short', day:'numeric'});
+}
+
+// Best-guess Format column value from a filename when no explicit type.
+function _guessCompileFormat(fileName) {
+  var fn = String(fileName || '').toLowerCase();
+  if (/sample|swatch|board/.test(fn))     return 'Samples';
+  if (/shop|drawing|dwg/.test(fn))         return 'Drawings';
+  if (/rfi/.test(fn))                       return 'RFI Response';
+  if (/spec|specification/.test(fn))        return 'Specifications';
+  if (/photo|image|jpe?g|png/.test(fn))     return 'Photos';
+  if (/data|datasheet|cut.?sheet/.test(fn)) return 'Product Data';
+  if (/test|report/.test(fn))               return 'Test Reports';
+  if (/letter|compliance/.test(fn))         return 'Letters';
+  return '';
+}
+
+// Round 7: map a user role to a Procore-style job title for the
+// signature block. KMI users don't have a separate title field on the
+// users table today; this gives them a sensible default that they can
+// override directly in the compile dialog before generating.
+function _userRoleTitle(role) {
+  switch (String(role || '').toLowerCase()) {
+    case 'admin':      return 'Administrator';
+    case 'pm':         return 'Project Manager';
+    case 'pc':         return 'Project Coordinator';
+    case 'super':      return 'Superintendent';
+    case 'foreman':    return 'Foreman';
+    case 'accounting': return 'Accounting';
+    default:           return '';
+  }
+}
+
+// ── Dialog (Round 7 redesign) ────────────────────────────────────────
+// Mirrors Jessica's existing Procore transmittal output: project contact
+// picker, transmittal #, full metadata block (Transmit/Sent Via/Submitted
+// For/Action As Noted), default cover comments templated from the
+// submittal/package, and a signature block sourced from the current
+// user's profile. Items table on the cover is one row per attached
+// document, not one per submittal.
+
+// Module-level state for the contact picker — referenced by both
+// onCompileContactChange (in-dialog) and the cover renderer.
+var _compileContactsByPmId = {};
+
 function showSubmittalPackageCompile(submittalId) {
   if (!requireFull('edit-submittals', 'compile submittal packages')) return;
   if (typeof window.jspdf === 'undefined' || !window.jspdf || !window.jspdf.jsPDF) {
@@ -7035,44 +7107,117 @@ function showSubmittalPackageCompile(submittalId) {
     alert('This submittal has no package name yet. Add a package name (e.g. "CMU Test Reports") on the submittal, save, then compile.');
     return;
   }
+
   // Gather every submittal in the same package on the same project
   var pkgItems = (db.submittals || []).filter(function(s){
     return String(s.projectId) === String(anchor.projectId) &&
            (s.packageName || '') === anchor.packageName;
   }).sort(function(a, b){
-    // Sort by KMI # so the manifest reads naturally (matches the spec section order)
     return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
   });
 
-  // Pre-fill recipient from the project's customer
+  // Project + customer lookup
   var proj = (db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {};
   var cust = proj.customerId ? (db.customers || []).find(function(c){ return String(c.id) === String(proj.customerId); }) : null;
-  var defaultTo = '';
-  if (cust) {
-    if (cust.contact)   defaultTo += cust.contact + '\n';
-    if (cust.name)      defaultTo += cust.name + '\n';
-    if (cust.address)   defaultTo += cust.address + '\n';
-    if (cust.cityState) defaultTo += cust.cityState;
+
+  // Build the project contact dropdown — every PM whose customerId
+  // matches the project's customer, regardless of whether it's listed
+  // in contactAssignments. Pre-populate _compileContactsByPmId so
+  // onCompileContactChange can pull addresses without re-looking up.
+  _compileContactsByPmId = {};
+  var customerPms = (db.pms || []).filter(function(pm){
+    return cust && String(pm.customerId) === String(cust.id);
+  }).sort(function(a, b){
+    return String(a.lastName || '').localeCompare(String(b.lastName || ''));
+  });
+  customerPms.forEach(function(pm){ _compileContactsByPmId[String(pm.id)] = pm; });
+
+  // Pick a default contact: the first one referenced in contactAssignments
+  // that resolves to a customer-side PM, otherwise the first customer PM.
+  var defaultPmId = '';
+  var assigns = Array.isArray(proj.contactAssignments) ? proj.contactAssignments : [];
+  for (var ai = 0; ai < assigns.length; ai++) {
+    if (_compileContactsByPmId[String(assigns[ai].pmId)]) {
+      defaultPmId = String(assigns[ai].pmId);
+      break;
+    }
   }
-  if (!defaultTo) defaultTo = '[Recipient name]\n[Company]\n[Address]';
+  if (!defaultPmId && customerPms.length) defaultPmId = String(customerPms[0].id);
 
-  // Pre-fill from = current user + KMI standard address
-  var senderName = _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '';
-  var defaultFrom = (senderName ? senderName + '\n' : '') +
-    'KMI Construction LLC\n2880 S. 171st Street\nNew Berlin, Wisconsin 53151';
+  // Helper: build the To block text from a PM record + customer
+  function _buildToBlock(pm, c) {
+    var lines = [];
+    if (pm) {
+      var nm = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim();
+      var cn = c && c.name ? c.name : '';
+      lines.push(nm + (cn ? ' (' + cn + ')' : ''));
+    } else if (c) {
+      lines.push(c.name || '');
+    }
+    if (c && c.address)   lines.push(c.address);
+    if (c && c.cityState) lines.push(c.cityState);
+    return lines.filter(Boolean).join('\n');
+  }
+  var defaultPm = defaultPmId ? _compileContactsByPmId[defaultPmId] : null;
+  var defaultTo = _buildToBlock(defaultPm, cust);
 
-  // Project block
-  var projLine = (proj.name || ('Project ' + anchor.projectId));
-  if (proj.number) projLine = '#' + proj.number + ' — ' + projLine;
-  var projAddr  = [proj.address, [proj.city, proj.state].filter(Boolean).join(', '), proj.zip].filter(Boolean).join('\n');
+  // From block — current user + KMI standard address
+  var u = _currentUser || {};
+  var senderName  = ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+  var defaultFrom = (senderName ? senderName + ' (KMI Construction LLC)\n' : 'KMI Construction LLC\n') +
+    '2880 S. 171st Street\nNew Berlin, Wisconsin 53151';
 
-  // Build the items list with checkboxes
-  var itemRows = pkgItems.map(function(s, idx){
+  // Copies To — the sender by default; user can add Adam Masters etc.
+  var defaultCopies = senderName ? (senderName + ' (KMI Construction LLC)') : '';
+  // If the project has KMI users assigned via contactAssignments, append them
+  if (Array.isArray(proj.contactAssignments)) {
+    proj.contactAssignments.forEach(function(ca){
+      // Skip the customer-side PMs (already in the recipient dropdown)
+      if (_compileContactsByPmId[String(ca.pmId)]) return;
+      // Look up in users (KMI-side) — pms is customer-side
+      var kmiUser = (db.users || []).find(function(uu){ return String(uu.id) === String(ca.pmId); });
+      if (kmiUser) {
+        var nm = ((kmiUser.firstName || '') + ' ' + (kmiUser.lastName || '')).trim();
+        if (nm && defaultCopies.indexOf(nm) === -1) {
+          defaultCopies += (defaultCopies ? ', ' : '') + nm + ' (KMI Construction LLC)';
+        }
+      }
+    });
+  }
+
+  // Project line + address (top-right of cover)
+  var projLine = (proj.number ? proj.number + ' ' : '') + (proj.name || '');
+  var projAddr = [proj.address, [proj.city, proj.state].filter(Boolean).join(', '), proj.zip].filter(Boolean).join('\n');
+
+  // Title — "Transmittal #N - Submittal #KMI Item Name". The transmittal
+  // counter defaults to 1; the user can edit before generating.
+  var defaultTitleSubmittal = (anchor.kmiSubmittalNo ? '#' + anchor.kmiSubmittalNo + ' ' : '') + (anchor.packageName || anchor.itemName || '');
+
+  // Default cover comments — templated using project/package context.
+  // The signature block uses the current user's profile; user can edit
+  // any of this in the textarea before generating.
+  var userTitle = _userRoleTitle(u.role) || '';
+  var defaultComments =
+    'Hello,\n\n' +
+    'Attached is the ' + (anchor.packageName || 'submittal') +
+    ' submittal for the ' + (proj.name || 'project') + ' project. ' +
+    'Please review and provide your response. Reach out with any questions.\n\n' +
+    'Thank you,\n' +
+    (senderName || '[Your name]') + '\n' +
+    (userTitle || '[Your title]') + '\n' +
+    'KMI Construction\n' +
+    (u.email || '[Your email]');
+
+  // Today's date (yyyy-mm-dd) for the date inputs
+  var todayIso = (new Date()).toISOString().slice(0, 10);
+
+  // Build the items list with checkboxes (per-submittal include/exclude).
+  // The cover sheet's items table will be per-document; this list lets
+  // the PC choose which submittals' docs are pulled into the package.
+  var itemRows = pkgItems.map(function(s){
     var docs = _gatherCompileDocsForSubmittal(s);
     var docCount = docs.length;
     var label = (s.kmiSubmittalNo || ('#' + s.id)) + ' — ' + (s.itemName || '(no name)');
-    // Round 6: when a library submittal has multiple products, list them
-    // so the PC can verify they're all included before generating
     if (!s.isCustom) {
       var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
       if (pids.length > 1) {
@@ -7080,38 +7225,82 @@ function showSubmittalPackageCompile(submittalId) {
         label += ' [' + names.join(', ') + ']';
       }
     }
-    var note = '';
-    if (docCount === 0) {
-      note = '<span style="color:#9A7A2E;font-size:11px;margin-left:8px">⚠ no documents</span>';
-    } else {
-      note = '<span style="color:#888;font-size:11px;margin-left:8px">' + docCount + ' doc' + (docCount === 1 ? '' : 's') + '</span>';
-    }
+    var note = docCount === 0
+      ? '<span style="color:#9A7A2E;font-size:11px;margin-left:8px">⚠ no documents</span>'
+      : '<span style="color:#888;font-size:11px;margin-left:8px">' + docCount + ' doc' + (docCount === 1 ? '' : 's') + '</span>';
     return '<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:0.5px solid #eee;cursor:pointer">' +
       '<input type="checkbox" class="cmp-item" data-id="' + subEsc(s.id) + '" ' + (docCount > 0 ? 'checked' : '') + '>' +
       '<span style="font-size:12px">' + subEsc(label) + note + '</span>' +
     '</label>';
   }).join('');
 
+  // Project contact dropdown options
+  var contactOpts = '<option value="">— Pick a recipient —</option>' +
+    customerPms.map(function(pm){
+      var nm = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim();
+      var sel = String(pm.id) === defaultPmId ? ' selected' : '';
+      var ttl = pm.title ? (' (' + pm.title + ')') : '';
+      return '<option value="' + subEsc(pm.id) + '"' + sel + '>' + subEsc(nm + ttl) + '</option>';
+    }).join('');
+
+  function _opts(values, current) {
+    return values.map(function(v){
+      return '<option value="' + subEsc(v) + '"' + (v === current ? ' selected' : '') + '>' + subEsc(v) + '</option>';
+    }).join('');
+  }
+
+  var transmitOpts   = _opts(['Under Separate Cover', 'Attached', 'Hand Delivery', 'Email', 'Mail', 'Courier'], 'Under Separate Cover');
+  var sentViaOpts    = _opts(['Hand Delivery', 'Email', 'Mail', 'Courier', 'Procore', 'Other'], 'Hand Delivery');
+  var submittedForOpts = _opts(['Approval', 'Information Only', 'Review', 'Record'], 'Approval');
+
   var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
-    '<div class="mt">Compile package</div>' +
-    '<div class="msb">Generates a single PDF: KMI cover sheet + every checked item\'s documents</div>' +
+    '<div class="mt">Compile transmittal</div>' +
+    '<div class="msb">Generates a Procore-style transmittal cover + every checked item\'s documents in one PDF</div>' +
 
     '<div class="fg">' +
-      '<div class="fgr"><label>Package</label><input id="cmp-pkg" value="' + subEsc(anchor.packageName) + '"></div>' +
+      // Title / transmittal #
+      '<div class="fgr"><label>Transmittal #</label>' +
+        '<input id="cmp-trans-no" type="number" min="1" step="1" value="1" style="width:80px">' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">Counter you keep manually for this project (Procore auto-generates this; here you set it).</div>' +
+      '</div>' +
+      '<div class="fgr"><label>Title — Submittal #/name (auto)</label><input id="cmp-title-sub" value="' + subEsc(defaultTitleSubmittal) + '"></div>' +
+
+      // Project context (read-only display + editable address)
       '<div class="fgr"><label>Project</label><input id="cmp-proj" value="' + subEsc(projLine) + '" disabled></div>' +
-      '<div class="fgr full"><label>Project address (right of cover)</label><textarea id="cmp-proj-addr" rows="2">' + subEsc(projAddr) + '</textarea></div>' +
-      '<div class="fgr"><label>To</label><textarea id="cmp-to" rows="4" placeholder="Recipient name + company + address">' + subEsc(defaultTo) + '</textarea></div>' +
-      '<div class="fgr"><label>From</label><textarea id="cmp-from" rows="4">' + subEsc(defaultFrom) + '</textarea></div>' +
-      '<div class="fgr full"><label>Cover comments (optional)</label>' +
-        '<textarea id="cmp-comments" rows="3" placeholder="Optional cover note — e.g. \'Attached for approval is our Brick Unit Masonry Product Data submittal for the Hilldale Phase II project. Please contact Adam if you have any questions.\'"></textarea>' +
+      '<div class="fgr"><label>Project address (top-right of cover)</label><textarea id="cmp-proj-addr" rows="2">' + subEsc(projAddr) + '</textarea></div>' +
+
+      // Recipient picker + To block
+      '<div class="fgr full"><label>Project contact (recipient)</label>' +
+        '<select id="cmp-contact-pm" onchange="onCompileContactChange()">' + contactOpts + '</select>' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">Pulled from this project\'s customer\'s PM list. Selecting one auto-fills the To block; you can edit further below.</div>' +
+      '</div>' +
+      '<div class="fgr"><label>To</label><textarea id="cmp-to" rows="3">' + subEsc(defaultTo) + '</textarea></div>' +
+      '<div class="fgr"><label>From</label><textarea id="cmp-from" rows="3">' + subEsc(defaultFrom) + '</textarea></div>' +
+
+      // Dates + copies
+      '<div class="fgr"><label>Date Created</label><input id="cmp-date-created" type="date" value="' + todayIso + '"></div>' +
+      '<div class="fgr"><label>Sent date</label><input id="cmp-date-sent" type="date" value="' + todayIso + '"></div>' +
+      '<div class="fgr"><label>Due By</label><input id="cmp-date-due" type="date" value=""></div>' +
+      '<div class="fgr"><label>Submitted For</label><select id="cmp-submitted-for">' + submittedForOpts + '</select></div>' +
+      '<div class="fgr"><label>Transmit</label><select id="cmp-transmit">' + transmitOpts + '</select></div>' +
+      '<div class="fgr"><label>Sent Via</label><select id="cmp-sent-via">' + sentViaOpts + '</select></div>' +
+      '<div class="fgr"><label>Action As Noted (optional)</label><input id="cmp-action-as-noted" value="" placeholder="Free-text notes (e.g. \'Approve and return\')"></div>' +
+      '<div class="fgr full"><label>Copies To</label>' +
+        '<textarea id="cmp-copies" rows="2">' + subEsc(defaultCopies) + '</textarea>' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">Comma-separated. Pre-filled with the sender + any KMI users assigned to this project.</div>' +
+      '</div>' +
+
+      '<div class="fgr full"><label>Cover comments &amp; signature</label>' +
+        '<textarea id="cmp-comments" rows="9">' + subEsc(defaultComments) + '</textarea>' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">Pre-filled with a default message and your profile signature. Edit as needed before generating.</div>' +
       '</div>' +
     '</div>' +
 
-    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Items in this package (' + pkgItems.length + ')</div>' +
-      '<div style="border:0.5px solid #ddd;border-radius:4px;max-height:240px;overflow-y:auto">' +
+    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Submittal items in this package (' + pkgItems.length + ')</div>' +
+      '<div style="border:0.5px solid #ddd;border-radius:4px;max-height:200px;overflow-y:auto">' +
         itemRows +
       '</div>' +
-      '<div style="font-size:11px;color:#888;margin-top:6px">Items with no documents are unchecked by default — they\'ll still appear in the cover\'s manifest, just nothing to merge in.</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:6px">Each <em>document</em> on a checked submittal becomes its own row in the Transmittal Items table on the cover.</div>' +
     '</div>' +
 
     '<div id="cmp-status" style="margin-top:10px;font-size:12px;color:#888;min-height:18px"></div>' +
@@ -7121,27 +7310,39 @@ function showSubmittalPackageCompile(submittalId) {
     '</div>';
 
   showModal(html);
-
-  // Stash the anchor IDs so compileSubmittalPackage can find them.
-  // The actual selection comes from the checkboxes at compile-time.
   _compileSubmittalIds = pkgItems.map(function(s){ return s.id; });
 }
 
-// ── Cover sheet generator ────────────────────────────────────────────
-// Builds the page-1 cover. Mirrors the visual style of T&M / COR PDFs
-// (KMI letterhead top + bottom, accent stripe under titles, monospace
-// for numbers in the items table).
+// Re-fill the To block when the user picks a different project contact
+function onCompileContactChange() {
+  var sel = g('cmp-contact-pm');
+  var to  = g('cmp-to');
+  if (!sel || !to) return;
+  var pm = _compileContactsByPmId[String(sel.value)];
+  if (!pm) return;
+  var anchor = _compileSubmittalIds.length ? getSubmittal(_compileSubmittalIds[0]) : null;
+  var proj = anchor ? ((db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {}) : {};
+  var cust = proj.customerId ? (db.customers || []).find(function(c){ return String(c.id) === String(proj.customerId); }) : null;
+  var lines = [];
+  var nm = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim();
+  var cn = cust && cust.name ? cust.name : '';
+  lines.push(nm + (cn ? ' (' + cn + ')' : ''));
+  if (cust && cust.address)   lines.push(cust.address);
+  if (cust && cust.cityState) lines.push(cust.cityState);
+  to.value = lines.filter(Boolean).join('\n');
+}
+
+// ── Cover sheet generator (Round 7 redesign) ─────────────────────────
+// Procore-style layout: KMI top-left, Project top-right, gold-underlined
+// title, label-value metadata block, per-document items table, comments
+// section, footer with page X of Y. No KMI letterhead banner (the
+// Procore version is text-only) — uses the brand-logo asset already in
+// the sidebar HTML for the small top-left logomark.
 function _renderCompileCoverSheet(doc, ctx) {
   var PAGE_W = 612, PAGE_H = 792;
   var LM = 54, RM = 558;
-
-  // Letterhead images
-  if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
-    try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 109); } catch (e) {}
-  }
-  if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
-    try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 72, PAGE_W, 72); } catch (e) {}
-  }
+  var BODY_TOP = 36;
+  var FOOTER_Y = PAGE_H - 36;
 
   function sf(st, sz, col) {
     doc.setFont('helvetica', st);
@@ -7149,162 +7350,218 @@ function _renderCompileCoverSheet(doc, ctx) {
     doc.setTextColor(col ? col[0] : 0, col ? col[1] : 0, col ? col[2] : 0);
   }
   function ln(x1, y1, x2, y2, w, rgb) {
-    doc.setDrawColor(rgb ? rgb[0] : 0, rgb ? rgb[1] : 0, rgb ? rgb[2] : 0);
-    doc.setLineWidth(w || 0.5);
+    doc.setDrawColor(rgb ? rgb[0] : 200, rgb ? rgb[1] : 200, rgb ? rgb[2] : 200);
+    doc.setLineWidth(w || 0.4);
     doc.line(x1, y1, x2, y2);
   }
   function wrap(text, maxW) {
     return doc.splitTextToSize(String(text || ''), maxW);
   }
 
-  var y = 130;
+  // ── Header: KMI top-left, Project top-right ───────────────────────
+  // Pull the small KMI logo from the sidebar img if available.
+  var logoSrc = null;
+  var logoEl = (typeof document !== 'undefined') ? document.querySelector('.brand-logo') : null;
+  if (logoEl && logoEl.src) logoSrc = logoEl.src;
 
-  // Title
-  sf('bold', 14, [42, 47, 92]);
-  doc.text('SUBMITTAL TRANSMITTAL', PAGE_W / 2, y, {align:'center'});
-  ln(LM, y + 4, RM, y + 4, 0.8, [200, 168, 75]);
-  y += 14;
-
-  // Project + package subtitle
-  sf('normal', 10, [60, 60, 60]);
-  doc.text('Package: ' + (ctx.packageName || ''), PAGE_W / 2, y, {align:'center'});
-  y += 12;
-  sf('normal', 9, [110, 110, 110]);
-  doc.text('Generated ' + ctx.dateStr, PAGE_W / 2, y, {align:'center'});
-  y += 18;
-
-  // Two-column meta block: To (left) | From (right)
-  var COL_W = (RM - LM - 14) / 2;
-  var leftX  = LM;
-  var rightX = LM + COL_W + 14;
-  var blockTop = y;
-
-  function drawLabeledBlock(x, label, body) {
-    sf('bold', 8, [110, 110, 110]);
-    doc.text(label.toUpperCase(), x, blockTop);
-    sf('normal', 10, [0, 0, 0]);
-    var lines = wrap(body, COL_W);
-    var by = blockTop + 12;
-    for (var i = 0; i < lines.length && i < 6; i++) {
-      doc.text(lines[i], x, by);
-      by += 12;
-    }
-    return by;
+  var headerY = BODY_TOP;
+  if (logoSrc) {
+    try { doc.addImage(logoSrc, 'PNG', LM, headerY, 70, 32); } catch (e) {}
   }
-  var leftEnd  = drawLabeledBlock(leftX,  'To',   ctx.toBlock);
-  var rightEnd = drawLabeledBlock(rightX, 'From', ctx.fromBlock);
-  y = Math.max(leftEnd, rightEnd) + 6;
+  var kmiTextX = logoSrc ? (LM + 80) : LM;
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('KMI Construction LLC', kmiTextX, headerY + 9);
+  sf('normal', 9, [70, 70, 70]);
+  doc.text('2880 S. 171st Street',         kmiTextX, headerY + 21);
+  doc.text('New Berlin, Wisconsin 53151',  kmiTextX, headerY + 32);
+  doc.text('P: (262) 548-0632',            kmiTextX, headerY + 43);
 
-  // Project block (full width)
-  sf('bold', 8, [110, 110, 110]);
-  doc.text('PROJECT', LM, y);
-  y += 12;
-  sf('bold', 11, [0, 0, 0]);
-  doc.text(ctx.projectLine || '', LM, y);
-  y += 14;
+  // Project block — right-aligned
+  sf('bold', 10, [0, 0, 0]);
+  doc.text('Project: ' + (ctx.projectLine || ''), RM, headerY + 9, {align: 'right'});
+  sf('normal', 9, [70, 70, 70]);
   if (ctx.projectAddr) {
-    sf('normal', 10, [60, 60, 60]);
-    var pal = wrap(ctx.projectAddr, RM - LM);
-    for (var i = 0; i < pal.length; i++) { doc.text(pal[i], LM, y); y += 12; }
+    var pal = wrap(ctx.projectAddr, 260);
+    var py = headerY + 21;
+    for (var i = 0; i < pal.length && i < 3; i++) {
+      doc.text(pal[i], RM, py, {align: 'right'});
+      py += 11;
+    }
   }
-  y += 6;
 
-  // Submitted For / Action As Noted (Procore-style strip)
-  sf('bold', 8, [110, 110, 110]);
-  doc.text('SUBMITTED FOR', LM, y);
-  doc.text('TRANSMIT VIA', LM + 200, y);
-  doc.text('DATE', LM + 360, y);
-  y += 12;
-  sf('normal', 10, [0, 0, 0]);
-  doc.text('Approval', LM, y);
-  doc.text('Attached', LM + 200, y);
-  doc.text(ctx.dateStr, LM + 360, y);
-  y += 16;
+  // Horizontal rule under header
+  ln(LM, headerY + 56, RM, headerY + 56, 0.4, [210, 210, 210]);
 
-  ln(LM, y, RM, y, 0.4, [180, 180, 180]);
+  // ── Title with gold underline ─────────────────────────────────────
+  var y = headerY + 80;
+  sf('bold', 15, [0, 0, 0]);
+  var titleParts = [];
+  if (ctx.transmittalNo) titleParts.push('Transmittal #' + ctx.transmittalNo);
+  titleParts.push('Submittal ' + (ctx.titleSubmittal || ''));
+  var title = titleParts.join(' - ');
+  var titleLines = wrap(title, RM - LM);
+  for (var ti = 0; ti < titleLines.length; ti++) {
+    doc.text(titleLines[ti], PAGE_W / 2, y, {align: 'center'});
+    y += 18;
+  }
+  // Gold accent underline
+  ln(LM, y - 4, RM, y - 4, 1.0, [200, 168, 75]);
   y += 10;
 
-  // Items table
-  sf('bold', 8, [110, 110, 110]);
-  doc.text('TRANSMITTAL ITEMS', LM, y);
+  // ── Metadata block (label-value, two-column grid) ─────────────────
+  // Left column = labels, then values to the right of them.
+  // Layout: To/From paired side-by-side; Date Created spans; Copies To
+  // spans full width; Transmit/Sent Via paired; Submitted For/Action paired.
+  var LABEL_X_L = LM;
+  var VAL_X_L   = LM + 80;
+  var LABEL_X_R = LM + 270;
+  var VAL_X_R   = LM + 350;
+  var COL_W     = 200;
+
+  function labelValue(labelX, valueX, label, value, maxW) {
+    sf('bold', 9, [0, 0, 0]);
+    doc.text(label, labelX, y);
+    sf('normal', 10, [0, 0, 0]);
+    var lines = wrap(value, maxW || (RM - valueX));
+    var yy = y;
+    for (var i = 0; i < lines.length && i < 6; i++) {
+      doc.text(lines[i], valueX, yy);
+      yy += 12;
+    }
+    return yy - y;  // height used
+  }
+
+  // To / From row
+  var hL = labelValue(LABEL_X_L, VAL_X_L, 'To',   ctx.toBlock,   COL_W);
+  var hR = labelValue(LABEL_X_R, VAL_X_R, 'From', ctx.fromBlock, COL_W);
+  y += Math.max(hL, hR, 12) + 8;
+
+  // Date Created (full width)
+  labelValue(LABEL_X_L, VAL_X_L, 'Date Created', ctx.dateCreated || '', RM - VAL_X_L);
+  y += 18;
+
+  // Copies To (full width)
+  var hC = labelValue(LABEL_X_L, VAL_X_L, 'Copies To', ctx.copiesTo || '', RM - VAL_X_L);
+  y += Math.max(hC, 12) + 6;
+
+  // Transmit / Sent Via row
+  labelValue(LABEL_X_L, VAL_X_L, 'Transmit', ctx.transmit || '', COL_W);
+  labelValue(LABEL_X_R, VAL_X_R, 'Sent Via', ctx.sentVia  || '', COL_W);
+  y += 18;
+
+  // Submitted For / Action As Noted row
+  var sfAction = '';
+  if (ctx.actionAsNoted) sfAction = ctx.actionAsNoted;
+  if (ctx.dueBy)         sfAction += (sfAction ? '\n' : '') + 'Due By ' + ctx.dueBy;
+  if (ctx.sentDate)      sfAction += (sfAction ? '\n' : '') + 'Sent date ' + ctx.sentDate;
+  var hAL = labelValue(LABEL_X_L, VAL_X_L, 'Submitted For',   ctx.submittedFor || '', COL_W);
+  var hAR = labelValue(LABEL_X_R, VAL_X_R, 'Action As Noted', sfAction,               COL_W);
+  y += Math.max(hAL, hAR, 12) + 8;
+
+  // Horizontal rule before items
+  ln(LM, y, RM, y, 0.4, [210, 210, 210]);
   y += 14;
+
+  // ── Transmittal Items table (per-document rows) ──────────────────
+  sf('bold', 11, [0, 0, 0]);
+  doc.text('Transmittal Items', LM, y);
+  y += 14;
+
+  // Column layout: Format | Description | Date | Copies
+  var COL_FMT_X    = LM;
+  var COL_DESC_X   = LM + 75;
+  var COL_DATE_X   = RM - 100;
+  var COL_COPIES_X = RM - 8;
+  var COL_DESC_W   = (COL_DATE_X - 8) - COL_DESC_X;
 
   // Header row
   sf('bold', 9, [60, 60, 60]);
-  doc.text('KMI #',     LM,        y);
-  doc.text('Spec',      LM + 90,   y);
-  doc.text('Item',      LM + 145,  y);
-  doc.text('Docs',      RM - 30,   y, {align:'right'});
+  doc.text('Format',      COL_FMT_X,    y);
+  doc.text('Description', COL_DESC_X,   y);
+  doc.text('Date',        COL_DATE_X,   y);
+  doc.text('Copies',      COL_COPIES_X, y, {align: 'right'});
   ln(LM, y + 3, RM, y + 3, 0.4, [180, 180, 180]);
-  y += 14;
+  y += 12;
 
-  sf('normal', 9, [0, 0, 0]);
-  for (var ii = 0; ii < ctx.items.length; ii++) {
-    var it = ctx.items[ii];
-    if (y > 700) {
+  function ensureRoom(neededH) {
+    if (y + neededH > FOOTER_Y - 30) {
       doc.addPage();
-      // re-add letterhead on overflow page
-      if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
-        try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 109); } catch(e){}
-      }
-      if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
-        try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 72, PAGE_W, 72); } catch(e){}
-      }
-      y = 130;
-      sf('bold', 11, [42, 47, 92]);
-      doc.text('Transmittal items (continued)', LM, y);
-      y += 18;
-      sf('normal', 9, [0, 0, 0]);
-    }
-    // KMI # in monospace-ish
-    doc.setFont('courier', 'normal');
-    doc.text(String(it.kmiNo || '—'), LM, y);
-    doc.setFont('helvetica', 'normal');
-    doc.text(String(it.spec || '—'), LM + 90, y);
-    var nameLines = wrap(it.name, RM - (LM + 145) - 50);
-    doc.text(nameLines[0] || '', LM + 145, y);
-    doc.text(String(it.docCount), RM - 30, y, {align:'right'});
-    var rowH = Math.max(12, nameLines.length * 11);
-    if (nameLines.length > 1) {
-      for (var k = 1; k < nameLines.length; k++) {
-        y += 11;
-        doc.text(nameLines[k], LM + 145, y);
-      }
-    }
-    if (it.included === false) {
-      sf('italic', 8, [150, 100, 30]);
-      doc.text('(excluded from compile)', LM + 145, y + 10);
-      sf('normal', 9, [0, 0, 0]);
-      rowH += 11;
-    }
-    y += 14;
-  }
-
-  ln(LM, y, RM, y, 0.4, [180, 180, 180]);
-  y += 14;
-
-  // Comments
-  if (ctx.comments) {
-    sf('bold', 8, [110, 110, 110]);
-    doc.text('COMMENTS', LM, y);
-    y += 12;
-    sf('normal', 10, [0, 0, 0]);
-    var cl = wrap(ctx.comments, RM - LM);
-    for (var c = 0; c < cl.length; c++) {
-      if (y > 700) break;
-      doc.text(cl[c], LM, y);
+      _renderCompileCoverFooter(doc, ctx);
+      y = BODY_TOP + 30;
+      sf('bold', 11, [0, 0, 0]);
+      doc.text('Transmittal Items (continued)', LM, y);
+      y += 16;
+      sf('bold', 9, [60, 60, 60]);
+      doc.text('Format',      COL_FMT_X,    y);
+      doc.text('Description', COL_DESC_X,   y);
+      doc.text('Date',        COL_DATE_X,   y);
+      doc.text('Copies',      COL_COPIES_X, y, {align: 'right'});
+      ln(LM, y + 3, RM, y + 3, 0.4, [180, 180, 180]);
       y += 12;
     }
   }
+
+  sf('normal', 10, [0, 0, 0]);
+  if (!ctx.docItems || !ctx.docItems.length) {
+    sf('italic', 9, [120, 120, 120]);
+    doc.text('No documents attached to this transmittal.', LM, y);
+    y += 14;
+  } else {
+    for (var di = 0; di < ctx.docItems.length; di++) {
+      var it = ctx.docItems[di];
+      var descLines = wrap(it.description || '', COL_DESC_W);
+      var rowH = Math.max(12, descLines.length * 11);
+      ensureRoom(rowH + 4);
+      sf('normal', 10, [0, 0, 0]);
+      doc.text(String(it.format || ''), COL_FMT_X, y);
+      for (var li = 0; li < descLines.length; li++) {
+        doc.text(descLines[li], COL_DESC_X, y + (li * 11));
+      }
+      doc.text(String(it.date || ''),   COL_DATE_X,   y);
+      doc.text(String(it.copies || ''), COL_COPIES_X, y, {align: 'right'});
+      y += rowH + 2;
+    }
+  }
+  ln(LM, y, RM, y, 0.4, [220, 220, 220]);
+  y += 16;
+
+  // Comments section
+  if (ctx.comments) {
+    ensureRoom(40);
+    sf('bold', 11, [0, 0, 0]);
+    doc.text('Comments', LM, y);
+    y += 14;
+    sf('normal', 10, [0, 0, 0]);
+    var paragraphs = String(ctx.comments).split(/\n/);
+    for (var pi = 0; pi < paragraphs.length; pi++) {
+      var pLines = wrap(paragraphs[pi], RM - LM);
+      if (!pLines.length) { y += 6; continue; }
+      for (var pl = 0; pl < pLines.length; pl++) {
+        ensureRoom(14);
+        doc.text(pLines[pl], LM, y);
+        y += 12;
+      }
+    }
+  }
+
+  // Footer is drawn in the post-pass (compileSubmittalPackage) so it
+  // can include the final "Page X of Y" total — don't draw here.
 }
 
-// ── Top-level compile ────────────────────────────────────────────────
+// Stub kept for the ensureRoom continuation page (gives the new page
+// something to anchor visually before items resume). The real footer
+// with page numbers is applied in the post-pass.
+function _renderCompileCoverFooter(doc, ctx) {
+  // Intentionally empty — footer is fully painted in the post-pass.
+}
+
+// ── Top-level compile (Round 7) ──────────────────────────────────────
 async function compileSubmittalPackage() {
   if (!requireFull('edit-submittals', 'compile submittal packages')) return;
   var btn = g('cmp-go-btn');
   var status = g('cmp-status');
 
-  // Read the dialog state
+  // Checked items
   var checks = document.querySelectorAll('.cmp-item:checked');
   if (!checks || !checks.length) {
     if (status) status.innerHTML = '<span style="color:#A32D2D">Pick at least one item to include.</span>';
@@ -7312,63 +7569,94 @@ async function compileSubmittalPackage() {
   }
   var includedIds = Array.prototype.map.call(checks, function(c){ return c.getAttribute('data-id'); });
 
-  var packageName = (g('cmp-pkg').value || '').trim();
-  var toBlock     = (g('cmp-to').value || '').trim();
-  var fromBlock   = (g('cmp-from').value || '').trim();
-  var projAddr    = (g('cmp-proj-addr').value || '').trim();
-  var comments    = (g('cmp-comments').value || '').trim();
+  // Read every dialog field
+  var transNo       = (g('cmp-trans-no').value     || '').trim();
+  var titleSubmittal= (g('cmp-title-sub').value    || '').trim();
+  var projAddr      = (g('cmp-proj-addr').value    || '').trim();
+  var toBlock       = (g('cmp-to').value           || '').trim();
+  var fromBlock     = (g('cmp-from').value         || '').trim();
+  var copiesTo      = (g('cmp-copies').value       || '').trim();
+  var transmit      = (g('cmp-transmit').value     || '').trim();
+  var sentVia       = (g('cmp-sent-via').value     || '').trim();
+  var submittedFor  = (g('cmp-submitted-for').value|| '').trim();
+  var actionAsNoted = (g('cmp-action-as-noted').value || '').trim();
+  var dateCreatedIso= (g('cmp-date-created').value || '').trim();
+  var sentDateIso   = (g('cmp-date-sent').value    || '').trim();
+  var dueByIso      = (g('cmp-date-due').value     || '').trim();
+  var comments      = (g('cmp-comments').value     || '').trim();
 
-  // All items in the package (for the manifest), with included flag from checks
+  // Format dates for the cover (Procore uses "Mon DD, YYYY" / "MM/DD/YY")
+  function fmtLong(iso)  { return iso ? _formatProcoreDate(iso) : ''; }
+  function fmtShort(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    var mm = String(d.getMonth() + 1).padStart(2, '0');
+    var dd = String(d.getDate()).padStart(2, '0');
+    var yy = String(d.getFullYear()).slice(-2);
+    return mm + '/' + dd + '/' + yy;
+  }
+
   var allInPkg = _compileSubmittalIds.map(function(id){ return getSubmittal(id); }).filter(Boolean);
   var includedSet = {};
   includedIds.forEach(function(id){ includedSet[String(id)] = true; });
 
-  // Build items list for the cover manifest
-  var manifestItems = allInPkg.map(function(s){
+  // Build per-document items list for the cover (one row per attached file)
+  var docItems = [];
+  allInPkg.forEach(function(s){
+    if (!includedSet[String(s.id)]) return;
     var docs = _gatherCompileDocsForSubmittal(s);
-    // Round 6: append product names to the item description when more
-    // than one product is linked. Single-product items keep their
-    // original clean look.
-    var name = s.itemName || '(no name)';
-    if (!s.isCustom) {
-      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
-      if (pids.length > 1) {
-        var pnames = pids.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ('#' + pid); });
-        name += ' (' + pnames.join(' / ') + ')';
-      }
-    }
-    return {
-      kmiNo:    s.kmiSubmittalNo || '—',
-      spec:     _csiPrefix(s.csiSection) || '',
-      name:     name,
-      docCount: docs.length,
-      included: !!includedSet[String(s.id)]
-    };
+    docs.forEach(function(entry){
+      docItems.push({
+        format:      entry.format,
+        description: entry.fileName,
+        date:        entry.dateStr,
+        copies:      '1'
+      });
+    });
   });
 
-  // Pull project info for the cover
+  // Project info for the header
   var anchor = allInPkg[0];
   var proj = anchor ? ((db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {}) : {};
-  var projectLine = (proj.number ? '#' + proj.number + ' — ' : '') + (proj.name || '');
+  var projectLine = (proj.number ? proj.number + ' ' : '') + (proj.name || '');
 
   if (btn) btn.disabled = true;
   if (status) status.innerHTML = '<span style="color:#666">Building cover…</span>';
 
   try {
     var jsPDF = window.jspdf.jsPDF;
-    var doc = new jsPDF({unit:'pt', format:'letter'});
-    var dateStr = new Date().toLocaleDateString('en-US', {year:'numeric', month:'long', day:'numeric'});
-
-    _renderCompileCoverSheet(doc, {
-      packageName: packageName,
-      projectLine: projectLine,
-      projectAddr: projAddr,
-      toBlock:     toBlock,
-      fromBlock:   fromBlock,
-      dateStr:     dateStr,
-      items:       manifestItems,
-      comments:    comments
+    var doc = new jsPDF({unit: 'pt', format: 'letter'});
+    var printedOn = new Date().toLocaleString('en-US', {
+      year:'numeric', month:'short', day:'numeric',
+      hour:'numeric', minute:'2-digit', hour12:true,
+      timeZoneName:'short'
     });
+
+    var ctx = {
+      transmittalNo:  transNo,
+      titleSubmittal: titleSubmittal,
+      projectLine:    projectLine,
+      projectAddr:    projAddr,
+      toBlock:        toBlock,
+      fromBlock:      fromBlock,
+      dateCreated:    fmtLong(dateCreatedIso),
+      copiesTo:       copiesTo,
+      transmit:       transmit,
+      sentVia:        sentVia,
+      submittedFor:   submittedFor,
+      actionAsNoted:  actionAsNoted,
+      dueBy:          fmtShort(dueByIso),
+      sentDate:       fmtShort(sentDateIso),
+      docItems:       docItems,
+      comments:       comments,
+      printedOn:      printedOn
+    };
+
+    _renderCompileCoverSheet(doc, ctx);
+    // Snapshot how many pages the cover used so the post-pass only
+    // paints the KMI footer on cover pages, not on appended source PDFs.
+    var coverPageCount = doc.internal.getNumberOfPages();
 
     // Append every checked item's docs in order
     var totalAppendedPages = 0;
@@ -7392,42 +7680,62 @@ async function compileSubmittalPackage() {
       }
     }
 
-    // If any docs were skipped, add a final summary page
+    // After everything, walk every cover page and paint a "Page X of Y"
+    // footer where Y is the cover page count (not the entire merged
+    // doc — the appended source PDFs have their own pagination).
+    var totalPages = doc.internal.getNumberOfPages();
+    for (var p = 1; p <= coverPageCount; p++) {
+      doc.setPage(p);
+      doc.setDrawColor(220, 220, 220);
+      doc.setLineWidth(0.4);
+      doc.line(54, 748, 558, 748);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(110, 110, 110);
+      doc.text('KMI Construction LLC', 54, 756);
+      doc.text('Page ' + p + ' of ' + coverPageCount, 306, 756, {align: 'center'});
+      doc.text('Printed On: ' + printedOn, 558, 756, {align: 'right'});
+    }
+
+    // If anything was skipped, append a final summary page
     if (skipped.length) {
       doc.addPage();
-      if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
-        try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, 612, 109); } catch(e){}
-      }
-      if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
-        try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, 720, 612, 72); } catch(e){}
-      }
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(12);
       doc.setTextColor(154, 122, 46);
-      doc.text('Items not appended', 54, 130);
+      doc.text('Items not appended', 54, 80);
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(10);
       doc.setTextColor(0, 0, 0);
-      var yy = 150;
+      var yy = 100;
       for (var sk = 0; sk < skipped.length && yy < 700; sk++) {
         doc.text('• ' + skipped[sk], 54, yy);
         yy += 14;
       }
+      // Add footer to this last page too
+      var totalP = doc.internal.getNumberOfPages();
+      doc.setDrawColor(220, 220, 220);
+      doc.setLineWidth(0.4);
+      doc.line(54, 748, 558, 748);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(110, 110, 110);
+      doc.text('KMI Construction LLC', 54, 756);
+      doc.text('Page ' + totalP + ' of ' + totalP, 306, 756, {align: 'center'});
+      doc.text('Printed On: ' + printedOn, 558, 756, {align: 'right'});
     }
 
-    var safePkg = (packageName || 'package').replace(/[^A-Za-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'package';
-    var fname = 'KMI_Submittal_' + safePkg + '_' + dateStr.replace(/[^A-Za-z0-9]+/g, '-') + '.pdf';
+    var safePkg = (anchor && anchor.packageName ? anchor.packageName : 'package').replace(/[^A-Za-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'package';
+    var dateForFile = (new Date()).toISOString().slice(0, 10);
+    var fname = 'KMI_Submittal_' + safePkg + '_' + dateForFile + '.pdf';
     doc.save(fname);
 
     if (status) {
-      var msg = '<span style="color:#3B6D11">Generated ' + (manifestItems.filter(function(m){ return m.included; }).length) + ' item(s), ' + totalAppendedPages + ' attached page(s)</span>';
+      var msg = '<span style="color:#3B6D11">Generated ' + docItems.length + ' transmittal item(s), ' + totalAppendedPages + ' attached page(s)</span>';
       if (skipped.length) msg += ' <span style="color:#9A7A2E">— ' + skipped.length + ' not appended (see last page)</span>';
       status.innerHTML = msg;
     }
     if (btn) btn.disabled = false;
-
-    // Don't auto-close — let the user see the result message and read
-    // any skipped-doc warnings. They can close when ready.
   } catch (e) {
     console.error('Compile failed:', e);
     if (status) status.innerHTML = '<span style="color:#A32D2D">Compile failed: ' + subEsc(e && e.message ? e.message : String(e)) + '</span>';
