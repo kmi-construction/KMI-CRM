@@ -1556,6 +1556,7 @@ textarea{resize:vertical;min-height:72px}
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
       <button class="btn" onclick="nav('submittals')">Cancel</button>
+      <button class="btn" onclick="showSubmittalPackageCompile(_editSubmittalId)" id="esb-compile-btn" style="display:none">📄 Compile package</button>
       <button class="btn btn-p" onclick="saveSubmittal()" id="esb-save-btn">Save submittal</button>
       <button class="btn" onclick="deleteSubmittal()" id="esb-del-btn" style="color:#A32D2D;display:none">Delete</button>
     </div>
@@ -5544,6 +5545,10 @@ function renderEditSubmittalPage() {
   }
   var delBtn = g('esb-del-btn');
   if (delBtn) delBtn.style.display = (r && canDel) ? '' : 'none';
+  // Compile button — only for saved submittals (we need an id and a
+  // package to gather siblings from)
+  var compileBtn = g('esb-compile-btn');
+  if (compileBtn) compileBtn.style.display = r ? '' : 'none';
 
   // Document preview — only for library-linked, saved submittals
   renderSubmittalDocsPreview();
@@ -6757,6 +6762,495 @@ function onSubmittalResponseChange() {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// PACKAGE COMPILE (Round 4)
+// ════════════════════════════════════════════════════════════════════
+// Generate a single PDF that combines a KMI transmittal cover sheet with
+// every product/custom document attached to every submittal in a package.
+// Replaces the "open the project file folder, find each PDF, drag them
+// into Acrobat in the right order, prepend the cover" manual workflow.
+//
+// We reuse the existing jsPDF + pdf.js stack already in use by T&M
+// tickets and CORs — no pdf-lib dependency. Source PDFs are rasterised
+// to JPEG pages at 2x scale and concatenated; images are added directly.
+//
+// Source documents come from two buckets:
+//   • kmi-product-library      — for library-linked items (productDocuments)
+//   • kmi-project-files        — for custom items (customDocuments)
+// The fetch helper picks the bucket based on which field the doc came from.
+
+var _compileSubmittalIds = [];   // module state — set by the dialog, read by compile
+
+// Fetch bytes from any storage bucket via a 5-min signed URL. Mirrors
+// _fetchUploadedFileBytes but takes the bucket as an argument so we can
+// pull from kmi-product-library too.
+async function _fetchAnyBucketFileBytes(bucket, path) {
+  if (!bucket || !path) return null;
+  if (!supabaseClient) throw new Error('Not connected to Supabase storage.');
+  var r = await supabaseClient.storage.from(bucket).createSignedUrl(path, 300);
+  if (r && r.error) throw new Error(r.error.message);
+  if (!r || !r.data || !r.data.signedUrl) throw new Error('Could not generate signed URL.');
+  var resp = await fetch(r.data.signedUrl);
+  if (!resp.ok) throw new Error('Fetch failed: HTTP ' + resp.status);
+  return await resp.arrayBuffer();
+}
+
+// Append a single doc record to a jsPDF doc. Doc records can be:
+//   • product document (filePath + bucket=kmi-product-library)
+//   • custom document  (filePath + bucket=kmi-project-files)
+//   • response document (not relevant here — those are incoming)
+// Returns the number of pages added (0 on skip/failure).
+async function _appendCompileDocToJsPdf(doc, docRec, bucket) {
+  if (!docRec || !docRec.filePath) return 0;
+  var ab;
+  try {
+    ab = await _fetchAnyBucketFileBytes(bucket, docRec.filePath);
+  } catch (e) {
+    console.warn('Compile: failed to fetch', docRec.filePath, e);
+    return 0;
+  }
+  if (!ab) return 0;
+  var ct = (docRec.contentType || '').toLowerCase();
+  var nm = (docRec.fileName || '').toLowerCase();
+  var isPdf   = ct.indexOf('pdf')    !== -1 || /\.pdf$/i.test(nm);
+  var isImage = ct.indexOf('image/') === 0  || /\.(jpe?g|png|gif|webp)$/i.test(nm);
+  try {
+    if (isPdf)   return await _appendPdfBytesToJsPdf(doc, ab);
+    if (isImage) return await _appendImageBytesToJsPdf(doc, ab, ct || 'image/jpeg');
+    // Unknown extension — try PDF first, then image
+    try { return await _appendPdfBytesToJsPdf(doc, ab); }
+    catch (e) {
+      try { return await _appendImageBytesToJsPdf(doc, ab, 'image/jpeg'); }
+      catch (e2) {
+        console.warn('Compile: unrecognised format, skipped:', docRec.fileName);
+        return 0;
+      }
+    }
+  } catch (e) {
+    console.warn('Compile: append threw for', docRec.fileName, e);
+    return 0;
+  }
+}
+
+// Gather every doc that should be in the compiled package for a given
+// submittal. Returns an array of {bucket, doc, kind} ready for the
+// compile loop. Library-linked items contribute their product's docs;
+// custom items contribute their own customDocuments.
+function _gatherCompileDocsForSubmittal(s) {
+  var out = [];
+  if (!s) return out;
+  if (s.isCustom) {
+    (s.customDocuments || []).forEach(function(d){
+      out.push({bucket: PROJECT_FILES_BUCKET, doc: d, kind: 'custom'});
+    });
+  } else if (s.productId) {
+    (db.productDocuments || []).forEach(function(d){
+      if (String(d.productId) === String(s.productId)) {
+        out.push({bucket: PRODUCT_LIBRARY_BUCKET, doc: d, kind: 'library'});
+      }
+    });
+  }
+  return out;
+}
+
+// ── Dialog ───────────────────────────────────────────────────────────
+function showSubmittalPackageCompile(submittalId) {
+  if (!requireFull('edit-submittals', 'compile submittal packages')) return;
+  if (typeof window.jspdf === 'undefined' || !window.jspdf || !window.jspdf.jsPDF) {
+    alert('PDF library is still loading. Wait a moment and try again.');
+    return;
+  }
+  if (!window.pdfjsLib) {
+    alert('pdf.js is still loading. Wait a moment and try again.');
+    return;
+  }
+
+  var anchor = getSubmittal(submittalId);
+  if (!anchor) { alert('Submittal not found.'); return; }
+  if (!anchor.packageName) {
+    alert('This submittal has no package name yet. Add a package name (e.g. "CMU Test Reports") on the submittal, save, then compile.');
+    return;
+  }
+  // Gather every submittal in the same package on the same project
+  var pkgItems = (db.submittals || []).filter(function(s){
+    return String(s.projectId) === String(anchor.projectId) &&
+           (s.packageName || '') === anchor.packageName;
+  }).sort(function(a, b){
+    // Sort by KMI # so the manifest reads naturally (matches the spec section order)
+    return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
+  });
+
+  // Pre-fill recipient from the project's customer
+  var proj = (db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {};
+  var cust = proj.customerId ? (db.customers || []).find(function(c){ return String(c.id) === String(proj.customerId); }) : null;
+  var defaultTo = '';
+  if (cust) {
+    if (cust.contact)   defaultTo += cust.contact + '\n';
+    if (cust.name)      defaultTo += cust.name + '\n';
+    if (cust.address)   defaultTo += cust.address + '\n';
+    if (cust.cityState) defaultTo += cust.cityState;
+  }
+  if (!defaultTo) defaultTo = '[Recipient name]\n[Company]\n[Address]';
+
+  // Pre-fill from = current user + KMI standard address
+  var senderName = _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '';
+  var defaultFrom = (senderName ? senderName + '\n' : '') +
+    'KMI Construction LLC\n2880 S. 171st Street\nNew Berlin, Wisconsin 53151';
+
+  // Project block
+  var projLine = (proj.name || ('Project ' + anchor.projectId));
+  if (proj.number) projLine = '#' + proj.number + ' — ' + projLine;
+  var projAddr  = [proj.address, [proj.city, proj.state].filter(Boolean).join(', '), proj.zip].filter(Boolean).join('\n');
+
+  // Build the items list with checkboxes
+  var itemRows = pkgItems.map(function(s, idx){
+    var docs = _gatherCompileDocsForSubmittal(s);
+    var docCount = docs.length;
+    var label = (s.kmiSubmittalNo || ('#' + s.id)) + ' — ' + (s.itemName || '(no name)');
+    var note = '';
+    if (docCount === 0) {
+      note = '<span style="color:#9A7A2E;font-size:11px;margin-left:8px">⚠ no documents</span>';
+    } else {
+      note = '<span style="color:#888;font-size:11px;margin-left:8px">' + docCount + ' doc' + (docCount === 1 ? '' : 's') + '</span>';
+    }
+    return '<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:0.5px solid #eee;cursor:pointer">' +
+      '<input type="checkbox" class="cmp-item" data-id="' + subEsc(s.id) + '" ' + (docCount > 0 ? 'checked' : '') + '>' +
+      '<span style="font-size:12px">' + subEsc(label) + note + '</span>' +
+    '</label>';
+  }).join('');
+
+  var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Compile package</div>' +
+    '<div class="msb">Generates a single PDF: KMI cover sheet + every checked item\'s documents</div>' +
+
+    '<div class="fg">' +
+      '<div class="fgr"><label>Package</label><input id="cmp-pkg" value="' + subEsc(anchor.packageName) + '"></div>' +
+      '<div class="fgr"><label>Project</label><input id="cmp-proj" value="' + subEsc(projLine) + '" disabled></div>' +
+      '<div class="fgr full"><label>Project address (right of cover)</label><textarea id="cmp-proj-addr" rows="2">' + subEsc(projAddr) + '</textarea></div>' +
+      '<div class="fgr"><label>To</label><textarea id="cmp-to" rows="4" placeholder="Recipient name + company + address">' + subEsc(defaultTo) + '</textarea></div>' +
+      '<div class="fgr"><label>From</label><textarea id="cmp-from" rows="4">' + subEsc(defaultFrom) + '</textarea></div>' +
+      '<div class="fgr full"><label>Cover comments (optional)</label>' +
+        '<textarea id="cmp-comments" rows="3" placeholder="Optional cover note — e.g. \'Attached for approval is our Brick Unit Masonry Product Data submittal for the Hilldale Phase II project. Please contact Adam if you have any questions.\'"></textarea>' +
+      '</div>' +
+    '</div>' +
+
+    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Items in this package (' + pkgItems.length + ')</div>' +
+      '<div style="border:0.5px solid #ddd;border-radius:4px;max-height:240px;overflow-y:auto">' +
+        itemRows +
+      '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:6px">Items with no documents are unchecked by default — they\'ll still appear in the cover\'s manifest, just nothing to merge in.</div>' +
+    '</div>' +
+
+    '<div id="cmp-status" style="margin-top:10px;font-size:12px;color:#888;min-height:18px"></div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="compileSubmittalPackage()" id="cmp-go-btn">📄 Generate PDF</button>' +
+    '</div>';
+
+  showModal(html);
+
+  // Stash the anchor IDs so compileSubmittalPackage can find them.
+  // The actual selection comes from the checkboxes at compile-time.
+  _compileSubmittalIds = pkgItems.map(function(s){ return s.id; });
+}
+
+// ── Cover sheet generator ────────────────────────────────────────────
+// Builds the page-1 cover. Mirrors the visual style of T&M / COR PDFs
+// (KMI letterhead top + bottom, accent stripe under titles, monospace
+// for numbers in the items table).
+function _renderCompileCoverSheet(doc, ctx) {
+  var PAGE_W = 612, PAGE_H = 792;
+  var LM = 54, RM = 558;
+
+  // Letterhead images
+  if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
+    try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 109); } catch (e) {}
+  }
+  if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
+    try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 72, PAGE_W, 72); } catch (e) {}
+  }
+
+  function sf(st, sz, col) {
+    doc.setFont('helvetica', st);
+    doc.setFontSize(sz);
+    doc.setTextColor(col ? col[0] : 0, col ? col[1] : 0, col ? col[2] : 0);
+  }
+  function ln(x1, y1, x2, y2, w, rgb) {
+    doc.setDrawColor(rgb ? rgb[0] : 0, rgb ? rgb[1] : 0, rgb ? rgb[2] : 0);
+    doc.setLineWidth(w || 0.5);
+    doc.line(x1, y1, x2, y2);
+  }
+  function wrap(text, maxW) {
+    return doc.splitTextToSize(String(text || ''), maxW);
+  }
+
+  var y = 130;
+
+  // Title
+  sf('bold', 14, [42, 47, 92]);
+  doc.text('SUBMITTAL TRANSMITTAL', PAGE_W / 2, y, {align:'center'});
+  ln(LM, y + 4, RM, y + 4, 0.8, [200, 168, 75]);
+  y += 14;
+
+  // Project + package subtitle
+  sf('normal', 10, [60, 60, 60]);
+  doc.text('Package: ' + (ctx.packageName || ''), PAGE_W / 2, y, {align:'center'});
+  y += 12;
+  sf('normal', 9, [110, 110, 110]);
+  doc.text('Generated ' + ctx.dateStr, PAGE_W / 2, y, {align:'center'});
+  y += 18;
+
+  // Two-column meta block: To (left) | From (right)
+  var COL_W = (RM - LM - 14) / 2;
+  var leftX  = LM;
+  var rightX = LM + COL_W + 14;
+  var blockTop = y;
+
+  function drawLabeledBlock(x, label, body) {
+    sf('bold', 8, [110, 110, 110]);
+    doc.text(label.toUpperCase(), x, blockTop);
+    sf('normal', 10, [0, 0, 0]);
+    var lines = wrap(body, COL_W);
+    var by = blockTop + 12;
+    for (var i = 0; i < lines.length && i < 6; i++) {
+      doc.text(lines[i], x, by);
+      by += 12;
+    }
+    return by;
+  }
+  var leftEnd  = drawLabeledBlock(leftX,  'To',   ctx.toBlock);
+  var rightEnd = drawLabeledBlock(rightX, 'From', ctx.fromBlock);
+  y = Math.max(leftEnd, rightEnd) + 6;
+
+  // Project block (full width)
+  sf('bold', 8, [110, 110, 110]);
+  doc.text('PROJECT', LM, y);
+  y += 12;
+  sf('bold', 11, [0, 0, 0]);
+  doc.text(ctx.projectLine || '', LM, y);
+  y += 14;
+  if (ctx.projectAddr) {
+    sf('normal', 10, [60, 60, 60]);
+    var pal = wrap(ctx.projectAddr, RM - LM);
+    for (var i = 0; i < pal.length; i++) { doc.text(pal[i], LM, y); y += 12; }
+  }
+  y += 6;
+
+  // Submitted For / Action As Noted (Procore-style strip)
+  sf('bold', 8, [110, 110, 110]);
+  doc.text('SUBMITTED FOR', LM, y);
+  doc.text('TRANSMIT VIA', LM + 200, y);
+  doc.text('DATE', LM + 360, y);
+  y += 12;
+  sf('normal', 10, [0, 0, 0]);
+  doc.text('Approval', LM, y);
+  doc.text('Attached', LM + 200, y);
+  doc.text(ctx.dateStr, LM + 360, y);
+  y += 16;
+
+  ln(LM, y, RM, y, 0.4, [180, 180, 180]);
+  y += 10;
+
+  // Items table
+  sf('bold', 8, [110, 110, 110]);
+  doc.text('TRANSMITTAL ITEMS', LM, y);
+  y += 14;
+
+  // Header row
+  sf('bold', 9, [60, 60, 60]);
+  doc.text('KMI #',     LM,        y);
+  doc.text('Spec',      LM + 90,   y);
+  doc.text('Item',      LM + 145,  y);
+  doc.text('Docs',      RM - 30,   y, {align:'right'});
+  ln(LM, y + 3, RM, y + 3, 0.4, [180, 180, 180]);
+  y += 14;
+
+  sf('normal', 9, [0, 0, 0]);
+  for (var ii = 0; ii < ctx.items.length; ii++) {
+    var it = ctx.items[ii];
+    if (y > 700) {
+      doc.addPage();
+      // re-add letterhead on overflow page
+      if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
+        try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 109); } catch(e){}
+      }
+      if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
+        try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 72, PAGE_W, 72); } catch(e){}
+      }
+      y = 130;
+      sf('bold', 11, [42, 47, 92]);
+      doc.text('Transmittal items (continued)', LM, y);
+      y += 18;
+      sf('normal', 9, [0, 0, 0]);
+    }
+    // KMI # in monospace-ish
+    doc.setFont('courier', 'normal');
+    doc.text(String(it.kmiNo || '—'), LM, y);
+    doc.setFont('helvetica', 'normal');
+    doc.text(String(it.spec || '—'), LM + 90, y);
+    var nameLines = wrap(it.name, RM - (LM + 145) - 50);
+    doc.text(nameLines[0] || '', LM + 145, y);
+    doc.text(String(it.docCount), RM - 30, y, {align:'right'});
+    var rowH = Math.max(12, nameLines.length * 11);
+    if (nameLines.length > 1) {
+      for (var k = 1; k < nameLines.length; k++) {
+        y += 11;
+        doc.text(nameLines[k], LM + 145, y);
+      }
+    }
+    if (it.included === false) {
+      sf('italic', 8, [150, 100, 30]);
+      doc.text('(excluded from compile)', LM + 145, y + 10);
+      sf('normal', 9, [0, 0, 0]);
+      rowH += 11;
+    }
+    y += 14;
+  }
+
+  ln(LM, y, RM, y, 0.4, [180, 180, 180]);
+  y += 14;
+
+  // Comments
+  if (ctx.comments) {
+    sf('bold', 8, [110, 110, 110]);
+    doc.text('COMMENTS', LM, y);
+    y += 12;
+    sf('normal', 10, [0, 0, 0]);
+    var cl = wrap(ctx.comments, RM - LM);
+    for (var c = 0; c < cl.length; c++) {
+      if (y > 700) break;
+      doc.text(cl[c], LM, y);
+      y += 12;
+    }
+  }
+}
+
+// ── Top-level compile ────────────────────────────────────────────────
+async function compileSubmittalPackage() {
+  if (!requireFull('edit-submittals', 'compile submittal packages')) return;
+  var btn = g('cmp-go-btn');
+  var status = g('cmp-status');
+
+  // Read the dialog state
+  var checks = document.querySelectorAll('.cmp-item:checked');
+  if (!checks || !checks.length) {
+    if (status) status.innerHTML = '<span style="color:#A32D2D">Pick at least one item to include.</span>';
+    return;
+  }
+  var includedIds = Array.prototype.map.call(checks, function(c){ return c.getAttribute('data-id'); });
+
+  var packageName = (g('cmp-pkg').value || '').trim();
+  var toBlock     = (g('cmp-to').value || '').trim();
+  var fromBlock   = (g('cmp-from').value || '').trim();
+  var projAddr    = (g('cmp-proj-addr').value || '').trim();
+  var comments    = (g('cmp-comments').value || '').trim();
+
+  // All items in the package (for the manifest), with included flag from checks
+  var allInPkg = _compileSubmittalIds.map(function(id){ return getSubmittal(id); }).filter(Boolean);
+  var includedSet = {};
+  includedIds.forEach(function(id){ includedSet[String(id)] = true; });
+
+  // Build items list for the cover manifest
+  var manifestItems = allInPkg.map(function(s){
+    var docs = _gatherCompileDocsForSubmittal(s);
+    return {
+      kmiNo:    s.kmiSubmittalNo || '—',
+      spec:     _csiPrefix(s.csiSection) || '',
+      name:     s.itemName || '(no name)',
+      docCount: docs.length,
+      included: !!includedSet[String(s.id)]
+    };
+  });
+
+  // Pull project info for the cover
+  var anchor = allInPkg[0];
+  var proj = anchor ? ((db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {}) : {};
+  var projectLine = (proj.number ? '#' + proj.number + ' — ' : '') + (proj.name || '');
+
+  if (btn) btn.disabled = true;
+  if (status) status.innerHTML = '<span style="color:#666">Building cover…</span>';
+
+  try {
+    var jsPDF = window.jspdf.jsPDF;
+    var doc = new jsPDF({unit:'pt', format:'letter'});
+    var dateStr = new Date().toLocaleDateString('en-US', {year:'numeric', month:'long', day:'numeric'});
+
+    _renderCompileCoverSheet(doc, {
+      packageName: packageName,
+      projectLine: projectLine,
+      projectAddr: projAddr,
+      toBlock:     toBlock,
+      fromBlock:   fromBlock,
+      dateStr:     dateStr,
+      items:       manifestItems,
+      comments:    comments
+    });
+
+    // Append every checked item's docs in order
+    var totalAppendedPages = 0;
+    var skipped = [];
+    for (var i = 0; i < allInPkg.length; i++) {
+      var s = allInPkg[i];
+      if (!includedSet[String(s.id)]) continue;
+      var docs = _gatherCompileDocsForSubmittal(s);
+      if (!docs.length) {
+        skipped.push((s.kmiSubmittalNo || '#' + s.id) + ' (no docs)');
+        continue;
+      }
+      if (status) status.innerHTML = '<span style="color:#666">Adding docs for ' + subEsc(s.kmiSubmittalNo || s.itemName) + '…</span>';
+      for (var j = 0; j < docs.length; j++) {
+        var entry = docs[j];
+        var pages = await _appendCompileDocToJsPdf(doc, entry.doc, entry.bucket);
+        totalAppendedPages += pages;
+        if (pages === 0) {
+          skipped.push((s.kmiSubmittalNo || '#' + s.id) + ' / ' + (entry.doc.fileName || '?'));
+        }
+      }
+    }
+
+    // If any docs were skipped, add a final summary page
+    if (skipped.length) {
+      doc.addPage();
+      if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
+        try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, 612, 109); } catch(e){}
+      }
+      if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
+        try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, 720, 612, 72); } catch(e){}
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(12);
+      doc.setTextColor(154, 122, 46);
+      doc.text('Items not appended', 54, 130);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.setTextColor(0, 0, 0);
+      var yy = 150;
+      for (var sk = 0; sk < skipped.length && yy < 700; sk++) {
+        doc.text('• ' + skipped[sk], 54, yy);
+        yy += 14;
+      }
+    }
+
+    var safePkg = (packageName || 'package').replace(/[^A-Za-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'package';
+    var fname = 'KMI_Submittal_' + safePkg + '_' + dateStr.replace(/[^A-Za-z0-9]+/g, '-') + '.pdf';
+    doc.save(fname);
+
+    if (status) {
+      var msg = '<span style="color:#3B6D11">Generated ' + (manifestItems.filter(function(m){ return m.included; }).length) + ' item(s), ' + totalAppendedPages + ' attached page(s)</span>';
+      if (skipped.length) msg += ' <span style="color:#9A7A2E">— ' + skipped.length + ' not appended (see last page)</span>';
+      status.innerHTML = msg;
+    }
+    if (btn) btn.disabled = false;
+
+    // Don't auto-close — let the user see the result message and read
+    // any skipped-doc warnings. They can close when ready.
+  } catch (e) {
+    console.error('Compile failed:', e);
+    if (status) status.innerHTML = '<span style="color:#A32D2D">Compile failed: ' + subEsc(e && e.message ? e.message : String(e)) + '</span>';
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
 // PROJECT-DETAIL EMBEDDED VIEW (Round 2B)
 // ════════════════════════════════════════════════════════════════════
 // Returns an HTML string with a compact submittals table for the given
@@ -6805,8 +7299,15 @@ function renderProjectSubmittalsBlock(projectId) {
 
   var body = '';
   Object.keys(byPkg).sort().forEach(function(pkg){
-    body += '<tr style="background:#fafafa"><td colspan="6" style="padding:6px 8px;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">' +
-      subEsc(pkg) + ' <span style="color:#aaa;font-weight:400;text-transform:none">(' + byPkg[pkg].length + ')</span></td></tr>';
+    // First submittal in the package — used to scope the Compile action
+    var firstId = byPkg[pkg][0] && byPkg[pkg][0].id;
+    var compileBtnHtml = (canEdit && firstId)
+      ? ' <button class="btn btn-sm" style="float:right;margin-top:-3px;font-size:10px;padding:2px 8px" onclick="event.stopPropagation();showSubmittalPackageCompile(' + firstId + ')">📄 Compile</button>'
+      : '';
+    body += '<tr style="background:#fafafa"><td colspan="7" style="padding:6px 8px;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">' +
+      subEsc(pkg) + ' <span style="color:#aaa;font-weight:400;text-transform:none">(' + byPkg[pkg].length + ')</span>' +
+      compileBtnHtml +
+      '</td></tr>';
     byPkg[pkg].forEach(function(s){
       var prod = s.productId ? getProduct(s.productId) : null;
       var prodCell = s.isCustom
