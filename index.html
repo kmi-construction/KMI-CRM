@@ -1558,7 +1558,13 @@ textarea{resize:vertical;min-height:72px}
           </label>
         </div>
       </div>
-      <div class="fgr full" id="esb-prod-wrap"><label>Product</label><select id="esb-prod"><option value="">— Select a product —</option></select></div>
+      <div class="fgr full" id="esb-prod-wrap">
+        <label>Products</label>
+        <div id="esb-prod-list" style="margin-bottom:8px"></div>
+        <select id="esb-prod-add" onchange="onAddSubmittalProduct(this)">
+          <option value="">+ Add a product…</option>
+        </select>
+      </div>
 
       <div class="fgr"><label>Due date</label><input id="esb-due" type="date"></div>
       <div class="fgr"><label>Sent date</label><input id="esb-sent" type="date"></div>
@@ -5185,6 +5191,11 @@ async function saveProductDocumentMeta() {
 
 var _editSubmittalId = null;
 var _subSrcMode      = 'library';  // 'library' | 'custom'
+// Round 6: products picked on the edit form. Mirrors the form's UI state
+// so save/preview can read it without scraping the DOM. Initialized from
+// the loaded submittal in renderSubmittalProductsList; cleared on switch
+// to custom mode.
+var _editingSubmittalProductIds = [];
 
 function subEsc(s) {
   return String(s == null ? '' : s)
@@ -5395,11 +5406,12 @@ function renderSubmittals() {
     if (fd === 'this-month'&& !_isWithinThisMonth(r.dueDate)) return false;
     if (fd === 'no-date'   && r.dueDate)                       return false;
     if (s) {
-      var prod = r.productId ? getProduct(r.productId) : null;
+      var pids2 = (Array.isArray(r.productIds) && r.productIds.length) ? r.productIds : (r.productId ? [r.productId] : []);
+      var prodNames = pids2.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ''; }).join(' ');
       var hay = (r.itemName || '') + ' ' + (r.description || '') + ' ' +
                 (r.packageName || '') + ' ' + (r.kmiSubmittalNo || '') + ' ' +
                 (r.customerSubmittalNo || '') + ' ' + (r.csiSection || '') + ' ' +
-                ((prod && prod.name) || '');
+                prodNames;
       if (!hay.toLowerCase().includes(s)) return false;
     }
     return true;
@@ -5428,10 +5440,20 @@ function renderSubmittals() {
     return;
   }
   tbody.innerHTML = rows.map(function(r){
-    var prod = r.productId ? getProduct(r.productId) : null;
-    var prodCell = r.isCustom
-      ? '<span style="color:#888;font-style:italic">Custom item</span>'
-      : (prod ? subEsc(prod.name) : '<span style="color:#A32D2D">Missing product</span>');
+    // Round 6: build product cell from the productIds array
+    var pids = (Array.isArray(r.productIds) && r.productIds.length) ? r.productIds : (r.productId ? [r.productId] : []);
+    var prodCell;
+    if (r.isCustom) {
+      prodCell = '<span style="color:#888;font-style:italic">Custom item</span>';
+    } else if (!pids.length) {
+      prodCell = '<span style="color:#A32D2D">Missing product</span>';
+    } else {
+      var firstP = getProduct(pids[0]);
+      var firstName = firstP ? firstP.name : ('#' + pids[0]);
+      prodCell = subEsc(firstName) + (pids.length > 1
+        ? ' <span style="color:#888;font-size:11px">(+' + (pids.length - 1) + ' more)</span>'
+        : '');
+    }
     var dueCell = r.dueDate || '—';
     if (_isOverdue(r.dueDate) && (r.status || 'draft') !== 'closed') {
       dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
@@ -5466,6 +5488,7 @@ function initNewSubmittal() {
   if (!requireFull('edit-submittals', 'add submittals')) return;
   _editSubmittalId = null;
   _subSrcMode = 'library';
+  _editingSubmittalProductIds = [];
   nav('edit-submittal');
 }
 
@@ -5477,7 +5500,97 @@ function editSubmittal(id) {
   _editSubmittalId = id;
   var existing = getSubmittal(id);
   _subSrcMode = (existing && existing.isCustom) ? 'custom' : 'library';
+  // Seed the picker state from the loaded submittal. renderSubmittalProductsList
+  // will overwrite this on render, but having it set early means anything
+  // that reads it before the page renders sees consistent data.
+  _editingSubmittalProductIds = (existing && Array.isArray(existing.productIds))
+    ? existing.productIds.slice()
+    : (existing && existing.productId ? [existing.productId] : []);
   nav('edit-submittal');
+}
+
+// ── Round 6 multi-product picker ────────────────────────────────────
+// Renders the list of currently-picked products as removable rows, and
+// the "+ Add a product…" select with the remaining (unpicked) products.
+
+function renderSubmittalProductsList(r) {
+  var listEl = g('esb-prod-list');
+  var addEl  = g('esb-prod-add');
+  if (!listEl || !addEl) return;
+
+  // Seed the module-level state from the current submittal on first render
+  if (r) {
+    _editingSubmittalProductIds = Array.isArray(r.productIds)
+      ? r.productIds.slice()
+      : (r.productId ? [r.productId] : []);
+  }
+  if (!Array.isArray(_editingSubmittalProductIds)) _editingSubmittalProductIds = [];
+
+  var canEdit = canAccess('edit-submittals') === 'full';
+
+  // Render the picked-products list
+  if (!_editingSubmittalProductIds.length) {
+    listEl.innerHTML = '<div style="padding:10px 12px;color:#aaa;font-size:12px;border:0.5px dashed #ddd;border-radius:4px">No products picked yet — use "+ Add a product…" below.</div>';
+  } else {
+    listEl.innerHTML = _editingSubmittalProductIds.map(function(pid){
+      var p = getProduct(pid);
+      var mfg = p ? getManufacturer(p.manufacturerId) : null;
+      var label = p
+        ? ((mfg && mfg.name ? mfg.name + ' — ' : '') + (p.name || '') + (p.sizeOrModel ? ' (' + p.sizeOrModel + ')' : ''))
+        : '<span style="color:#A32D2D">Missing product (#' + pid + ')</span>';
+      var docCount = p ? (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(p.id); }).length : 0;
+      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 10px;background:#fafafa;border:0.5px solid #e8e8e8;border-radius:4px;margin-bottom:4px">' +
+        '<span style="flex:1;font-size:12px">' + (p ? subEsc(label) : label) +
+          (p ? ' <span style="color:#888;font-size:11px">· ' + docCount + ' doc' + (docCount === 1 ? '' : 's') + '</span>' : '') +
+        '</span>' +
+        (canEdit
+          ? '<button type="button" class="btn btn-sm" onclick="removeSubmittalProduct(\'' + subEsc(pid) + '\')" style="color:#A32D2D">×</button>'
+          : '') +
+      '</div>';
+    }).join('');
+  }
+
+  // Populate the add picker with products NOT already on the list
+  var picked = {};
+  _editingSubmittalProductIds.forEach(function(pid){ picked[String(pid)] = true; });
+  var avail = (db.products || [])
+    .filter(function(p){ return p.isActive !== false && !picked[String(p.id)]; })
+    .slice()
+    .sort(function(a, b){ return String(a.name || '').localeCompare(String(b.name || '')); });
+
+  addEl.innerHTML = '<option value="">+ Add a product…</option>' +
+    avail.map(function(p){
+      var mfg = getManufacturer(p.manufacturerId);
+      var label = (mfg && mfg.name ? mfg.name + ' — ' : '') + (p.name || '') + (p.sizeOrModel ? ' (' + p.sizeOrModel + ')' : '');
+      return '<option value="' + subEsc(p.id) + '">' + subEsc(label) + '</option>';
+    }).join('');
+  addEl.disabled = !canEdit;
+}
+
+function onAddSubmittalProduct(selectEl) {
+  var pid = selectEl ? selectEl.value : '';
+  if (!pid) return;
+  // Coerce to a number when possible to match how productIds are stored
+  // on saved submittals (Date.now() ints), but keep string IDs untouched
+  // for legacy/imported data.
+  var coerced = Number(pid);
+  if (isFinite(coerced) && String(coerced) === String(pid)) pid = coerced;
+  if (!_editingSubmittalProductIds.some(function(x){ return String(x) === String(pid); })) {
+    _editingSubmittalProductIds.push(pid);
+  }
+  renderSubmittalProductsList(null);   // re-render without re-seeding
+  renderSubmittalDocsPreview();
+  // Reset the select so the same option can be re-added if removed later
+  if (selectEl) selectEl.value = '';
+}
+
+function removeSubmittalProduct(pid) {
+  if (!hasFull('edit-submittals')) return;
+  _editingSubmittalProductIds = _editingSubmittalProductIds.filter(function(x){
+    return String(x) !== String(pid);
+  });
+  renderSubmittalProductsList(null);
+  renderSubmittalDocsPreview();
 }
 
 function renderEditSubmittalPage() {
@@ -5526,20 +5639,10 @@ function renderEditSubmittalPage() {
         return '<option value="' + subEsc(c) + '"' + sel + '>' + subEsc(c) + '</option>';
       }).join('');
   }
-  // Product dropdown — only active products + show manufacturer name
-  var prodSel = g('esb-prod');
-  if (prodSel) {
-    var prods = (db.products || []).filter(function(p){ return p.isActive !== false; }).slice().sort(function(a,b){
-      return String(a.name || '').localeCompare(String(b.name || ''));
-    });
-    prodSel.innerHTML = '<option value="">— Select a product —</option>' +
-      prods.map(function(p){
-        var mfg = getManufacturer(p.manufacturerId);
-        var label = (mfg && mfg.name ? mfg.name + ' — ' : '') + (p.name || '') + (p.sizeOrModel ? ' (' + p.sizeOrModel + ')' : '');
-        var sel = (r && String(r.productId) === String(p.id)) ? ' selected' : '';
-        return '<option value="' + subEsc(p.id) + '"' + sel + '>' + subEsc(label) + '</option>';
-      }).join('');
-  }
+  // Products picker (Round 6) — multi-select list. Each picked product
+  // shows as a row with a remove button; the "+ Add a product…" select
+  // below adds another. The list reads from r.productIds (array).
+  renderSubmittalProductsList(r);
   // Package datalist — autocomplete from existing packages on the same project
   var pkgList = g('esb-pkg-list');
   if (pkgList) {
@@ -5579,7 +5682,7 @@ function renderEditSubmittalPage() {
   // Disable all inputs for read-only roles
   if (!canEdit) {
     ['esb-proj','esb-status','esb-response','esb-csi','esb-kno','esb-cno','esb-pkg','esb-name','esb-desc',
-     'esb-prod','esb-due','esb-sent','esb-resp','esb-rnotes','esb-notes',
+     'esb-prod-add','esb-due','esb-sent','esb-resp','esb-rnotes','esb-notes',
      'esb-src-lib','esb-src-cus'].forEach(function(id){
       var el = g(id); if (el) el.disabled = true;
     });
@@ -5612,10 +5715,10 @@ function onSubmittalSrcChange() {
   _subSrcMode = mode;
   var prodWrap = g('esb-prod-wrap');
   if (prodWrap) prodWrap.style.display = (mode === 'library') ? '' : 'none';
-  // If switching to custom, clear any selected product
+  // If switching to custom, clear any picked products
   if (mode === 'custom') {
-    var prodSel = g('esb-prod');
-    if (prodSel) prodSel.value = '';
+    _editingSubmittalProductIds = [];
+    renderSubmittalProductsList(null);
   }
   renderSubmittalDocsPreview();
   renderSubmittalCustomDocs();
@@ -5639,67 +5742,76 @@ function renderSubmittalDocsPreview() {
   var sec  = g('esb-docs-section');
   if (!card || !sec) return;
 
-  // Show only when we're library-linked AND a product is selected
-  var prodSel = g('esb-prod');
-  var prodId  = prodSel ? prodSel.value : '';
-  if (_subSrcMode !== 'library' || !prodId) {
+  // Show only when we're library-linked AND at least one product is picked
+  var picked = (_editingSubmittalProductIds || []).slice();
+  if (_subSrcMode !== 'library' || !picked.length) {
     card.style.display = 'none';
     sec.innerHTML = '';
     return;
   }
   card.style.display = '';
 
-  var prod = getProduct(prodId);
-  if (!prod) {
-    sec.innerHTML = '<div style="padding:14px;color:#A32D2D;font-size:12px">Product not found in library.</div>';
-    return;
-  }
-  var docs = (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(prod.id); });
-  if (!docs.length) {
-    sec.innerHTML = '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
-      'No documents on this product yet. Open the Product Library and add the data sheet / test report there — they will appear here automatically.' +
+  // For each picked product, list its docs in a sub-section. Missing
+  // products (referenced by id but no longer in db.products) get their
+  // own warning row.
+  var blocks = picked.map(function(pid){
+    var prod = getProduct(pid);
+    if (!prod) {
+      return '<div style="padding:10px;background:#fcebeb;color:#A32D2D;border-radius:4px;font-size:12px;margin-bottom:10px">' +
+        'Product #' + subEsc(pid) + ' is referenced but no longer exists in the library.' +
       '</div>';
-    return;
-  }
-  // Sort: amber (stale) first
-  docs.sort(function(a, b){
-    var sa = _docStaleStatus(a), sb = _docStaleStatus(b);
-    if (sa !== sb) return sa === 'amber' ? -1 : 1;
-    return 0;
+    }
+    var docs = (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(prod.id); });
+    var mfg = getManufacturer(prod.manufacturerId);
+    var hdr = (mfg && mfg.name ? mfg.name + ' — ' : '') + (prod.name || '');
+    var html = '<div style="margin-bottom:14px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px solid #e8e8e8;margin-bottom:6px">' +
+        '<span style="font-weight:600;font-size:12px">' + subEsc(hdr) + '</span>' +
+        '<span style="color:#888;font-size:11px">' + docs.length + ' doc' + (docs.length === 1 ? '' : 's') + '</span>' +
+      '</div>';
+    if (!docs.length) {
+      html += '<div style="padding:8px 10px;color:#aaa;font-size:12px;font-style:italic">No documents on this product yet. Add them in the Product Library.</div>';
+    } else {
+      // Sort: stale first
+      docs.sort(function(a, b){
+        var sa = _docStaleStatus(a), sb = _docStaleStatus(b);
+        if (sa !== sb) return sa === 'amber' ? -1 : 1;
+        return 0;
+      });
+      html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+        '<th style="padding:5px 8px;text-align:left;width:80px">Status</th>' +
+        '<th style="padding:5px 8px;text-align:left">Document</th>' +
+        '<th style="padding:5px 8px;text-align:left;width:130px">Type</th>' +
+        '<th style="padding:5px 8px;text-align:left;width:110px">Issue date</th>' +
+        '<th style="padding:5px 8px;width:90px"></th>' +
+      '</tr></thead><tbody>';
+      docs.forEach(function(d){
+        var titleStr = d.title || d.fileName || '—';
+        html += '<tr>' +
+          '<td style="padding:5px 8px">' + _docStalePill(d) + '</td>' +
+          '<td style="padding:5px 8px;word-break:break-all">' + subEsc(titleStr) + '</td>' +
+          '<td style="padding:5px 8px">' + subEsc(d.documentType || '—') + '</td>' +
+          '<td style="padding:5px 8px;font-size:11px">' + subEsc((d.issueDate || '').slice(0,10) || '—') + '</td>' +
+          '<td style="padding:5px 8px;text-align:right">' +
+            '<button type="button" class="btn btn-sm" onclick="viewProductDocument(\'' + subEsc(d.id) + '\')">⬇ Open</button>' +
+          '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+    html += '</div>';
+    return html;
   });
-  var html = '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
-    'These documents currently live on <strong>' + subEsc(prod.name) + '</strong> in the Product Library. ' +
-    'Round 3 will compile them into a single PDF along with a KMI transmittal cover.' +
-    '</div>';
-  html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
-    '<th style="padding:6px 8px;text-align:left;width:90px">Status</th>' +
-    '<th style="padding:6px 8px;text-align:left">Document</th>' +
-    '<th style="padding:6px 8px;text-align:left;width:130px">Type</th>' +
-    '<th style="padding:6px 8px;text-align:left;width:110px">Issue date</th>' +
-    '<th style="padding:6px 8px;width:90px"></th>' +
-    '</tr></thead><tbody>';
-  docs.forEach(function(d){
-    var pill = _docStalePill(d);
-    var titleStr = d.title || d.fileName || '—';
-    html += '<tr>' +
-      '<td style="padding:6px 8px">' + pill + '</td>' +
-      '<td style="padding:6px 8px;word-break:break-all">' + subEsc(titleStr) + '</td>' +
-      '<td style="padding:6px 8px">' + subEsc(d.documentType || '—') + '</td>' +
-      '<td style="padding:6px 8px;font-size:11px">' + subEsc((d.issueDate || '').slice(0,10) || '—') + '</td>' +
-      '<td style="padding:6px 8px;text-align:right">' +
-        '<button type="button" class="btn btn-sm" onclick="viewProductDocument(\'' + subEsc(d.id) + '\')">⬇ Open</button>' +
-      '</td></tr>';
-  });
-  html += '</tbody></table>';
-  sec.innerHTML = html;
+
+  sec.innerHTML = '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
+    'Documents currently on the picked product' + (picked.length === 1 ? '' : 's') + ' in the Product Library. ' +
+    'Round 4 compile pulls all of these into the package PDF in the order shown.' +
+    '</div>' + blocks.join('');
 }
 
-// Re-render the preview whenever the product picker changes
+// Re-render the package datalist + offer to regenerate KMI # whenever
+// the project changes. The product picker re-renders its own preview
+// directly from add/remove handlers (no listener needed).
 document.addEventListener('change', function(ev){
-  if (ev.target && ev.target.id === 'esb-prod') {
-    renderSubmittalDocsPreview();
-  }
-  // When project changes, refresh the package datalist + offer to regenerate KMI #
   if (ev.target && ev.target.id === 'esb-proj') {
     var pkgList = g('esb-pkg-list');
     if (pkgList) {
@@ -5731,10 +5843,10 @@ async function saveSubmittal() {
 
   var srcCus = g('esb-src-cus');
   var isCustom = !!(srcCus && srcCus.checked);
-  var prodIdRaw = (g('esb-prod').value || '').trim();
-  var prodId = (!isCustom && prodIdRaw) ? (Number(prodIdRaw) || prodIdRaw) : null;
-  if (!isCustom && !prodId) {
-    if (!confirm('No product selected from the library. Save anyway?\n\nIf this is a shop drawing or sample, switch to "Custom item" instead.')) return;
+  // Round 6: pull from the picker state, not a single dropdown
+  var productIds = isCustom ? [] : (_editingSubmittalProductIds || []).slice();
+  if (!isCustom && !productIds.length) {
+    if (!confirm('No products picked from the library. Save anyway?\n\nIf this is a shop drawing or sample, switch to "Custom item" instead.')) return;
   }
 
   var status   = (g('esb-status').value   || 'draft').trim();
@@ -5775,7 +5887,8 @@ async function saveSubmittal() {
     itemName:            name,
     description:         (g('esb-desc').value   || '').trim(),
     packageName:         (g('esb-pkg').value    || '').trim(),
-    productId:           prodId,
+    productIds:          productIds,
+    productId:           productIds.length ? productIds[0] : null,
     isCustom:            isCustom,
     status:              status,
     response:            response,
@@ -6187,6 +6300,7 @@ async function confirmSubmittalImport() {
       itemName:            src.itemName,
       description:         src.description,
       packageName:         src.packageName,
+      productIds:          [],
       productId:           null,
       isCustom:            false,
       status:              src.status || 'draft',
@@ -6699,6 +6813,7 @@ async function createSubmittalRevision(originalId) {
     itemName:            orig.itemName,
     description:         orig.description,
     packageName:         orig.packageName,
+    productIds:          orig.isCustom ? [] : (Array.isArray(orig.productIds) ? orig.productIds.slice() : (orig.productId ? [orig.productId] : [])),
     productId:           orig.isCustom ? null : orig.productId,
     isCustom:            !!orig.isCustom,
     status:              'draft',
@@ -6887,11 +7002,16 @@ function _gatherCompileDocsForSubmittal(s) {
     (s.customDocuments || []).forEach(function(d){
       out.push({bucket: PROJECT_FILES_BUCKET, doc: d, kind: 'custom'});
     });
-  } else if (s.productId) {
-    (db.productDocuments || []).forEach(function(d){
-      if (String(d.productId) === String(s.productId)) {
-        out.push({bucket: PRODUCT_LIBRARY_BUCKET, doc: d, kind: 'library'});
-      }
+  } else {
+    // Round 6: gather across every linked product. Falls back to legacy
+    // single productId for any submittal that hasn't been migrated yet.
+    var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+    pids.forEach(function(pid){
+      (db.productDocuments || []).forEach(function(d){
+        if (String(d.productId) === String(pid)) {
+          out.push({bucket: PRODUCT_LIBRARY_BUCKET, doc: d, kind: 'library', productId: pid});
+        }
+      });
     });
   }
   return out;
@@ -6951,6 +7071,15 @@ function showSubmittalPackageCompile(submittalId) {
     var docs = _gatherCompileDocsForSubmittal(s);
     var docCount = docs.length;
     var label = (s.kmiSubmittalNo || ('#' + s.id)) + ' — ' + (s.itemName || '(no name)');
+    // Round 6: when a library submittal has multiple products, list them
+    // so the PC can verify they're all included before generating
+    if (!s.isCustom) {
+      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+      if (pids.length > 1) {
+        var names = pids.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ('#' + pid); });
+        label += ' [' + names.join(', ') + ']';
+      }
+    }
     var note = '';
     if (docCount === 0) {
       note = '<span style="color:#9A7A2E;font-size:11px;margin-left:8px">⚠ no documents</span>';
@@ -7197,10 +7326,21 @@ async function compileSubmittalPackage() {
   // Build items list for the cover manifest
   var manifestItems = allInPkg.map(function(s){
     var docs = _gatherCompileDocsForSubmittal(s);
+    // Round 6: append product names to the item description when more
+    // than one product is linked. Single-product items keep their
+    // original clean look.
+    var name = s.itemName || '(no name)';
+    if (!s.isCustom) {
+      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+      if (pids.length > 1) {
+        var pnames = pids.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ('#' + pid); });
+        name += ' (' + pnames.join(' / ') + ')';
+      }
+    }
     return {
       kmiNo:    s.kmiSubmittalNo || '—',
       spec:     _csiPrefix(s.csiSection) || '',
-      name:     s.itemName || '(no name)',
+      name:     name,
       docCount: docs.length,
       included: !!includedSet[String(s.id)]
     };
@@ -7354,10 +7494,19 @@ function renderProjectSubmittalsBlock(projectId) {
       compileBtnHtml +
       '</td></tr>';
     byPkg[pkg].forEach(function(s){
-      var prod = s.productId ? getProduct(s.productId) : null;
-      var prodCell = s.isCustom
-        ? '<span style="color:#888;font-style:italic">Custom</span>'
-        : (prod ? subEsc(prod.name) : '<span style="color:#A32D2D">Missing product</span>');
+      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+      var prodCell;
+      if (s.isCustom) {
+        prodCell = '<span style="color:#888;font-style:italic">Custom</span>';
+      } else if (!pids.length) {
+        prodCell = '<span style="color:#A32D2D">Missing product</span>';
+      } else {
+        var firstP = getProduct(pids[0]);
+        var firstName = firstP ? firstP.name : ('#' + pids[0]);
+        prodCell = subEsc(firstName) + (pids.length > 1
+          ? ' <span style="color:#888;font-size:11px">(+' + (pids.length - 1) + ')</span>'
+          : '');
+      }
       var dueCell = s.dueDate || '—';
       if (_isOverdue(s.dueDate) && s.status !== 'closed') {
         dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
@@ -22802,7 +22951,14 @@ function toSBSubmittal(r) {
     item_name:r.itemName||'',
     description:r.description||'',
     package_name:r.packageName||'',
-    product_id:r.productId||null,
+    // Round 6: product_ids is the canonical array; product_id stays
+    // populated with the first product so legacy code paths keep working.
+    product_ids: Array.isArray(r.productIds) && r.productIds.length
+                   ? r.productIds
+                   : (r.productId ? [r.productId] : []),
+    product_id:  (Array.isArray(r.productIds) && r.productIds.length)
+                   ? r.productIds[0]
+                   : (r.productId || null),
     is_custom:!!r.isCustom,
     status:r.status||'draft',
     response:r.response||'',
@@ -22830,7 +22986,13 @@ function fromSBSubmittal(r) {
     itemName:r.item_name||'',
     description:r.description||'',
     packageName:r.package_name||'',
-    productId:r.product_id||null,
+    // Round 6: prefer product_ids (array), fall back to legacy single
+    // product_id wrapped in an array if migration hasn't run yet.
+    productIds:  Array.isArray(r.product_ids) && r.product_ids.length
+                   ? r.product_ids
+                   : (r.product_id ? [r.product_id] : []),
+    productId:   r.product_id ||
+                 (Array.isArray(r.product_ids) && r.product_ids.length ? r.product_ids[0] : null),
     isCustom:!!r.is_custom,
     // Status / response (Round 3 split). If the row was last written
     // before the split, the legacy single-status values may still be
