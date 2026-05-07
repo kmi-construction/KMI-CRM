@@ -1484,6 +1484,7 @@ textarea{resize:vertical;min-height:72px}
     <input class="si" placeholder="Search by item name, package, product..." oninput="renderSubmittals()" id="sb-s">
     <select class="fs" onchange="renderSubmittals()" id="sb-fproj"><option value="">All projects</option></select>
     <select class="fs" onchange="renderSubmittals()" id="sb-fstatus"><option value="">All statuses</option></select>
+    <select class="fs" onchange="renderSubmittals()" id="sb-fresponse"><option value="">All responses</option></select>
     <select class="fs" onchange="renderSubmittals()" id="sb-fpackage"><option value="">All packages</option></select>
     <select class="fs" onchange="renderSubmittals()" id="sb-fdue">
       <option value="">All due dates</option>
@@ -1492,11 +1493,14 @@ textarea{resize:vertical;min-height:72px}
       <option value="this-month">Due this month</option>
       <option value="no-date">No due date</option>
     </select>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#444;cursor:pointer;margin-left:auto">
+      <input type="checkbox" id="sb-factive" onchange="onSubmittalActiveToggle()"> Active only
+    </label>
   </div>
   <div class="card" style="padding:0;overflow:hidden">
     <table>
       <thead><tr>
-        <th>Status</th><th>Project</th><th>KMI #</th><th>Spec Section</th><th>Item</th><th>Package</th><th>Product</th><th>Due</th><th>Sent</th><th>Returned</th><th>Actions</th>
+        <th>Status</th><th>Response</th><th>Project</th><th>KMI #</th><th>Spec Section</th><th>Item</th><th>Package</th><th>Product</th><th>Due</th><th>Sent</th><th>Returned</th><th>Actions</th>
       </tr></thead>
       <tbody id="sb-tbody"></tbody>
     </table>
@@ -1512,11 +1516,17 @@ textarea{resize:vertical;min-height:72px}
     <button class="btn" onclick="nav('submittals')">&larr; Back to submittals</button>
   </div>
 
+  <!-- Revision context banner — populated by renderSubmittalRevisionBanner.
+       Shows "Revision of X" link when this submittal has a parent, and
+       the "Create revision" prompt when the response triggers one. -->
+  <div id="esb-revision-banner"></div>
+
   <div class="card">
     <div class="ch"><span class="ct">Submittal details</span></div>
     <div class="fg">
       <div class="fgr"><label>Project *</label><select id="esb-proj"><option value="">— Select —</option></select></div>
       <div class="fgr"><label>Status</label><select id="esb-status"></select></div>
+      <div class="fgr"><label>Response</label><select id="esb-response" onchange="onSubmittalResponseChange()"></select></div>
       <div class="fgr"><label>Spec Section</label><select id="esb-csi" onchange="onSubmittalCsiChange()"><option value="">— Select —</option></select></div>
       <div class="fgr"><label>KMI submittal #</label><input id="esb-kno" placeholder="Auto-generated from spec section"></div>
       <div class="fgr"><label>Customer submittal #</label><input id="esb-cno" placeholder="If the GC assigned one"></div>
@@ -5154,16 +5164,28 @@ function getProjectName(id) {
   return p.name || p.projectName || ('Project ' + p.id);
 }
 
-// ── Status workflow ──────────────────────────────────────────────────
+// ── Status (lifecycle) ──────────────────────────────────────────
+// Round 3: trimmed from 8 verdict-mixed states down to 4 pure
+// lifecycle states. The customer's verdict lives in `response`.
 var SUBMITTAL_STATUSES = [
-  {key:'draft',             label:'Draft',              cls:'bd-draft',      terminal:false},
-  {key:'pending-rfi',       label:'Pending RFI',        cls:'bd-pending',    terminal:false},
-  {key:'submitted',         label:'Submitted',          cls:'bd-sent',       terminal:false},
-  {key:'approved',          label:'Approved',           cls:'bd-won',        terminal:true},
-  {key:'approved-as-noted', label:'Approved as Noted',  cls:'bd-budget',     terminal:true},
-  {key:'revise-resubmit',   label:'Revise & Resubmit',  cls:'bd-review',     terminal:false},
-  {key:'rejected',          label:'Rejected',           cls:'bd-lost',       terminal:true},
-  {key:'closed',            label:'Closed',             cls:'bd-pending',    terminal:true}
+  {key:'draft',       label:'Draft',       cls:'bd-draft'},
+  {key:'pending-rfi', label:'Pending RFI', cls:'bd-pending'},
+  {key:'open',        label:'Open',        cls:'bd-sent'},
+  {key:'closed',      label:'Closed',      cls:'bd-pending'}
+];
+
+// ── Response (customer's verdict) ───────────────────────────────
+// Empty key means "no response yet". Non-empty responses auto-flip
+// status to Closed in saveSubmittal (user can override). The
+// `promptRevise` flag drives the post-save "Create revision?" prompt.
+var SUBMITTAL_RESPONSES = [
+  {key:'',                  label:'(no response)',     cls:'',           promptRevise:false},
+  {key:'reviewed',          label:'Reviewed',          cls:'bd-won',     promptRevise:false},
+  {key:'approved',          label:'Approved',          cls:'bd-won',     promptRevise:false},
+  {key:'approved-as-noted', label:'Approved as Noted', cls:'bd-budget',  promptRevise:true},
+  {key:'revise-resubmit',   label:'Revise & Resubmit', cls:'bd-review',  promptRevise:true},
+  {key:'rejected',          label:'Rejected',          cls:'bd-lost',    promptRevise:true},
+  {key:'for-record-only',   label:'For Record Only',   cls:'bd-sent',    promptRevise:false}
 ];
 
 function subStatusMeta(key) {
@@ -5178,6 +5200,22 @@ function subStatusBadge(key) {
 function subStatusOptionsHtml(selected) {
   return SUBMITTAL_STATUSES.map(function(s){
     return '<option value="' + s.key + '"' + (s.key === selected ? ' selected' : '') + '>' + subEsc(s.label) + '</option>';
+  }).join('');
+}
+
+function subResponseMeta(key) {
+  return SUBMITTAL_RESPONSES.find(function(s){ return s.key === (key || ''); }) || SUBMITTAL_RESPONSES[0];
+}
+
+function subResponseBadge(key) {
+  if (!key) return '<span style="color:#bbb;font-size:11px">—</span>';
+  var m = subResponseMeta(key);
+  return '<span class="bdg ' + m.cls + '">' + subEsc(m.label) + '</span>';
+}
+
+function subResponseOptionsHtml(selected) {
+  return SUBMITTAL_RESPONSES.map(function(s){
+    return '<option value="' + s.key + '"' + (s.key === (selected || '') ? ' selected' : '') + '>' + subEsc(s.label) + '</option>';
   }).join('');
 }
 
@@ -5225,6 +5263,17 @@ function renderSubmittalsPage() {
       SUBMITTAL_STATUSES.map(function(s){ return '<option value="' + s.key + '">' + subEsc(s.label) + '</option>'; }).join('');
     statusSel.value = prevSt;
   }
+  // Response filter (Round 3)
+  var respSel = g('sb-fresponse');
+  if (respSel) {
+    var prevR = respSel.value;
+    respSel.innerHTML = '<option value="">All responses</option>' +
+      '<option value="__none__">No response yet</option>' +
+      SUBMITTAL_RESPONSES.filter(function(r){ return r.key; }).map(function(r){
+        return '<option value="' + r.key + '">' + subEsc(r.label) + '</option>';
+      }).join('');
+    respSel.value = prevR;
+  }
   // Package filter — derived from existing submittals
   var pkgSel = g('sb-fpackage');
   if (pkgSel) {
@@ -5238,6 +5287,20 @@ function renderSubmittalsPage() {
       pkgList.map(function(p){ return '<option value="' + subEsc(p) + '">' + subEsc(p) + '</option>'; }).join('');
     pkgSel.value = prevPkg;
   }
+  // Active-only toggle — default checked, persisted to localStorage
+  var activeEl = g('sb-factive');
+  if (activeEl) {
+    var stored = null;
+    try { stored = localStorage.getItem('kmi_submittals_active_only'); } catch (e) {}
+    activeEl.checked = (stored === null) ? true : (stored === '1');
+  }
+  renderSubmittals();
+}
+
+function onSubmittalActiveToggle() {
+  var el = g('sb-factive');
+  if (!el) return;
+  try { localStorage.setItem('kmi_submittals_active_only', el.checked ? '1' : '0'); } catch (e) {}
   renderSubmittals();
 }
 
@@ -5271,12 +5334,18 @@ function renderSubmittals() {
   var s   = ((g('sb-s')        || {}).value || '').toLowerCase();
   var fp  =  (g('sb-fproj')    || {}).value || '';
   var fs  =  (g('sb-fstatus')  || {}).value || '';
+  var fr  =  (g('sb-fresponse')|| {}).value || '';
   var fpk =  (g('sb-fpackage') || {}).value || '';
   var fd  =  (g('sb-fdue')     || {}).value || '';
+  var activeEl = g('sb-factive');
+  var activeOnly = activeEl ? !!activeEl.checked : true;
 
   var rows = (db.submittals || []).filter(function(r){
+    if (activeOnly && (r.status === 'closed')) return false;
     if (fp  && String(r.projectId) !== String(fp))           return false;
     if (fs  && (r.status || 'draft') !== fs)                  return false;
+    if (fr === '__none__' && (r.response || ''))             return false;
+    if (fr && fr !== '__none__' && (r.response || '') !== fr) return false;
     if (fpk && (r.packageName || '') !== fpk)                 return false;
     if (fd === 'overdue'   && !_isOverdue(r.dueDate))         return false;
     if (fd === 'this-week' && !_isWithinThisWeek(r.dueDate))  return false;
@@ -5293,7 +5362,7 @@ function renderSubmittals() {
     return true;
   });
 
-  // Sort: overdue first, then by due date asc, then by status group, then by KMI #
+  // Sort: overdue first, then by due date asc, then by KMI #
   rows.sort(function(a, b){
     var oa = _isOverdue(a.dueDate) ? 0 : 1;
     var ob = _isOverdue(b.dueDate) ? 0 : 1;
@@ -5308,7 +5377,7 @@ function renderSubmittals() {
   var tbody = g('sb-tbody');
   if (!tbody) return;
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:30px;color:#aaa;font-size:13px">' +
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:30px;color:#aaa;font-size:13px">' +
       ((db.submittals || []).length === 0
         ? 'No submittals yet — ' + (canEdit ? '<button class="btn btn-sm btn-p" onclick="initNewSubmittal()">Add your first submittal</button>' : 'ask an admin to add one.')
         : 'No submittals match the current filters.') +
@@ -5321,11 +5390,12 @@ function renderSubmittals() {
       ? '<span style="color:#888;font-style:italic">Custom item</span>'
       : (prod ? subEsc(prod.name) : '<span style="color:#A32D2D">Missing product</span>');
     var dueCell = r.dueDate || '—';
-    if (_isOverdue(r.dueDate) && (r.status || 'draft') !== 'submitted' && !subStatusMeta(r.status).terminal) {
+    if (_isOverdue(r.dueDate) && (r.status || 'draft') !== 'closed') {
       dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
     }
     return '<tr style="cursor:pointer" onclick="editSubmittal(' + r.id + ')">' +
       '<td>' + subStatusBadge(r.status || 'draft') + '</td>' +
+      '<td>' + subResponseBadge(r.response || '') + '</td>' +
       '<td style="font-size:12px">' + subEsc(getProjectName(r.projectId)) + '</td>' +
       '<td style="font-family:monospace;font-size:11px">' + subEsc(r.kmiSubmittalNo || '—') + '</td>' +
       '<td style="font-size:11px">' + subEsc(_csiPrefix(r.csiSection) || '—') + '</td>' +
@@ -5397,6 +5467,11 @@ function renderEditSubmittalPage() {
   if (statSel) {
     statSel.innerHTML = subStatusOptionsHtml((r && r.status) || 'draft');
   }
+  // Response dropdown (Round 3)
+  var respSel = g('esb-response');
+  if (respSel) {
+    respSel.innerHTML = subResponseOptionsHtml((r && r.response) || '');
+  }
   // CSI dropdown — use the same constant the Product Library uses
   var csiSel = g('esb-csi');
   if (csiSel) {
@@ -5458,7 +5533,7 @@ function renderEditSubmittalPage() {
 
   // Disable all inputs for read-only roles
   if (!canEdit) {
-    ['esb-proj','esb-status','esb-csi','esb-kno','esb-cno','esb-pkg','esb-name','esb-desc',
+    ['esb-proj','esb-status','esb-response','esb-csi','esb-kno','esb-cno','esb-pkg','esb-name','esb-desc',
      'esb-prod','esb-due','esb-sent','esb-resp','esb-rnotes','esb-notes',
      'esb-src-lib','esb-src-cus'].forEach(function(id){
       var el = g(id); if (el) el.disabled = true;
@@ -5476,6 +5551,9 @@ function renderEditSubmittalPage() {
   renderSubmittalCustomDocs();
   // Response documents card — for any saved submittal
   renderSubmittalResponseDocs();
+  // Revision context banner (Round 3) — shows parent link and/or
+  // "Create revision" prompt depending on the current response.
+  renderSubmittalRevisionBanner();
 }
 
 function onSubmittalSrcChange() {
@@ -5610,21 +5688,33 @@ async function saveSubmittal() {
     if (!confirm('No product selected from the library. Save anyway?\n\nIf this is a shop drawing or sample, switch to "Custom item" instead.')) return;
   }
 
-  var status = (g('esb-status').value || 'draft').trim();
+  var status   = (g('esb-status').value   || 'draft').trim();
+  var response = (g('esb-response').value || '').trim();
   var dueDate      = (g('esb-due').value  || '').trim()  || null;
   var sentDate     = (g('esb-sent').value || '').trim() || null;
   var responseDate = (g('esb-resp').value || '').trim() || null;
 
-  // Auto-fill date helpers when status changes (if user didn't manually pick)
+  // Auto-fill date helpers based on what changed (Round 3 — driven off
+  // response now, not status). Compute deltas vs the existing record.
   var existing = _editSubmittalId ? getSubmittal(_editSubmittalId) : null;
-  var prevStatus = existing ? (existing.status || 'draft') : null;
+  var prevStatus   = existing ? (existing.status   || 'draft') : null;
+  var prevResponse = existing ? (existing.response || '')      : null;
   var todayStr = (new Date()).toISOString().slice(0,10);
-  if (status === 'submitted' && prevStatus !== 'submitted' && !sentDate) {
+
+  // Status flipped to Open → fill sentDate if blank
+  if (status === 'open' && prevStatus !== 'open' && !sentDate) {
     sentDate = todayStr;
   }
-  var meta = subStatusMeta(status);
-  if (meta.terminal && !responseDate && prevStatus !== status) {
+  // Response newly set (was blank or different) → fill responseDate if blank
+  if (response && response !== prevResponse && !responseDate) {
     responseDate = todayStr;
+  }
+  // Response set → auto-close (user can override; we only auto-set when
+  // they're flipping the response and status is still pre-response)
+  if (response && response !== prevResponse) {
+    if (status === 'draft' || status === 'open' || status === 'pending-rfi') {
+      status = 'closed';
+    }
   }
 
   var nowIso = new Date().toISOString();
@@ -5639,6 +5729,7 @@ async function saveSubmittal() {
     productId:           prodId,
     isCustom:            isCustom,
     status:              status,
+    response:            response,
     dueDate:             dueDate,
     sentDate:            sentDate,
     responseDate:        responseDate,
@@ -5657,6 +5748,7 @@ async function saveSubmittal() {
 
   if (!Array.isArray(db.submittals)) db.submittals = [];
   var record;
+  var isNew = !_editSubmittalId;
   if (_editSubmittalId) {
     record = getSubmittal(_editSubmittalId);
     if (record) Object.assign(record, data);
@@ -5682,6 +5774,23 @@ async function saveSubmittal() {
   // Re-render the page so the title/delete-button/dates update in place,
   // and the auto-filled dates (sent/response) become visible.
   renderEditSubmittalPage();
+
+  // Round 3: revision prompt. Trigger when the response was just newly
+  // set to a verdict that typically requires a follow-up submittal AND
+  // we don't already have a revision linked. Skipped for new records
+  // because there's no "transition" — they were created with that
+  // response from the start.
+  if (!isNew && response && response !== prevResponse) {
+    var meta = subResponseMeta(response);
+    if (meta.promptRevise && !_hasChildRevision(record.id)) {
+      // Defer slightly so the alert/confirm doesn't fight the page render
+      setTimeout(function(){
+        if (confirm('Response set to "' + meta.label + '" — create a revision submittal?\n\nThe new submittal will inherit the project, spec section, item, package, and product link. KMI # will bump (e.g. -1.0 → -1.1) and status will start as Draft.')) {
+          createSubmittalRevision(record.id);
+        }
+      }, 50);
+    }
+  }
 }
 
 async function deleteSubmittal() {
@@ -5720,19 +5829,42 @@ async function deleteSubmittal() {
 var _importParsedRows = [];
 var _importTargetProjectId = null;
 
-// Map a free-text status from the spreadsheet to one of our 8 status keys.
+// Map a free-text status from the spreadsheet to one of our status keys.
+// Round 3: this only emits LIFECYCLE statuses (draft, pending-rfi, open,
+// closed). Verdicts seen in the spreadsheet are split out by
+// _normalizeImportResponse below — never both.
 function _normalizeImportStatus(raw) {
   var s = String(raw || '').trim().toLowerCase();
   if (!s) return 'draft';
-  if (/submitted/.test(s))                    return 'submitted';
+  // Verdict-like values become Closed (their verdict is captured in
+  // the response field via _normalizeImportResponse).
+  if (/approved.*noted|as.*noted/.test(s))     return 'closed';
+  if (/revise|resubmit/.test(s))               return 'closed';
+  if (/^reviewed/.test(s))                     return 'closed';
+  if (/^approved/.test(s))                     return 'closed';
+  if (/^rejected/.test(s))                     return 'closed';
+  if (/for.*record/.test(s))                   return 'closed';
+  // True lifecycle states
+  if (/submitted/.test(s))                     return 'open';
   if (/pending.*rfi|rfi/.test(s))              return 'pending-rfi';
-  if (/approved.*noted|as.*noted/.test(s))     return 'approved-as-noted';
-  if (/revise|resubmit/.test(s))               return 'revise-resubmit';
-  if (/approved/.test(s))                      return 'approved';
-  if (/rejected/.test(s))                      return 'rejected';
   if (/closed|complete/.test(s))               return 'closed';
   // "Requested", "Will Submit Later", "Pending", anything else → draft
   return 'draft';
+}
+
+// Map a free-text status to a response key (or '' if it's a lifecycle
+// status, not a verdict). Round 3 — splits verdicts out of the old
+// single-field model.
+function _normalizeImportResponse(raw) {
+  var s = String(raw || '').trim().toLowerCase();
+  if (!s) return '';
+  if (/approved.*noted|as.*noted/.test(s))     return 'approved-as-noted';
+  if (/revise|resubmit/.test(s))               return 'revise-resubmit';
+  if (/^reviewed/.test(s))                     return 'reviewed';
+  if (/^approved/.test(s))                     return 'approved';
+  if (/^rejected/.test(s))                     return 'rejected';
+  if (/for.*record/.test(s))                   return 'for-record-only';
+  return '';
 }
 
 // Normalize a spec section value from the spreadsheet to our canonical
@@ -5883,7 +6015,8 @@ async function onSubmittalImportFile(ev) {
           itemName:       itemName,
           description:    descUsed,
           packageName:    col.pkg    >= 0 ? String(raw[col.pkg]    || '').trim() : '',
-          status:         col.status >= 0 ? _normalizeImportStatus(raw[col.status]) : 'draft'
+          status:         col.status >= 0 ? _normalizeImportStatus(raw[col.status])   : 'draft',
+          response:       col.status >= 0 ? _normalizeImportResponse(raw[col.status]) : ''
         });
       }
 
@@ -5927,7 +6060,8 @@ async function onSubmittalImportFile(ev) {
         '<td style="padding:4px 6px;font-size:11px;font-family:monospace">' + (r.kmiSubmittalNo ? subEsc(r.kmiSubmittalNo) : '<i style="color:#aaa">auto</i>') + '</td>' +
         '<td style="padding:4px 6px;font-size:12px;font-weight:600">' + subEsc(r.itemName) + '</td>' +
         '<td style="padding:4px 6px;font-size:11px">' + subEsc(r.packageName || '') + '</td>' +
-        '<td style="padding:4px 6px">' + subStatusBadge(r.status) + '</td>' +
+        '<td style="padding:4px 6px">' + subStatusBadge(r.status) +
+          (r.response ? ' ' + subResponseBadge(r.response) : '') + '</td>' +
       '</tr>';
     }).join('');
 
@@ -6006,12 +6140,15 @@ async function confirmSubmittalImport() {
       productId:           null,
       isCustom:            false,
       status:              src.status || 'draft',
+      response:            src.response || '',
       dueDate:             null,
       sentDate:            null,
       responseDate:        null,
       responseNotes:       '',
       notes:               '',
       customDocuments:     [],
+      responseDocuments:   [],
+      prevSubmittalId:     null,
       createdAt:           nowIso,
       createdByUserId:     _currentUser ? _currentUser.id : null,
       updatedAt:           nowIso,
@@ -6435,6 +6572,191 @@ async function rmSubmittalResponseDoc(docId) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// REVISIONS (Round 3)
+// ════════════════════════════════════════════════════════════════════
+// When a submittal receives a verdict that requires re-submission
+// (Approved as Noted with conditions, Revise & Resubmit, Rejected),
+// the user spins up a "revision" submittal that inherits the original's
+// scope and links back via prevSubmittalId. KMI # bumps by .1 each
+// revision: -1.0 → -1.1 → -1.2.
+
+function _hasChildRevision(submittalId) {
+  if (!submittalId) return false;
+  return (db.submittals || []).some(function(s){
+    return String(s.prevSubmittalId) === String(submittalId);
+  });
+}
+
+function _getChildRevision(submittalId) {
+  if (!submittalId) return null;
+  return (db.submittals || []).find(function(s){
+    return String(s.prevSubmittalId) === String(submittalId);
+  });
+}
+
+// Bump '04 21 00-1.0' → '04 21 00-1.1', '-1.5' → '-1.6', etc.
+// If the source has no rev suffix, treat it as .0 and produce .1.
+// Loops to find a non-colliding number within the project.
+function _bumpKmiRevision(originalKmiNo, projectId) {
+  if (!originalKmiNo) return '';
+  var m = originalKmiNo.match(/^(.+?-\d+)\.(\d+)$/);
+  var base, rev;
+  if (m) {
+    base = m[1];
+    rev = parseInt(m[2], 10) + 1;
+  } else if (originalKmiNo.indexOf('-') > -1) {
+    base = originalKmiNo;
+    rev = 1;
+  } else {
+    return originalKmiNo + '-rev1';
+  }
+  var attempt;
+  for (var i = 0; i < 100; i++) {
+    attempt = base + '.' + rev;
+    var clash = (db.submittals || []).find(function(s){
+      return String(s.projectId) === String(projectId) && s.kmiSubmittalNo === attempt;
+    });
+    if (!clash) return attempt;
+    rev++;
+  }
+  return attempt;
+}
+
+async function createSubmittalRevision(originalId) {
+  if (!requireFull('edit-submittals', 'create revision submittals')) return;
+  var orig = getSubmittal(originalId);
+  if (!orig) { alert('Original submittal not found.'); return; }
+  if (_hasChildRevision(originalId)) {
+    var existing = _getChildRevision(originalId);
+    if (confirm('A revision (' + (existing.kmiSubmittalNo || '#' + existing.id) + ') already exists for this submittal. Open it instead?')) {
+      _editSubmittalId = existing.id;
+      _subSrcMode = existing.isCustom ? 'custom' : 'library';
+      nav('edit-submittal');
+    }
+    return;
+  }
+
+  var nowIso = new Date().toISOString();
+  var newId  = Date.now();
+  var newKmi = _bumpKmiRevision(orig.kmiSubmittalNo, orig.projectId);
+
+  var rev = {
+    id:                  newId,
+    projectId:           orig.projectId,
+    kmiSubmittalNo:      newKmi,
+    customerSubmittalNo: '',
+    csiSection:          orig.csiSection,
+    itemName:            orig.itemName,
+    description:         orig.description,
+    packageName:         orig.packageName,
+    productId:           orig.isCustom ? null : orig.productId,
+    isCustom:            !!orig.isCustom,
+    status:              'draft',
+    response:            '',
+    dueDate:             null,
+    sentDate:            null,
+    responseDate:        null,
+    responseNotes:       '',
+    notes:               '',
+    customDocuments:     [],
+    responseDocuments:   [],
+    prevSubmittalId:     orig.id,
+    createdAt:           nowIso,
+    createdByUserId:     _currentUser ? _currentUser.id : null,
+    updatedAt:           nowIso,
+    updatedByUserId:     _currentUser ? _currentUser.id : null
+  };
+  if (!Array.isArray(db.submittals)) db.submittals = [];
+  db.submittals.push(rev);
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(rev));
+      if (r && r.error) console.warn('revision push warning:', r.error.message);
+    } catch (e) {
+      console.warn('revision push threw:', e);
+    }
+  }
+
+  // Switch to editing the new revision so the user can adjust whatever
+  // the customer's response called out and ship it.
+  _editSubmittalId = newId;
+  _subSrcMode = rev.isCustom ? 'custom' : 'library';
+  nav('edit-submittal');
+}
+
+function renderSubmittalRevisionBanner() {
+  var el = g('esb-revision-banner');
+  if (!el) return;
+  if (!_editSubmittalId) { el.innerHTML = ''; return; }
+  var r = getSubmittal(_editSubmittalId);
+  if (!r) { el.innerHTML = ''; return; }
+
+  var html = '';
+
+  // Parent banner — "this is a revision of X"
+  if (r.prevSubmittalId) {
+    var parent = getSubmittal(r.prevSubmittalId);
+    if (parent) {
+      var parentResp = parent.response ? ('"' + subResponseMeta(parent.response).label + '"') : 'no response recorded';
+      html += '<div style="padding:10px 14px;background:#f5f6fa;border-left:3px solid var(--ac);border-radius:4px;margin-bottom:14px;font-size:12px">' +
+        '<strong>Revision of ' + subEsc(parent.kmiSubmittalNo || '#' + parent.id) + '</strong> ' +
+        '<span style="color:#666">— original was returned with ' + parentResp + '. </span>' +
+        '<a href="javascript:void(0)" onclick="editSubmittal(' + parent.id + ')" style="color:var(--kmi);font-weight:600">View original</a>' +
+      '</div>';
+    }
+  }
+
+  // Forward-revision link — "this submittal already has a revision"
+  var child = _getChildRevision(r.id);
+  if (child) {
+    html += '<div style="padding:10px 14px;background:#fafafa;border-left:3px solid #999;border-radius:4px;margin-bottom:14px;font-size:12px">' +
+      '<strong>A revision exists:</strong> ' +
+      '<a href="javascript:void(0)" onclick="editSubmittal(' + child.id + ')" style="color:var(--kmi);font-weight:600">' +
+      subEsc(child.kmiSubmittalNo || '#' + child.id) + '</a>' +
+      ' <span style="color:#888">(' + subStatusMeta(child.status).label +
+      (child.response ? ' / ' + subResponseMeta(child.response).label : '') + ')</span>' +
+    '</div>';
+  }
+
+  // "Create revision" prompt — when the response triggers it AND no child yet
+  if (!child && r.response) {
+    var meta = subResponseMeta(r.response);
+    if (meta.promptRevise) {
+      var canEdit = canAccess('edit-submittals') === 'full';
+      html += '<div style="padding:10px 14px;background:#FBE9C5;border-left:3px solid #9A7A2E;border-radius:4px;margin-bottom:14px;font-size:12px;display:flex;justify-content:space-between;align-items:center">' +
+        '<div>This submittal received <strong>' + subEsc(meta.label) + '</strong>. ' +
+        'A follow-up submittal is typically required.</div>' +
+        (canEdit
+          ? '<button class="btn btn-sm btn-p" onclick="createSubmittalRevision(' + r.id + ')">Create revision</button>'
+          : '') +
+      '</div>';
+    }
+  }
+
+  el.innerHTML = html;
+}
+
+// Triggered when the Response dropdown changes — auto-set status to
+// Closed in the UI immediately so the user sees the consequence
+// before saving. They can override before clicking Save.
+function onSubmittalResponseChange() {
+  var respEl = g('esb-response');
+  var statEl = g('esb-status');
+  if (!respEl || !statEl) return;
+  var resp = respEl.value;
+  if (resp) {
+    // Only flip if status is currently in a pre-response state — don't
+    // clobber an explicit "draft" the user just picked
+    var s = statEl.value;
+    if (s === 'draft' || s === 'open' || s === 'pending-rfi') {
+      statEl.value = 'closed';
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
 // PROJECT-DETAIL EMBEDDED VIEW (Round 2B)
 // ════════════════════════════════════════════════════════════════════
 // Returns an HTML string with a compact submittals table for the given
@@ -6491,11 +6813,12 @@ function renderProjectSubmittalsBlock(projectId) {
         ? '<span style="color:#888;font-style:italic">Custom</span>'
         : (prod ? subEsc(prod.name) : '<span style="color:#A32D2D">Missing product</span>');
       var dueCell = s.dueDate || '—';
-      if (_isOverdue(s.dueDate) && !subStatusMeta(s.status).terminal && (s.status || 'draft') !== 'submitted') {
+      if (_isOverdue(s.dueDate) && s.status !== 'closed') {
         dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
       }
       body += '<tr style="cursor:pointer" onclick="editSubmittal(' + s.id + ')">' +
         '<td style="padding:5px 8px">' + subStatusBadge(s.status || 'draft') + '</td>' +
+        '<td style="padding:5px 8px">' + subResponseBadge(s.response || '') + '</td>' +
         '<td style="padding:5px 8px;font-family:monospace;font-size:11px">' + subEsc(s.kmiSubmittalNo || '—') + '</td>' +
         '<td style="padding:5px 8px;font-weight:600;font-size:12px">' + subEsc(s.itemName || '') + '</td>' +
         '<td style="padding:5px 8px;font-size:12px">' + prodCell + '</td>' +
@@ -6513,6 +6836,7 @@ function renderProjectSubmittalsBlock(projectId) {
     '<div class="ch"><span class="ct">Submittals (' + rows.length + ')</span>' + addBtn + '</div>' +
     '<table style="width:100%;font-size:12px"><thead><tr>' +
       '<th style="padding:6px 8px;text-align:left;width:90px">Status</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:130px">Response</th>' +
       '<th style="padding:6px 8px;text-align:left;width:110px">KMI #</th>' +
       '<th style="padding:6px 8px;text-align:left">Item</th>' +
       '<th style="padding:6px 8px;text-align:left">Product</th>' +
@@ -21686,6 +22010,33 @@ function fromSBProductDocument(r) {
 }
 
 // ── Submittal mappers (Round 2A) ────────────────────────────────
+// Round 3 split: pre-split rows store the verdict in the status column
+// ('approved', 'approved-as-noted', 'revise-resubmit', 'rejected') and
+// post-split rows have those moved to the response column with status
+// flipped to 'closed'. Likewise pre-split 'submitted' → post 'open'.
+// This helper accepts both shapes and always returns the post-split
+// (status, response) pair, so the rest of the app can ignore the legacy.
+function _normalizeLegacySubmittalStatus(rawStatus, rawResponse) {
+  var s = String(rawStatus || 'draft');
+  var r = String(rawResponse || '');
+  // If we already have a response, the row has been split already.
+  if (r) {
+    if (s === 'submitted')         s = 'open';   // catch a half-migrated row
+    if (s === 'approved' ||
+        s === 'approved-as-noted' ||
+        s === 'revise-resubmit' ||
+        s === 'rejected') s = 'closed';
+    return {status:s, response:r};
+  }
+  // No response field — translate any legacy verdict-style status.
+  if (s === 'approved')          return {status:'closed', response:'approved'};
+  if (s === 'approved-as-noted') return {status:'closed', response:'approved-as-noted'};
+  if (s === 'revise-resubmit')   return {status:'closed', response:'revise-resubmit'};
+  if (s === 'rejected')          return {status:'closed', response:'rejected'};
+  if (s === 'submitted')         return {status:'open',   response:''};
+  return {status:s, response:''};
+}
+
 function toSBSubmittal(r) {
   return {
     id:r.id,
@@ -21699,6 +22050,8 @@ function toSBSubmittal(r) {
     product_id:r.productId||null,
     is_custom:!!r.isCustom,
     status:r.status||'draft',
+    response:r.response||'',
+    prev_submittal_id:r.prevSubmittalId||null,
     due_date:r.dueDate||null,
     sent_date:r.sentDate||null,
     response_date:r.responseDate||null,
@@ -21724,7 +22077,12 @@ function fromSBSubmittal(r) {
     packageName:r.package_name||'',
     productId:r.product_id||null,
     isCustom:!!r.is_custom,
-    status:r.status||'draft',
+    // Status / response (Round 3 split). If the row was last written
+    // before the split, the legacy single-status values may still be
+    // present — translate them on read so the UI never sees them.
+    status:    _normalizeLegacySubmittalStatus(r.status, r.response).status,
+    response:  _normalizeLegacySubmittalStatus(r.status, r.response).response,
+    prevSubmittalId: r.prev_submittal_id||null,
     dueDate:r.due_date||null,
     sentDate:r.sent_date||null,
     responseDate:r.response_date||null,
