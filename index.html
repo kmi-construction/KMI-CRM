@@ -915,6 +915,19 @@ textarea{resize:vertical;min-height:72px}
     <div class="card"><div class="ch"><span class="ct">Project roles</span><button class="btn btn-sm btn-p" onclick="showAddType('projectRole')">+ Add</button></div><div id="t-project-roles"></div></div>
     <div class="card"><div class="ch"><span class="ct">Vendor types</span><button class="btn btn-sm btn-p" onclick="showAddType('vendor')">+ Add</button></div><div id="t-vendor-types"></div></div>
   </div>
+
+  <!-- ── Spec Sections (Round 5) ─────────────────────────────────────
+       The master list of MasterFormat-style spec sections used by the
+       Submittals and Product Library modules. Editing here reflows
+       every dropdown across the app immediately. -->
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Spec sections</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Master list used by Submittals and Product Library — edits propagate everywhere</span>
+      <button class="btn btn-sm btn-p" style="margin-left:auto" onclick="showAddSpecSection()">+ Add</button>
+    </div>
+    <div id="t-spec-sections"></div>
+  </div>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
     <div class="card"><div class="ch"><span class="ct">Inclusions</span><button class="btn btn-sm btn-p" onclick="showAddClar('std')">+ Add</button></div><div id="t-std"></div></div>
     <div class="card"><div class="ch"><span class="ct">Exclusions</span><button class="btn btn-sm btn-p" onclick="showAddClar('excl')">+ Add</button></div><div id="t-excl"></div></div>
@@ -1766,6 +1779,11 @@ var DB_DEFAULTS = {
   // Library-linked items reference a product (productId); custom items
   // (shop drawings, samples, RFI placeholders) set isCustom=true.
   submittals: [],
+  // Spec sections (Round 5) — master list managed via Templates.
+  // Replaces the hardcoded CSI_SECTIONS constant; that constant remains
+  // as a fallback for environments where the round5 migration hasn't
+  // run yet.
+  specSections: [],
   // T&M Tickets — daily field tickets created by foremen, signed by customer
   // superintendent, approved by KMI PM, then rolled into a Change Order Request.
   // See the COR module (separate) for how rolled-up tickets feed CORs.
@@ -1870,6 +1888,7 @@ function loadDB() {
         products:         p.products         || [],
         productDocuments: p.productDocuments || [],
         submittals:       p.submittals       || [],
+        specSections:     p.specSections     || [],
         tmTickets:      p.tmTickets      || [],
         cors:           p.cors           || [],
         costCodes:           p.costCodes           || [],
@@ -4216,6 +4235,29 @@ var CSI_SECTIONS = [
   '07 92 00 — Joint Sealants'
 ];
 
+// Round 5: spec sections are now editable via Templates. Returns the live
+// list as formatted "code — title" strings (same shape the dropdowns and
+// saved data have always used). Falls back to the hardcoded CSI_SECTIONS
+// list if the round5 migration hasn't run yet on this Supabase project,
+// so legacy environments keep working.
+//
+// `includeInactive` is true for management screens (Templates) so admins
+// can see deactivated sections; the dropdowns elsewhere call without it
+// and only see active sections.
+function getSpecSections(includeInactive) {
+  var live = (db.specSections || []).filter(function(s){
+    return includeInactive ? true : (s.isActive !== false);
+  });
+  if (!live.length) return CSI_SECTIONS.slice();
+  return live.slice().sort(function(a, b){
+    var ao = (a.sortOrder || 0), bo = (b.sortOrder || 0);
+    if (ao !== bo) return ao - bo;
+    return String(a.code || '').localeCompare(String(b.code || ''));
+  }).map(function(s){
+    return s.title ? (s.code + ' — ' + s.title) : s.code;
+  });
+}
+
 var DOC_STALENESS_YEARS = 3;
 
 // ── Module state ─────────────────────────────────────────────────────
@@ -4521,7 +4563,7 @@ function renderProducts() {
   if (csiSel) {
     var prevCsi = csiSel.value;
     csiSel.innerHTML = '<option value="">All spec sections</option>' +
-      CSI_SECTIONS.map(function(s){ return '<option value="' + plEsc(s) + '">' + plEsc(s) + '</option>'; }).join('');
+      getSpecSections().map(function(s){ return '<option value="' + plEsc(s) + '">' + plEsc(s) + '</option>'; }).join('');
     csiSel.value = prevCsi;
   }
 
@@ -4627,7 +4669,7 @@ function _populateProductSelects() {
     }).join('');
 
   csiSel.innerHTML = '<option value="">— Select —</option>' +
-    CSI_SECTIONS.map(function(s){
+    getSpecSections().map(function(s){
       var sel = (p && p.csiSection === s) ? ' selected' : '';
       return '<option value="' + plEsc(s) + '"' + sel + '>' + plEsc(s) + '</option>';
     }).join('');
@@ -5473,11 +5515,13 @@ function renderEditSubmittalPage() {
   if (respSel) {
     respSel.innerHTML = subResponseOptionsHtml((r && r.response) || '');
   }
-  // CSI dropdown — use the same constant the Product Library uses
+  // Spec section dropdown — uses the live list managed via Templates
+  // (Round 5), with a fallback to the CSI_SECTIONS constant for legacy
+  // environments.
   var csiSel = g('esb-csi');
   if (csiSel) {
     csiSel.innerHTML = '<option value="">— Select —</option>' +
-      CSI_SECTIONS.map(function(c){
+      getSpecSections().map(function(c){
         var sel = (r && r.csiSection === c) ? ' selected' : '';
         return '<option value="' + subEsc(c) + '"' + sel + '>' + subEsc(c) + '</option>';
       }).join('');
@@ -5886,10 +5930,11 @@ function _normalizeImportCsi(raw) {
   if (digits.length === 5) digits = '0' + digits;
   if (digits.length !== 6) return s;  // can't normalize — keep raw value
   var prefix = digits.slice(0,2) + ' ' + digits.slice(2,4) + ' ' + digits.slice(4,6);
-  // Match against known full labels in CSI_SECTIONS
-  var full = (typeof CSI_SECTIONS !== 'undefined') ? CSI_SECTIONS.find(function(c){
+  // Match against known full labels in the live spec sections list
+  var live = getSpecSections();
+  var full = live.find(function(c){
     return c.indexOf(prefix) === 0;
-  }) : null;
+  });
   return full || prefix;
 }
 
@@ -20400,6 +20445,215 @@ function renderTemplates() {
   renderBudgetTemplateTable();
   renderBudgetSettingsForms();
   renderAutoRoutes();
+  renderSpecSections();
+}
+
+// ── Spec Sections (Round 5) ─────────────────────────────────────────
+// Editable list backing every spec-section dropdown across the app.
+// Stored in db.specSections; displayed via the Templates page.
+
+var _editSpecSectionId = null;
+
+function renderSpecSections() {
+  var el = g('t-spec-sections');
+  if (!el) return;
+  // Show all rows here (active + inactive) so admins can see what's
+  // been deactivated and reactivate if needed. Sort by sort_order, then
+  // by code so the visual order matches what users see in the dropdowns.
+  var list = (db.specSections || []).slice().sort(function(a, b){
+    var ao = (a.sortOrder || 0), bo = (b.sortOrder || 0);
+    if (ao !== bo) return ao - bo;
+    return String(a.code || '').localeCompare(String(b.code || ''));
+  });
+
+  if (!list.length) {
+    el.innerHTML = '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center">' +
+      'No spec sections yet — run the round 5 SQL migration in Supabase to seed the standard MasterFormat list, ' +
+      'or click "+ Add" to create one manually.' +
+    '</div>';
+    return;
+  }
+
+  var canEdit = canAccess('templates') === 'full';
+  var html = '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+    '<th style="padding:6px 8px;text-align:left;width:110px">Code</th>' +
+    '<th style="padding:6px 8px;text-align:left">Title</th>' +
+    '<th style="padding:6px 8px;text-align:center;width:80px">Active</th>' +
+    '<th style="padding:6px 8px;text-align:right;width:90px">Sort</th>' +
+    '<th style="padding:6px 8px;width:140px"></th>' +
+    '</tr></thead><tbody>';
+  list.forEach(function(s){
+    var dim = (s.isActive === false) ? 'opacity:0.55' : '';
+    html += '<tr style="' + dim + '">' +
+      '<td style="padding:6px 8px;font-family:monospace;font-size:11px">' + plEsc(s.code || '') + '</td>' +
+      '<td style="padding:6px 8px">' + plEsc(s.title || '') + '</td>' +
+      '<td style="padding:6px 8px;text-align:center;font-size:11px">' +
+        (s.isActive === false ? '<span style="color:#888">inactive</span>' : '<span style="color:#3B6D11">●</span>') +
+      '</td>' +
+      '<td style="padding:6px 8px;text-align:right;color:#888">' + (s.sortOrder || 0) + '</td>' +
+      '<td style="padding:6px 8px;text-align:right">' +
+        (canEdit ? '<button class="btn btn-sm" onclick="showEditSpecSection(' + s.id + ')">✎ Edit</button> ' : '') +
+        (canEdit ? '<button class="btn btn-sm" onclick="deleteSpecSection(' + s.id + ')" style="color:#A32D2D">×</button>' : '') +
+      '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function _specSectionFormHtml(s) {
+  s = s || {};
+  return '<div class="fg">' +
+    '<div class="fgr"><label>Code *</label>' +
+      '<input id="ss-code" value="' + plEsc(s.code || '') + '" placeholder="e.g. 04 21 00">' +
+      '<div style="font-size:10px;color:#888;margin-top:3px">MasterFormat: <code>XX XX XX</code> (six digits, two spaces). Non-standard codes get a confirm prompt before saving.</div>' +
+    '</div>' +
+    '<div class="fgr"><label>Title</label>' +
+      '<input id="ss-title" value="' + plEsc(s.title || '') + '" placeholder="e.g. Clay Unit Masonry">' +
+    '</div>' +
+    '<div class="fgr"><label>Sort order</label>' +
+      '<input id="ss-sort" type="number" step="10" value="' + (s.sortOrder || 0) + '">' +
+      '<div style="font-size:10px;color:#888;margin-top:3px">Lower numbers appear first. Convention: increment by 10 so you can wedge new sections in between later.</div>' +
+    '</div>' +
+    '<div class="fgr"><label>Active</label>' +
+      '<select id="ss-active">' +
+        '<option value="true"' +  ((s.isActive === false) ? '' : ' selected') + '>Active (shown in dropdowns)</option>' +
+        '<option value="false"' + ((s.isActive === false) ? ' selected' : '') + '>Inactive (hidden from dropdowns; existing references still display)</option>' +
+      '</select>' +
+    '</div>' +
+  '</div>';
+}
+
+function showAddSpecSection() {
+  if (!requireFull('templates', 'add spec sections')) return;
+  _editSpecSectionId = null;
+  // Default sort_order to (current max + 10) so new entries land at the end
+  var maxSort = 0;
+  (db.specSections || []).forEach(function(s){ if ((s.sortOrder || 0) > maxSort) maxSort = s.sortOrder || 0; });
+  var seed = {sortOrder: maxSort + 10, isActive: true};
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add spec section</div>' +
+    '<div class="msb">Adds to every spec section dropdown across the app</div>' +
+    _specSectionFormHtml(seed) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" onclick="saveSpecSection()">Add section</button></div>');
+}
+
+function showEditSpecSection(id) {
+  if (!requireFull('templates', 'edit spec sections')) return;
+  var s = (db.specSections || []).find(function(x){ return String(x.id) === String(id); });
+  if (!s) { alert('Spec section not found.'); return; }
+  _editSpecSectionId = id;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Edit spec section</div>' +
+    '<div class="msb">' + plEsc(s.code || '') + (s.title ? ' — ' + plEsc(s.title) : '') + '</div>' +
+    _specSectionFormHtml(s) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" onclick="saveSpecSection()">Save changes</button></div>');
+}
+
+async function saveSpecSection() {
+  var codeRaw  = (g('ss-code').value  || '').trim();
+  var title    = (g('ss-title').value || '').trim();
+  var sortRaw  = (g('ss-sort').value  || '0').trim();
+  var isActive = (g('ss-active').value !== 'false');
+  if (!codeRaw) { alert('Code is required.'); return; }
+
+  // Validate the code against the standard MasterFormat XX XX XX pattern;
+  // allow override via confirm so non-standard codes can still be added.
+  var standard = /^\d{2} \d{2} \d{2}$/.test(codeRaw);
+  if (!standard) {
+    if (!confirm('"' + codeRaw + '" doesn\'t match the standard MasterFormat format (XX XX XX, six digits with two spaces).\n\nSave anyway?')) {
+      return;
+    }
+  }
+
+  // Dedupe by code (case-insensitive). Spec section codes are canonical;
+  // having two rows with the same code makes the dropdowns confusing.
+  var codeLc = codeRaw.toLowerCase();
+  var clash = (db.specSections || []).find(function(x){
+    return String(x.id) !== String(_editSpecSectionId) &&
+           String(x.code || '').toLowerCase() === codeLc;
+  });
+  if (clash) {
+    alert('A spec section with code "' + clash.code + '" already exists. Edit that one instead, or pick a different code.');
+    return;
+  }
+
+  var sortOrder = parseInt(sortRaw, 10);
+  if (!isFinite(sortOrder)) sortOrder = 0;
+
+  var nowIso = new Date().toISOString();
+  var data = {
+    code:       codeRaw,
+    title:      title,
+    isActive:   isActive,
+    sortOrder:  sortOrder,
+    updatedAt:  nowIso,
+    updatedByUserId: _currentUser ? _currentUser.id : null
+  };
+
+  if (!Array.isArray(db.specSections)) db.specSections = [];
+  var record;
+  if (_editSpecSectionId) {
+    record = (db.specSections || []).find(function(x){ return String(x.id) === String(_editSpecSectionId); });
+    if (record) Object.assign(record, data);
+  } else {
+    record = data;
+    record.id = Date.now();
+    record.createdAt = nowIso;
+    record.createdByUserId = _currentUser ? _currentUser.id : null;
+    db.specSections.push(record);
+  }
+  saveDB();
+
+  if (supabaseClient && record) {
+    try {
+      var r = await supabaseClient.from('kmi_spec_sections').upsert(toSBSpecSection(record));
+      if (r && r.error) console.warn('spec section push warning:', r.error.message);
+    } catch (e) {
+      console.warn('spec section push threw:', e);
+    }
+  }
+
+  closeModal();
+  _editSpecSectionId = null;
+  renderSpecSections();
+}
+
+async function deleteSpecSection(id) {
+  if (!requireFull('templates', 'delete spec sections')) return;
+  var s = (db.specSections || []).find(function(x){ return String(x.id) === String(id); });
+  if (!s) return;
+
+  // Count usages so the user knows what they're affecting. Submittals
+  // and products store the formatted "code — title" string.
+  var formatted = s.title ? (s.code + ' — ' + s.title) : s.code;
+  var subUsage  = (db.submittals || []).filter(function(x){ return x.csiSection === formatted; }).length;
+  var prodUsage = (db.products   || []).filter(function(x){ return x.csiSection === formatted; }).length;
+
+  var msg = 'Delete spec section "' + formatted + '"?';
+  if (subUsage || prodUsage) {
+    msg += '\n\nIn use by ' +
+      (subUsage  ? subUsage  + ' submittal' + (subUsage  === 1 ? '' : 's') : '') +
+      (subUsage && prodUsage ? ' and ' : '') +
+      (prodUsage ? prodUsage + ' product'   + (prodUsage === 1 ? '' : 's') : '') +
+      '. Existing rows will keep their stored spec text and continue to display correctly, but will no longer be selectable from the dropdown — equivalent to deactivating the section.\n\nIf you only want to hide it without affecting future references, click Cancel and use Edit → set Active to Inactive instead.';
+  }
+  if (!confirm(msg)) return;
+
+  db.specSections = (db.specSections || []).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_spec_sections').delete().eq('id', id);
+      if (r && r.error) console.warn('spec section delete warning:', r.error.message);
+    } catch (e) {
+      console.warn('spec section delete threw:', e);
+    }
+  }
+  renderSpecSections();
 }
 
 // ── Foundation master data status indicators on Templates page ──────────
@@ -22598,6 +22852,34 @@ function fromSBSubmittal(r) {
   };
 }
 
+// ── Spec Section mappers (Round 5) ──────────────────────────────
+function toSBSpecSection(r) {
+  return {
+    id:                  r.id,
+    code:                r.code  || '',
+    title:               r.title || '',
+    is_active:           (r.isActive !== false),
+    sort_order:          r.sortOrder || 0,
+    created_at:          r.createdAt || null,
+    created_by_user_id:  r.createdByUserId || null,
+    updated_at:          r.updatedAt || null,
+    updated_by_user_id:  r.updatedByUserId || null
+  };
+}
+function fromSBSpecSection(r) {
+  return {
+    id:                  r.id,
+    code:                r.code  || '',
+    title:               r.title || '',
+    isActive:            (r.is_active !== false),
+    sortOrder:           r.sort_order || 0,
+    createdAt:           r.created_at || null,
+    createdByUserId:     r.created_by_user_id || null,
+    updatedAt:           r.updated_at || null,
+    updatedByUserId:     r.updated_by_user_id || null
+  };
+}
+
 function toSBUser(r)    {
   return {
     id:r.id, first_name:r.firstName||'', last_name:r.lastName||'',
@@ -23136,6 +23418,11 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_submittals').upsert(db.submittals.map(toSBSubmittal));
       if (r && r.error) errs.push('submittals: ' + r.error.message);
     }
+    // Spec sections (Round 5) — non-fatal if table missing
+    if ((db.specSections || []).length) {
+      var r = await supabaseClient.from('kmi_spec_sections').upsert(db.specSections.map(toSBSpecSection));
+      if (r && r.error) errs.push('spec_sections: ' + r.error.message);
+    }
     // Users
     if (db.users.length) {
       var r = await supabaseClient.from('kmi_users').upsert(db.users.map(toSBUser));
@@ -23241,7 +23528,7 @@ async function pullFromSupabase() {
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
-         mfgsRes, prodsRes, pdocsRes, subsRes] = await Promise.all([
+         mfgsRes, prodsRes, pdocsRes, subsRes, specRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -23262,7 +23549,8 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_manufacturers').select('*'),
       supabaseClient.from('kmi_products').select('*'),
       supabaseClient.from('kmi_product_documents').select('*'),
-      supabaseClient.from('kmi_submittals').select('*')
+      supabaseClient.from('kmi_submittals').select('*'),
+      supabaseClient.from('kmi_spec_sections').select('*').order('sort_order', {ascending:true})
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -23395,6 +23683,13 @@ async function pullFromSupabase() {
     } else if (subsRes && subsRes.error) {
       console.warn('kmi_submittals load error (table missing?):', subsRes.error.message);
       if (!Array.isArray(db.submittals)) db.submittals = [];
+    }
+    // Spec sections (Round 5) — same preserve-on-missing pattern
+    if (specRes && !specRes.error) {
+      db.specSections = (specRes.data || []).map(fromSBSpecSection);
+    } else if (specRes && specRes.error) {
+      console.warn('kmi_spec_sections load error (table missing?):', specRes.error.message);
+      if (!Array.isArray(db.specSections)) db.specSections = [];
     }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
