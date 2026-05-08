@@ -2044,16 +2044,23 @@ function normalizeRole(role) {
 }
 // Idempotent: force Fred/Mike to Admin and Mark to Project Manager. Runs on boot
 // and after every Supabase pull so their access can't be clobbered by stale cloud data.
+// Round 8: also seeds the title field — Mike & Fred are Admins by permission
+// but Project Managers by job, so outputs print the correct title.
 var SEED_ROLE_ENFORCE = [
-  {email:'fred@kmi-construction.com',       role:'Admin'},
-  {email:'mike@kmi-construction.com',       role:'Admin'},
-  {email:'mark.dunco@kmi-construction.com', role:'Project Manager'}
+  {email:'fred@kmi-construction.com',       role:'Admin',           title:'Project Manager'},
+  {email:'mike@kmi-construction.com',       role:'Admin',           title:'Project Manager'},
+  {email:'mark.dunco@kmi-construction.com', role:'Project Manager', title:'Project Manager'}
 ];
 function enforceSeedRoles() {
   var changed = false;
   SEED_ROLE_ENFORCE.forEach(function(fix){
     var u = db.users.find(function(x){ return (x.email || '').toLowerCase() === fix.email; });
-    if (u && u.role !== fix.role) { u.role = fix.role; changed = true; }
+    if (u) {
+      if (u.role !== fix.role)   { u.role  = fix.role;  changed = true; }
+      // Only seed title if the user hasn't set one explicitly — preserve
+      // any custom title an admin has typed via their profile.
+      if (fix.title && !u.title) { u.title = fix.title; changed = true; }
+    }
   });
   // Also normalize legacy roles on all other users
   db.users.forEach(function(u){
@@ -7062,20 +7069,32 @@ function _guessCompileFormat(fileName) {
   return '';
 }
 
-// Round 7: map a user role to a Procore-style job title for the
-// signature block. KMI users don't have a separate title field on the
-// users table today; this gives them a sensible default that they can
-// override directly in the compile dialog before generating.
+// Round 7+8: resolve the job title for a user object. Precedence:
+//   1. user.title (free-text field set on the user profile)
+//   2. role-as-title — fine for non-Admins because their roles are
+//      already real job titles ("Project Manager", "Project
+//      Coordinator", "Accounting", etc.). Admins get a blank fallback
+//      so the signature line is never inaccurate; they're prompted to
+//      set a custom title via their profile.
+//   3. ''
+function _userTitle(user) {
+  if (!user) return '';
+  var t = String(user.title || '').trim();
+  if (t) return t;
+  return _userRoleTitle(user.role);
+}
+
+// Map a permission role to a job-title fallback. The app's roles
+// (Admin / Project Manager / Project Coordinator / Accounting /
+// Superintendent / Foreman) are already proper job titles for
+// everyone except Admin — that one returns blank so the user is
+// nudged to set a real title via their profile.
 function _userRoleTitle(role) {
-  switch (String(role || '').toLowerCase()) {
-    case 'admin':      return 'Administrator';
-    case 'pm':         return 'Project Manager';
-    case 'pc':         return 'Project Coordinator';
-    case 'super':      return 'Superintendent';
-    case 'foreman':    return 'Foreman';
-    case 'accounting': return 'Accounting';
-    default:           return '';
-  }
+  var r = String(role || '').trim();
+  if (!r) return '';
+  if (r === 'Admin') return '';
+  // Anything else passes through as-is — they ARE job titles
+  return r;
 }
 
 // ── Dialog (Round 7 redesign) ────────────────────────────────────────
@@ -7196,7 +7215,7 @@ function showSubmittalPackageCompile(submittalId) {
   // Default cover comments — templated using project/package context.
   // The signature block uses the current user's profile; user can edit
   // any of this in the textarea before generating.
-  var userTitle = _userRoleTitle(u.role) || '';
+  var userTitle = _userTitle(u);
   var defaultComments =
     'Hello,\n\n' +
     'Attached is the ' + (anchor.packageName || 'submittal') +
@@ -7404,8 +7423,8 @@ function _renderCompileCoverSheet(doc, ctx) {
     doc.text(titleLines[ti], PAGE_W / 2, y, {align: 'center'});
     y += 18;
   }
-  // Gold accent underline
-  ln(LM, y - 4, RM, y - 4, 1.0, [200, 168, 75]);
+  // Round 8: title underline is black (was gold)
+  ln(LM, y - 4, RM, y - 4, 1.0, [0, 0, 0]);
   y += 10;
 
   // ── Metadata block (label-value, two-column grid) ─────────────────
@@ -7465,7 +7484,9 @@ function _renderCompileCoverSheet(doc, ctx) {
   // ── Transmittal Items table (per-document rows) ──────────────────
   sf('bold', 11, [0, 0, 0]);
   doc.text('Transmittal Items', LM, y);
-  y += 14;
+  // Round 8: Mike asked for more breathing room between the section
+  // title and the column headers.
+  y += 22;
 
   // Column layout: Format | Description | Date | Copies
   var COL_FMT_X    = LM;
@@ -7481,7 +7502,8 @@ function _renderCompileCoverSheet(doc, ctx) {
   doc.text('Date',        COL_DATE_X,   y);
   doc.text('Copies',      COL_COPIES_X, y, {align: 'right'});
   ln(LM, y + 3, RM, y + 3, 0.4, [180, 180, 180]);
-  y += 12;
+  // Round 8: more space between column headers and first data row.
+  y += 18;
 
   function ensureRoom(neededH) {
     if (y + neededH > FOOTER_Y - 30) {
@@ -7490,14 +7512,15 @@ function _renderCompileCoverSheet(doc, ctx) {
       y = BODY_TOP + 30;
       sf('bold', 11, [0, 0, 0]);
       doc.text('Transmittal Items (continued)', LM, y);
-      y += 16;
+      // Round 8: matching breathing-room on continuation pages
+      y += 22;
       sf('bold', 9, [60, 60, 60]);
       doc.text('Format',      COL_FMT_X,    y);
       doc.text('Description', COL_DESC_X,   y);
       doc.text('Date',        COL_DATE_X,   y);
       doc.text('Copies',      COL_COPIES_X, y, {align: 'right'});
       ln(LM, y + 3, RM, y + 3, 0.4, [180, 180, 180]);
-      y += 12;
+      y += 18;
     }
   }
 
@@ -12549,7 +12572,7 @@ function buildStandardCorPDF(c, p) {
 
   var YELLOW = [255, 240, 130];   // total-row highlight
   var KMI    = [42, 47, 92];      // dark navy used for headings
-  var ACCENT = [200, 168, 75];    // kmi gold accent
+  var ACCENT = [0, 0, 0];         // Round 8: previously gold (200,168,75); now black for any future divider use
 
   letterhead();
 
@@ -19541,6 +19564,9 @@ function userForm(u, opts) {
     emailField +
     '<div class="fgr"><label>Phone</label><input id="uf-phone" value="' + (u?u.phone:'') + '" placeholder="(555) 555-0000"></div>' +
     roleField +
+    '<div class="fgr"><label>Job title</label><input id="uf-title" value="' + (u && u.title ? u.title : '') + '" placeholder="e.g. Project Manager">' +
+      '<div style="font-size:11px;color:#888;margin-top:4px">Shown on output PDFs (transmittals, COR signatures, etc). Falls back to your role if blank — for Admins this means leaving the title line empty unless you set it explicitly.</div>' +
+    '</div>' +
     (selfEdit
       ? ''
       : '<div class="fgr"><label>Foundation PM code</label><input id="uf-fnd-pm" value="' + (u && u.foundationPmCode ? u.foundationPmCode : '') + '" placeholder="e.g. MJK" maxlength="10"><div style="font-size:11px;color:#888;margin-top:4px">Used on Foundation budget exports when this user is the assigned Project Manager.</div></div>') +
@@ -19585,6 +19611,10 @@ async function saveUser() {
     return;
   }
   var data = {firstName:first, lastName:last, email:email, phone:phone, role:role};
+  // Round 8: capture the user's job title independently of role.
+  // Role drives permissions; title drives what's printed on outputs.
+  var titleEl = g('uf-title');
+  if (titleEl) data.title = (titleEl.value || '').trim();
   // Apply signature only if the user actually changed it.
   // undefined = untouched, null = explicit removal, object = new upload.
   if (_pendingSignatureImage !== undefined) {
@@ -23354,6 +23384,7 @@ function toSBUser(r)    {
   return {
     id:r.id, first_name:r.firstName||'', last_name:r.lastName||'',
     email:r.email||'', phone:r.phone||'', role:r.role||'',
+    title:                r.title || '',
     password_hash:       r.passwordHash || null,
     password_salt:       r.passwordSalt || null,
     must_reset_password: !!r.mustResetPassword,
@@ -23367,6 +23398,7 @@ function fromSBUser(r)  {
   return {
     id:r.id, firstName:r.first_name||'', lastName:r.last_name||'',
     email:r.email||'', phone:r.phone||'', role:r.role||'',
+    title:              r.title || '',
     passwordHash:       r.password_hash || '',
     passwordSalt:       r.password_salt || '',
     mustResetPassword:  !!r.must_reset_password,
