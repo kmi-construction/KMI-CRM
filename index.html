@@ -5203,6 +5203,14 @@ var _subSrcMode      = 'library';  // 'library' | 'custom'
 // the loaded submittal in renderSubmittalProductsList; cleared on switch
 // to custom mode.
 var _editingSubmittalProductIds = [];
+// Round 9: doc IDs currently checked in the Documents preview. Driven
+// off the submittal's selectedDocIds array, augmented as products are
+// added (auto-check all of the new product's docs) and pruned as
+// products are removed. Saved verbatim to selectedDocIds on save.
+// null = legacy auto-all (nothing has been touched yet); array = the
+// explicit selection. Switches from null → array the moment the user
+// toggles any checkbox or adds/removes a product.
+var _editingSubmittalDocSelection = null;
 
 function subEsc(s) {
   return String(s == null ? '' : s)
@@ -5496,6 +5504,7 @@ function initNewSubmittal() {
   _editSubmittalId = null;
   _subSrcMode = 'library';
   _editingSubmittalProductIds = [];
+  _editingSubmittalDocSelection = null;
   nav('edit-submittal');
 }
 
@@ -5513,6 +5522,14 @@ function editSubmittal(id) {
   _editingSubmittalProductIds = (existing && Array.isArray(existing.productIds))
     ? existing.productIds.slice()
     : (existing && existing.productId ? [existing.productId] : []);
+  // Round 9: seed doc selection. Null on the record means legacy
+  // auto-all; the preview renderer will treat null as "every doc
+  // currently on every linked product is checked", and won't write
+  // anything back until the user actually toggles a box or
+  // adds/removes a product.
+  _editingSubmittalDocSelection = (existing && Array.isArray(existing.selectedDocIds))
+    ? existing.selectedDocIds.slice()
+    : null;
   nav('edit-submittal');
 }
 
@@ -5585,6 +5602,16 @@ function onAddSubmittalProduct(selectEl) {
   if (!_editingSubmittalProductIds.some(function(x){ return String(x) === String(pid); })) {
     _editingSubmittalProductIds.push(pid);
   }
+  // Round 9: materialize the doc selection (if it was still null/legacy
+  // auto-all) and add every doc on the newly-picked product. This means
+  // adding a product brings its docs in by default — the user can then
+  // uncheck what they don't want.
+  _editingSubmittalDocSelection = _materializeDocSelection(_editingSubmittalDocSelection, _editingSubmittalProductIds);
+  (db.productDocuments || []).forEach(function(d){
+    if (String(d.productId) === String(pid) && !_editingSubmittalDocSelection.some(function(x){ return String(x) === String(d.id); })) {
+      _editingSubmittalDocSelection.push(d.id);
+    }
+  });
   renderSubmittalProductsList(null);   // re-render without re-seeding
   renderSubmittalDocsPreview();
   // Reset the select so the same option can be re-added if removed later
@@ -5596,8 +5623,85 @@ function removeSubmittalProduct(pid) {
   _editingSubmittalProductIds = _editingSubmittalProductIds.filter(function(x){
     return String(x) !== String(pid);
   });
+  // Round 9: drop any doc selections tied to the removed product.
+  // Materialize first so we have a concrete array to filter even if
+  // the user hadn't touched the picker before.
+  _editingSubmittalDocSelection = _materializeDocSelection(_editingSubmittalDocSelection, _editingSubmittalProductIds.concat([pid]));
+  _editingSubmittalDocSelection = _editingSubmittalDocSelection.filter(function(docId){
+    var d = (db.productDocuments || []).find(function(x){ return String(x.id) === String(docId); });
+    return d && String(d.productId) !== String(pid);
+  });
   renderSubmittalProductsList(null);
   renderSubmittalDocsPreview();
+}
+
+// Round 9: turn a possibly-null doc selection (legacy auto-all) into a
+// concrete array containing every doc currently on the given products.
+// Idempotent on already-materialized arrays — just returns the array.
+function _materializeDocSelection(currentSelection, productIds) {
+  if (Array.isArray(currentSelection)) return currentSelection;
+  // null/undefined → seed with all docs of all linked products
+  var seeded = [];
+  (productIds || []).forEach(function(pid){
+    (db.productDocuments || []).forEach(function(d){
+      if (String(d.productId) === String(pid)) seeded.push(d.id);
+    });
+  });
+  return seeded;
+}
+
+// Round 9: per-doc checkbox toggle on the Documents preview.
+function onSubmittalDocCheck(docId, checked) {
+  if (!hasFull('edit-submittals')) return;
+  // Materialize first so we always operate on a concrete array.
+  _editingSubmittalDocSelection = _materializeDocSelection(_editingSubmittalDocSelection, _editingSubmittalProductIds);
+  // Coerce numeric IDs to numbers for consistent comparison
+  var coerced = Number(docId);
+  var keyId = (isFinite(coerced) && String(coerced) === String(docId)) ? coerced : docId;
+  var has = _editingSubmittalDocSelection.some(function(x){ return String(x) === String(keyId); });
+  if (checked && !has) {
+    _editingSubmittalDocSelection.push(keyId);
+  } else if (!checked && has) {
+    _editingSubmittalDocSelection = _editingSubmittalDocSelection.filter(function(x){ return String(x) !== String(keyId); });
+  }
+  // Update the docs-selected count in this product's header without re-rendering
+  // the whole preview (avoids losing scroll position on long lists).
+  _refreshSubmittalDocCounts();
+}
+
+// Round 9: bulk select-all / deselect-all for one product.
+function onSubmittalDocSelectAll(productId, checked) {
+  if (!hasFull('edit-submittals')) return;
+  _editingSubmittalDocSelection = _materializeDocSelection(_editingSubmittalDocSelection, _editingSubmittalProductIds);
+  var prodDocIds = (db.productDocuments || [])
+    .filter(function(d){ return String(d.productId) === String(productId); })
+    .map(function(d){ return d.id; });
+  if (checked) {
+    prodDocIds.forEach(function(did){
+      if (!_editingSubmittalDocSelection.some(function(x){ return String(x) === String(did); })) {
+        _editingSubmittalDocSelection.push(did);
+      }
+    });
+  } else {
+    _editingSubmittalDocSelection = _editingSubmittalDocSelection.filter(function(x){
+      return !prodDocIds.some(function(did){ return String(did) === String(x); });
+    });
+  }
+  renderSubmittalDocsPreview();   // full re-render — many checkboxes change at once
+}
+
+// Update only the per-product "X of Y selected" header counts without
+// re-rendering the entire docs preview.
+function _refreshSubmittalDocCounts() {
+  if (!Array.isArray(_editingSubmittalDocSelection)) return;
+  var sel = {};
+  _editingSubmittalDocSelection.forEach(function(id){ sel[String(id)] = true; });
+  (_editingSubmittalProductIds || []).forEach(function(pid){
+    var prodDocs = (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(pid); });
+    var checked  = prodDocs.filter(function(d){ return sel[String(d.id)]; }).length;
+    var el = document.getElementById('esb-doc-count-' + String(pid));
+    if (el) el.textContent = checked + ' of ' + prodDocs.length + ' selected';
+  });
 }
 
 function renderEditSubmittalPage() {
@@ -5758,6 +5862,23 @@ function renderSubmittalDocsPreview() {
   }
   card.style.display = '';
 
+  var canEdit = canAccess('edit-submittals') === 'full';
+
+  // Round 9: build a quick lookup of which doc IDs are currently
+  // checked. If the selection is null (legacy auto-all), pretend every
+  // doc on every linked product is checked — without mutating module
+  // state, so untouched submittals stay in the legacy shape on save.
+  var sel = {};
+  if (Array.isArray(_editingSubmittalDocSelection)) {
+    _editingSubmittalDocSelection.forEach(function(id){ sel[String(id)] = true; });
+  } else {
+    picked.forEach(function(pid){
+      (db.productDocuments || []).forEach(function(d){
+        if (String(d.productId) === String(pid)) sel[String(d.id)] = true;
+      });
+    });
+  }
+
   // For each picked product, list its docs in a sub-section. Missing
   // products (referenced by id but no longer in db.products) get their
   // own warning row.
@@ -5771,11 +5892,26 @@ function renderSubmittalDocsPreview() {
     var docs = (db.productDocuments || []).filter(function(d){ return String(d.productId) === String(prod.id); });
     var mfg = getManufacturer(prod.manufacturerId);
     var hdr = (mfg && mfg.name ? mfg.name + ' — ' : '') + (prod.name || '');
+    var checkedCount = docs.filter(function(d){ return sel[String(d.id)]; }).length;
+    var allChecked = docs.length > 0 && checkedCount === docs.length;
+
     var html = '<div style="margin-bottom:14px">' +
-      '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px solid #e8e8e8;margin-bottom:6px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #e8e8e8;margin-bottom:6px;gap:12px">' +
         '<span style="font-weight:600;font-size:12px">' + subEsc(hdr) + '</span>' +
-        '<span style="color:#888;font-size:11px">' + docs.length + ' doc' + (docs.length === 1 ? '' : 's') + '</span>' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<span id="esb-doc-count-' + subEsc(prod.id) + '" style="color:#888;font-size:11px">' +
+            checkedCount + ' of ' + docs.length + ' selected' +
+          '</span>' +
+          (canEdit && docs.length > 0
+            ? '<label style="font-size:11px;color:#666;cursor:pointer;display:inline-flex;align-items:center;gap:4px">' +
+                '<input type="checkbox" ' + (allChecked ? 'checked' : '') +
+                ' onchange="onSubmittalDocSelectAll(\'' + subEsc(prod.id) + '\', this.checked)">' +
+                'All' +
+              '</label>'
+            : '') +
+        '</div>' +
       '</div>';
+
     if (!docs.length) {
       html += '<div style="padding:8px 10px;color:#aaa;font-size:12px;font-style:italic">No documents on this product yet. Add them in the Product Library.</div>';
     } else {
@@ -5786,6 +5922,7 @@ function renderSubmittalDocsPreview() {
         return 0;
       });
       html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+        '<th style="padding:5px 8px;text-align:center;width:40px">Incl.</th>' +
         '<th style="padding:5px 8px;text-align:left;width:80px">Status</th>' +
         '<th style="padding:5px 8px;text-align:left">Document</th>' +
         '<th style="padding:5px 8px;text-align:left;width:130px">Type</th>' +
@@ -5794,7 +5931,14 @@ function renderSubmittalDocsPreview() {
       '</tr></thead><tbody>';
       docs.forEach(function(d){
         var titleStr = d.title || d.fileName || '—';
-        html += '<tr>' +
+        var isChecked = !!sel[String(d.id)];
+        var rowOpacity = isChecked ? '' : 'opacity:0.55';
+        html += '<tr style="' + rowOpacity + '">' +
+          '<td style="padding:5px 8px;text-align:center">' +
+            '<input type="checkbox" ' + (isChecked ? 'checked' : '') +
+            (canEdit ? '' : ' disabled') +
+            ' onchange="onSubmittalDocCheck(\'' + subEsc(d.id) + '\', this.checked)">' +
+          '</td>' +
           '<td style="padding:5px 8px">' + _docStalePill(d) + '</td>' +
           '<td style="padding:5px 8px;word-break:break-all">' + subEsc(titleStr) + '</td>' +
           '<td style="padding:5px 8px">' + subEsc(d.documentType || '—') + '</td>' +
@@ -5810,8 +5954,10 @@ function renderSubmittalDocsPreview() {
   });
 
   sec.innerHTML = '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
-    'Documents currently on the picked product' + (picked.length === 1 ? '' : 's') + ' in the Product Library. ' +
-    'Round 4 compile pulls all of these into the package PDF in the order shown.' +
+    'Check which documents on each linked product to include in this submittal. ' +
+    'A separate Brick Samples submittal and Brick Test Reports submittal can both reference Endicott Ironspot ' +
+    'while pulling different docs. New products are auto-checked when added; uncheck individually or use the ' +
+    '"All" toggle in each product header.' +
     '</div>' + blocks.join('');
 }
 
@@ -5896,6 +6042,15 @@ async function saveSubmittal() {
     packageName:         (g('esb-pkg').value    || '').trim(),
     productIds:          productIds,
     productId:           productIds.length ? productIds[0] : null,
+    // Round 9: persist the doc selection. If user never touched a
+    // checkbox or product, _editingSubmittalDocSelection stays null
+    // and we save it as null (legacy auto-all). The moment they
+    // touch anything, it materializes into an explicit array.
+    selectedDocIds:      isCustom
+                           ? null   // custom items don't use library selection
+                           : (Array.isArray(_editingSubmittalDocSelection)
+                                ? _editingSubmittalDocSelection.slice()
+                                : null),
     isCustom:            isCustom,
     status:              status,
     response:            response,
@@ -6309,6 +6464,7 @@ async function confirmSubmittalImport() {
       packageName:         src.packageName,
       productIds:          [],
       productId:           null,
+      selectedDocIds:      null,
       isCustom:            false,
       status:              src.status || 'draft',
       response:            src.response || '',
@@ -6822,6 +6978,12 @@ async function createSubmittalRevision(originalId) {
     packageName:         orig.packageName,
     productIds:          orig.isCustom ? [] : (Array.isArray(orig.productIds) ? orig.productIds.slice() : (orig.productId ? [orig.productId] : [])),
     productId:           orig.isCustom ? null : orig.productId,
+    // Round 9: revisions inherit the same doc selection so the
+    // "Brick Samples Rev .1" still sends the same sample photo as
+    // the parent did. Custom items get null (no library docs).
+    selectedDocIds:      orig.isCustom
+                           ? null
+                           : (Array.isArray(orig.selectedDocIds) ? orig.selectedDocIds.slice() : null),
     isCustom:            !!orig.isCustom,
     status:              'draft',
     response:            '',
@@ -7024,22 +7186,29 @@ function _gatherCompileDocsForSubmittal(s) {
     });
   } else {
     var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+    // Round 9: per-submittal doc selection. null/undefined on the
+    // record means legacy auto-all (include every doc); an explicit
+    // array filters to just those IDs. Build a quick lookup once.
+    var hasSelection = Array.isArray(s.selectedDocIds);
+    var selSet = {};
+    if (hasSelection) s.selectedDocIds.forEach(function(id){ selSet[String(id)] = true; });
     pids.forEach(function(pid){
       (db.productDocuments || []).forEach(function(d){
-        if (String(d.productId) === String(pid)) {
-          out.push({
-            bucket:      PRODUCT_LIBRARY_BUCKET,
-            doc:         d,
-            kind:        'library',
-            productId:   pid,
-            // documentType comes from the Product Library — values like
-            // "Sample", "Product Data Sheet", "Test Report", "Letter of
-            // Compliance". These map directly to Procore's Format column.
-            format:      d.documentType || 'Documents',
-            fileName:    d.fileName || d.title || '—',
-            dateStr:     _formatProcoreDate(d.issueDate) || _formatProcoreDate(d.uploadedAt) || _formatProcoreDate(new Date().toISOString())
-          });
-        }
+        if (String(d.productId) !== String(pid)) return;
+        // Skip docs not in the selection (when one is set)
+        if (hasSelection && !selSet[String(d.id)]) return;
+        out.push({
+          bucket:      PRODUCT_LIBRARY_BUCKET,
+          doc:         d,
+          kind:        'library',
+          productId:   pid,
+          // documentType comes from the Product Library — values like
+          // "Sample", "Product Data Sheet", "Test Report", "Letter of
+          // Compliance". These map directly to Procore's Format column.
+          format:      d.documentType || 'Documents',
+          fileName:    d.fileName || d.title || '—',
+          dateStr:     _formatProcoreDate(d.issueDate) || _formatProcoreDate(d.uploadedAt) || _formatProcoreDate(new Date().toISOString())
+        });
       });
     });
   }
@@ -23298,6 +23467,11 @@ function toSBSubmittal(r) {
                    ? r.productIds[0]
                    : (r.productId || null),
     is_custom:!!r.isCustom,
+    // Round 9: per-submittal document selection. null = auto-include
+    // all docs (legacy default); array = explicit subset.
+    selected_doc_ids: (r.selectedDocIds === null || r.selectedDocIds === undefined)
+      ? null
+      : (Array.isArray(r.selectedDocIds) ? r.selectedDocIds : []),
     status:r.status||'draft',
     response:r.response||'',
     prev_submittal_id:r.prevSubmittalId||null,
@@ -23332,6 +23506,12 @@ function fromSBSubmittal(r) {
     productId:   r.product_id ||
                  (Array.isArray(r.product_ids) && r.product_ids.length ? r.product_ids[0] : null),
     isCustom:!!r.is_custom,
+    // Round 9: preserve the null vs array distinction. null/undefined
+    // means "include all docs" (legacy auto-behavior). The compile
+    // path treats null and array specially.
+    selectedDocIds: (r.selected_doc_ids === null || r.selected_doc_ids === undefined)
+      ? null
+      : (Array.isArray(r.selected_doc_ids) ? r.selected_doc_ids : []),
     // Status / response (Round 3 split). If the row was last written
     // before the split, the legacy single-status values may still be
     // present — translate them on read so the UI never sees them.
