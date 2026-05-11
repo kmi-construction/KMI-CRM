@@ -802,6 +802,17 @@ textarea{resize:vertical;min-height:72px}
       <div id="nprj-mat-list-section"></div>
     </div>
 
+    <!-- Project parameters (Form-fill Round 1) — answers to the
+         questions defined in Templates. Reused across submittals to
+         auto-fill AcroForm PDFs (Round 4). -->
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Project parameters</span>
+        <span style="font-size:11px;color:#888;font-weight:400">Answers reused to auto-fill submittal forms (block sizes, finishes, wire sizes, etc.)</span>
+      </div>
+      <div id="nprj-parameters-section"></div>
+    </div>
+
     <!-- Attached files (Round 2.5) — vendor quotes, drawings, anything -->
     <div class="card">
       <div class="ch">
@@ -944,6 +955,21 @@ textarea{resize:vertical;min-height:72px}
       <button class="btn btn-sm btn-p" style="margin-left:auto" onclick="showAddSpecSection()">+ Add</button>
     </div>
     <div id="t-spec-sections"></div>
+  </div>
+
+  <!-- ── Project Parameters (Form-fill Round 1) ──────────────────────
+       Master list of project-level questions (Block Size, Wire Size,
+       Mortar Color, etc.) whose answers are captured on each project
+       and reused to auto-fill fillable PDF forms attached to submittals
+       (Form-fill Round 4). Per-project values live in
+       project.formParameters; this card manages the master list. -->
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Project parameters</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Questions answered once per project — drive auto-fill on submittal forms</span>
+      <button class="btn btn-sm btn-p" style="margin-left:auto" onclick="showAddProjectParameter()">+ Add</button>
+    </div>
+    <div id="t-project-parameters"></div>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
     <div class="card"><div class="ch"><span class="ct">Inclusions</span><button class="btn btn-sm btn-p" onclick="showAddClar('std')">+ Add</button></div><div id="t-std"></div></div>
@@ -1807,6 +1833,13 @@ var DB_DEFAULTS = {
   // as a fallback for environments where the round5 migration hasn't
   // run yet.
   specSections: [],
+  // Project parameters (Form-fill Round 1) — master list managed via
+  // Templates. Each parameter (e.g. "Block Size", "Wire Size", "Mortar
+  // Color") gets a name, input type, and optional option list. Per-project
+  // values live on db.projects[i].formParameters (JSONB keyed by
+  // parameter id). Bound to AcroForm questions on product documents in
+  // Form-fill Round 2 to drive default fill values.
+  projectParameters: [],
   // T&M Tickets — daily field tickets created by foremen, signed by customer
   // superintendent, approved by KMI PM, then rolled into a Change Order Request.
   // See the COR module (separate) for how rolled-up tickets feed CORs.
@@ -20235,6 +20268,7 @@ function initNewProject() {
   // render in disabled mode with a "save first, then re-open to apply" hint.
   renderProjectLaborRateSection();
   renderProjectMaterialList();
+  renderProjectParametersSection();
   renderProjectAttachments();
   renderProjectSubmittalsSection();
 
@@ -20394,6 +20428,7 @@ function editProject(id) {
   // _editProjectId is set, so the sections render in active mode.
   renderProjectLaborRateSection();
   renderProjectMaterialList();
+  renderProjectParametersSection();
   renderProjectAttachments();
   renderProjectSubmittalsSection();
 
@@ -21157,6 +21192,7 @@ function renderTemplates() {
   renderBudgetSettingsForms();
   renderAutoRoutes();
   renderSpecSections();
+  renderProjectParameters();
 }
 
 // ── Spec Sections (Round 5) ─────────────────────────────────────────
@@ -21365,6 +21401,431 @@ async function deleteSpecSection(id) {
     }
   }
   renderSpecSections();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// PROJECT PARAMETERS — Form-fill Round 1
+// ═══════════════════════════════════════════════════════════════════
+// Master list of "questions" each project answers (Block Size, Wire
+// Size, Mortar Color, etc.). Per-project answers ride on the project
+// record's formParameters JSONB. In Form-fill Round 2 these parameters
+// will be bindable to AcroForm fields on product documents so the
+// compiled submittal PDFs come out with the right boxes checked.
+//
+// Lifecycle: a parameter can be active or inactive. Inactive parameters
+// stay in the master list but no longer appear in the project edit UI;
+// any project values already stored for them remain in the JSONB so
+// reactivating the parameter brings the prior answers back.
+
+var PROJ_PARAM_INPUT_TYPES = [
+  { key: 'single_select', label: 'Single-select (one option)' },
+  { key: 'multi_select',  label: 'Multi-select (one or more options)' },
+  { key: 'text',          label: 'Text' },
+  { key: 'number',        label: 'Number' }
+];
+
+var _editProjectParameterId = null;
+
+function projParamInputTypeLabel(key) {
+  var t = PROJ_PARAM_INPUT_TYPES.find(function(x){ return x.key === key; });
+  return t ? t.label : (key || '—');
+}
+
+function renderProjectParameters() {
+  var el = g('t-project-parameters');
+  if (!el) return;
+  // Show all rows here (active + inactive) so admins can see what's
+  // been deactivated and reactivate if needed.
+  var list = (db.projectParameters || []).slice().sort(function(a, b){
+    var ao = (a.sortOrder || 0), bo = (b.sortOrder || 0);
+    if (ao !== bo) return ao - bo;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+
+  if (!list.length) {
+    el.innerHTML = '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center">' +
+      'No project parameters yet — click "+ Add" to define one. Common starters: ' +
+      'Block Size (multi-select), Wire Size (single), Finish (single), Mortar Color (text).' +
+    '</div>';
+    return;
+  }
+
+  var canEdit = canAccess('templates') === 'full';
+  var html = '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+    '<th style="padding:6px 8px;text-align:left">Name</th>' +
+    '<th style="padding:6px 8px;text-align:left;width:200px">Type</th>' +
+    '<th style="padding:6px 8px;text-align:left">Options</th>' +
+    '<th style="padding:6px 8px;text-align:center;width:80px">Active</th>' +
+    '<th style="padding:6px 8px;text-align:right;width:70px">Sort</th>' +
+    '<th style="padding:6px 8px;width:140px"></th>' +
+    '</tr></thead><tbody>';
+  list.forEach(function(s){
+    var dim = (s.isActive === false) ? 'opacity:0.55' : '';
+    var optsTxt = '';
+    if (s.inputType === 'single_select' || s.inputType === 'multi_select') {
+      var opts = Array.isArray(s.options) ? s.options : [];
+      optsTxt = opts.length
+        ? '<span style="color:#666">' + plEsc(opts.join(', ')) + '</span>'
+        : '<span style="color:#A32D2D;font-style:italic">no options defined</span>';
+    } else {
+      optsTxt = '<span style="color:#aaa">—</span>';
+    }
+    html += '<tr style="' + dim + '">' +
+      '<td style="padding:6px 8px"><strong>' + plEsc(s.name || '') + '</strong>' +
+        (s.description ? '<div style="font-size:11px;color:#888;margin-top:2px">' + plEsc(s.description) + '</div>' : '') +
+      '</td>' +
+      '<td style="padding:6px 8px">' + plEsc(projParamInputTypeLabel(s.inputType)) + '</td>' +
+      '<td style="padding:6px 8px">' + optsTxt + '</td>' +
+      '<td style="padding:6px 8px;text-align:center;font-size:11px">' +
+        (s.isActive === false ? '<span style="color:#888">inactive</span>' : '<span style="color:#3B6D11">●</span>') +
+      '</td>' +
+      '<td style="padding:6px 8px;text-align:right;color:#888">' + (s.sortOrder || 0) + '</td>' +
+      '<td style="padding:6px 8px;text-align:right">' +
+        (canEdit ? '<button class="btn btn-sm" onclick="showEditProjectParameter(' + s.id + ')">✎ Edit</button> ' : '') +
+        (canEdit ? '<button class="btn btn-sm" onclick="deleteProjectParameter(' + s.id + ')" style="color:#A32D2D">×</button>' : '') +
+      '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function _projectParameterFormHtml(s) {
+  s = s || {};
+  var typeOpts = PROJ_PARAM_INPUT_TYPES.map(function(t){
+    var sel = (s.inputType === t.key) ? ' selected' : '';
+    return '<option value="' + t.key + '"' + sel + '>' + plEsc(t.label) + '</option>';
+  }).join('');
+  var optsTextarea = Array.isArray(s.options) ? s.options.join('\n') : '';
+  return '<div class="fg">' +
+    '<div class="fgr full"><label>Name *</label>' +
+      '<input id="pp-name" value="' + plEsc(s.name || '') + '" placeholder="e.g. Block Size">' +
+    '</div>' +
+    '<div class="fgr full"><label>Description / helper hint</label>' +
+      '<input id="pp-desc" value="' + plEsc(s.description || '') + '" placeholder="Optional — shown under the field on the project edit page">' +
+    '</div>' +
+    '<div class="fgr"><label>Input type *</label>' +
+      '<select id="pp-type" onchange="onProjParamTypeChange()">' + typeOpts + '</select>' +
+    '</div>' +
+    '<div class="fgr"><label>Sort order</label>' +
+      '<input id="pp-sort" type="number" step="10" value="' + (s.sortOrder || 0) + '">' +
+      '<div style="font-size:10px;color:#888;margin-top:3px">Lower numbers first. Convention: increment by 10.</div>' +
+    '</div>' +
+    '<div class="fgr full" id="pp-opts-row"><label>Options (one per line) *</label>' +
+      '<textarea id="pp-opts" rows="6" placeholder="One option per line, e.g.\n4&quot;\n6&quot;\n8&quot;\n10&quot;\n12&quot;\n14&quot;\n16&quot;">' + plEsc(optsTextarea) + '</textarea>' +
+      '<div style="font-size:10px;color:#888;margin-top:3px">Required for single-select and multi-select. Ignored for text/number.</div>' +
+    '</div>' +
+    '<div class="fgr"><label>Active</label>' +
+      '<select id="pp-active">' +
+        '<option value="true"' +  ((s.isActive === false) ? '' : ' selected') + '>Active (shown on project edit)</option>' +
+        '<option value="false"' + ((s.isActive === false) ? ' selected' : '') + '>Inactive (hidden; stored values preserved)</option>' +
+      '</select>' +
+    '</div>' +
+  '</div>';
+}
+
+// Toggle visibility of the options textarea based on selected input type
+function onProjParamTypeChange() {
+  var typeEl = g('pp-type');
+  var optsRow = g('pp-opts-row');
+  if (!typeEl || !optsRow) return;
+  var t = typeEl.value;
+  optsRow.style.display = (t === 'single_select' || t === 'multi_select') ? '' : 'none';
+}
+
+function showAddProjectParameter() {
+  if (!requireFull('templates', 'add project parameters')) return;
+  _editProjectParameterId = null;
+  var maxSort = 0;
+  (db.projectParameters || []).forEach(function(s){ if ((s.sortOrder || 0) > maxSort) maxSort = s.sortOrder || 0; });
+  var seed = { sortOrder: maxSort + 10, isActive: true, inputType: 'single_select', options: [] };
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add project parameter</div>' +
+    '<div class="msb">Adds a question that gets answered once per project and reused to auto-fill submittal forms</div>' +
+    _projectParameterFormHtml(seed) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" onclick="saveProjectParameter()">Add parameter</button></div>');
+  // Set options row visibility now that the modal is in the DOM
+  setTimeout(onProjParamTypeChange, 0);
+}
+
+function showEditProjectParameter(id) {
+  if (!requireFull('templates', 'edit project parameters')) return;
+  var s = (db.projectParameters || []).find(function(x){ return String(x.id) === String(id); });
+  if (!s) { alert('Parameter not found.'); return; }
+  _editProjectParameterId = id;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Edit project parameter</div>' +
+    '<div class="msb">' + plEsc(s.name || '') + '</div>' +
+    _projectParameterFormHtml(s) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" onclick="saveProjectParameter()">Save changes</button></div>');
+  setTimeout(onProjParamTypeChange, 0);
+}
+
+async function saveProjectParameter() {
+  var name      = (g('pp-name').value || '').trim();
+  var desc      = (g('pp-desc').value || '').trim();
+  var inputType = (g('pp-type').value || 'single_select').trim();
+  var sortRaw   = (g('pp-sort').value || '0').trim();
+  var optsRaw   = (g('pp-opts').value || '').trim();
+  var isActive  = (g('pp-active').value !== 'false');
+
+  if (!name) { alert('Name is required.'); return; }
+  if (!PROJ_PARAM_INPUT_TYPES.some(function(t){ return t.key === inputType; })) {
+    alert('Invalid input type.'); return;
+  }
+
+  var options = [];
+  if (inputType === 'single_select' || inputType === 'multi_select') {
+    options = optsRaw.split(/\r?\n/).map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+    if (!options.length) { alert('Please enter at least one option (one per line).'); return; }
+    // Dedupe options while preserving order
+    var seen = {};
+    options = options.filter(function(o){
+      var k = o.toLowerCase();
+      if (seen[k]) return false;
+      seen[k] = true;
+      return true;
+    });
+  }
+
+  // Dedupe by name (case-insensitive)
+  var nameLc = name.toLowerCase();
+  var clash = (db.projectParameters || []).find(function(x){
+    return String(x.id) !== String(_editProjectParameterId) &&
+           String(x.name || '').toLowerCase() === nameLc;
+  });
+  if (clash) {
+    alert('A parameter named "' + clash.name + '" already exists. Edit that one or pick a different name.');
+    return;
+  }
+
+  var sortOrder = parseInt(sortRaw, 10);
+  if (!isFinite(sortOrder)) sortOrder = 0;
+
+  var nowIso = new Date().toISOString();
+  var data = {
+    name:        name,
+    description: desc,
+    inputType:   inputType,
+    options:     options,
+    sortOrder:   sortOrder,
+    isActive:    isActive,
+    updatedAt:   nowIso,
+    updatedByUserId: _currentUser ? _currentUser.id : null
+  };
+
+  if (!Array.isArray(db.projectParameters)) db.projectParameters = [];
+  var record;
+  if (_editProjectParameterId) {
+    record = (db.projectParameters || []).find(function(x){ return String(x.id) === String(_editProjectParameterId); });
+    if (record) Object.assign(record, data);
+  } else {
+    record = data;
+    record.id = Date.now();
+    record.createdAt = nowIso;
+    record.createdByUserId = _currentUser ? _currentUser.id : null;
+    db.projectParameters.push(record);
+  }
+  saveDB();
+
+  if (supabaseClient && record) {
+    try {
+      var r = await supabaseClient.from('kmi_project_parameters').upsert(toSBProjectParameter(record));
+      if (r && r.error) console.warn('project parameter push warning:', r.error.message);
+    } catch (e) {
+      console.warn('project parameter push threw:', e);
+    }
+  }
+
+  closeModal();
+  _editProjectParameterId = null;
+  renderProjectParameters();
+  // If a project edit page is currently open, refresh its parameters section
+  // so the new parameter shows up immediately without a navigation.
+  if (_editProjectId) renderProjectParametersSection();
+}
+
+async function deleteProjectParameter(id) {
+  if (!requireFull('templates', 'delete project parameters')) return;
+  var s = (db.projectParameters || []).find(function(x){ return String(x.id) === String(id); });
+  if (!s) return;
+
+  // Count projects that have a stored value for this parameter
+  var projUsage = (db.projects || []).filter(function(p){
+    return p.formParameters && p.formParameters[String(s.id)] !== undefined;
+  }).length;
+
+  var msg = 'Delete project parameter "' + s.name + '"?';
+  if (projUsage) {
+    msg += '\n\nStored on ' + projUsage + ' project' + (projUsage === 1 ? '' : 's') +
+      '. Deleting removes the parameter definition; the stored answers on those projects will become orphaned (still in the database but no longer editable from the project page).\n\n' +
+      'To hide the parameter without losing its answers, click Cancel and use Edit → set Active to Inactive instead.';
+  }
+  if (!confirm(msg)) return;
+
+  db.projectParameters = (db.projectParameters || []).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_project_parameters').delete().eq('id', id);
+      if (r && r.error) console.warn('project parameter delete warning:', r.error.message);
+    } catch (e) {
+      console.warn('project parameter delete threw:', e);
+    }
+  }
+  renderProjectParameters();
+  if (_editProjectId) renderProjectParametersSection();
+}
+
+// ── Per-project Parameter values (Project Edit page) ────────────────
+// Renders one input per active parameter into nprj-parameters-section.
+// Values save on change to the in-memory project record. Push to
+// Supabase happens via the existing saveProject() flow (which writes
+// the whole project record including form_parameters JSONB).
+
+function _projParamEscId(id) {
+  return String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function renderProjectParametersSection() {
+  var el = g('nprj-parameters-section');
+  if (!el) return;
+
+  // Pre-save: nothing to show yet
+  if (!_editProjectId) {
+    el.innerHTML = '<div style="font-size:12px;color:#888">' +
+      'Save the project first, then re-open it to set parameter values. ' +
+      '<br>Parameters are defined in <strong>Templates → Project parameters</strong>.' +
+    '</div>';
+    return;
+  }
+
+  var p = getProj(_editProjectId);
+  if (!p) { el.innerHTML = ''; return; }
+  if (!p.formParameters || typeof p.formParameters !== 'object') p.formParameters = {};
+
+  var params = (db.projectParameters || []).slice()
+    .filter(function(s){ return s.isActive !== false; })
+    .sort(function(a, b){
+      var ao = (a.sortOrder || 0), bo = (b.sortOrder || 0);
+      if (ao !== bo) return ao - bo;
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+
+  if (!params.length) {
+    el.innerHTML = '<div style="font-size:12px;color:#888">' +
+      'No project parameters defined yet. Add some in <strong>Templates → Project parameters</strong>. ' +
+      'Common starters: Block Size, Wire Size, Mortar Color, Finish.' +
+    '</div>';
+    return;
+  }
+
+  var canEdit = canAccess('edit-customers') === 'full' ||
+                canAccess('templates') === 'full' ||
+                (_currentUser && _currentUser.role === 'Admin') ||
+                (_currentUser && _currentUser.role === 'Project Manager') ||
+                (_currentUser && _currentUser.role === 'Project Coordinator');
+
+  var html = '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
+    'These answers are reused to auto-fill submittal forms on this project. ' +
+    'Edits save immediately.' +
+  '</div>' +
+  '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
+
+  params.forEach(function(param){
+    var safeId = _projParamEscId(param.id);
+    var stored = p.formParameters[String(param.id)];
+    var disabled = canEdit ? '' : ' disabled';
+    var input = '';
+
+    if (param.inputType === 'single_select') {
+      var opts = '<option value="">— Not set —</option>' +
+        (param.options || []).map(function(o){
+          var sel = (stored === o) ? ' selected' : '';
+          return '<option value="' + plEsc(o) + '"' + sel + '>' + plEsc(o) + '</option>';
+        }).join('');
+      input = '<select id="ppv-' + safeId + '"' + disabled +
+        ' onchange="onProjectParameterChange(\'' + plEsc(String(param.id)) + '\', \'single\')">' +
+        opts + '</select>';
+    } else if (param.inputType === 'multi_select') {
+      var arr = Array.isArray(stored) ? stored : (stored ? [stored] : []);
+      input = '<div id="ppv-' + safeId + '" style="border:1px solid #ddd;border-radius:3px;padding:6px 8px;max-height:120px;overflow:auto;background:#fff">' +
+        (param.options || []).map(function(o){
+          var chk = (arr.indexOf(o) !== -1) ? ' checked' : '';
+          return '<label style="display:flex;align-items:center;gap:6px;font-size:12px;padding:2px 0;cursor:pointer">' +
+            '<input type="checkbox" value="' + plEsc(o) + '"' + chk + disabled +
+            ' onchange="onProjectParameterChange(\'' + plEsc(String(param.id)) + '\', \'multi\')">' +
+            plEsc(o) +
+          '</label>';
+        }).join('') +
+      '</div>';
+    } else if (param.inputType === 'number') {
+      var val = (stored !== undefined && stored !== null) ? String(stored) : '';
+      input = '<input id="ppv-' + safeId + '" type="number" step="any" value="' + plEsc(val) + '"' + disabled +
+        ' onchange="onProjectParameterChange(\'' + plEsc(String(param.id)) + '\', \'number\')">';
+    } else { // text
+      input = '<input id="ppv-' + safeId + '" type="text" value="' + plEsc(stored || '') + '"' + disabled +
+        ' onchange="onProjectParameterChange(\'' + plEsc(String(param.id)) + '\', \'text\')">';
+    }
+
+    html += '<div class="fgr" style="margin:0">' +
+      '<label style="font-weight:600">' + plEsc(param.name) + '</label>' +
+      input +
+      (param.description
+        ? '<div style="font-size:11px;color:#888;margin-top:3px">' + plEsc(param.description) + '</div>'
+        : '') +
+    '</div>';
+  });
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+// Called on every parameter input change. Writes the value into the
+// project's formParameters object and persists locally + to Supabase.
+async function onProjectParameterChange(paramId, kind) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId);
+  if (!p) return;
+  if (!p.formParameters || typeof p.formParameters !== 'object') p.formParameters = {};
+
+  var safeId = _projParamEscId(paramId);
+  var el = g('ppv-' + safeId);
+  if (!el) return;
+
+  var newVal;
+  if (kind === 'multi') {
+    var boxes = el.querySelectorAll('input[type=checkbox]');
+    var arr = [];
+    boxes.forEach(function(cb){ if (cb.checked) arr.push(cb.value); });
+    newVal = arr;
+  } else if (kind === 'number') {
+    var n = parseFloat(el.value);
+    newVal = isFinite(n) ? n : null;
+  } else { // single, text
+    newVal = (el.value || '').trim();
+  }
+
+  // Clear key entirely when value is empty / empty array / null
+  var isEmpty = newVal === '' || newVal === null || (Array.isArray(newVal) && newVal.length === 0);
+  if (isEmpty) {
+    delete p.formParameters[String(paramId)];
+  } else {
+    p.formParameters[String(paramId)] = newVal;
+  }
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+      if (r && r.error) console.warn('project formParameters push warning:', r.error.message);
+    } catch (e) {
+      console.warn('project formParameters push threw:', e);
+    }
+  }
 }
 
 // ── Foundation master data status indicators on Templates page ──────────
@@ -23615,6 +24076,42 @@ function fromSBSpecSection(r) {
   };
 }
 
+// ── Project Parameter mappers (Form-fill Round 1) ───────────────
+// Master list of "questions" each project answers (Block Size, Wire
+// Size, Mortar Color, etc.). Per-project answers ride on the project
+// record's formParameters JSONB. Bound to AcroForm questions on
+// product documents in Form-fill Round 2 to seed default fill values.
+function toSBProjectParameter(r) {
+  return {
+    id:                  r.id,
+    name:                r.name || '',
+    description:         r.description || '',
+    input_type:          r.inputType || 'single_select',
+    options:             Array.isArray(r.options) ? r.options : [],
+    sort_order:          r.sortOrder || 0,
+    is_active:           (r.isActive !== false),
+    created_at:          r.createdAt || null,
+    created_by_user_id:  r.createdByUserId || null,
+    updated_at:          r.updatedAt || null,
+    updated_by_user_id:  r.updatedByUserId || null
+  };
+}
+function fromSBProjectParameter(r) {
+  return {
+    id:                  r.id,
+    name:                r.name || '',
+    description:         r.description || '',
+    inputType:           r.input_type || 'single_select',
+    options:             Array.isArray(r.options) ? r.options : [],
+    sortOrder:           r.sort_order || 0,
+    isActive:            (r.is_active !== false),
+    createdAt:           r.created_at || null,
+    createdByUserId:     r.created_by_user_id || null,
+    updatedAt:           r.updated_at || null,
+    updatedByUserId:     r.updated_by_user_id || null
+  };
+}
+
 function toSBUser(r)    {
   return {
     id:r.id, first_name:r.firstName||'', last_name:r.lastName||'',
@@ -23741,7 +24238,12 @@ function toSBProject(r) {
     // Round 4.4 — Default cost codes used when exporting Change Orders to Foundation
     co_default_labor_cost_code:    r.coDefaultLaborCostCode    || null,
     co_default_material_cost_code: r.coDefaultMaterialCostCode || null,
-    co_default_sub_cost_code:      r.coDefaultSubCostCode      || null
+    co_default_sub_cost_code:      r.coDefaultSubCostCode      || null,
+    // Form-fill Round 1 — per-project answers to Project Parameters.
+    // Shape: { "<parameterId>": <value> } where value is a string for
+    // single_select/text/number and an array of strings for multi_select.
+    // Parameters themselves live in db.projectParameters (Templates).
+    form_parameters:               r.formParameters            || {}
   };
 }
 function fromSBProject(r) {
@@ -23782,7 +24284,9 @@ function fromSBProject(r) {
     // Round 4.4 — Default cost codes for Foundation CO exports (legacy projects default to 4000)
     coDefaultLaborCostCode:    r.co_default_labor_cost_code    || '4000',
     coDefaultMaterialCostCode: r.co_default_material_cost_code || '4000',
-    coDefaultSubCostCode:      r.co_default_sub_cost_code      || '4000'
+    coDefaultSubCostCode:      r.co_default_sub_cost_code      || '4000',
+    // Form-fill Round 1 — per-project parameter answers (see toSBProject)
+    formParameters:            (r.form_parameters && typeof r.form_parameters === 'object') ? r.form_parameters : {}
   };
 }
 
@@ -24160,6 +24664,11 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_spec_sections').upsert(db.specSections.map(toSBSpecSection));
       if (r && r.error) errs.push('spec_sections: ' + r.error.message);
     }
+    // Project parameters (Form-fill Round 1) — non-fatal if table missing
+    if ((db.projectParameters || []).length) {
+      var r = await supabaseClient.from('kmi_project_parameters').upsert(db.projectParameters.map(toSBProjectParameter));
+      if (r && r.error) errs.push('project_parameters: ' + r.error.message);
+    }
     // Users
     if (db.users.length) {
       var r = await supabaseClient.from('kmi_users').upsert(db.users.map(toSBUser));
@@ -24265,7 +24774,7 @@ async function pullFromSupabase() {
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
-         mfgsRes, prodsRes, pdocsRes, subsRes, specRes] = await Promise.all([
+         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -24287,7 +24796,8 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_products').select('*'),
       supabaseClient.from('kmi_product_documents').select('*'),
       supabaseClient.from('kmi_submittals').select('*'),
-      supabaseClient.from('kmi_spec_sections').select('*').order('sort_order', {ascending:true})
+      supabaseClient.from('kmi_spec_sections').select('*').order('sort_order', {ascending:true}),
+      supabaseClient.from('kmi_project_parameters').select('*').order('sort_order', {ascending:true})
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -24427,6 +24937,13 @@ async function pullFromSupabase() {
     } else if (specRes && specRes.error) {
       console.warn('kmi_spec_sections load error (table missing?):', specRes.error.message);
       if (!Array.isArray(db.specSections)) db.specSections = [];
+    }
+    // Project parameters (Form-fill Round 1) — same preserve-on-missing pattern
+    if (projParamsRes && !projParamsRes.error) {
+      db.projectParameters = (projParamsRes.data || []).map(fromSBProjectParameter);
+    } else if (projParamsRes && projParamsRes.error) {
+      console.warn('kmi_project_parameters load error (table missing?):', projParamsRes.error.message);
+      if (!Array.isArray(db.projectParameters)) db.projectParameters = [];
     }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
