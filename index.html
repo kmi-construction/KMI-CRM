@@ -5357,21 +5357,20 @@ async function _pdfDetectFormFields(arrayBuffer) {
     var out = [];
     for (var i = 0; i < fields.length; i++) {
       var f = fields[i];
-      var ctor = (f.constructor && f.constructor.name) || 'Unknown';
-      // pdf-lib field class names: PDFCheckBox, PDFTextField, PDFRadioGroup,
-      // PDFDropdown, PDFOptionList, PDFButton, PDFSignature.
-      // Filter buttons and signatures — not data fields.
-      if (ctor === 'PDFButton' || ctor === 'PDFSignature') continue;
+      // CRITICAL: cannot use f.constructor.name — pdf-lib's production
+      // bundle is minified, so class names come back as single letters
+      // ('r', 'b', 't', etc.). Use instanceof against the exported class
+      // identities instead, which survive minification.
+      var type = _pdfLibFieldKind(f);
+      if (type === 'Button' || type === 'Signature' || type === 'Unknown') continue;
       var name = '';
       try { name = f.getName(); } catch (e) { name = ''; }
       if (!name) continue;
-      // Simplify the constructor name to the shape stored in the schema
-      // (drop the PDF prefix). E.g. PDFCheckBox → CheckBox.
-      var type = ctor.replace(/^PDF/, '');
       var entry = { name: name, type: type };
-      // For radio groups and dropdowns, also surface the available
-      // selectable options — those become natural question options later.
-      if (ctor === 'PDFRadioGroup' || ctor === 'PDFDropdown' || ctor === 'PDFOptionList') {
+      // For radio groups, dropdowns, option lists: surface the PDF's own
+      // internal option labels. These are what `field.select()` needs at
+      // fill time, so question options in the schema MUST match these.
+      if (type === 'RadioGroup' || type === 'Dropdown' || type === 'OptionList') {
         try {
           var opts = f.getOptions ? f.getOptions() : [];
           if (Array.isArray(opts) && opts.length) entry.options = opts.slice();
@@ -5384,6 +5383,24 @@ async function _pdfDetectFormFields(arrayBuffer) {
     console.warn('pdf-lib detection failed:', e);
     return [];
   }
+}
+
+// pdf-lib field type detection robust to minified builds. The production
+// pdf-lib bundle mangles class names (constructor.name returns 'r'/'b'/etc.),
+// but the exported class identities under window.PDFLib are preserved, so
+// instanceof checks still work. Returns a friendly string used both in
+// the Configure Form UI (rawFields type column) and the compile fill logic.
+function _pdfLibFieldKind(field) {
+  if (!field || !window.PDFLib) return 'Unknown';
+  var PL = window.PDFLib;
+  if (PL.PDFCheckBox   && field instanceof PL.PDFCheckBox)   return 'CheckBox';
+  if (PL.PDFRadioGroup && field instanceof PL.PDFRadioGroup) return 'RadioGroup';
+  if (PL.PDFTextField  && field instanceof PL.PDFTextField)  return 'TextField';
+  if (PL.PDFDropdown   && field instanceof PL.PDFDropdown)   return 'Dropdown';
+  if (PL.PDFOptionList && field instanceof PL.PDFOptionList) return 'OptionList';
+  if (PL.PDFButton     && field instanceof PL.PDFButton)     return 'Button';
+  if (PL.PDFSignature  && field instanceof PL.PDFSignature)  return 'Signature';
+  return 'Unknown';
 }
 
 // Tiny ID factory for cf-internal question/option IDs. Not stored in
@@ -8347,27 +8364,38 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
       var name = '';
       try { name = field.getName(); } catch (e) { return; }
       if (!name) return;
-      var ctor = (field.constructor && field.constructor.name) || '';
+      // Use instanceof-based type detection — constructor.name is mangled
+      // in the production pdf-lib bundle and would cause every type check
+      // to fall through (applied: 0).
+      var kind = _pdfLibFieldKind(field);
       var hit = false;
       try {
-        if (ctor === 'PDFCheckBox') {
+        if (kind === 'CheckBox') {
           if (Object.prototype.hasOwnProperty.call(fieldChecks, name)) {
             if (fieldChecks[name]) field.check(); else field.uncheck();
             hit = true;
           }
-        } else if (ctor === 'PDFTextField') {
+        } else if (kind === 'TextField') {
           if (Object.prototype.hasOwnProperty.call(fieldTexts, name)) {
             field.setText(fieldTexts[name]);
             hit = true;
           }
-        } else if (ctor === 'PDFRadioGroup' || ctor === 'PDFDropdown' || ctor === 'PDFOptionList') {
+        } else if (kind === 'RadioGroup' || kind === 'Dropdown' || kind === 'OptionList') {
           if (Object.prototype.hasOwnProperty.call(fieldRadios, name)) {
-            try { field.select(fieldRadios[name]); hit = true; } catch (e) { /* invalid option for this field */ }
+            try { field.select(fieldRadios[name]); hit = true; }
+            catch (e) {
+              // select() throws for option labels that aren't valid for this field.
+              // Surface this clearly — it's the most common configuration bug
+              // (schema option label doesn't match the PDF's internal option label).
+              var validOpts = [];
+              try { validOpts = field.getOptions ? field.getOptions() : []; } catch (e2) {}
+              console.warn('[form-fill] field', name, '(' + kind + '): select(' + JSON.stringify(fieldRadios[name]) + ') failed. Valid options for this field:', validOpts, '— update your schema option labels to match exactly.');
+            }
           }
         }
       } catch (e) {
         threw++;
-        console.warn('[form-fill] field', name, '(' + ctor + '): apply threw:', e && e.message);
+        console.warn('[form-fill] field', name, '(' + kind + '): apply threw:', e && e.message);
       }
       if (hit) applied++;
     });
