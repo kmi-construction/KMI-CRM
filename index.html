@@ -8612,6 +8612,10 @@ function _gatherCompileDocsForSubmittal(s) {
         kind:        'custom',
         format:      fmt,
         fileName:    d.fileName || '—',
+        // Round 10: productName drives the Description column on the
+        // cover. Custom submittals have no product linkage, so fall
+        // back to the submittal title.
+        productName: String(s.title || '').trim(),
         // Custom docs have no "issue date" concept — use upload date so
         // the items table has something meaningful in the Date column.
         dateStr:     _formatProcoreDate(d.uploadedAt) || _formatProcoreDate(new Date().toISOString())
@@ -8630,6 +8634,7 @@ function _gatherCompileDocsForSubmittal(s) {
         if (String(d.productId) !== String(pid)) return;
         // Skip docs not in the selection (when one is set)
         if (hasSelection && !selSet[String(d.id)]) return;
+        var _prodForName = getProduct(pid);
         out.push({
           bucket:      PRODUCT_LIBRARY_BUCKET,
           doc:         d,
@@ -8640,6 +8645,8 @@ function _gatherCompileDocsForSubmittal(s) {
           // Compliance". These map directly to Procore's Format column.
           format:      d.documentType || 'Documents',
           fileName:    d.fileName || d.title || '—',
+          // Round 10: productName drives the Description column.
+          productName: _prodForName ? String(_prodForName.name || '').trim() : '',
           dateStr:     _formatProcoreDate(d.issueDate) || _formatProcoreDate(d.uploadedAt) || _formatProcoreDate(new Date().toISOString())
         });
       });
@@ -9090,17 +9097,22 @@ function _renderCompileCoverSheet(doc, ctx) {
   // title and the column headers.
   y += 22;
 
-  // Column layout: Format | Description | Date | Copies
-  var COL_FMT_X    = LM;
-  var COL_DESC_X   = LM + 75;
+  // Column layout (Round 10): Description | Format | Date | Copies
+  //  - Description is now first (product name, typically short).
+  //  - Format gets a wider, wrapping column so values like
+  //    "Letter of Compliance" and "Product Data Sheet" don't get
+  //    clipped against the Description column.
+  var COL_DESC_X   = LM;
+  var COL_FMT_X    = LM + 220;
   var COL_DATE_X   = RM - 100;
   var COL_COPIES_X = RM - 8;
-  var COL_DESC_W   = (COL_DATE_X - 8) - COL_DESC_X;
+  var COL_DESC_W   = (COL_FMT_X  - 8) - COL_DESC_X;
+  var COL_FMT_W    = (COL_DATE_X - 8) - COL_FMT_X;
 
   // Header row
   sf('bold', 9, [60, 60, 60]);
-  doc.text('Format',      COL_FMT_X,    y);
   doc.text('Description', COL_DESC_X,   y);
+  doc.text('Format',      COL_FMT_X,    y);
   doc.text('Date',        COL_DATE_X,   y);
   doc.text('Copies',      COL_COPIES_X, y, {align: 'right'});
   ln(LM, y + 3, RM, y + 3, 0.4, [180, 180, 180]);
@@ -9117,8 +9129,8 @@ function _renderCompileCoverSheet(doc, ctx) {
       // Round 8: matching breathing-room on continuation pages
       y += 22;
       sf('bold', 9, [60, 60, 60]);
-      doc.text('Format',      COL_FMT_X,    y);
       doc.text('Description', COL_DESC_X,   y);
+      doc.text('Format',      COL_FMT_X,    y);
       doc.text('Date',        COL_DATE_X,   y);
       doc.text('Copies',      COL_COPIES_X, y, {align: 'right'});
       ln(LM, y + 3, RM, y + 3, 0.4, [180, 180, 180]);
@@ -9135,12 +9147,16 @@ function _renderCompileCoverSheet(doc, ctx) {
     for (var di = 0; di < ctx.docItems.length; di++) {
       var it = ctx.docItems[di];
       var descLines = wrap(it.description || '', COL_DESC_W);
-      var rowH = Math.max(12, descLines.length * 11);
+      var fmtLines  = wrap(it.format      || '', COL_FMT_W);
+      var lineCount = Math.max(descLines.length, fmtLines.length, 1);
+      var rowH = Math.max(12, lineCount * 11);
       ensureRoom(rowH + 4);
       sf('normal', 10, [0, 0, 0]);
-      doc.text(String(it.format || ''), COL_FMT_X, y);
       for (var li = 0; li < descLines.length; li++) {
         doc.text(descLines[li], COL_DESC_X, y + (li * 11));
+      }
+      for (var lj = 0; lj < fmtLines.length; lj++) {
+        doc.text(fmtLines[lj], COL_FMT_X, y + (lj * 11));
       }
       doc.text(String(it.date || ''),   COL_DATE_X,   y);
       doc.text(String(it.copies || ''), COL_COPIES_X, y, {align: 'right'});
@@ -9227,15 +9243,30 @@ async function compileSubmittalPackage() {
   includedIds.forEach(function(id){ includedSet[String(id)] = true; });
 
   // Build per-document items list for the cover (one row per attached file)
+  //
+  // Round 10:
+  //  - Description column shows the Product Name (or submittal title
+  //    for custom submittals). Falls back to the filename so a row is
+  //    never blank for a library product missing a name.
+  //  - Date column shows the single date the transmittal is being sent
+  //    (sentDate, then dateCreated, then today) — not the per-file
+  //    issue/upload date.
+  var _submittalDateStr =
+        _formatProcoreDate(sentDateIso) ||
+        _formatProcoreDate(dateCreatedIso) ||
+        _formatProcoreDate(new Date().toISOString());
   var docItems = [];
   allInPkg.forEach(function(s){
     if (!includedSet[String(s.id)]) return;
     var docs = _gatherCompileDocsForSubmittal(s);
     docs.forEach(function(entry){
+      var desc = (entry.productName && entry.productName.length)
+        ? entry.productName
+        : (entry.fileName || '—');
       docItems.push({
         format:      entry.format,
-        description: entry.fileName,
-        date:        entry.dateStr,
+        description: desc,
+        date:        _submittalDateStr,
         copies:      '1'
       });
     });
@@ -9352,9 +9383,23 @@ async function compileSubmittalPackage() {
       doc.text('Printed On: ' + printedOn, 558, 756, {align: 'right'});
     }
 
-    var safePkg = (anchor && anchor.packageName ? anchor.packageName : 'package').replace(/[^A-Za-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'package';
-    var dateForFile = (new Date()).toISOString().slice(0, 10);
-    var fname = 'KMI_Submittal_' + safePkg + '_' + dateForFile + '.pdf';
+    // Round 10: filename = "<kmiSubmittalNo> - <packageName>.pdf"
+    // e.g. "04 21 00-1.0 - Granite Shop Drawings.pdf". Sanitizer
+    // strips only the chars Windows/macOS/Linux refuse in filenames
+    // so spaces, hyphens, periods, and parentheses survive.
+    function _safeForCompileFilename(s) {
+      return String(s || '')
+        .replace(/[\\\/:*?"<>|\x00-\x1f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+    var _subNo = anchor ? _safeForCompileFilename(anchor.kmiSubmittalNo) : '';
+    var _pkgNm = anchor ? _safeForCompileFilename(anchor.packageName)    : '';
+    var fname;
+    if (_subNo && _pkgNm)      fname = _subNo + ' - ' + _pkgNm + '.pdf';
+    else if (_subNo)           fname = _subNo + '.pdf';
+    else if (_pkgNm)           fname = _pkgNm + '.pdf';
+    else                       fname = 'KMI_Submittal_' + (new Date()).toISOString().slice(0, 10) + '.pdf';
     doc.save(fname);
 
     if (status) {
