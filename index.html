@@ -5924,6 +5924,14 @@ var _editingSubmittalProductIds = [];
 // toggles any checkbox or adds/removes a product.
 var _editingSubmittalDocSelection = null;
 
+// Form-fill Round 3 — per-submittal answers to questions on fillable
+// docs. Shape: { "<docId>": { "<questionId>": <value>, ... }, ... }.
+// Deep-cloned from the loaded submittal on edit; new submittals start
+// at {}. Saved verbatim to record.formValues on save. Pre-fill from
+// project parameters happens lazily during render (only for keys that
+// don't already have a stored value, so user overrides survive).
+var _editingSubmittalFormValues = {};
+
 function subEsc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
@@ -6217,6 +6225,7 @@ function initNewSubmittal() {
   _subSrcMode = 'library';
   _editingSubmittalProductIds = [];
   _editingSubmittalDocSelection = null;
+  _editingSubmittalFormValues = {};
   nav('edit-submittal');
 }
 
@@ -6242,6 +6251,11 @@ function editSubmittal(id) {
   _editingSubmittalDocSelection = (existing && Array.isArray(existing.selectedDocIds))
     ? existing.selectedDocIds.slice()
     : null;
+  // Form-fill Round 3: deep-clone the stored form values so cancel/back
+  // discards in-flight edits cleanly. Pre-fill happens during render.
+  _editingSubmittalFormValues = (existing && existing.formValues && typeof existing.formValues === 'object')
+    ? JSON.parse(JSON.stringify(existing.formValues))
+    : {};
   nav('edit-submittal');
 }
 
@@ -6645,6 +6659,11 @@ function renderSubmittalDocsPreview() {
         var titleStr = d.title || d.fileName || '—';
         var isChecked = !!sel[String(d.id)];
         var rowOpacity = isChecked ? '' : 'opacity:0.55';
+        // Form-fill Round 3: fillable badge (if doc has a configured schema)
+        var fillTag = '';
+        if (d.isFillable && d.formSchema && Array.isArray(d.formSchema.questions) && d.formSchema.questions.length) {
+          fillTag = '<span style="display:inline-block;margin-left:6px;padding:1px 5px;border-radius:3px;background:#E8F0FE;color:#1A4480;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.3px">Fillable</span>';
+        }
         html += '<tr style="' + rowOpacity + '">' +
           '<td style="padding:5px 8px;text-align:center">' +
             '<input type="checkbox" ' + (isChecked ? 'checked' : '') +
@@ -6652,12 +6671,22 @@ function renderSubmittalDocsPreview() {
             ' onchange="onSubmittalDocCheck(\'' + subEsc(d.id) + '\', this.checked)">' +
           '</td>' +
           '<td style="padding:5px 8px">' + _docStalePill(d) + '</td>' +
-          '<td style="padding:5px 8px;word-break:break-all">' + subEsc(titleStr) + '</td>' +
+          '<td style="padding:5px 8px;word-break:break-all">' + subEsc(titleStr) + fillTag + '</td>' +
           '<td style="padding:5px 8px">' + subEsc(d.documentType || '—') + '</td>' +
           '<td style="padding:5px 8px;font-size:11px">' + subEsc((d.issueDate || '').slice(0,10) || '—') + '</td>' +
           '<td style="padding:5px 8px;text-align:right">' +
             '<button type="button" class="btn btn-sm" onclick="viewProductDocument(\'' + subEsc(d.id) + '\')">⬇ Open</button>' +
           '</td></tr>';
+        // Form-fill Round 3: inline panel for the doc's form questions.
+        // Shown only when (a) the doc is fillable with a configured schema,
+        // (b) it's currently included in this submittal. Pre-fill from
+        // project parameters happens lazily inside the panel renderer.
+        if (isChecked && d.isFillable && d.formSchema && Array.isArray(d.formSchema.questions) && d.formSchema.questions.length) {
+          var panelHtml = _renderSubmittalFormValuesPanel(d, prod.id, canEdit);
+          if (panelHtml) {
+            html += '<tr><td colspan="6" style="padding:0 8px 8px 36px;background:#fcfcfa">' + panelHtml + '</td></tr>';
+          }
+        }
       });
       html += '</tbody></table>';
     }
@@ -6671,6 +6700,289 @@ function renderSubmittalDocsPreview() {
     'while pulling different docs. New products are auto-checked when added; uncheck individually or use the ' +
     '"All" toggle in each product header.' +
     '</div>' + blocks.join('');
+}
+
+// ════════════════════════════════════════════════════════════════════
+// FORM VALUES (Form-fill Round 3)
+// ════════════════════════════════════════════════════════════════════
+// Per-submittal answers to the questions defined on each included
+// fillable document. Pre-fills from Project Parameters at first render
+// (only for keys that don't already have a stored value, so user
+// overrides survive). Saved to record.formValues on save; Round 4 reads
+// them back to fill the PDF when compiling the package.
+//
+// Module state lives in _editingSubmittalFormValues (declared with the
+// other _editingSubmittal* state above). Shape:
+//   { "<docId>": { "<questionId>": <value>, ... }, ... }
+
+// Helper — fetch a project's stored answer for a Project Parameter.
+// Returns undefined when missing so callers can distinguish "no answer"
+// from "explicit empty string".
+function _getProjectParameterValue(projectId, parameterId) {
+  if (!projectId || !parameterId) return undefined;
+  var p = getProj(projectId);
+  if (!p || !p.formParameters || typeof p.formParameters !== 'object') return undefined;
+  var v = p.formParameters[String(parameterId)];
+  return v;
+}
+
+// Get a question's stored value, falling back to the project parameter
+// default when no per-submittal value is stored. Returns null when both
+// are missing.
+function _subFormGetEffectiveValue(docId, q, projectId) {
+  var dv = (_editingSubmittalFormValues && _editingSubmittalFormValues[String(docId)]) || {};
+  if (Object.prototype.hasOwnProperty.call(dv, String(q.id))) return dv[String(q.id)];
+  if (q.projectParameterId) {
+    var pv = _getProjectParameterValue(projectId, q.projectParameterId);
+    if (pv !== undefined) return pv;
+  }
+  // Default per type
+  if (q.inputType === 'multi_select') return [];
+  if (q.inputType === 'number') return null;
+  return '';
+}
+
+// Pre-fill: walk the doc's questions and, for any question without a
+// stored value, copy the project parameter default into the per-submittal
+// form values. This persists the pre-fill so it's transparently included
+// in saves (and visible as "user-set" — which is fine since the user can
+// override).
+//
+// We only pre-fill when the project parameter "fits" the question:
+//   single → single (and value is one of the question's options)
+//   multi  → multi  (intersect values with question options)
+//   text   → text
+//   number → number
+// Mismatched bindings stay blank and force manual entry. This keeps the
+// auto-fill predictable: if it would silently produce a wrong answer, it
+// produces no answer instead.
+function _initFormValuesForDoc(docId, doc, projectId) {
+  if (!_editingSubmittalFormValues || typeof _editingSubmittalFormValues !== 'object') {
+    _editingSubmittalFormValues = {};
+  }
+  if (!_editingSubmittalFormValues[String(docId)]) _editingSubmittalFormValues[String(docId)] = {};
+  var bag = _editingSubmittalFormValues[String(docId)];
+
+  var questions = (doc.formSchema && Array.isArray(doc.formSchema.questions)) ? doc.formSchema.questions : [];
+  questions.forEach(function(q){
+    var qKey = String(q.id);
+    if (Object.prototype.hasOwnProperty.call(bag, qKey)) return; // already set (incl. cleared)
+    if (!q.projectParameterId) return;
+    var param = (db.projectParameters || []).find(function(p){ return String(p.id) === String(q.projectParameterId); });
+    if (!param || param.isActive === false) return;
+    var pv = _getProjectParameterValue(projectId, param.id);
+    if (pv === undefined || pv === null || pv === '') return;
+
+    var qOptLabels = (q.options || []).map(function(o){ return o.label; });
+    if (q.inputType === 'single_select' && param.inputType === 'single_select') {
+      if (qOptLabels.indexOf(pv) !== -1) bag[qKey] = pv;
+    } else if (q.inputType === 'multi_select' && param.inputType === 'multi_select') {
+      var arr = Array.isArray(pv) ? pv : [pv];
+      var keep = arr.filter(function(v){ return qOptLabels.indexOf(v) !== -1; });
+      if (keep.length) bag[qKey] = keep;
+    } else if (q.inputType === 'text' && param.inputType === 'text') {
+      bag[qKey] = String(pv);
+    } else if (q.inputType === 'number' && param.inputType === 'number') {
+      var n = Number(pv);
+      if (isFinite(n)) bag[qKey] = n;
+    }
+    // Other combinations (single ↔ multi, text → number, etc.) are
+    // intentionally skipped so the user has to confirm the value.
+  });
+}
+
+// Compare a stored value to a project parameter's value. Used to flag
+// "(project default)" vs "(overridden)" next to bound questions.
+function _subFormIsProjectDefault(question, currentValue, projectValue) {
+  if (projectValue === undefined || projectValue === null) return false;
+  if (question.inputType === 'multi_select') {
+    var a = Array.isArray(currentValue) ? currentValue.slice().sort() : [];
+    var b = Array.isArray(projectValue)  ? projectValue.slice().sort()  : [];
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  return String(currentValue) === String(projectValue);
+}
+
+// Top-level panel renderer for a single fillable doc on a submittal.
+// Returns the HTML for the inline panel rendered under the doc row.
+function _renderSubmittalFormValuesPanel(doc, productId, canEdit) {
+  if (!doc || !doc.formSchema || !Array.isArray(doc.formSchema.questions) || !doc.formSchema.questions.length) {
+    return '';
+  }
+  // Resolve project ID for parameter lookup. The form picker stores it
+  // on the submittal-edit page (esb-proj). Use the in-flight value when
+  // a project hasn't been saved on the submittal yet.
+  var projEl = g('esb-proj');
+  var projectId = projEl ? (projEl.value || null) : null;
+  if (!projectId && _editSubmittalId) {
+    var r = getSubmittal(_editSubmittalId);
+    if (r) projectId = r.projectId;
+  }
+
+  // Lazy pre-fill — runs once per (submittal × doc), idempotent for
+  // already-populated questions.
+  _initFormValuesForDoc(doc.id, doc, projectId);
+
+  var qs = doc.formSchema.questions || [];
+  var html = '<div style="border-left:3px solid #DDD3B5;padding:10px 12px;margin:2px 0 8px;background:#fffbf0">' +
+    '<div style="font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">' +
+      'Form values · ' + subEsc(doc.title || doc.fileName || '') +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px">';
+
+  qs.forEach(function(q){
+    html += _subFormQuestionInputHtml(doc.id, q, projectId, canEdit);
+  });
+
+  html += '</div></div>';
+  void productId;  // not used; the panel is doc-centric, product is just context
+  return html;
+}
+
+// Render one question's input + status annotation.
+function _subFormQuestionInputHtml(docId, q, projectId, canEdit) {
+  var safeDoc = subEsc(docId);
+  var safeQ   = subEsc(q.id);
+  var docKey  = String(docId);
+  var qKey    = String(q.id);
+  var bag     = (_editingSubmittalFormValues && _editingSubmittalFormValues[docKey]) || {};
+  var stored  = Object.prototype.hasOwnProperty.call(bag, qKey) ? bag[qKey] : undefined;
+
+  // Resolve project param + project's current value for status badge
+  var param = q.projectParameterId
+    ? (db.projectParameters || []).find(function(p){ return String(p.id) === String(q.projectParameterId); })
+    : null;
+  var paramMissing = !!(q.projectParameterId && (!param || param.isActive === false));
+  var projectValue = (param && !paramMissing) ? _getProjectParameterValue(projectId, param.id) : undefined;
+
+  // Determine "effective" value for display purposes (stored, or project default)
+  var effective;
+  if (stored !== undefined) {
+    effective = stored;
+  } else if (projectValue !== undefined && projectValue !== null && projectValue !== '') {
+    effective = projectValue;
+  } else if (q.inputType === 'multi_select') {
+    effective = [];
+  } else if (q.inputType === 'number') {
+    effective = null;
+  } else {
+    effective = '';
+  }
+
+  // Status pill
+  var pill = '';
+  if (paramMissing) {
+    pill = '<span style="font-size:10px;color:#9A7A2E">(bound parameter deleted)</span>';
+  } else if (param && stored === undefined) {
+    pill = '<span style="font-size:10px;color:#3B6D11">(from project)</span>';
+  } else if (param && stored !== undefined) {
+    var isDefault = _subFormIsProjectDefault(q, stored, projectValue);
+    pill = isDefault
+      ? '<span style="font-size:10px;color:#3B6D11">(matches project)</span>'
+      : '<span style="font-size:10px;color:#1A4480">(overridden)</span>';
+  } else {
+    pill = '<span style="font-size:10px;color:#888">(manual)</span>';
+  }
+
+  // Reset link (only when bound, not param-missing, and current diverges)
+  var resetLink = '';
+  if (canEdit && param && !paramMissing && stored !== undefined &&
+      !_subFormIsProjectDefault(q, stored, projectValue)) {
+    resetLink = ' <a href="#" onclick="onSubmittalFormValueReset(\'' + safeDoc + '\', \'' + safeQ + '\'); return false;" style="font-size:10px;color:var(--kmi);text-decoration:underline">reset</a>';
+  }
+
+  var input = '';
+  var dis = canEdit ? '' : ' disabled';
+  if (q.inputType === 'single_select') {
+    var opts = '<option value="">— Not set —</option>' +
+      (q.options || []).map(function(o){
+        var sel = (effective === o.label) ? ' selected' : '';
+        return '<option value="' + subEsc(o.label) + '"' + sel + '>' + subEsc(o.label) + '</option>';
+      }).join('');
+    input = '<select' + dis +
+      ' onchange="onSubmittalFormValueChange(\'' + safeDoc + '\', \'' + safeQ + '\', \'single\', this.value)" style="width:100%">' +
+      opts + '</select>';
+  } else if (q.inputType === 'multi_select') {
+    var arr = Array.isArray(effective) ? effective : (effective ? [effective] : []);
+    input = '<div id="ssfv-multi-' + safeDoc + '-' + safeQ + '" style="border:1px solid #ddd;border-radius:3px;padding:5px 7px;max-height:120px;overflow:auto;background:#fff">' +
+      (q.options || []).map(function(o){
+        var chk = (arr.indexOf(o.label) !== -1) ? ' checked' : '';
+        return '<label style="display:flex;align-items:center;gap:5px;font-size:12px;padding:1px 0;cursor:pointer">' +
+          '<input type="checkbox" value="' + subEsc(o.label) + '"' + chk + dis +
+          ' onchange="onSubmittalFormValueChange(\'' + safeDoc + '\', \'' + safeQ + '\', \'multi\', null)">' +
+          subEsc(o.label) +
+        '</label>';
+      }).join('') +
+    '</div>';
+  } else if (q.inputType === 'number') {
+    var val = (effective !== undefined && effective !== null) ? String(effective) : '';
+    input = '<input type="number" step="any" value="' + subEsc(val) + '"' + dis +
+      ' onchange="onSubmittalFormValueChange(\'' + safeDoc + '\', \'' + safeQ + '\', \'number\', this.value)" style="width:100%">';
+  } else { // text
+    input = '<input type="text" value="' + subEsc(effective || '') + '"' + dis +
+      ' onchange="onSubmittalFormValueChange(\'' + safeDoc + '\', \'' + safeQ + '\', \'text\', this.value)" style="width:100%">';
+  }
+
+  return '<div>' +
+    '<label style="font-size:11px;font-weight:600;color:#444;display:block;margin-bottom:2px">' +
+      subEsc(q.label || '(unnamed question)') + ' ' + pill + resetLink +
+    '</label>' +
+    input +
+  '</div>';
+}
+
+// Mutator — called on every input change in the form values panel.
+// `kind` is one of 'single', 'multi', 'text', 'number'. For 'multi'
+// we read the checkbox states from a wrapper div with a deterministic ID.
+//
+// Semantics: every change is "explicit", even clearing a select to empty.
+// We always STORE the value (incl. '' or []) so the user's intent
+// survives across re-renders. The only path that re-triggers project-
+// parameter pre-fill is the explicit reset link (which deletes the key).
+async function onSubmittalFormValueChange(docId, qId, kind, value) {
+  if (!_editingSubmittalFormValues || typeof _editingSubmittalFormValues !== 'object') {
+    _editingSubmittalFormValues = {};
+  }
+  var docKey = String(docId), qKey = String(qId);
+  if (!_editingSubmittalFormValues[docKey]) _editingSubmittalFormValues[docKey] = {};
+  var bag = _editingSubmittalFormValues[docKey];
+
+  var newVal;
+  if (kind === 'multi') {
+    // Lookup the wrapper div by its deterministic ID so we don't rely
+    // on activeElement (which would be the checkbox at change time but
+    // could be lost if anything else gains focus first).
+    var container = g('ssfv-multi-' + subEsc(docId) + '-' + subEsc(qId));
+    var arr = [];
+    if (container) {
+      container.querySelectorAll('input[type=checkbox]').forEach(function(cb){
+        if (cb.checked) arr.push(cb.value);
+      });
+    }
+    newVal = arr;
+  } else if (kind === 'number') {
+    var n = parseFloat(value);
+    newVal = isFinite(n) ? n : null;
+  } else { // single, text
+    newVal = (value || '').toString().trim();
+  }
+
+  // Always store — even empty values. Reset is the only path that
+  // re-enables project-parameter pre-fill (by deleting the key).
+  bag[qKey] = newVal;
+
+  // Re-render the docs preview so status pills update in place.
+  renderSubmittalDocsPreview();
+}
+
+// "reset" link — clear the per-submittal value so the question reverts
+// to the project parameter default on the next render.
+function onSubmittalFormValueReset(docId, qId) {
+  if (!_editingSubmittalFormValues || !_editingSubmittalFormValues[String(docId)]) return;
+  delete _editingSubmittalFormValues[String(docId)][String(qId)];
+  renderSubmittalDocsPreview();
 }
 
 // Re-render the package datalist + offer to regenerate KMI # whenever
@@ -6771,6 +7083,10 @@ async function saveSubmittal() {
     responseDate:        responseDate,
     responseNotes:       (g('esb-rnotes').value || '').trim(),
     notes:               (g('esb-notes').value  || '').trim(),
+    // Form-fill Round 3 — persist per-submittal form answers
+    formValues:          isCustom
+                           ? {}   // custom items have no form schema
+                           : JSON.parse(JSON.stringify(_editingSubmittalFormValues || {})),
     updatedAt:           nowIso,
     updatedByUserId:     _currentUser ? _currentUser.id : null
   };
@@ -24667,6 +24983,12 @@ function toSBSubmittal(r) {
     notes:r.notes||'',
     custom_documents: Array.isArray(r.customDocuments) ? r.customDocuments : [],
     response_documents: Array.isArray(r.responseDocuments) ? r.responseDocuments : [],
+    // Form-fill Round 3 — per-submittal answers to the form questions on
+    // each included fillable document. Shape:
+    //   { "<documentId>": { "<questionId>": <value>, ... }, ... }
+    // Value type matches the question's input type (string for
+    // single_select/text, array for multi_select, number for number).
+    form_values: (r.formValues && typeof r.formValues === 'object') ? r.formValues : {},
     created_at:r.createdAt||null,
     created_by_user_id:r.createdByUserId||null,
     updated_at:r.updatedAt||null,
@@ -24710,6 +25032,8 @@ function fromSBSubmittal(r) {
     notes:r.notes||'',
     customDocuments: Array.isArray(r.custom_documents) ? r.custom_documents : [],
     responseDocuments: Array.isArray(r.response_documents) ? r.response_documents : [],
+    // Form-fill Round 3 — see toSBSubmittal
+    formValues: (r.form_values && typeof r.form_values === 'object') ? r.form_values : {},
     createdAt:r.created_at||null,
     createdByUserId:r.created_by_user_id||null,
     updatedAt:r.updated_at||null,
