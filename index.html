@@ -8310,6 +8310,12 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
     var pdfDoc = await window.PDFLib.PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
     var form = pdfDoc.getForm();
 
+    // Tracks radio-group fields with MORE THAN ONE selected option. After
+    // updateFieldAppearances rebuilds each widget's AP/N dict, we walk
+    // these and add appearance-stream aliases so flatten draws every
+    // selected widget as "checked" — see the alias step after step 6.
+    var multiSelectRadios = [];
+
     // 2-4. Build field-state maps. We use one structure for all
     // select-style fields (checkboxes, radio groups, dropdowns, option
     // lists) so the apply step can decide how to write based on the
@@ -8434,6 +8440,20 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
                   widget.setAppearanceState(window.PDFLib.PDFName.of('Off'));
                 }
               });
+              // For multi-select on radio groups, the AS values above aren't
+              // enough — pdf-lib's flatten reads each widget's AP/N keyed by
+              // the FIELD's value (not by widget AS). So widgets whose on-value
+              // doesn't match V get their "off" appearance drawn (blank).
+              // We capture the field name + selected on-values + canonical on-value
+              // here so the post-updateFieldAppearances step can alias appearance
+              // streams to make flatten draw every selected widget as checked.
+              if (selectedLabels.length > 1) {
+                multiSelectRadios.push({
+                  fieldName: name,
+                  canonicalOnValue: window.PDFLib.PDFName.of(selectedLabels[0]),
+                  selectedAsNames: selectedAsNames
+                });
+              }
               hit = true;
             } catch (e) {
               console.warn('[form-fill] field', name, '(RadioGroup): widget-level fill failed, falling back to select():', e && e.message);
@@ -8475,15 +8495,75 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
 
     // 6. CRITICAL: regenerate field appearances BEFORE flatten. Without
     // this, checked checkboxes show as blank on the rasterized page.
+    var didUpdate = false;
     try {
       form.updateFieldAppearances();
+      didUpdate = true;
     } catch (e) {
       console.warn('[form-fill] updateFieldAppearances failed (continuing anyway):', e && e.message);
     }
 
-    // 7. Flatten so values bake into the visible page.
+    // 6b. Alias appearance streams for multi-select radio groups so flatten
+    // draws every selected widget as "checked". Must run AFTER step 6 —
+    // updateFieldAppearances rebuilds each widget's AP/N dict from scratch
+    // ({Off + widget's-own-on-value}), so any alias added before step 6
+    // would be wiped out. Must also run BEFORE flatten so the aliases are
+    // in place when flatten queries AP/N keyed by field V.
+    //
+    // For each selected widget whose on-value ≠ V, add a second key under
+    // V pointing to the SAME stream as the widget's existing on-value. The
+    // checkmark glyph is just a graphic; it doesn't matter that it was
+    // authored for a different option label. When flatten asks "what's the
+    // appearance for V on this widget?" it now finds the checked stream
+    // instead of nothing → draws a check at the widget's location.
+    multiSelectRadios.forEach(function(info){
+      try {
+        var field = form.getFields().find(function(f){
+          try { return f.getName() === info.fieldName; } catch (e) { return false; }
+        });
+        if (!field) return;
+        var acroField = field.acroField;
+        var widgets   = acroField.getWidgets();
+        var aliased   = 0;
+        widgets.forEach(function(widget){
+          try {
+            var wov;
+            try { wov = acroField.getWidgetOnValue(widget); } catch (e) { return; }
+            if (!wov) return;
+            var widgetOnName = wov.toString();
+            // Only alias widgets that should be ON but whose on-value
+            // doesn't match V (those don't need help — flatten draws them
+            // naturally via the existing AP/N entry at the V key).
+            if (info.selectedAsNames.indexOf(widgetOnName) === -1) return;
+            if (widgetOnName === info.canonicalOnValue.toString()) return;
+            var apN = widget.getNormalAppearance();
+            if (!apN || !(apN instanceof window.PDFLib.PDFDict)) return;
+            var onStream = apN.get(wov);
+            if (!onStream) return;
+            apN.set(info.canonicalOnValue, onStream);
+            aliased++;
+          } catch (e) {
+            console.warn('[form-fill] widget alias step threw:', e && e.message);
+          }
+        });
+        console.log('[form-fill] field', info.fieldName, '— aliased', aliased, 'extra widget(s) under V');
+      } catch (e) {
+        console.warn('[form-fill] multi-select alias failed for', info.fieldName, ':', e && e.message);
+      }
+    });
+
+    // 7. Flatten so values bake into the visible page. If we've aliased
+    // any appearances, suppress flatten's built-in updateFieldAppearances
+    // call (passing the option pdf-lib accepts) so it doesn't rebuild the
+    // AP/N dicts and wipe out our aliases. When there are no multi-select
+    // radios, the no-arg form is fine (and stays backward-compatible if
+    // somehow running against an older pdf-lib without the options arg).
     try {
-      form.flatten();
+      if (multiSelectRadios.length > 0 && didUpdate) {
+        form.flatten({ updateFieldAppearances: false });
+      } else {
+        form.flatten();
+      }
     } catch (e) {
       console.warn('[form-fill] form.flatten() failed, returning original bytes:', e && e.message);
       return arrayBuffer;
