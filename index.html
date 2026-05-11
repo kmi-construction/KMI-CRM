@@ -8310,10 +8310,23 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
     var pdfDoc = await window.PDFLib.PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
     var form = pdfDoc.getForm();
 
-    // 2-4. Build field-state maps.
-    var fieldChecks = {}; // fieldName → bool   (checkboxes referenced by select questions)
-    var fieldTexts  = {}; // fieldName → string (text/number questions)
-    var fieldRadios = {}; // fieldName → string (radio groups / dropdowns — picked option label)
+    // 2-4. Build field-state maps. We use one structure for all
+    // select-style fields (checkboxes, radio groups, dropdowns, option
+    // lists) so the apply step can decide how to write based on the
+    // PDF's actual field kind rather than what the schema says.
+    //
+    // fieldSelections: fieldName → Set of selected option labels.
+    //   - For CheckBox fields: any entry in the set ⇒ check; empty ⇒ uncheck.
+    //   - For RadioGroup fields: each label maps to a widget; we set that
+    //     widget's appearance state directly (NOT via field.select(), which
+    //     would enforce the "only one on" radio semantic). This lets a
+    //     question authored as multi-select on a radio-group field tick
+    //     multiple visible boxes — invalid per PDF spec, but Acrobat,
+    //     Bluebeam, Edge, and pdf.js all render it correctly.
+    //   - For Dropdown / OptionList: pdf-lib's select() accepts an array
+    //     for natural multi-select.
+    var fieldSelections = {};
+    var fieldTexts      = {}; // fieldName → string
 
     formSchema.questions.forEach(function(q){
       var qKey = String(q.id);
@@ -8330,49 +8343,48 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
         } else {
           selected = Array.isArray(value) ? value.slice() : (value ? [value] : []);
         }
-        // Default every option's fields to UNCHECKED — overrides PDF defaults.
+        // Mark every option's fields as "touched by this question" — even
+        // unselected ones, so they get explicitly cleared (override any
+        // default state baked into the source PDF).
         (q.options || []).forEach(function(o){
           (o.fieldNames || []).forEach(function(fn){
-            if (!Object.prototype.hasOwnProperty.call(fieldChecks, fn)) fieldChecks[fn] = false;
+            if (!fieldSelections[fn]) fieldSelections[fn] = new Set();
           });
         });
-        // Flip selected options' fields to checked.
+        // Add selected option labels to the set for their fields.
         (q.options || []).forEach(function(o){
           if (selected.indexOf(o.label) !== -1) {
             (o.fieldNames || []).forEach(function(fn){
-              fieldChecks[fn] = true;
-              fieldRadios[fn] = o.label;
+              fieldSelections[fn].add(o.label);
             });
           }
         });
       }
     });
 
-    console.log('[form-fill] doc', docId, '— field maps:', {
-      checkboxes: fieldChecks,
-      texts: fieldTexts,
-      radios: fieldRadios
-    });
+    // Log selections in a JSON-friendly shape (Sets don't stringify nicely)
+    var selDump = {};
+    Object.keys(fieldSelections).forEach(function(k){ selDump[k] = Array.from(fieldSelections[k]); });
+    console.log('[form-fill] doc', docId, '— field maps:', { selections: selDump, texts: fieldTexts });
 
     // 5. Apply to the actual PDF fields. Track stats for diagnostics.
     var fields = form.getFields();
     var pdfFieldNames = fields.map(function(f){ try { return f.getName(); } catch(e){ return ''; } });
     console.log('[form-fill] doc', docId, '— PDF has', fields.length, 'fields:', pdfFieldNames);
 
-    var applied = 0, skippedNoMatch = 0, threw = 0;
+    var applied = 0, threw = 0;
     fields.forEach(function(field){
       var name = '';
       try { name = field.getName(); } catch (e) { return; }
       if (!name) return;
       // Use instanceof-based type detection — constructor.name is mangled
-      // in the production pdf-lib bundle and would cause every type check
-      // to fall through (applied: 0).
+      // in the production pdf-lib bundle.
       var kind = _pdfLibFieldKind(field);
       var hit = false;
       try {
         if (kind === 'CheckBox') {
-          if (Object.prototype.hasOwnProperty.call(fieldChecks, name)) {
-            if (fieldChecks[name]) field.check(); else field.uncheck();
+          if (fieldSelections[name]) {
+            if (fieldSelections[name].size > 0) field.check(); else field.uncheck();
             hit = true;
           }
         } else if (kind === 'TextField') {
@@ -8380,16 +8392,67 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
             field.setText(fieldTexts[name]);
             hit = true;
           }
-        } else if (kind === 'RadioGroup' || kind === 'Dropdown' || kind === 'OptionList') {
-          if (Object.prototype.hasOwnProperty.call(fieldRadios, name)) {
-            try { field.select(fieldRadios[name]); hit = true; }
-            catch (e) {
-              // select() throws for option labels that aren't valid for this field.
-              // Surface this clearly — it's the most common configuration bug
-              // (schema option label doesn't match the PDF's internal option label).
-              var validOpts = [];
-              try { validOpts = field.getOptions ? field.getOptions() : []; } catch (e2) {}
-              console.warn('[form-fill] field', name, '(' + kind + '): select(' + JSON.stringify(fieldRadios[name]) + ') failed. Valid options for this field:', validOpts, '— update your schema option labels to match exactly.');
+        } else if (kind === 'RadioGroup') {
+          if (fieldSelections[name]) {
+            // Widget-level AS manipulation. Bypasses pdf-lib's select(),
+            // which honors the radio group's single-choice semantic and
+            // would prevent multi-select from working. Walk each widget,
+            // turn its appearance state on if its on-value is in our
+            // selected set, off otherwise.
+            try {
+              var acroField = field.acroField;
+              var widgets   = acroField.getWidgets();
+              var selectedLabels = Array.from(fieldSelections[name]);
+              // Pre-compute encoded forms of each selected label so we can
+              // compare against PDFName objects (which round-trip through
+              // hex encoding for non-ASCII).
+              var selectedAsNames = selectedLabels.map(function(L){
+                return window.PDFLib.PDFName.of(L).toString();
+              });
+              widgets.forEach(function(widget){
+                var wov;
+                try { wov = acroField.getWidgetOnValue(widget); } catch (e) { return; }
+                if (!wov) return;  // widget without an on-value (rare)
+                var widgetOnName = wov.toString();
+                var shouldBeOn = (selectedAsNames.indexOf(widgetOnName) !== -1);
+                if (shouldBeOn) {
+                  // Set AS to the widget's own on-value, not a label string —
+                  // the on-value already encodes the right PDFName.
+                  widget.setAppearanceState(wov);
+                } else {
+                  widget.setAppearanceState(window.PDFLib.PDFName.of('Off'));
+                }
+              });
+              // Update the field's /V to one of the selected values (or
+              // remove it if nothing is selected). Without this, some
+              // viewers re-derive widget visibility from V and ignore AS.
+              if (selectedLabels.length > 0) {
+                try { acroField.setValue(window.PDFLib.PDFName.of(selectedLabels[0])); } catch (e) {}
+              }
+              hit = true;
+            } catch (e) {
+              console.warn('[form-fill] field', name, '(RadioGroup): widget-level fill failed, falling back to select():', e && e.message);
+              // Fallback: try the legacy single-choice path with the first selected label
+              if (fieldSelections[name].size > 0) {
+                var firstLabel = Array.from(fieldSelections[name])[0];
+                try { field.select(firstLabel); hit = true; } catch (e2) {
+                  var validOpts = []; try { validOpts = field.getOptions(); } catch (e3) {}
+                  console.warn('[form-fill] field', name, '(RadioGroup): select(' + JSON.stringify(firstLabel) + ') also failed. Valid options:', validOpts);
+                }
+              }
+            }
+          }
+        } else if (kind === 'Dropdown' || kind === 'OptionList') {
+          if (fieldSelections[name] && fieldSelections[name].size > 0) {
+            var arr = Array.from(fieldSelections[name]);
+            try {
+              // pdf-lib's select() on PDFDropdown / PDFOptionList accepts
+              // a string OR an array of strings (for multi-select).
+              field.select(arr.length === 1 ? arr[0] : arr);
+              hit = true;
+            } catch (e) {
+              var validOpts = []; try { validOpts = field.getOptions(); } catch (e2) {}
+              console.warn('[form-fill] field', name, '(' + kind + '): select(' + JSON.stringify(arr) + ') failed. Valid options:', validOpts, '— update your schema option labels to match exactly.');
             }
           }
         }
@@ -8419,6 +8482,21 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
     } catch (e) {
       console.warn('[form-fill] form.flatten() failed, returning original bytes:', e && e.message);
       return arrayBuffer;
+    }
+
+    // 8. Strip /OCProperties from the document catalog. Many manufacturer
+    // PDFs (H&B 220 is one) use Optional Content Groups to render visible
+    // checkmark glyphs — clicking a box in Acrobat doesn't draw a new
+    // mark, it toggles a hidden layer. After flatten, the marks are baked
+    // into page content streams as plain graphics, so the OCG metadata
+    // is dead weight. pdf.js (used in the compile rasterizer) warns
+    // about and silently drops content referencing OCGs it can't resolve,
+    // making checkmarks invisible on the rasterized page. Removing the
+    // catalog entry sidesteps the issue entirely.
+    try {
+      pdfDoc.catalog.delete(window.PDFLib.PDFName.of('OCProperties'));
+    } catch (e) {
+      console.warn('[form-fill] OCProperties strip failed (continuing):', e && e.message);
     }
 
     var u8 = await pdfDoc.save();
