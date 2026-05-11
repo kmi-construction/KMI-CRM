@@ -9,6 +9,11 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- pdf-lib (Form-fill Round 2) — used to detect AcroForm fields on
+     uploaded product documents and (in Round 4) to fill those fields
+     when compiling submittal packages. pdf.js reads-only; pdf-lib both
+     reads and writes form fields, which is why both are loaded. -->
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <script>if(window['pdfjsLib']){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1530,6 +1535,46 @@ textarea{resize:vertical;min-height:72px}
       <span style="font-size:11px;color:#888;font-weight:400">Product data, test reports, letters of compliance — what you ship in submittals</span>
     </div>
     <div id="ep-docs-section"></div>
+  </div>
+</div>
+
+<!-- CONFIGURE FORM (Form-fill Round 2) — schema editor for fillable PDFs.
+     Maps the raw AcroForm fields detected on upload into "questions" that
+     the user picks per-project (with optional defaults from Project
+     Parameters). Used by the compile pipeline in Round 4 to fill the PDF
+     before merging it into the submittal package. -->
+<div class="pg" id="pg-configure-form">
+  <div class="ph">
+    <div>
+      <h1 id="cf-title">Configure form</h1>
+      <div class="sub" id="cf-sub"></div>
+      <div class="stripe"></div>
+    </div>
+  </div>
+  <div style="display:flex;gap:10px;margin-bottom:14px">
+    <button class="btn" onclick="cfBack()">&larr; Back to product</button>
+    <button class="btn" onclick="cfRescanFields()" title="Reload the PDF from storage and re-detect form fields">🔄 Re-scan PDF</button>
+    <div style="flex:1"></div>
+    <button class="btn btn-p" onclick="cfSaveSchema()" id="cf-save-btn">Save schema</button>
+  </div>
+
+  <!-- Detected fields card -->
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Detected PDF fields</span>
+      <span style="font-size:11px;color:#888;font-weight:400" id="cf-rawfields-sub"></span>
+    </div>
+    <div id="cf-rawfields-section"></div>
+  </div>
+
+  <!-- Questions card -->
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Questions</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Group PDF fields into questions the user answers per submittal</span>
+      <button class="btn btn-sm btn-p" style="margin-left:auto" onclick="cfAddQuestion()">+ Add question</button>
+    </div>
+    <div id="cf-questions-section"></div>
   </div>
 </div>
 
@@ -3178,6 +3223,7 @@ function nav(page) {
     'email-settings': renderEmailSettings,
     'product-library': renderProductLibrary,
     'edit-product':    renderEditProductPage,
+    'configure-form':  renderConfigureFormPage,
     'submittals':      renderSubmittalsPage,
     'edit-submittal':  renderEditSubmittalPage
   };
@@ -4985,9 +5031,20 @@ function renderProductDocuments() {
     var issue = d.issueDate ? d.issueDate.slice(0, 10) : '—';
     var conf  = d.lastConfirmedAt ? d.lastConfirmedAt.slice(0, 10) : '—';
     var titleStr = d.title || d.fileName || '—';
+    // Form-fill Round 2: fillable badge + question count (if configured)
+    var fillBadge = '';
+    if (d.isFillable) {
+      var qCount = (d.formSchema && Array.isArray(d.formSchema.questions)) ? d.formSchema.questions.length : 0;
+      var raw    = (d.formSchema && Array.isArray(d.formSchema.rawFields)) ? d.formSchema.rawFields.length : 0;
+      if (qCount > 0) {
+        fillBadge = '<span style="display:inline-block;margin-left:6px;padding:1px 6px;border-radius:3px;background:#DDEDC8;color:#3B6D11;font-size:10px;font-weight:600" title="' + qCount + ' question' + (qCount === 1 ? '' : 's') + ' configured against ' + raw + ' PDF field' + (raw === 1 ? '' : 's') + '">Fillable · ' + qCount + 'Q</span>';
+      } else {
+        fillBadge = '<span style="display:inline-block;margin-left:6px;padding:1px 6px;border-radius:3px;background:#FBE9C5;color:#9A7A2E;font-size:10px;font-weight:600" title="' + raw + ' PDF field' + (raw === 1 ? '' : 's') + ' detected; click Configure to map them into questions">Fillable · setup</span>';
+      }
+    }
     html += '<tr>' +
       '<td style="padding:6px 8px">' + pill + '</td>' +
-      '<td style="padding:6px 8px;word-break:break-all">' + plEsc(titleStr) +
+      '<td style="padding:6px 8px;word-break:break-all">' + plEsc(titleStr) + fillBadge +
         (d.title && d.fileName && d.title !== d.fileName ? '<div style="font-size:10px;color:#aaa">' + plEsc(d.fileName) + '</div>' : '') +
       '</td>' +
       '<td style="padding:6px 8px">' + plEsc(d.documentType || '—') + '</td>' +
@@ -4997,6 +5054,7 @@ function renderProductDocuments() {
       '<td style="padding:6px 8px;text-align:right">' +
         '<button type="button" class="btn btn-sm" onclick="viewProductDocument(\'' + plEsc(d.id) + '\')">⬇ Open</button> ' +
         (canConfirm && stale ? '<button type="button" class="btn btn-sm" onclick="confirmProductDocument(\'' + plEsc(d.id) + '\')" title="Confirm this document is still valid; resets the 3-year clock">✓ Confirm</button> ' : '') +
+        (canEdit && d.isFillable ? '<button type="button" class="btn btn-sm" onclick="openConfigureForm(\'' + plEsc(d.id) + '\')" title="Map detected PDF fields into questions">🛠 Configure form</button> ' : '') +
         (canEdit ? '<button type="button" class="btn btn-sm" onclick="editProductDocumentMeta(\'' + plEsc(d.id) + '\')">✎</button> ' : '') +
         (canEdit ? '<button type="button" class="btn btn-sm" onclick="rmProductDocument(\'' + plEsc(d.id) + '\')" style="color:#A32D2D">×</button>' : '') +
       '</td>' +
@@ -5081,8 +5139,31 @@ async function onProductDocSelected(ev) {
       uploadedAt: nowIso,
       uploadedByUserId: _currentUser ? _currentUser.id : null,
       uploadedByName:   _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '',
-      notes: ''
+      notes: '',
+      // Form-fill Round 2 — detected below for PDFs
+      isFillable: false,
+      formSchema: {}
     };
+
+    // Form-fill Round 2: detect AcroForm fields on PDFs (best-effort).
+    // pdf-lib runs entirely client-side; if it fails we just skip detection
+    // and leave the doc as non-fillable. The user can re-scan later from
+    // the Configure form page.
+    var isPdfUpload = (file.type === 'application/pdf') || /\.pdf$/i.test(file.name);
+    if (isPdfUpload && window.PDFLib) {
+      if (status) status.textContent = 'Uploaded — scanning for form fields…';
+      try {
+        var ab = await file.arrayBuffer();
+        var detected = await _pdfDetectFormFields(ab);
+        if (detected && detected.length) {
+          doc.isFillable = true;
+          doc.formSchema = { rawFields: detected, questions: [] };
+        }
+      } catch (e) {
+        console.warn('AcroForm detection skipped (will not block upload):', e);
+      }
+    }
+
     db.productDocuments = Array.isArray(db.productDocuments) ? db.productDocuments : [];
     db.productDocuments.push(doc);
     saveDB();
@@ -5099,8 +5180,16 @@ async function onProductDocSelected(ev) {
     var titleEl = g('epd-title'); if (titleEl) titleEl.value = '';
     var issueEl = g('epd-issue'); if (issueEl) issueEl.value = '';
 
-    if (status) status.textContent = 'Uploaded ✓';
-    setTimeout(function(){ if (status) status.textContent = ''; }, 3000);
+    if (status) {
+      if (doc.isFillable) {
+        var fieldCount = (doc.formSchema.rawFields || []).length;
+        status.textContent = 'Uploaded ✓ — ' + fieldCount + ' form field' + (fieldCount === 1 ? '' : 's') + ' detected (click "Configure form" to map them)';
+        setTimeout(function(){ if (status) status.textContent = ''; }, 8000);
+      } else {
+        status.textContent = 'Uploaded ✓';
+        setTimeout(function(){ if (status) status.textContent = ''; }, 3000);
+      }
+    }
     renderProductDocuments();
     // Update the product list summary too (in case user navigates back)
   } catch (e) {
@@ -5226,6 +5315,579 @@ async function saveProductDocumentMeta() {
   closeModal();
   _editProductDocId = null;
   renderProductDocuments();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONFIGURE FORM (Form-fill Round 2)
+// ═══════════════════════════════════════════════════════════════════════
+// Schema editor for fillable PDFs in the product library. Lets the user
+// take the raw AcroForm fields detected on upload and group them into
+// "questions" that will be answered per submittal (with optional defaults
+// pulled from Project Parameters defined in Templates).
+//
+// Data model lives on the product document record:
+//   doc.isFillable: boolean
+//   doc.formSchema: {
+//     rawFields: [{name, type, page}, ...],
+//     questions: [{
+//       id, label, inputType, projectParameterId,
+//       options: [{id, label, fieldNames: []}],  // for single/multi-select
+//       fieldNames: []                            // for text/number
+//     }]
+//   }
+//
+// Module state mirrors the in-flight edit; saved on Save back to the doc.
+// Re-render strategy is whole-page on every mutation (consistent with the
+// project material list pattern and avoids the addEventListener-timing
+// pitfalls Mike's principles call out).
+
+var _editFormDocId = null;   // doc whose schema is being edited
+var _cfSchema = null;        // deep-cloned schema, mutated by the UI
+
+// ── pdf-lib helpers ────────────────────────────────────────────────────
+// Detect AcroForm fields on a PDF ArrayBuffer. Returns [] for non-PDFs,
+// PDFs without forms, or on any parse failure. Buttons (PRINT FORM etc.)
+// are filtered out — they're not user-fillable data.
+async function _pdfDetectFormFields(arrayBuffer) {
+  if (!arrayBuffer || !window.PDFLib) return [];
+  try {
+    var pdfDoc = await window.PDFLib.PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+    var form = pdfDoc.getForm();
+    var fields = form.getFields();
+    var out = [];
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i];
+      var ctor = (f.constructor && f.constructor.name) || 'Unknown';
+      // pdf-lib field class names: PDFCheckBox, PDFTextField, PDFRadioGroup,
+      // PDFDropdown, PDFOptionList, PDFButton, PDFSignature.
+      // Filter buttons and signatures — not data fields.
+      if (ctor === 'PDFButton' || ctor === 'PDFSignature') continue;
+      var name = '';
+      try { name = f.getName(); } catch (e) { name = ''; }
+      if (!name) continue;
+      // Simplify the constructor name to the shape stored in the schema
+      // (drop the PDF prefix). E.g. PDFCheckBox → CheckBox.
+      var type = ctor.replace(/^PDF/, '');
+      var entry = { name: name, type: type };
+      // For radio groups and dropdowns, also surface the available
+      // selectable options — those become natural question options later.
+      if (ctor === 'PDFRadioGroup' || ctor === 'PDFDropdown' || ctor === 'PDFOptionList') {
+        try {
+          var opts = f.getOptions ? f.getOptions() : [];
+          if (Array.isArray(opts) && opts.length) entry.options = opts.slice();
+        } catch (e) { /* ignore */ }
+      }
+      out.push(entry);
+    }
+    return out;
+  } catch (e) {
+    console.warn('pdf-lib detection failed:', e);
+    return [];
+  }
+}
+
+// Tiny ID factory for cf-internal question/option IDs. Not stored in
+// Supabase as a primary key — these IDs live inside the JSONB schema.
+function _cfNewId(prefix) {
+  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// Escape helper local to cf — mirrors plEsc so the names don't shadow.
+function cfEsc(s) { return plEsc(s == null ? '' : String(s)); }
+
+// ── Open / back / save ────────────────────────────────────────────────
+function openConfigureForm(docId) {
+  if (!hasFull('edit-product-library')) { alert('You do not have permission to configure forms.'); return; }
+  var d = getProductDocument(docId);
+  if (!d) { alert('Document not found.'); return; }
+  if (!d.isFillable) {
+    alert('This document is not flagged as fillable. If you expected PDF form fields, click "Re-scan PDF" on a previously-uploaded copy, or re-upload the file.');
+    return;
+  }
+  _editFormDocId = docId;
+  // Deep clone the schema so cancel/back discards in-flight edits cleanly.
+  var src = d.formSchema || { rawFields: [], questions: [] };
+  _cfSchema = JSON.parse(JSON.stringify({
+    rawFields: Array.isArray(src.rawFields) ? src.rawFields : [],
+    questions: Array.isArray(src.questions) ? src.questions : []
+  }));
+  nav('configure-form');
+}
+
+function cfBack() {
+  // No confirm — Save persists changes; back implicitly discards.
+  // Equivalent UX to material list / labor rates pages.
+  _editFormDocId = null;
+  _cfSchema = null;
+  nav('edit-product');
+}
+
+async function cfSaveSchema() {
+  if (!_editFormDocId || !_cfSchema) return;
+  if (!hasFull('edit-product-library')) { alert('You do not have permission to save form schemas.'); return; }
+  var d = getProductDocument(_editFormDocId);
+  if (!d) { alert('Document not found.'); return; }
+
+  // Quick validation pass — surface common mistakes without blocking save
+  // (a confirm prompt rather than a hard block, since "save in progress
+  // and finish later" is a reasonable workflow).
+  var warnings = [];
+  (_cfSchema.questions || []).forEach(function(q, qi){
+    if (!q.label || !q.label.trim()) warnings.push('Question ' + (qi + 1) + ' has no label.');
+    if ((q.inputType === 'single_select' || q.inputType === 'multi_select') && (!q.options || !q.options.length)) {
+      warnings.push('Question "' + (q.label || ('#' + (qi + 1))) + '" is a select but has no options.');
+    }
+    if ((q.inputType === 'text' || q.inputType === 'number') && (!q.fieldNames || !q.fieldNames.length)) {
+      warnings.push('Question "' + (q.label || ('#' + (qi + 1))) + '" is text/number but has no PDF field assigned.');
+    }
+    (q.options || []).forEach(function(o, oi){
+      if (!o.label || !o.label.trim()) warnings.push('Question "' + (q.label || '#' + (qi + 1)) + '", option ' + (oi + 1) + ' has no label.');
+      if (!o.fieldNames || !o.fieldNames.length) warnings.push('Question "' + (q.label || '#' + (qi + 1)) + '", option "' + (o.label || '#' + (oi + 1)) + '" has no PDF field assigned.');
+    });
+  });
+  if (warnings.length) {
+    var msg = 'Schema looks incomplete:\n\n• ' + warnings.slice(0, 8).join('\n• ');
+    if (warnings.length > 8) msg += '\n• …and ' + (warnings.length - 8) + ' more.';
+    msg += '\n\nSave anyway? (You can finish later.)';
+    if (!confirm(msg)) return;
+  }
+
+  d.formSchema = JSON.parse(JSON.stringify(_cfSchema));
+  saveDB();
+
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_product_documents').upsert(toSBProductDocument(d));
+      if (r && r.error) console.warn('product_document schema push warning:', r.error.message);
+    } catch (e) {
+      console.warn('product_document schema push threw:', e);
+    }
+  }
+
+  alert('Schema saved.');
+  // Re-render the page to reflect the saved baseline.
+  renderConfigureFormPage();
+}
+
+// Re-scan: pull the PDF down from storage and re-detect fields. Adds new
+// fields to the list (matched by name); removes nothing (so questions
+// referencing now-missing fields still display, just flagged "(missing)").
+async function cfRescanFields() {
+  if (!_editFormDocId || !_cfSchema) return;
+  if (!hasFull('edit-product-library')) { alert('You do not have permission to re-scan.'); return; }
+  var d = getProductDocument(_editFormDocId);
+  if (!d) return;
+  if (!supabaseClient) { alert('Not connected to Supabase — can\'t fetch the PDF.'); return; }
+  var sec = g('cf-rawfields-section');
+  if (sec) sec.innerHTML = '<div style="padding:10px;color:#888;font-size:12px">Re-scanning…</div>';
+  try {
+    var ab = await _fetchAnyBucketFileBytes(PRODUCT_LIBRARY_BUCKET, d.filePath);
+    if (!ab) throw new Error('Could not fetch PDF bytes.');
+    var detected = await _pdfDetectFormFields(ab);
+
+    // Merge: keep existing entries, add any new field names.
+    var byName = {};
+    (_cfSchema.rawFields || []).forEach(function(f){ byName[f.name] = f; });
+    detected.forEach(function(f){
+      if (!byName[f.name]) {
+        byName[f.name] = f;
+      } else {
+        // Refresh type/options if they changed
+        byName[f.name].type = f.type;
+        if (f.options) byName[f.name].options = f.options;
+      }
+    });
+    _cfSchema.rawFields = Object.keys(byName).map(function(k){ return byName[k]; });
+    if (detected.length === 0) {
+      d.isFillable = false;  // No fields → no longer fillable; persist below
+    } else {
+      d.isFillable = true;
+    }
+    renderConfigureFormPage();
+    alert('Re-scan complete. ' + detected.length + ' field' + (detected.length === 1 ? '' : 's') + ' present in the PDF.');
+  } catch (e) {
+    alert('Re-scan failed: ' + (e.message || e));
+    renderConfigureFormPage();
+  }
+}
+
+// ── Page render ────────────────────────────────────────────────────────
+function renderConfigureFormPage() {
+  if (!_editFormDocId || !_cfSchema) {
+    // Direct navigation without opening first — bounce back
+    nav('product-library');
+    return;
+  }
+  var d = getProductDocument(_editFormDocId);
+  if (!d) { nav('product-library'); return; }
+  var p = getProduct(d.productId);
+  var canEdit = canAccess('edit-product-library') === 'full';
+
+  var titleEl = g('cf-title');
+  var subEl   = g('cf-sub');
+  if (titleEl) titleEl.textContent = 'Configure form';
+  if (subEl) {
+    var docLabel = (d.title || d.fileName || '—');
+    var prodLabel = p ? p.name : '(unknown product)';
+    subEl.textContent = prodLabel + ' — ' + docLabel;
+  }
+  var saveBtn = g('cf-save-btn');
+  if (saveBtn) saveBtn.style.display = canEdit ? '' : 'none';
+
+  _renderCfRawFieldsSection(canEdit);
+  _renderCfQuestionsSection(canEdit);
+}
+
+// Build a usage map: which question/option (if any) references each
+// PDF field. Used to annotate the raw fields list AND to flag fields
+// that are missing from the PDF but still referenced by a question.
+function _cfFieldUsage() {
+  var map = {};  // fieldName → "Question label → Option label" (or just "Question label")
+  (_cfSchema.questions || []).forEach(function(q, qi){
+    var qLabel = q.label || ('Question ' + (qi + 1));
+    if (q.inputType === 'text' || q.inputType === 'number') {
+      (q.fieldNames || []).forEach(function(fn){
+        map[fn] = map[fn] || [];
+        map[fn].push(qLabel);
+      });
+    } else {
+      (q.options || []).forEach(function(o, oi){
+        var oLabel = o.label || ('Option ' + (oi + 1));
+        (o.fieldNames || []).forEach(function(fn){
+          map[fn] = map[fn] || [];
+          map[fn].push(qLabel + ' → ' + oLabel);
+        });
+      });
+    }
+  });
+  return map;
+}
+
+function _renderCfRawFieldsSection(canEdit) {
+  var sec = g('cf-rawfields-section');
+  var subEl = g('cf-rawfields-sub');
+  if (!sec) return;
+  var raw = _cfSchema.rawFields || [];
+  var usage = _cfFieldUsage();
+  var unusedCount = raw.filter(function(f){ return !usage[f.name]; }).length;
+
+  if (subEl) {
+    subEl.textContent = raw.length + ' field' + (raw.length === 1 ? '' : 's') + ' detected' +
+      (unusedCount ? ' · ' + unusedCount + ' unused' : ' · all mapped');
+  }
+
+  if (!raw.length) {
+    sec.innerHTML = '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center">' +
+      'No PDF form fields detected. Click <strong>🔄 Re-scan PDF</strong> if you expected some, ' +
+      'or re-upload the file (the original might not have been a fillable PDF).' +
+    '</div>';
+    return;
+  }
+
+  // Sort: unmapped first (so they're easy to spot), then by name
+  var sorted = raw.slice().sort(function(a, b){
+    var au = usage[a.name] ? 1 : 0, bu = usage[b.name] ? 1 : 0;
+    if (au !== bu) return au - bu;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+
+  var html = '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+    '<th style="padding:5px 8px;text-align:left;width:35%">Field name</th>' +
+    '<th style="padding:5px 8px;text-align:left;width:100px">Type</th>' +
+    '<th style="padding:5px 8px;text-align:left">Used in</th>' +
+  '</tr></thead><tbody>';
+  sorted.forEach(function(f){
+    var refs = usage[f.name];
+    var usedCell = refs && refs.length
+      ? '<span style="color:#3B6D11">' + refs.map(cfEsc).join('<br>') + '</span>'
+      : '<span style="color:#A32D2D;font-style:italic">unused</span>';
+    html += '<tr>' +
+      '<td style="padding:5px 8px;font-family:monospace;font-size:11px;word-break:break-all">' + cfEsc(f.name) + '</td>' +
+      '<td style="padding:5px 8px">' + cfEsc(f.type || '—') + '</td>' +
+      '<td style="padding:5px 8px">' + usedCell + '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+
+  // Flag any "missing" fields — referenced by a question but not in the PDF
+  var rawNames = {};
+  raw.forEach(function(f){ rawNames[f.name] = true; });
+  var missing = Object.keys(usage).filter(function(n){ return !rawNames[n]; });
+  if (missing.length) {
+    html += '<div style="margin-top:10px;padding:8px 10px;background:#FBE9C5;color:#9A7A2E;border-radius:3px;font-size:12px">' +
+      '<strong>⚠ Referenced fields not in PDF:</strong> ' + missing.map(cfEsc).join(', ') +
+      '<br>These questions will be ignored when the PDF is filled. Edit the question to remove the broken reference, or re-scan the PDF.' +
+    '</div>';
+  }
+  sec.innerHTML = html;
+  void canEdit;  // currently informational only
+}
+
+function _cfBoundParamLabel(paramId) {
+  if (!paramId) return '';
+  var p = (db.projectParameters || []).find(function(x){ return String(x.id) === String(paramId); });
+  return p ? p.name : '(deleted parameter)';
+}
+
+function _renderCfQuestionsSection(canEdit) {
+  var sec = g('cf-questions-section');
+  if (!sec) return;
+  var qs = _cfSchema.questions || [];
+  if (!qs.length) {
+    sec.innerHTML = '<div style="padding:18px;color:#aaa;font-size:13px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No questions yet. Click <strong>+ Add question</strong> above to define one.' +
+    '</div>';
+    return;
+  }
+
+  var raw = _cfSchema.rawFields || [];
+  // Build options for the project-parameter dropdown (active parameters only)
+  var paramOpts = '<option value="">(none — manual per submittal)</option>' +
+    (db.projectParameters || [])
+      .filter(function(p){ return p.isActive !== false; })
+      .slice()
+      .sort(function(a, b){ return (a.sortOrder || 0) - (b.sortOrder || 0) || (a.name || '').localeCompare(b.name || ''); })
+      .map(function(p){
+        return '<option value="' + cfEsc(p.id) + '" data-type="' + cfEsc(p.inputType) + '">' + cfEsc(p.name) + ' (' + cfEsc(p.inputType) + ')</option>';
+      }).join('');
+
+  var html = '';
+  qs.forEach(function(q, qi){
+    html += _cfQuestionBlockHtml(q, qi, raw, paramOpts, canEdit);
+  });
+  sec.innerHTML = html;
+
+  // Wire dropdown defaults after render
+  qs.forEach(function(q, qi){
+    var typeSel = g('cf-q-type-' + qi);
+    if (typeSel) typeSel.value = q.inputType || 'single_select';
+    var paramSel = g('cf-q-param-' + qi);
+    if (paramSel) paramSel.value = q.projectParameterId || '';
+  });
+}
+
+function _cfQuestionBlockHtml(q, qi, raw, paramOpts, canEdit) {
+  var isSelect = (q.inputType === 'single_select' || q.inputType === 'multi_select');
+  var dis = canEdit ? '' : ' disabled';
+  var html = '<div style="border:0.5px solid #ddd;border-radius:6px;padding:14px;margin-bottom:14px;background:#fafafa">' +
+    // Title row
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
+      '<span style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px">Question ' + (qi + 1) + '</span>' +
+      '<div style="flex:1"></div>' +
+      (canEdit ? '<button type="button" class="btn btn-sm" style="color:#A32D2D" onclick="cfRemoveQuestion(' + qi + ')">× Remove question</button>' : '') +
+    '</div>' +
+    // Question metadata grid
+    '<div class="fg" style="margin-bottom:0">' +
+      '<div class="fgr"><label>Label *</label>' +
+        '<input value="' + cfEsc(q.label || '') + '" oninput="cfUpdateQuestionField(' + qi + ', \'label\', this.value)"' + dis + ' placeholder="e.g. Block Size">' +
+      '</div>' +
+      '<div class="fgr"><label>Input type *</label>' +
+        '<select id="cf-q-type-' + qi + '" onchange="cfUpdateQuestionType(' + qi + ', this.value)"' + dis + '>' +
+          '<option value="single_select">Single-select</option>' +
+          '<option value="multi_select">Multi-select</option>' +
+          '<option value="text">Text</option>' +
+          '<option value="number">Number</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="fgr full"><label>Pull default from Project Parameter</label>' +
+        '<select id="cf-q-param-' + qi + '" onchange="cfUpdateQuestionField(' + qi + ', \'projectParameterId\', this.value)"' + dis + '>' +
+          paramOpts +
+        '</select>' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">' +
+          'When bound, this question pre-fills from the project\'s answer. Option labels must match exactly to flow automatically. Leave as "(none)" for questions where the value is unique per submittal.' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  // Mapping section: options (for select) or single field picker (for text/number)
+  if (isSelect) {
+    html += '<div style="margin-top:14px;padding-top:12px;border-top:0.5px dashed #ccc">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+        '<span style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px">Options</span>' +
+        '<div style="flex:1"></div>' +
+        (canEdit ? '<button type="button" class="btn btn-sm" onclick="cfAddOption(' + qi + ')">+ Add option</button>' : '') +
+      '</div>';
+
+    if (!q.options || !q.options.length) {
+      html += '<div style="padding:10px;color:#aaa;font-size:12px;font-style:italic">No options yet. Add one per checkbox/radio choice on the form.</div>';
+    } else {
+      q.options.forEach(function(o, oi){
+        html += _cfOptionRowHtml(o, qi, oi, raw, canEdit);
+      });
+    }
+    html += '</div>';
+  } else {
+    // text / number — single field picker at question level
+    html += '<div style="margin-top:14px;padding-top:12px;border-top:0.5px dashed #ccc">' +
+      '<div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">PDF field</div>' +
+      _cfFieldChipPickerHtml(q.fieldNames || [], raw, qi, null, canEdit) +
+    '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function _cfOptionRowHtml(o, qi, oi, raw, canEdit) {
+  var html = '<div style="display:grid;grid-template-columns:1fr 2fr 60px;gap:8px;align-items:start;margin-bottom:8px;background:#fff;padding:8px;border-radius:4px;border:0.5px solid #eee">' +
+    '<div>' +
+      '<input value="' + cfEsc(o.label || '') + '"' + (canEdit ? '' : ' disabled') +
+        ' oninput="cfUpdateOptionField(' + qi + ',' + oi + ', \'label\', this.value)"' +
+        ' placeholder="Option label">' +
+    '</div>' +
+    '<div>' + _cfFieldChipPickerHtml(o.fieldNames || [], raw, qi, oi, canEdit) + '</div>' +
+    '<div style="text-align:right">' +
+      (canEdit ? '<button type="button" class="btn btn-sm" style="color:#A32D2D" onclick="cfRemoveOption(' + qi + ',' + oi + ')" title="Remove option">×</button>' : '') +
+    '</div>' +
+  '</div>';
+  return html;
+}
+
+// Field-chip picker: shows current fields as removable chips + a dropdown
+// to add another. `oi=null` means the picker is at the question level
+// (for text/number), otherwise it's an option-level picker.
+function _cfFieldChipPickerHtml(currentFields, raw, qi, oi, canEdit) {
+  var rawNames = {};
+  raw.forEach(function(f){ rawNames[f.name] = true; });
+  var available = raw.filter(function(f){ return currentFields.indexOf(f.name) === -1; });
+
+  var dropdownId = (oi === null)
+    ? 'cf-q-addfield-' + qi
+    : 'cf-q-' + qi + '-o-' + oi + '-addfield';
+
+  var addCallback = (oi === null)
+    ? 'cfAddFieldToQuestion(' + qi + ', this.value); this.value=\'\';'
+    : 'cfAddFieldToOption(' + qi + ',' + oi + ', this.value); this.value=\'\';';
+
+  var html = '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:30px">';
+  currentFields.forEach(function(fn){
+    var missing = !rawNames[fn];
+    var bg = missing ? '#FBE9C5' : '#E8F0FE';
+    var fg = missing ? '#9A7A2E' : '#1A4480';
+    var label = missing ? (fn + ' (missing)') : fn;
+    html += '<span style="display:inline-flex;align-items:center;gap:4px;background:' + bg + ';color:' + fg + ';padding:2px 6px;border-radius:3px;font-family:monospace;font-size:11px">' +
+      cfEsc(label) +
+      (canEdit
+        ? ' <button type="button" style="background:none;border:none;color:' + fg + ';cursor:pointer;padding:0;font-size:13px;line-height:1" onclick="' +
+            (oi === null
+              ? 'cfRemoveFieldFromQuestion(' + qi + ', \'' + cfEsc(fn) + '\')'
+              : 'cfRemoveFieldFromOption(' + qi + ',' + oi + ', \'' + cfEsc(fn) + '\')') +
+          '" title="Unlink">×</button>'
+        : '') +
+    '</span>';
+  });
+
+  if (canEdit && available.length) {
+    html += '<select id="' + dropdownId + '" onchange="' + addCallback + '" style="font-size:11px;padding:2px 4px;max-width:200px">' +
+      '<option value="">+ add field…</option>' +
+      available.map(function(f){
+        return '<option value="' + cfEsc(f.name) + '">' + cfEsc(f.name) + ' (' + cfEsc(f.type) + ')</option>';
+      }).join('') +
+    '</select>';
+  } else if (canEdit && !available.length && !currentFields.length) {
+    html += '<span style="color:#aaa;font-size:11px;font-style:italic">(no fields available)</span>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// ── Mutators (each persists nothing — Save button does that) ──────────
+function cfAddQuestion() {
+  if (!_cfSchema) return;
+  if (!Array.isArray(_cfSchema.questions)) _cfSchema.questions = [];
+  _cfSchema.questions.push({
+    id: _cfNewId('q_'),
+    label: '',
+    inputType: 'single_select',
+    projectParameterId: null,
+    options: [],
+    fieldNames: []
+  });
+  renderConfigureFormPage();
+}
+
+function cfRemoveQuestion(qi) {
+  if (!_cfSchema || !Array.isArray(_cfSchema.questions)) return;
+  var q = _cfSchema.questions[qi]; if (!q) return;
+  if (!confirm('Remove question "' + (q.label || ('#' + (qi + 1))) + '"?\n\nMappings on this question will be lost. The PDF fields themselves stay intact.')) return;
+  _cfSchema.questions.splice(qi, 1);
+  renderConfigureFormPage();
+}
+
+function cfUpdateQuestionField(qi, field, value) {
+  if (!_cfSchema || !_cfSchema.questions[qi]) return;
+  _cfSchema.questions[qi][field] = (value === '' && field === 'projectParameterId') ? null : value;
+  // No re-render on text-input changes — that would steal focus mid-typing.
+  // The next render (on a different mutation or Save) will pick up the value.
+}
+
+function cfUpdateQuestionType(qi, value) {
+  if (!_cfSchema || !_cfSchema.questions[qi]) return;
+  var q = _cfSchema.questions[qi];
+  var wasSelect = (q.inputType === 'single_select' || q.inputType === 'multi_select');
+  var isSelect  = (value === 'single_select' || value === 'multi_select');
+  q.inputType = value;
+  // Type transitions:
+  //   select → text/number: drop options, ensure fieldNames array exists
+  //   text/number → select: drop fieldNames, ensure options array exists
+  if (wasSelect && !isSelect) {
+    if (!Array.isArray(q.fieldNames)) q.fieldNames = [];
+  } else if (!wasSelect && isSelect) {
+    if (!Array.isArray(q.options)) q.options = [];
+  }
+  renderConfigureFormPage();
+}
+
+function cfAddOption(qi) {
+  if (!_cfSchema || !_cfSchema.questions[qi]) return;
+  var q = _cfSchema.questions[qi];
+  if (!Array.isArray(q.options)) q.options = [];
+  q.options.push({ id: _cfNewId('o_'), label: '', fieldNames: [] });
+  renderConfigureFormPage();
+}
+
+function cfRemoveOption(qi, oi) {
+  if (!_cfSchema || !_cfSchema.questions[qi]) return;
+  _cfSchema.questions[qi].options.splice(oi, 1);
+  renderConfigureFormPage();
+}
+
+function cfUpdateOptionField(qi, oi, field, value) {
+  if (!_cfSchema || !_cfSchema.questions[qi] || !_cfSchema.questions[qi].options[oi]) return;
+  _cfSchema.questions[qi].options[oi][field] = value;
+  // No re-render — same reason as cfUpdateQuestionField.
+}
+
+function cfAddFieldToOption(qi, oi, fieldName) {
+  if (!fieldName) return;
+  if (!_cfSchema || !_cfSchema.questions[qi] || !_cfSchema.questions[qi].options[oi]) return;
+  var arr = _cfSchema.questions[qi].options[oi].fieldNames || [];
+  if (arr.indexOf(fieldName) === -1) arr.push(fieldName);
+  _cfSchema.questions[qi].options[oi].fieldNames = arr;
+  renderConfigureFormPage();
+}
+
+function cfRemoveFieldFromOption(qi, oi, fieldName) {
+  if (!_cfSchema || !_cfSchema.questions[qi] || !_cfSchema.questions[qi].options[oi]) return;
+  var arr = _cfSchema.questions[qi].options[oi].fieldNames || [];
+  _cfSchema.questions[qi].options[oi].fieldNames = arr.filter(function(n){ return n !== fieldName; });
+  renderConfigureFormPage();
+}
+
+function cfAddFieldToQuestion(qi, fieldName) {
+  if (!fieldName) return;
+  if (!_cfSchema || !_cfSchema.questions[qi]) return;
+  var arr = _cfSchema.questions[qi].fieldNames || [];
+  if (arr.indexOf(fieldName) === -1) arr.push(fieldName);
+  _cfSchema.questions[qi].fieldNames = arr;
+  renderConfigureFormPage();
+}
+
+function cfRemoveFieldFromQuestion(qi, fieldName) {
+  if (!_cfSchema || !_cfSchema.questions[qi]) return;
+  var arr = _cfSchema.questions[qi].fieldNames || [];
+  _cfSchema.questions[qi].fieldNames = arr.filter(function(n){ return n !== fieldName; });
+  renderConfigureFormPage();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -23912,7 +24574,11 @@ function toSBProductDocument(r) {
     uploaded_at:r.uploadedAt||null,
     uploaded_by_user_id:r.uploadedByUserId||null,
     uploaded_by_name:r.uploadedByName||'',
-    notes:r.notes||''
+    notes:r.notes||'',
+    // Form-fill Round 2 — AcroForm detection + question schema. Set at
+    // upload time (auto-detect) and editable via the Configure form page.
+    is_fillable:!!r.isFillable,
+    form_schema:r.formSchema||{}
   };
 }
 function fromSBProductDocument(r) {
@@ -23932,7 +24598,10 @@ function fromSBProductDocument(r) {
     uploadedAt:r.uploaded_at||null,
     uploadedByUserId:r.uploaded_by_user_id||null,
     uploadedByName:r.uploaded_by_name||'',
-    notes:r.notes||''
+    notes:r.notes||'',
+    // Form-fill Round 2 — see toSBProductDocument
+    isFillable:!!r.is_fillable,
+    formSchema:(r.form_schema && typeof r.form_schema === 'object') ? r.form_schema : {}
   };
 }
 
