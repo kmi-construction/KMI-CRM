@@ -8180,12 +8180,14 @@ async function _appendCompileDocToJsPdf(doc, docRec, bucket, submittal) {
   var isImage = ct.indexOf('image/') === 0  || /\.(jpe?g|png|gif|webp)$/i.test(nm);
 
   // Form-fill Round 4: PDF path goes through pdf-lib first when the doc
-  // is a configured fillable form and the submittal has stored values.
+  // is a configured fillable form. Submittal.formValues may be empty
+  // if the user never opened the form values panel — the helper falls
+  // back to Project Parameter pre-fill internally, mirroring Round 3's
+  // lazy render behavior at compile time.
   if (isPdf && submittal && docRec.isFillable && docRec.formSchema &&
-      Array.isArray(docRec.formSchema.questions) && docRec.formSchema.questions.length &&
-      submittal.formValues && submittal.formValues[String(docRec.id)]) {
+      Array.isArray(docRec.formSchema.questions) && docRec.formSchema.questions.length) {
     try {
-      ab = await _fillPdfForSubmittal(ab, docRec.formSchema, submittal.formValues, docRec.id);
+      ab = await _fillPdfForSubmittal(ab, docRec.formSchema, submittal.formValues, docRec.id, submittal.projectId);
     } catch (e) {
       console.warn('Compile: form fill threw for', docRec.fileName, '— using unfilled bytes:', e);
       // ab stays as the original; we still try to append it below.
@@ -8221,39 +8223,84 @@ async function _appendCompileDocToJsPdf(doc, docRec, bucket, submittal) {
 // document at all".
 //
 // Algorithm:
-//   1. For every checkbox-style option in the schema, default it to
+//   1. Build an "effective values" map per question: stored per-submittal
+//      first, then fall back to the Project Parameter answer for any
+//      bound question with no stored value. This mirrors the lazy
+//      pre-fill in Round 3's render so the compile output matches what
+//      the user would have seen even if they never opened the panel.
+//   2. For every checkbox-style option in the schema, default it to
 //      UNCHECKED. This is important — many manufacturer PDFs ship with
 //      a default checkbox state that we want to override, not OR with.
-//   2. For each selected option, set the corresponding fields to checked
+//   3. For each selected option, set the corresponding fields to checked
 //      (and capture the option label for radio groups / dropdowns).
-//   3. For text/number questions, set the field text directly.
-//   4. Walk all form fields and apply the computed state using pdf-lib's
+//   4. For text/number questions, set the field text directly.
+//   5. Walk all form fields and apply the computed state using pdf-lib's
 //      field-class-specific methods (check/uncheck/setText/select).
-//   5. form.flatten() — bakes values into the visible page so they
-//      survive rasterization. Without this, the values exist in the
-//      AcroForm dict but pdf.js won't render them.
-async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId) {
+//   6. form.updateFieldAppearances() — REGENERATES appearance streams
+//      after our modifications. Without this, flatten produces a page
+//      where checkboxes look blank even though the form dict has them
+//      marked. This is a known pdf-lib gotcha (issue #570 / similar).
+//   7. form.flatten() — bakes appearance streams into the visible page
+//      so they survive rasterization.
+async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, projectId) {
   if (!window.PDFLib) {
-    console.warn('pdf-lib not loaded; skipping form fill');
+    console.warn('[form-fill] pdf-lib not loaded; skipping fill');
     return arrayBuffer;
   }
   if (!formSchema || !Array.isArray(formSchema.questions) || !formSchema.questions.length) {
     return arrayBuffer;
   }
-  var docValues = (formValues && typeof formValues === 'object') ? formValues[String(docId)] : null;
-  if (!docValues || typeof docValues !== 'object') return arrayBuffer;
+
+  // 1. Build effective values per question. Stored values override
+  // project-parameter defaults; for unset bound questions we derive the
+  // value from the project parameter (same compatibility rules as Round 3).
+  var docValues = (formValues && typeof formValues === 'object' && formValues[String(docId)]) || {};
+  var effective = {};
+  formSchema.questions.forEach(function(q){
+    var qKey = String(q.id);
+    if (Object.prototype.hasOwnProperty.call(docValues, qKey)) {
+      effective[qKey] = docValues[qKey];
+      return;
+    }
+    // Fallback: derive from Project Parameter
+    if (!q.projectParameterId || !projectId) return;
+    var param = (db.projectParameters || []).find(function(p){ return String(p.id) === String(q.projectParameterId); });
+    if (!param || param.isActive === false) return;
+    var pv = _getProjectParameterValue(projectId, param.id);
+    if (pv === undefined || pv === null || pv === '') return;
+    var qOptLabels = (q.options || []).map(function(o){ return o.label; });
+    if (q.inputType === 'single_select' && param.inputType === 'single_select') {
+      if (qOptLabels.indexOf(pv) !== -1) effective[qKey] = pv;
+    } else if (q.inputType === 'multi_select' && param.inputType === 'multi_select') {
+      var arr = Array.isArray(pv) ? pv : [pv];
+      var keep = arr.filter(function(v){ return qOptLabels.indexOf(v) !== -1; });
+      if (keep.length) effective[qKey] = keep;
+    } else if (q.inputType === 'text' && param.inputType === 'text') {
+      effective[qKey] = String(pv);
+    } else if (q.inputType === 'number' && param.inputType === 'number') {
+      var n = Number(pv); if (isFinite(n)) effective[qKey] = n;
+    }
+  });
+
+  var effectiveCount = Object.keys(effective).length;
+  console.log('[form-fill] doc', docId, '— effective values for', effectiveCount, 'of', formSchema.questions.length, 'questions:', effective);
+  if (effectiveCount === 0) {
+    console.warn('[form-fill] No values to apply for doc', docId, '— returning original bytes');
+    return arrayBuffer;
+  }
 
   try {
     var pdfDoc = await window.PDFLib.PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
     var form = pdfDoc.getForm();
 
-    // Build field-state maps.
+    // 2-4. Build field-state maps.
     var fieldChecks = {}; // fieldName → bool   (checkboxes referenced by select questions)
     var fieldTexts  = {}; // fieldName → string (text/number questions)
     var fieldRadios = {}; // fieldName → string (radio groups / dropdowns — picked option label)
 
     formSchema.questions.forEach(function(q){
-      var value = docValues[String(q.id)];
+      var qKey = String(q.id);
+      var value = effective[qKey];
       if (q.inputType === 'text' || q.inputType === 'number') {
         if (value === undefined || value === null) return;
         var v = String(value);
@@ -8266,13 +8313,13 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId) 
         } else {
           selected = Array.isArray(value) ? value.slice() : (value ? [value] : []);
         }
-        // 1. Default every option's fields to UNCHECKED — overrides PDF defaults.
+        // Default every option's fields to UNCHECKED — overrides PDF defaults.
         (q.options || []).forEach(function(o){
           (o.fieldNames || []).forEach(function(fn){
             if (!Object.prototype.hasOwnProperty.call(fieldChecks, fn)) fieldChecks[fn] = false;
           });
         });
-        // 2. Flip selected options' fields to checked.
+        // Flip selected options' fields to checked.
         (q.options || []).forEach(function(o){
           if (selected.indexOf(o.label) !== -1) {
             (o.fieldNames || []).forEach(function(fn){
@@ -8284,51 +8331,73 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId) 
       }
     });
 
-    // Apply to the actual PDF fields.
+    console.log('[form-fill] doc', docId, '— field maps:', {
+      checkboxes: fieldChecks,
+      texts: fieldTexts,
+      radios: fieldRadios
+    });
+
+    // 5. Apply to the actual PDF fields. Track stats for diagnostics.
     var fields = form.getFields();
+    var pdfFieldNames = fields.map(function(f){ try { return f.getName(); } catch(e){ return ''; } });
+    console.log('[form-fill] doc', docId, '— PDF has', fields.length, 'fields:', pdfFieldNames);
+
+    var applied = 0, skippedNoMatch = 0, threw = 0;
     fields.forEach(function(field){
       var name = '';
       try { name = field.getName(); } catch (e) { return; }
       if (!name) return;
       var ctor = (field.constructor && field.constructor.name) || '';
+      var hit = false;
       try {
         if (ctor === 'PDFCheckBox') {
           if (Object.prototype.hasOwnProperty.call(fieldChecks, name)) {
             if (fieldChecks[name]) field.check(); else field.uncheck();
+            hit = true;
           }
         } else if (ctor === 'PDFTextField') {
           if (Object.prototype.hasOwnProperty.call(fieldTexts, name)) {
             field.setText(fieldTexts[name]);
+            hit = true;
           }
         } else if (ctor === 'PDFRadioGroup' || ctor === 'PDFDropdown' || ctor === 'PDFOptionList') {
           if (Object.prototype.hasOwnProperty.call(fieldRadios, name)) {
-            try { field.select(fieldRadios[name]); } catch (e) { /* invalid option for this field */ }
+            try { field.select(fieldRadios[name]); hit = true; } catch (e) { /* invalid option for this field */ }
           }
         }
-        // PDFButton / PDFSignature: never written
       } catch (e) {
-        console.warn('Form fill: skipping field', name, '(' + ctor + '):', e && e.message);
+        threw++;
+        console.warn('[form-fill] field', name, '(' + ctor + '): apply threw:', e && e.message);
       }
+      if (hit) applied++;
     });
+    console.log('[form-fill] doc', docId, '— applied:', applied, ' threw:', threw, ' (out of', fields.length, 'fields)');
 
-    // Flatten so values render when the page is rasterized. If a single
-    // field's appearance fails (rare but happens with malformed PDFs),
-    // pdf-lib throws here. Without flatten the values are in the form
-    // dict but not the visible page, so we'd see a blank form — better
-    // to log and fall back to the original bytes.
+    if (applied === 0) {
+      console.warn('[form-fill] doc', docId, '— ZERO fields modified. Check that the schema field names match the PDF field names listed above.');
+    }
+
+    // 6. CRITICAL: regenerate field appearances BEFORE flatten. Without
+    // this, checked checkboxes show as blank on the rasterized page.
+    try {
+      form.updateFieldAppearances();
+    } catch (e) {
+      console.warn('[form-fill] updateFieldAppearances failed (continuing anyway):', e && e.message);
+    }
+
+    // 7. Flatten so values bake into the visible page.
     try {
       form.flatten();
     } catch (e) {
-      console.warn('form.flatten() failed, returning original bytes:', e);
+      console.warn('[form-fill] form.flatten() failed, returning original bytes:', e && e.message);
       return arrayBuffer;
     }
 
     var u8 = await pdfDoc.save();
-    // Return a fresh ArrayBuffer (sliced, not just .buffer) so downstream
-    // consumers can't accidentally pick up extra unused bytes.
+    console.log('[form-fill] doc', docId, '— save OK, returning', u8.byteLength, 'bytes');
     return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
   } catch (e) {
-    console.warn('PDF fill failed, falling back to original bytes:', e);
+    console.warn('[form-fill] PDF fill failed, falling back to original bytes:', e);
     return arrayBuffer;
   }
 }
