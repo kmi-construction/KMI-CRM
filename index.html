@@ -8409,6 +8409,17 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
               var selectedAsNames = selectedLabels.map(function(L){
                 return window.PDFLib.PDFName.of(L).toString();
               });
+              // CRITICAL ORDERING: call setValue FIRST so the field's /V is
+              // populated and one widget is correctly initialized. setValue
+              // is destructive — it walks every widget and forces non-matching
+              // ones to /Off. If we ran the multi-select widget loop before
+              // setValue, setValue would undo the multi-AS we just applied
+              // (only the widget matching V would remain "on"). Calling it
+              // first means the widget loop below has the final say and can
+              // turn additional widgets on without setValue clobbering them.
+              if (selectedLabels.length > 0) {
+                try { acroField.setValue(window.PDFLib.PDFName.of(selectedLabels[0])); } catch (e) {}
+              }
               widgets.forEach(function(widget){
                 var wov;
                 try { wov = acroField.getWidgetOnValue(widget); } catch (e) { return; }
@@ -8423,12 +8434,6 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
                   widget.setAppearanceState(window.PDFLib.PDFName.of('Off'));
                 }
               });
-              // Update the field's /V to one of the selected values (or
-              // remove it if nothing is selected). Without this, some
-              // viewers re-derive widget visibility from V and ignore AS.
-              if (selectedLabels.length > 0) {
-                try { acroField.setValue(window.PDFLib.PDFName.of(selectedLabels[0])); } catch (e) {}
-              }
               hit = true;
             } catch (e) {
               console.warn('[form-fill] field', name, '(RadioGroup): widget-level fill failed, falling back to select():', e && e.message);
