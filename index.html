@@ -8553,14 +8553,29 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
     });
 
     // 7. Flatten so values bake into the visible page. If we've aliased
-    // any appearances, suppress flatten's built-in updateFieldAppearances
-    // call (passing the option pdf-lib accepts) so it doesn't rebuild the
-    // AP/N dicts and wipe out our aliases. When there are no multi-select
-    // radios, the no-arg form is fine (and stays backward-compatible if
-    // somehow running against an older pdf-lib without the options arg).
+    // any appearances, we MUST prevent flatten from re-running
+    // updateFieldAppearances — that method rebuilds each widget's AP/N
+    // dict from scratch with only {Off, widget's-own-on-value}, wiping
+    // out our aliases moments before the draw step queries the dict.
+    //
+    // We tried passing { updateFieldAppearances: false } to flatten(),
+    // but in pdf-lib 1.17.1 that option appears to be ignored — flatten
+    // calls updateFieldAppearances regardless. So we monkey-patch the
+    // instance method to a no-op, call flatten (which now reads our
+    // aliased dicts directly), and restore the method after.
+    //
+    // updateFieldAppearances was already called explicitly earlier (step
+    // 6), so the appearance streams already exist on each widget — we're
+    // just stopping pdf-lib from regenerating them a second time.
     try {
       if (multiSelectRadios.length > 0 && didUpdate) {
-        form.flatten({ updateFieldAppearances: false });
+        var savedUpdate = form.updateFieldAppearances;
+        form.updateFieldAppearances = function(){ /* no-op during flatten */ };
+        try {
+          form.flatten();
+        } finally {
+          form.updateFieldAppearances = savedUpdate;
+        }
       } else {
         form.flatten();
       }
