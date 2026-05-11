@@ -8156,7 +8156,15 @@ async function _fetchAnyBucketFileBytes(bucket, path) {
 //   • custom document  (filePath + bucket=kmi-project-files)
 //   • response document (not relevant here — those are incoming)
 // Returns the number of pages added (0 on skip/failure).
-async function _appendCompileDocToJsPdf(doc, docRec, bucket) {
+//
+// Form-fill Round 4: when `submittal` is supplied and the doc is a
+// configured fillable PDF, the bytes are first fed through pdf-lib to
+// fill the form fields based on submittal.formValues, then flattened,
+// before being handed to the existing rasterize-and-merge path. The
+// visual style of the compiled package is unchanged — pdf.js still
+// renders pages to JPEG at 2× scale; the only difference is that those
+// rendered pages now show the filled values.
+async function _appendCompileDocToJsPdf(doc, docRec, bucket, submittal) {
   if (!docRec || !docRec.filePath) return 0;
   var ab;
   try {
@@ -8170,6 +8178,20 @@ async function _appendCompileDocToJsPdf(doc, docRec, bucket) {
   var nm = (docRec.fileName || '').toLowerCase();
   var isPdf   = ct.indexOf('pdf')    !== -1 || /\.pdf$/i.test(nm);
   var isImage = ct.indexOf('image/') === 0  || /\.(jpe?g|png|gif|webp)$/i.test(nm);
+
+  // Form-fill Round 4: PDF path goes through pdf-lib first when the doc
+  // is a configured fillable form and the submittal has stored values.
+  if (isPdf && submittal && docRec.isFillable && docRec.formSchema &&
+      Array.isArray(docRec.formSchema.questions) && docRec.formSchema.questions.length &&
+      submittal.formValues && submittal.formValues[String(docRec.id)]) {
+    try {
+      ab = await _fillPdfForSubmittal(ab, docRec.formSchema, submittal.formValues, docRec.id);
+    } catch (e) {
+      console.warn('Compile: form fill threw for', docRec.fileName, '— using unfilled bytes:', e);
+      // ab stays as the original; we still try to append it below.
+    }
+  }
+
   try {
     if (isPdf)   return await _appendPdfBytesToJsPdf(doc, ab);
     if (isImage) return await _appendImageBytesToJsPdf(doc, ab, ct || 'image/jpeg');
@@ -8185,6 +8207,129 @@ async function _appendCompileDocToJsPdf(doc, docRec, bucket) {
   } catch (e) {
     console.warn('Compile: append threw for', docRec.fileName, e);
     return 0;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// PDF FORM FILL (Form-fill Round 4)
+// ────────────────────────────────────────────────────────────────────
+// Takes a PDF ArrayBuffer + the doc's form schema + a submittal's form
+// values, returns NEW bytes with the AcroForm filled and flattened so
+// the values show up when pdf.js rasterizes the page. On any failure,
+// returns the original bytes so compile never breaks because of a fill
+// problem — the worst case is "form shows up blank" rather than "no
+// document at all".
+//
+// Algorithm:
+//   1. For every checkbox-style option in the schema, default it to
+//      UNCHECKED. This is important — many manufacturer PDFs ship with
+//      a default checkbox state that we want to override, not OR with.
+//   2. For each selected option, set the corresponding fields to checked
+//      (and capture the option label for radio groups / dropdowns).
+//   3. For text/number questions, set the field text directly.
+//   4. Walk all form fields and apply the computed state using pdf-lib's
+//      field-class-specific methods (check/uncheck/setText/select).
+//   5. form.flatten() — bakes values into the visible page so they
+//      survive rasterization. Without this, the values exist in the
+//      AcroForm dict but pdf.js won't render them.
+async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId) {
+  if (!window.PDFLib) {
+    console.warn('pdf-lib not loaded; skipping form fill');
+    return arrayBuffer;
+  }
+  if (!formSchema || !Array.isArray(formSchema.questions) || !formSchema.questions.length) {
+    return arrayBuffer;
+  }
+  var docValues = (formValues && typeof formValues === 'object') ? formValues[String(docId)] : null;
+  if (!docValues || typeof docValues !== 'object') return arrayBuffer;
+
+  try {
+    var pdfDoc = await window.PDFLib.PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+    var form = pdfDoc.getForm();
+
+    // Build field-state maps.
+    var fieldChecks = {}; // fieldName → bool   (checkboxes referenced by select questions)
+    var fieldTexts  = {}; // fieldName → string (text/number questions)
+    var fieldRadios = {}; // fieldName → string (radio groups / dropdowns — picked option label)
+
+    formSchema.questions.forEach(function(q){
+      var value = docValues[String(q.id)];
+      if (q.inputType === 'text' || q.inputType === 'number') {
+        if (value === undefined || value === null) return;
+        var v = String(value);
+        (q.fieldNames || []).forEach(function(fn){ fieldTexts[fn] = v; });
+      } else {
+        // single_select / multi_select
+        var selected = [];
+        if (q.inputType === 'single_select') {
+          if (value !== undefined && value !== null && value !== '') selected = [value];
+        } else {
+          selected = Array.isArray(value) ? value.slice() : (value ? [value] : []);
+        }
+        // 1. Default every option's fields to UNCHECKED — overrides PDF defaults.
+        (q.options || []).forEach(function(o){
+          (o.fieldNames || []).forEach(function(fn){
+            if (!Object.prototype.hasOwnProperty.call(fieldChecks, fn)) fieldChecks[fn] = false;
+          });
+        });
+        // 2. Flip selected options' fields to checked.
+        (q.options || []).forEach(function(o){
+          if (selected.indexOf(o.label) !== -1) {
+            (o.fieldNames || []).forEach(function(fn){
+              fieldChecks[fn] = true;
+              fieldRadios[fn] = o.label;
+            });
+          }
+        });
+      }
+    });
+
+    // Apply to the actual PDF fields.
+    var fields = form.getFields();
+    fields.forEach(function(field){
+      var name = '';
+      try { name = field.getName(); } catch (e) { return; }
+      if (!name) return;
+      var ctor = (field.constructor && field.constructor.name) || '';
+      try {
+        if (ctor === 'PDFCheckBox') {
+          if (Object.prototype.hasOwnProperty.call(fieldChecks, name)) {
+            if (fieldChecks[name]) field.check(); else field.uncheck();
+          }
+        } else if (ctor === 'PDFTextField') {
+          if (Object.prototype.hasOwnProperty.call(fieldTexts, name)) {
+            field.setText(fieldTexts[name]);
+          }
+        } else if (ctor === 'PDFRadioGroup' || ctor === 'PDFDropdown' || ctor === 'PDFOptionList') {
+          if (Object.prototype.hasOwnProperty.call(fieldRadios, name)) {
+            try { field.select(fieldRadios[name]); } catch (e) { /* invalid option for this field */ }
+          }
+        }
+        // PDFButton / PDFSignature: never written
+      } catch (e) {
+        console.warn('Form fill: skipping field', name, '(' + ctor + '):', e && e.message);
+      }
+    });
+
+    // Flatten so values render when the page is rasterized. If a single
+    // field's appearance fails (rare but happens with malformed PDFs),
+    // pdf-lib throws here. Without flatten the values are in the form
+    // dict but not the visible page, so we'd see a blank form — better
+    // to log and fall back to the original bytes.
+    try {
+      form.flatten();
+    } catch (e) {
+      console.warn('form.flatten() failed, returning original bytes:', e);
+      return arrayBuffer;
+    }
+
+    var u8 = await pdfDoc.save();
+    // Return a fresh ArrayBuffer (sliced, not just .buffer) so downstream
+    // consumers can't accidentally pick up extra unused bytes.
+    return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+  } catch (e) {
+    console.warn('PDF fill failed, falling back to original bytes:', e);
+    return arrayBuffer;
   }
 }
 
@@ -8892,7 +9037,9 @@ async function compileSubmittalPackage() {
       if (status) status.innerHTML = '<span style="color:#666">Adding docs for ' + subEsc(s.kmiSubmittalNo || s.itemName) + '…</span>';
       for (var j = 0; j < docs.length; j++) {
         var entry = docs[j];
-        var pages = await _appendCompileDocToJsPdf(doc, entry.doc, entry.bucket);
+        // Form-fill Round 4: pass the submittal so fillable docs can be
+        // filled from submittal.formValues before rasterization.
+        var pages = await _appendCompileDocToJsPdf(doc, entry.doc, entry.bucket, s);
         totalAppendedPages += pages;
         if (pages === 0) {
           skipped.push((s.kmiSubmittalNo || '#' + s.id) + ' / ' + (entry.doc.fileName || '?'));
