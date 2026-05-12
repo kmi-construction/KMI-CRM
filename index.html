@@ -247,6 +247,365 @@ textarea{resize:vertical;min-height:72px}
 .toast.dismissing{animation:toast-out .2s ease-in forwards}
 @keyframes toast-in{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
 @keyframes toast-out{to{transform:translateX(20px);opacity:0}}
+
+/* ───────────────────────────────────────────────────────────────
+ * MOBILE SHELL — Round 1
+ * Activates at ≤768px. Hides the desktop sidebar, shows a top header
+ * + bottom tab bar, and reflows the T&M ticket list and form (which
+ * use tables) into stacked cards via td[data-label]:before tricks.
+ * ─────────────────────────────────────────────────────────────── */
+
+/* Mobile chrome elements are hidden by default — JS removes the
+ * inline display:none on successful login, and the media queries
+ * below take over from there. On desktop they stay hidden. */
+.mob-header,.mob-tabs{display:none}
+.mob-tab-icon{font-size:20px;line-height:1;font-weight:400}
+
+@media (max-width:768px){
+  /* Top header + bottom tab bar visible on mobile only */
+  .mob-header{
+    display:flex;align-items:center;justify-content:space-between;
+    position:fixed;top:0;left:0;right:0;height:54px;
+    background:var(--kmi);color:#fff;
+    padding:0 12px;z-index:90;
+    border-bottom:0.5px solid var(--kmi2)
+  }
+  .mob-header-title{font-size:15px;font-weight:600;color:#fff;flex:1;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 8px}
+  .mob-header-logo{height:30px;flex-shrink:0}
+  .mob-header-btn{
+    background:rgba(255,255,255,.12);border:0.5px solid rgba(255,255,255,.18);
+    color:#fff;font-size:18px;padding:6px 10px;border-radius:7px;
+    cursor:pointer;font-family:inherit;line-height:1;flex-shrink:0
+  }
+  .mob-tabs{
+    display:flex;position:fixed;bottom:0;left:0;right:0;
+    height:64px;background:#fff;border-top:0.5px solid #d8d8d8;
+    z-index:90;padding-bottom:env(safe-area-inset-bottom,0)
+  }
+  .mob-tab{
+    flex:1;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:3px;cursor:pointer;
+    color:#888;font-size:10px;font-weight:600;
+    border:none;background:none;font-family:inherit;
+    letter-spacing:.3px;padding:6px 4px;
+    transition:color .12s
+  }
+  .mob-tab.active{color:var(--kmi)}
+  .mob-tab.active .mob-tab-icon{color:var(--kmi)}
+
+  /* Layout: hide desktop sidebar, give content room for fixed chrome */
+  .sb{display:none}
+  body{overflow:hidden}
+  .app{display:block;height:100vh}
+  .main{
+    padding:64px 12px 80px 12px;
+    height:100vh;
+    -webkit-overflow-scrolling:touch
+  }
+
+  /* Page header — tighter on mobile */
+  .ph{flex-wrap:wrap;gap:8px;margin-bottom:14px;align-items:flex-start}
+  .ph h1{font-size:20px;margin:0}
+  .ph .sub{font-size:12px}
+  .stripe{display:none}
+
+  /* Cards: full-width, single-column form grids */
+  .card{padding:14px;margin-bottom:12px}
+  .fg{grid-template-columns:1fr !important;gap:12px}
+  .fgr.full{grid-column:1 !important}
+
+  /* Inputs — 16px to prevent iOS auto-zoom on focus,
+   * bigger touch targets via taller padding */
+  input,select,textarea{font-size:16px;padding:10px 12px}
+  label{font-size:11px}
+  textarea{min-height:84px}
+  .btn{padding:9px 14px;font-size:14px;min-height:40px;line-height:1.2}
+  .btn-sm{min-height:34px;padding:6px 10px;font-size:12px}
+
+  /* Action bars — search input full-width on its own row */
+  .ab{gap:8px;flex-direction:column;align-items:stretch}
+  .ab .si,.ab .fs,.ab .btn{width:100%;font-size:14px}
+  .ab .si{font-size:16px}
+  .ab .btn{margin-left:0 !important}
+
+  /* Metric tiles — 2 across on mobile */
+  .mets{grid-template-columns:1fr 1fr !important;gap:8px}
+  .mc{padding:12px}
+  .mv{font-size:18px}
+  .ml{font-size:10px}
+
+  /* Modals — full screen */
+  .ov.show{align-items:stretch}
+  .mdl{
+    width:100vw;max-width:100vw;height:100vh;max-height:100vh;
+    border-radius:0;padding:18px 14px 24px;
+    overflow-y:auto;-webkit-overflow-scrolling:touch
+  }
+  .mt{font-size:18px}
+  .xbtn{font-size:24px;top:14px;right:14px}
+
+  /* Tables: keep horizontal scroll affordance for any unhandled tables.
+   * Specific tables (T&M list, T&M form rows) reflow to cards below. */
+  table{font-size:12px}
+
+  /* Two-column tab pattern shrinks to single column */
+  .tabs{flex-wrap:wrap;gap:0}
+  .tab{padding:8px 10px;font-size:12px;flex:1;text-align:center}
+
+  /* Form footer button rows: full-width buttons, stacked */
+  .pg > div[style*="justify-content:flex-end"]{
+    flex-direction:column-reverse !important;
+    align-items:stretch !important;
+    gap:8px !important
+  }
+  .pg > div[style*="justify-content:flex-end"] .btn{width:100%}
+
+  /* Bid opportunities calendar etc. — keep small, scroll horizontally */
+  .cal-wrap{overflow-x:auto}
+  .cal-grid,.cal-dow{min-width:560px}
+  .cal-cell{min-height:80px;font-size:11px}
+
+  /* Toast container — full-width pinned above tab bar */
+  .toast-container{
+    bottom:78px;right:8px;left:8px;
+    max-width:none
+  }
+
+  /* Login screen already uses max-width:92vw — small refinement */
+  #login-overlay .login-card{padding:26px 24px}
+
+  /* ─── T&M LIST PAGE (#pg-tm-tickets) — row → card reflow ─── */
+  #pg-tm-tickets .card{padding:0}
+  #pg-tm-tickets table{display:block}
+  #pg-tm-tickets thead{display:none}
+  #pg-tm-tickets tbody,#pg-tm-tickets tr{display:block;width:100%}
+  #pg-tm-tickets tbody tr{
+    padding:12px 14px;
+    border-bottom:0.5px solid #eee;
+    background:#fff
+  }
+  #pg-tm-tickets tbody tr:last-child{border-bottom:none}
+  #pg-tm-tickets tbody td{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:4px 0 !important;
+    text-align:left !important;
+    border:none;
+    font-size:13px !important;
+    max-width:none !important;
+    overflow:visible !important;
+    white-space:normal !important
+  }
+  #pg-tm-tickets tbody td[data-label]:before{
+    content:attr(data-label);
+    display:inline-block;
+    font-size:10px;font-weight:600;color:#888;
+    text-transform:uppercase;letter-spacing:.5px;
+    flex-shrink:0;margin-right:10px;
+    min-width:88px
+  }
+  #pg-tm-tickets tbody td[data-label="Actions"]:before{display:none}
+  #pg-tm-tickets tbody td[data-label="Actions"]{
+    flex-wrap:wrap;gap:6px;
+    justify-content:flex-end;
+    padding-top:8px !important;
+    margin-top:4px;
+    border-top:0.5px solid #f3f3f3
+  }
+  #pg-tm-tickets tbody td[data-label="Ticket #"]{
+    font-size:15px !important;font-weight:700;
+    padding-bottom:6px !important;
+    border-bottom:0.5px solid #f3f3f3;
+    margin-bottom:4px
+  }
+
+  /* ─── T&M FORM PAGE (#pg-new-tm-ticket) — labor/equip/mat row reflow ─── */
+  #pg-new-tm-ticket table thead{display:none}
+  #pg-new-tm-ticket table tbody{display:block}
+  #pg-new-tm-ticket table tr[data-row]{
+    display:block;
+    background:#fafafa;
+    border:0.5px solid #e8e8e8;
+    border-radius:8px;
+    padding:10px 12px;
+    margin-bottom:10px;
+    position:relative
+  }
+  #pg-new-tm-ticket table tr[data-row] td{
+    display:block;
+    padding:5px 0 !important;
+    text-align:left !important
+  }
+  #pg-new-tm-ticket table tr[data-row] td[data-label]:before{
+    content:attr(data-label);
+    display:block;
+    font-size:10px;font-weight:600;color:#888;
+    text-transform:uppercase;letter-spacing:.5px;
+    margin-bottom:4px
+  }
+  #pg-new-tm-ticket table tr[data-row] td[data-label="Remove"]{
+    position:absolute;top:6px;right:6px;
+    padding:0 !important;width:auto
+  }
+  #pg-new-tm-ticket table tr[data-row] td[data-label="Remove"]:before{display:none}
+  #pg-new-tm-ticket table tr[data-row] td[data-label="Remove"] .btn{
+    min-height:30px;min-width:30px;padding:4px 10px;font-size:14px
+  }
+  /* Three-up hours row stays on a single line within the worker card */
+  #pg-new-tm-ticket table tr[data-row] td.ntm-hours-cell{
+    display:inline-block !important;
+    width:32%;
+    vertical-align:top;
+    margin-right:1%
+  }
+  #pg-new-tm-ticket table tr[data-row] td.ntm-hours-cell:last-of-type{margin-right:0}
+  #pg-new-tm-ticket table tr[data-row] td.ntm-hours-cell input{
+    font-size:15px !important;
+    text-align:center !important;
+    padding:8px 4px !important
+  }
+  /* Make row inputs full font size for easy entry */
+  #pg-new-tm-ticket table tr[data-row] input,
+  #pg-new-tm-ticket table tr[data-row] select{
+    font-size:15px !important;padding:8px 10px !important
+  }
+  /* Card-header buttons (+ Add worker etc.) full-width on mobile */
+  #pg-new-tm-ticket .ch{flex-wrap:wrap;gap:8px}
+  #pg-new-tm-ticket .ch .btn-sm{width:100%;margin-top:4px}
+  /* Labor totals footer */
+  #pg-new-tm-ticket tfoot{display:block}
+  #pg-new-tm-ticket tfoot tr{
+    display:flex;justify-content:space-between;
+    background:#EEF0F8;border-radius:7px;
+    padding:8px 12px;margin-top:4px;
+    font-weight:600;color:var(--kmi)
+  }
+  #pg-new-tm-ticket tfoot td{
+    padding:0 !important;border:none;
+    font-size:13px !important
+  }
+  #pg-new-tm-ticket tfoot td:empty{display:none}
+
+  /* ─── Mobile-only pages: m-projects, m-project-detail, m-submittals ─── */
+  .mob-list{display:flex;flex-direction:column;gap:8px}
+  .mob-list-row{
+    background:#fff;border:0.5px solid #e8e8e8;border-radius:9px;
+    padding:12px 14px;cursor:pointer;
+    transition:background .12s,border-color .12s
+  }
+  .mob-list-row:active{background:#f3f5fb;border-color:var(--stl)}
+  .mob-list-row-title{
+    font-size:15px;font-weight:600;color:#1a1a1a;
+    margin-bottom:3px;display:flex;align-items:center;gap:8px
+  }
+  .mob-list-row-num{
+    font-family:monospace;font-size:13px;color:var(--kmi);
+    background:#EEF0F8;padding:2px 8px;border-radius:5px;
+    font-weight:700;letter-spacing:.3px;flex-shrink:0
+  }
+  .mob-list-row-sub{font-size:12px;color:#666;line-height:1.45}
+  .mob-list-row-meta{
+    display:flex;gap:10px;flex-wrap:wrap;
+    margin-top:6px;font-size:11px;color:#888
+  }
+  .mob-list-row-meta strong{color:#1a1a1a;font-weight:600}
+  .mob-list-empty{
+    padding:36px 16px;text-align:center;color:#aaa;font-size:13px;
+    background:#fafafa;border-radius:9px;border:0.5px dashed #ddd
+  }
+
+  /* Contact card (KMI team / customer contact) */
+  .mob-contact{
+    display:flex;align-items:center;gap:12px;
+    background:#fff;border:0.5px solid #e8e8e8;border-radius:9px;
+    padding:11px 13px;margin-bottom:8px
+  }
+  .mob-contact-avatar{
+    width:38px;height:38px;border-radius:50%;
+    background:var(--kmi);color:#fff;
+    display:flex;align-items:center;justify-content:center;
+    font-size:13px;font-weight:700;flex-shrink:0;
+    letter-spacing:.5px
+  }
+  .mob-contact-avatar.cust{background:var(--ac);color:var(--kmi)}
+  .mob-contact-body{flex:1;min-width:0}
+  .mob-contact-name{font-size:14px;font-weight:600;color:#1a1a1a}
+  .mob-contact-role{font-size:11px;color:#888;margin-top:1px}
+  .mob-contact-actions{display:flex;gap:6px;flex-shrink:0}
+  .mob-contact-actions a{
+    display:flex;align-items:center;justify-content:center;
+    width:36px;height:36px;border-radius:50%;
+    background:#EEF0F8;color:var(--kmi);
+    text-decoration:none;font-size:16px;
+    border:0.5px solid var(--stl)
+  }
+  .mob-contact-actions a:active{background:var(--stl)}
+
+  /* Submittal status pills on mobile cards */
+  .mob-pill{
+    display:inline-block;padding:2px 7px;border-radius:100px;
+    font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px
+  }
+  .mob-pill-overdue{background:#FDEBEB;color:#A32D2D;border:0.5px solid #e8a0a0}
+  .mob-pill-pending{background:#fff5d6;color:#9A7A2E;border:0.5px solid #E8D08A}
+  .mob-pill-closed{background:#EAF3DE;color:#3B6D11;border:0.5px solid #8fbe5f}
+  .mob-pill-draft{background:#f5f5f5;color:#666;border:0.5px solid #ddd}
+
+  /* Section header inside a mobile page */
+  .mob-section-hdr{
+    font-size:10px;font-weight:700;color:#888;
+    text-transform:uppercase;letter-spacing:.7px;
+    margin:18px 0 8px 4px;
+    display:flex;align-items:center;justify-content:space-between
+  }
+  .mob-section-hdr:first-child{margin-top:4px}
+  .mob-section-hdr-count{
+    background:#EEF0F8;color:var(--kmi);
+    padding:2px 8px;border-radius:100px;
+    font-weight:700;font-size:10px;letter-spacing:.3px
+  }
+
+  /* Mobile project-detail header card */
+  .mob-proj-hero{
+    background:linear-gradient(135deg,var(--kmi) 0%,var(--kmi2) 100%);
+    color:#fff;border-radius:10px;
+    padding:16px;margin-bottom:14px
+  }
+  .mob-proj-hero-num{
+    font-family:monospace;font-size:11px;
+    color:var(--ac);letter-spacing:.5px;font-weight:700
+  }
+  .mob-proj-hero-name{font-size:17px;font-weight:600;margin:2px 0 8px}
+  .mob-proj-hero-meta{
+    font-size:12px;color:rgba(255,255,255,.78);line-height:1.55
+  }
+  .mob-proj-hero-actions{
+    display:flex;gap:8px;margin-top:12px
+  }
+  .mob-proj-hero-actions .btn{
+    flex:1;background:rgba(255,255,255,.14);
+    color:#fff;border:0.5px solid rgba(255,255,255,.25)
+  }
+  .mob-proj-hero-actions .btn:active{background:rgba(255,255,255,.22)}
+
+  /* "Open on desktop" stub page */
+  .mob-desktop-only{
+    padding:40px 24px;text-align:center;
+    background:#fafafa;border-radius:10px;
+    border:0.5px dashed #ddd;margin-top:20px
+  }
+  .mob-desktop-only-icon{font-size:48px;margin-bottom:12px;opacity:.4}
+  .mob-desktop-only-title{font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:6px}
+  .mob-desktop-only-body{font-size:12px;color:#666;line-height:1.5}
+}
+
+/* Desktop-only — explicitly hide mobile chrome */
+@media (min-width:769px){
+  .mob-header,.mob-tabs{display:none !important}
+  .pg.mob-only{display:none !important}
+}
+
 </style>
 </head>
 <body>
@@ -397,6 +756,13 @@ textarea{resize:vertical;min-height:72px}
   </div>
 </div>
 
+<!-- Mobile-only top header. Hidden on desktop via media query. -->
+<div class="mob-header" id="mob-header" style="display:none">
+  <button class="mob-header-btn" id="mob-header-user-btn" onclick="mobToggleUserMenu()" title="Account">&#9776;</button>
+  <div class="mob-header-title" id="mob-header-title">KMI CRM</div>
+  <button class="mob-header-btn" id="mob-header-action-btn" style="visibility:hidden">&nbsp;</button>
+</div>
+
 <div class="app" id="app-root" style="display:none">
 <div class="sb">
   <div class="sb-logo">
@@ -478,6 +844,62 @@ textarea{resize:vertical;min-height:72px}
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
     <div class="card"><div class="ch"><span class="ct">Monthly opportunities</span></div><div id="d-chart"></div></div>
     <div class="card"><div class="ch"><span class="ct">Activity feed</span></div><div class="af" id="d-act"></div></div>
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════════
+     MOBILE-ONLY PAGES (Round 1) — only used when viewport ≤768px and a
+     non-Accounting user is signed in. Bottom tab bar drives navigation.
+     ════════════════════════════════════════════════════════════════════ -->
+
+<!-- Mobile: list of my assigned projects -->
+<div class="pg mob-only" id="pg-m-projects">
+  <div class="ph"><div><h1>My projects</h1><div class="sub" id="m-proj-sub">Projects you're assigned to</div></div></div>
+  <div class="ab" style="margin-bottom:10px">
+    <input class="si" placeholder="Search by number, name, customer..." oninput="filterMobileProjects()" id="m-proj-search">
+  </div>
+  <div id="m-proj-list" class="mob-list"></div>
+</div>
+
+<!-- Mobile: project detail (KMI team + customer contacts, with shortcuts) -->
+<div class="pg mob-only" id="pg-m-project-detail">
+  <div class="ph" style="margin-bottom:10px">
+    <div><h1 id="m-pd-heading" style="font-size:17px">Project</h1></div>
+    <button class="btn btn-sm" onclick="nav('m-projects')">← Back</button>
+  </div>
+  <div id="m-pd-body"></div>
+</div>
+
+<!-- Mobile: submittals list, filtered to current user's assigned projects -->
+<div class="pg mob-only" id="pg-m-submittals">
+  <div class="ph" style="margin-bottom:10px">
+    <div>
+      <h1>Submittals</h1>
+      <div class="sub" id="m-sub-context">Across all my projects</div>
+    </div>
+    <button class="btn btn-sm" id="m-sub-clear-filter" style="display:none" onclick="mobClearSubmittalProjectFilter()">Show all</button>
+  </div>
+  <div class="ab" style="margin-bottom:10px">
+    <input class="si" placeholder="Search submittals..." oninput="filterMobileSubmittals()" id="m-sub-search">
+    <select class="fs" onchange="filterMobileSubmittals()" id="m-sub-fstatus">
+      <option value="">All statuses</option>
+      <option value="open">Open</option>
+      <option value="pending">Pending</option>
+      <option value="closed">Closed</option>
+      <option value="overdue">Overdue only</option>
+    </select>
+  </div>
+  <div id="m-sub-list" class="mob-list"></div>
+</div>
+
+<!-- Mobile: "open on desktop" stub for pages without a mobile version -->
+<div class="pg mob-only" id="pg-m-desktop-only">
+  <div class="ph"><div><h1 id="m-do-heading">Open on desktop</h1></div></div>
+  <div class="mob-desktop-only">
+    <div class="mob-desktop-only-icon">🖥</div>
+    <div class="mob-desktop-only-title" id="m-do-title">This feature isn't available on mobile yet</div>
+    <div class="mob-desktop-only-body" id="m-do-body">Mobile is currently focused on T&amp;M ticket capture, submittal review, and project directory access. For everything else, please open the CRM on a desktop or laptop.</div>
   </div>
 </div>
 
@@ -2259,6 +2681,11 @@ function showLogin() {
 function hideLogin() {
   g('login-overlay').style.display = 'none';
   g('app-root').style.display = 'flex';
+  // Round 1 mobile: reveal top header + bottom tab bar. Media query
+  // controls whether they actually paint — display:none here is the
+  // only thing that was suppressing them before sign-in.
+  var mh = g('mob-header'); if (mh) mh.style.display = '';
+  var mt = g('mob-tabs');   if (mt) mt.style.display = '';
 }
 
 async function loginAttempt() {
@@ -2280,12 +2707,37 @@ async function loginAttempt() {
 function enterApp() {
   hideLogin();
   applyUserPermissions();
+  // Mobile routing: re-detect first (DOM might have grown since boot)
+  detectMobile();
+  if (_isMobile) {
+    if (_mobUserBlocked()) {
+      // Accounting (or any future denied role): show a permanent stub
+      mobShowDesktopOnly('dashboard');
+      var t = g('m-do-title');
+      if (t) t.textContent = 'Mobile access not available for your role';
+      var b = g('m-do-body');
+      if (b) b.textContent = 'Your role (' + (normalizeRole(_currentUser.role) || '—') + ') doesn\'t have a mobile experience yet. Please use the CRM on a desktop or laptop.';
+      return;
+    }
+    // Default mobile landing: T&M tickets (the primary mobile use case)
+    nav('tm-tickets');
+    return;
+  }
   nav('dashboard');
 }
 function logout() {
   _currentUser = null;
   clearSession();
   closeModal();
+  // Re-hide mobile chrome at logout so the login screen isn't framed by it
+  var mh = g('mob-header'); if (mh) mh.style.display = 'none';
+  var mt = g('mob-tabs');   if (mt) mt.style.display = 'none';
+  // Reset mobile state so the next user starts fresh
+  _mobileSelectedProjectId = null;
+  _mobileSubmittalProjectFilter = null;
+  _mobileProjectSearch = '';
+  _mobileSubmittalSearch = '';
+  _mobileSubmittalStatus = '';
   showLogin();
 }
 
@@ -3239,10 +3691,479 @@ function nav(page) {
     'edit-product':    renderEditProductPage,
     'configure-form':  renderConfigureFormPage,
     'submittals':      renderSubmittalsPage,
-    'edit-submittal':  renderEditSubmittalPage
+    'edit-submittal':  renderEditSubmittalPage,
+    'm-projects':         renderMobileProjects,
+    'm-project-detail':   renderMobileProjectDetail,
+    'm-submittals':       renderMobileSubmittals,
+    'm-desktop-only':     function(){}
   };
   if (fns[page]) fns[page]();
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// MOBILE SHELL — Round 1
+// ═══════════════════════════════════════════════════════════════════════
+// Activates at viewport ≤768px. Hides desktop sidebar, shows top header
+// and bottom tab bar with 3 tabs: T&M, Submittals, Projects. Accounting
+// users are blocked entirely. All other roles get mobile access.
+//
+// Shared with desktop: data layer, auth, Supabase sync, permissions matrix.
+// Mobile-specific: viewport-driven CSS reflow + 3 dedicated pages
+// (m-projects, m-project-detail, m-submittals) + the existing tm-tickets
+// list & form (which reflow to cards via media queries).
+
+var _isMobile = false;
+var _mobileDeniedRoles = ['Accounting'];
+var _mobileAllowedPages = {
+  // Existing pages with mobile-friendly UX (via responsive CSS):
+  'tm-tickets': 1, 'new-tm-ticket': 1,
+  // Mobile-only pages (also tagged with .mob-only):
+  'm-projects': 1, 'm-project-detail': 1, 'm-submittals': 1, 'm-desktop-only': 1,
+  // Auxiliary pages a user may legitimately reach on mobile:
+  'supabase-setup': 1
+};
+var _mobileTabForPage = {
+  'tm-tickets': 'tm-tickets', 'new-tm-ticket': 'tm-tickets',
+  'm-submittals': 'm-submittals',
+  'm-projects': 'm-projects', 'm-project-detail': 'm-projects'
+};
+var _mobileSelectedProjectId = null;        // remembers project for detail page
+var _mobileSubmittalProjectFilter = null;   // when set, filters m-submittals list
+var _mobileProjectSearch = '';
+var _mobileSubmittalSearch = '';
+var _mobileSubmittalStatus = '';
+
+function _mobUserBlocked() {
+  if (!_currentUser) return false;
+  var role = normalizeRole(_currentUser.role);
+  return _mobileDeniedRoles.indexOf(role) !== -1;
+}
+
+// Detect viewport. Called on boot, resize, and orientation change. Toggles
+// body.mobile so any other code that wants to branch can do so cheaply.
+function detectMobile() {
+  var was = _isMobile;
+  _isMobile = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+  document.body.classList.toggle('mobile', _isMobile);
+  // If we just transitioned and the user is signed in, re-check the
+  // current page is mobile-allowed (in case they rotated to portrait
+  // mid-session on a non-mobile page).
+  if (_isMobile && !was && _currentUser && !_mobUserBlocked()) {
+    var active = document.querySelector('.pg.active');
+    var pageId = active ? active.id.replace(/^pg-/, '') : '';
+    if (pageId && !_mobileAllowedPages[pageId]) {
+      mobShowDesktopOnly(pageId);
+    }
+  }
+}
+
+window.addEventListener('resize', detectMobile);
+window.addEventListener('orientationchange', detectMobile);
+// Initial detect runs at boot, after DOM is ready (script is end-of-body).
+detectMobile();
+
+// Wraps nav(): on mobile, blocks unsupported pages and updates the active tab.
+// Defined as a function on window so it can be referenced from inline onclicks.
+var _origNav = nav;
+nav = function(page) {
+  if (_isMobile && _currentUser && !_mobUserBlocked()) {
+    if (!_mobileAllowedPages[page]) {
+      mobShowDesktopOnly(page);
+      mobSetActiveTab(null);
+      return;
+    }
+  }
+  _origNav(page);
+  // After nav, update the bottom tab highlight if mobile.
+  // (The mobile pages' renderers are wired into the fns dispatch map
+  // inside _origNav, so we don't need to call them again here.)
+  if (_isMobile) {
+    var tab = _mobileTabForPage[page] || null;
+    mobSetActiveTab(tab);
+    mobSetHeaderTitle(page);
+  }
+};
+
+function mobSetActiveTab(tab) {
+  var nodes = document.querySelectorAll('.mob-tab');
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    if (tab && n.getAttribute('data-mtab') === tab) n.classList.add('active');
+    else n.classList.remove('active');
+  }
+}
+
+function mobSetHeaderTitle(page) {
+  var titles = {
+    'tm-tickets':       'T&M Tickets',
+    'new-tm-ticket':    'T&M Ticket',
+    'm-projects':       'My Projects',
+    'm-project-detail': 'Project',
+    'm-submittals':     'Submittals',
+    'm-desktop-only':   'Desktop only',
+    'supabase-setup':   'Supabase'
+  };
+  var t = titles[page] || 'KMI CRM';
+  var el = document.getElementById('mob-header-title');
+  if (el) el.textContent = t;
+}
+
+function mobTabClick(target) {
+  // T&M and Submittals are direct nav. Projects defaults to the list.
+  if (target === 'tm-tickets') {
+    // From submittals/projects flow, going back to T&M clears any filters
+    nav('tm-tickets');
+  } else if (target === 'm-submittals') {
+    _mobileSubmittalProjectFilter = null;
+    nav('m-submittals');
+  } else if (target === 'm-projects') {
+    nav('m-projects');
+  }
+}
+
+function mobShowDesktopOnly(pageId) {
+  // Activate the stub page with a label explaining what they tried to open.
+  var labelMap = {
+    dashboard:'Dashboard', opportunities:'Bid Opportunities', analytics:'Analytics',
+    customers:'Customers', pms:'Project Managers', vendors:'Vendors',
+    'vendor-contacts':'Vendor Contacts', users:'Users', templates:'Templates',
+    projects:'Projects', budget:'Budget', cors:'Change Order Requests',
+    'new-cor':'New COR', 'new-opportunity':'New Opportunity',
+    'email-log':'Email Log', 'email-settings':'Email Settings',
+    'product-library':'Product Library', 'edit-product':'Edit Product',
+    'configure-form':'Configure Form', 'edit-submittal':'Edit Submittal',
+    submittals:'Submittals (desktop)', 'new-project':'New Project',
+    'supabase-setup':'Supabase Setup', 'import':'Import'
+  };
+  var label = labelMap[pageId] || pageId;
+  var titleEl = document.getElementById('m-do-title');
+  if (titleEl) titleEl.textContent = label + ' isn\'t available on mobile yet';
+  // Activate the page using the existing setActivePage helper
+  setActivePage('m-desktop-only');
+  mobSetHeaderTitle('m-desktop-only');
+}
+
+function mobToggleUserMenu() {
+  if (!_currentUser) return;
+  var name = (_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '');
+  var role = normalizeRole(_currentUser.role) || '—';
+  var body =
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Account</div>' +
+    '<div class="msb" style="margin-bottom:18px">' +
+      '<div style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:2px">' + tmEsc(name.trim() || _currentUser.email) + '</div>' +
+      '<div style="font-size:12px;color:#666">' + tmEsc(_currentUser.email || '') + '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:4px">Role: ' + tmEsc(role) + '</div>' +
+    '</div>' +
+    '<div style="display:flex;flex-direction:column;gap:10px">' +
+      '<button class="btn" style="width:100%;padding:12px" onclick="closeModal();showMyProfile()">Edit my profile</button>' +
+      '<button class="btn" style="width:100%;padding:12px;color:#A32D2D" onclick="closeModal();logout()">Sign out</button>' +
+    '</div>';
+  showModal(body);
+}
+
+// ── Mobile helpers ──────────────────────────────────────────────────
+function _mobInitials(first, last) {
+  var f = (first || '').trim().charAt(0).toUpperCase();
+  var l = (last  || '').trim().charAt(0).toUpperCase();
+  return (f + l) || '?';
+}
+function _mobEsc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// Returns the list of projects the current user is assigned to via
+// kmiAssignments. Admins / PMs may also want to see all projects, but
+// per the spec (Q4: option B) we only show assigned. If the user has
+// no assignments at all, we fall back to ALL projects so they can still
+// browse — this matters especially for new hires.
+function _mobAssignedProjects() {
+  if (!_currentUser) return [];
+  var uid = String(_currentUser.id);
+  var all = (db.projects || []).slice();
+  var mine = all.filter(function(p){
+    if (!Array.isArray(p.kmiAssignments)) return false;
+    return p.kmiAssignments.some(function(a){ return String(a.userId) === uid; });
+  });
+  if (mine.length) return mine;
+  // Admin / PM fallback: see everything when not explicitly assigned
+  // (foremen and supers with no assignments will also see all — better
+  // than an empty screen for first-time mobile users).
+  return all;
+}
+
+function renderMobileProjects() {
+  var list = _mobAssignedProjects();
+  // Sort by project number desc (newest at top), then name
+  list.sort(function(a,b){
+    var an = String(a.number || ''), bn = String(b.number || '');
+    if (an === bn) return (a.name || '').localeCompare(b.name || '');
+    return bn.localeCompare(an);
+  });
+  // Apply search filter
+  var q = (_mobileProjectSearch || '').toLowerCase().trim();
+  if (q) {
+    list = list.filter(function(p){
+      var c = getCust(p.customerId);
+      var hay = (String(p.number || '') + ' ' + (p.name || '') + ' ' + (c.name || '') + ' ' + (p.address || '') + ' ' + (p.city || '')).toLowerCase();
+      return hay.indexOf(q) !== -1;
+    });
+  }
+  var el = document.getElementById('m-proj-list');
+  if (!el) return;
+  if (!list.length) {
+    el.innerHTML = '<div class="mob-list-empty">' +
+      (q ? 'No projects match "' + _mobEsc(q) + '".'
+         : 'You\'re not assigned to any projects yet. Ask an admin to add you on the project record.') +
+      '</div>';
+    return;
+  }
+  el.innerHTML = list.map(function(p){
+    var c = getCust(p.customerId);
+    var kmiCt = Array.isArray(p.kmiAssignments) ? p.kmiAssignments.length : 0;
+    var conCt = Array.isArray(p.contactAssignments) ? p.contactAssignments.length : 0;
+    var subCt = (db.submittals || []).filter(function(s){ return String(s.projectId) === String(p.id); }).length;
+    var addr = [p.city, p.state].filter(Boolean).join(', ');
+    return '<div class="mob-list-row" onclick="openMobileProjectDetail(' + p.id + ')">' +
+      '<div class="mob-list-row-title">' +
+        '<span class="mob-list-row-num">' + _mobEsc(p.number || '—') + '</span>' +
+        '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1">' + _mobEsc(p.name || '') + '</span>' +
+      '</div>' +
+      '<div class="mob-list-row-sub">' + _mobEsc(c.name || '') + (addr ? ' · ' + _mobEsc(addr) : '') + '</div>' +
+      '<div class="mob-list-row-meta">' +
+        '<span><strong>' + kmiCt + '</strong> KMI</span>' +
+        '<span><strong>' + conCt + '</strong> contact' + (conCt === 1 ? '' : 's') + '</span>' +
+        '<span><strong>' + subCt + '</strong> submittal' + (subCt === 1 ? '' : 's') + '</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function filterMobileProjects() {
+  var s = document.getElementById('m-proj-search');
+  _mobileProjectSearch = s ? s.value : '';
+  renderMobileProjects();
+}
+
+function openMobileProjectDetail(id) {
+  _mobileSelectedProjectId = id;
+  nav('m-project-detail');
+}
+
+function renderMobileProjectDetail() {
+  if (!_mobileSelectedProjectId) {
+    nav('m-projects');
+    return;
+  }
+  var p = getProj(_mobileSelectedProjectId);
+  if (!p) { nav('m-projects'); return; }
+  var c = getCust(p.customerId);
+  var hdr = document.getElementById('m-pd-heading');
+  if (hdr) hdr.textContent = (p.number || 'Project');
+
+  var addrParts = [];
+  if (p.address) addrParts.push(p.address);
+  var cityLine = [p.city, p.state].filter(Boolean).join(', ');
+  if (cityLine) addrParts.push(cityLine + (p.zip ? ' ' + p.zip : ''));
+  else if (p.zip) addrParts.push(p.zip);
+  var addrHtml = addrParts.length ? addrParts.map(_mobEsc).join('<br>') : '<span style="opacity:.6">No address</span>';
+
+  var kmi = Array.isArray(p.kmiAssignments) ? p.kmiAssignments : [];
+  var contacts = Array.isArray(p.contactAssignments) ? p.contactAssignments : [];
+
+  // KMI team rows
+  var kmiHtml = '';
+  if (!kmi.length) {
+    kmiHtml = '<div class="mob-list-empty">No KMI team assigned</div>';
+  } else {
+    kmiHtml = kmi.map(function(a){
+      var u = getUser(a.userId) || {};
+      var name = ((u.firstName || '') + ' ' + (u.lastName || '')).trim() || 'Unknown user';
+      var role = a.role || u.title || u.role || '';
+      var email = u.email || '';
+      var phone = u.phone || '';
+      var actions = '';
+      if (phone) actions += '<a href="tel:' + _mobEsc(phone) + '" title="Call">📞</a>';
+      if (email) actions += '<a href="mailto:' + _mobEsc(email) + '" title="Email">✉</a>';
+      return '<div class="mob-contact">' +
+        '<div class="mob-contact-avatar">' + _mobEsc(_mobInitials(u.firstName, u.lastName)) + '</div>' +
+        '<div class="mob-contact-body">' +
+          '<div class="mob-contact-name">' + _mobEsc(name) + '</div>' +
+          (role ? '<div class="mob-contact-role">' + _mobEsc(role) + '</div>' : '') +
+          (email ? '<div class="mob-contact-role">' + _mobEsc(email) + '</div>' : '') +
+        '</div>' +
+        (actions ? '<div class="mob-contact-actions">' + actions + '</div>' : '') +
+      '</div>';
+    }).join('');
+  }
+
+  // Customer contact rows — sourced from db.pms
+  var contactHtml = '';
+  if (!contacts.length) {
+    contactHtml = '<div class="mob-list-empty">No customer contacts assigned</div>';
+  } else {
+    contactHtml = contacts.map(function(a){
+      var pm = (db.pms || []).find(function(x){ return String(x.id) === String(a.pmId); });
+      if (!pm) return '<div class="mob-contact"><div class="mob-contact-avatar cust">?</div><div class="mob-contact-body"><div class="mob-contact-name" style="color:#aaa">Unknown contact</div></div></div>';
+      var name = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim() || pm.email || 'Contact';
+      var role = a.role || pm.title || '';
+      var phone = pm.phone || '';
+      var email = pm.email || '';
+      var actions = '';
+      if (phone) actions += '<a href="tel:' + _mobEsc(phone) + '" title="Call">📞</a>';
+      if (email) actions += '<a href="mailto:' + _mobEsc(email) + '" title="Email">✉</a>';
+      return '<div class="mob-contact">' +
+        '<div class="mob-contact-avatar cust">' + _mobEsc(_mobInitials(pm.firstName, pm.lastName)) + '</div>' +
+        '<div class="mob-contact-body">' +
+          '<div class="mob-contact-name">' + _mobEsc(name) + '</div>' +
+          (role ? '<div class="mob-contact-role">' + _mobEsc(role) + '</div>' : '') +
+          (email ? '<div class="mob-contact-role">' + _mobEsc(email) + '</div>' : '') +
+        '</div>' +
+        (actions ? '<div class="mob-contact-actions">' + actions + '</div>' : '') +
+      '</div>';
+    }).join('');
+  }
+
+  // Count submittals for the View-submittals shortcut
+  var subCt = (db.submittals || []).filter(function(s){ return String(s.projectId) === String(p.id); }).length;
+
+  var html =
+    '<div class="mob-proj-hero">' +
+      '<div class="mob-proj-hero-num">' + _mobEsc(p.number || '—') + '</div>' +
+      '<div class="mob-proj-hero-name">' + _mobEsc(p.name || '') + '</div>' +
+      '<div class="mob-proj-hero-meta">' +
+        '<strong style="color:#fff;font-weight:600">' + _mobEsc(c.name || 'No customer') + '</strong><br>' +
+        addrHtml +
+      '</div>' +
+      '<div class="mob-proj-hero-actions">' +
+        '<button class="btn" onclick="mobOpenSubmittalsForProject(' + p.id + ')">▤ Submittals (' + subCt + ')</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mob-section-hdr">KMI Team <span class="mob-section-hdr-count">' + kmi.length + '</span></div>' +
+    kmiHtml +
+    '<div class="mob-section-hdr">Customer contacts <span class="mob-section-hdr-count">' + contacts.length + '</span></div>' +
+    contactHtml;
+
+  var body = document.getElementById('m-pd-body');
+  if (body) body.innerHTML = html;
+}
+
+function mobOpenSubmittalsForProject(projectId) {
+  _mobileSubmittalProjectFilter = projectId;
+  nav('m-submittals');
+}
+
+function mobClearSubmittalProjectFilter() {
+  _mobileSubmittalProjectFilter = null;
+  renderMobileSubmittals();
+}
+
+// Render the mobile submittals list. Filters by project if
+// _mobileSubmittalProjectFilter is set, otherwise shows every submittal
+// across the user's assigned projects.
+function renderMobileSubmittals() {
+  var assigned = _mobAssignedProjects();
+  var assignedIds = {};
+  assigned.forEach(function(p){ assignedIds[String(p.id)] = 1; });
+
+  var rows = (db.submittals || []).filter(function(s){
+    if (_mobileSubmittalProjectFilter) {
+      return String(s.projectId) === String(_mobileSubmittalProjectFilter);
+    }
+    return assignedIds[String(s.projectId)];
+  });
+
+  // Apply search + status filter
+  var q = (_mobileSubmittalSearch || '').toLowerCase().trim();
+  if (q) {
+    rows = rows.filter(function(s){
+      var p = getProj(s.projectId) || {};
+      var hay = ((s.itemName || '') + ' ' + (s.packageName || '') + ' ' + (s.kmiSubmittalNo || '') + ' ' + (p.number || '') + ' ' + (p.name || '')).toLowerCase();
+      return hay.indexOf(q) !== -1;
+    });
+  }
+  var fst = _mobileSubmittalStatus || '';
+  if (fst === 'overdue') {
+    rows = rows.filter(function(s){
+      return typeof _isOverdue === 'function' && _isOverdue(s.dueDate) && (s.status || 'draft') !== 'closed';
+    });
+  } else if (fst) {
+    rows = rows.filter(function(s){ return (s.status || 'draft') === fst; });
+  }
+
+  // Sort: overdue first, then by due date asc, then by status
+  rows.sort(function(a, b){
+    var oa = (typeof _isOverdue === 'function' && _isOverdue(a.dueDate) && a.status !== 'closed') ? 0 : 1;
+    var ob = (typeof _isOverdue === 'function' && _isOverdue(b.dueDate) && b.status !== 'closed') ? 0 : 1;
+    if (oa !== ob) return oa - ob;
+    var da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+    var dbb = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+    return da - dbb;
+  });
+
+  // Update context label + clear-filter button
+  var ctxEl = document.getElementById('m-sub-context');
+  var clearBtn = document.getElementById('m-sub-clear-filter');
+  if (_mobileSubmittalProjectFilter) {
+    var p = getProj(_mobileSubmittalProjectFilter) || {};
+    if (ctxEl) ctxEl.textContent = (p.number || '') + ' — ' + (p.name || '');
+    if (clearBtn) clearBtn.style.display = '';
+  } else {
+    if (ctxEl) ctxEl.textContent = 'Across all my projects';
+    if (clearBtn) clearBtn.style.display = 'none';
+  }
+
+  var el = document.getElementById('m-sub-list');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div class="mob-list-empty">' +
+      (q || fst ? 'No submittals match your filters.'
+                : 'No submittals on your projects yet.') +
+      '</div>';
+    return;
+  }
+
+  el.innerHTML = rows.map(function(s){
+    var p = getProj(s.projectId) || {};
+    var overdue = (typeof _isOverdue === 'function' && _isOverdue(s.dueDate) && s.status !== 'closed');
+    var pillCls = 'mob-pill-draft';
+    var pillTxt = (s.status || 'draft').toUpperCase();
+    if (overdue)            { pillCls = 'mob-pill-overdue'; pillTxt = 'OVERDUE'; }
+    else if (s.status === 'closed')   { pillCls = 'mob-pill-closed'; }
+    else if (s.status === 'pending' || s.status === 'open') { pillCls = 'mob-pill-pending'; }
+    var due = s.dueDate || '—';
+    var resp = s.response ? (' · ' + _mobEsc(s.response)) : '';
+    return '<div class="mob-list-row" onclick="mobOpenSubmittal(' + s.id + ')">' +
+      '<div class="mob-list-row-title">' +
+        '<span class="mob-list-row-num">' + _mobEsc(s.kmiSubmittalNo || '—') + '</span>' +
+        '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1">' + _mobEsc(s.itemName || s.packageName || 'Submittal') + '</span>' +
+        '<span class="mob-pill ' + pillCls + '" style="margin-left:auto;flex-shrink:0">' + _mobEsc(pillTxt) + '</span>' +
+      '</div>' +
+      '<div class="mob-list-row-sub">' + _mobEsc((p.number || '') + ' — ' + (p.name || '')) + '</div>' +
+      '<div class="mob-list-row-meta">' +
+        '<span>Due <strong>' + _mobEsc(due) + '</strong></span>' +
+        (s.packageName ? '<span>Pkg <strong>' + _mobEsc(s.packageName) + '</strong></span>' : '') +
+        (resp ? '<span>' + resp.replace(/^\s·\s/, '<strong>') + '</strong></span>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function filterMobileSubmittals() {
+  var s = document.getElementById('m-sub-search');
+  var f = document.getElementById('m-sub-fstatus');
+  _mobileSubmittalSearch = s ? s.value : '';
+  _mobileSubmittalStatus = f ? f.value : '';
+  renderMobileSubmittals();
+}
+
+function mobOpenSubmittal(id) {
+  // On mobile, opening a submittal sends users to the existing detail
+  // modal (editSubmittal opens a modal which renders OK at full-screen).
+  // If a project filter was set, we keep it for back-nav UX.
+  if (typeof editSubmittal === 'function') {
+    editSubmittal(id);
+  }
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // MATERIAL TEMPLATES + PROJECT SNAPSHOTS — Round 2
@@ -9770,14 +10691,14 @@ function filterTmTickets() {
     }
 
     return '<tr>' +
-      '<td style="font-weight:600;color:var(--kmi);font-family:monospace;cursor:pointer" onclick="viewTmTicket(' + t.id + ')">' + tmEsc(t.ticketNumber || '—') + '</td>' +
-      '<td style="font-size:12px">' + tmEsc(t.ticketDate || '—') + '</td>' +
-      '<td style="font-size:12px">' + tmEsc((p.number || '—') + ' — ' + (p.name || '')) + '</td>' +
-      '<td style="font-size:12px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + tmEsc(t.workDescription || '') + '">' + tmEsc(t.workDescription || '—') + '</td>' +
-      '<td style="font-size:12px;font-family:monospace;text-align:right">' + hoursCell + '</td>' +
-      '<td>' + tmStatusBadge(t) + '</td>' +
-      '<td style="font-size:12px;color:#555">' + tmEsc(creatorName) + '</td>' +
-      '<td>' + actions + '</td>' +
+      '<td data-label="Ticket #" style="font-weight:600;color:var(--kmi);font-family:monospace;cursor:pointer" onclick="viewTmTicket(' + t.id + ')">' + tmEsc(t.ticketNumber || '—') + '</td>' +
+      '<td data-label="Date" style="font-size:12px">' + tmEsc(t.ticketDate || '—') + '</td>' +
+      '<td data-label="Project" style="font-size:12px">' + tmEsc((p.number || '—') + ' — ' + (p.name || '')) + '</td>' +
+      '<td data-label="Description" style="font-size:12px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + tmEsc(t.workDescription || '') + '">' + tmEsc(t.workDescription || '—') + '</td>' +
+      '<td data-label="Hours ST/OT/DT" style="font-size:12px;font-family:monospace;text-align:right">' + hoursCell + '</td>' +
+      '<td data-label="Status">' + tmStatusBadge(t) + '</td>' +
+      '<td data-label="Created by" style="font-size:12px;color:#555">' + tmEsc(creatorName) + '</td>' +
+      '<td data-label="Actions">' + actions + '</td>' +
     '</tr>';
   }).join('');
 }
@@ -10118,12 +11039,12 @@ function ntmAddLaborRow(r) {
   var tr = document.createElement('tr');
   tr.setAttribute('data-row', key);
   tr.innerHTML =
-    '<td style="padding:4px 6px"><input style="width:100%;padding:5px 7px;font-size:12px" data-fld="name" value="' + tmEsc(r.name || '') + '" placeholder="Worker name"></td>' +
-    '<td style="padding:4px 6px"><select style="width:100%;padding:5px 7px;font-size:12px" data-fld="classification">' + _ntmBuildClassificationOptions(r.classification) + '</select></td>' +
-    '<td style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="stHours" value="' + (r.stHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
-    '<td style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="otHours" value="' + (r.otHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
-    '<td style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="dtHours" value="' + (r.dtHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
-    '<td style="padding:4px 6px;text-align:center"><button class="btn btn-sm" onclick="ntmRemoveRow(this,\'lab\')" title="Remove">✕</button></td>';
+    '<td data-label="Name" style="padding:4px 6px"><input style="width:100%;padding:5px 7px;font-size:12px" data-fld="name" value="' + tmEsc(r.name || '') + '" placeholder="Worker name"></td>' +
+    '<td data-label="Classification" style="padding:4px 6px"><select style="width:100%;padding:5px 7px;font-size:12px" data-fld="classification">' + _ntmBuildClassificationOptions(r.classification) + '</select></td>' +
+    '<td data-label="ST hrs" class="ntm-hours-cell" style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="stHours" value="' + (r.stHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
+    '<td data-label="OT hrs" class="ntm-hours-cell" style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="otHours" value="' + (r.otHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
+    '<td data-label="DT hrs" class="ntm-hours-cell" style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="dtHours" value="' + (r.dtHours || '') + '" oninput="ntmRefreshLaborTotals()"></td>' +
+    '<td data-label="Remove" style="padding:4px 6px;text-align:center"><button class="btn btn-sm" onclick="ntmRemoveRow(this,\'lab\')" title="Remove">✕</button></td>';
   tbody.appendChild(tr);
   ntmRefreshLaborTotals();
 }
@@ -10135,9 +11056,9 @@ function ntmAddEquipRow(r) {
   var tr = document.createElement('tr');
   tr.setAttribute('data-row', key);
   tr.innerHTML =
-    '<td style="padding:4px 6px"><input style="width:100%;padding:5px 7px;font-size:12px" data-fld="description" value="' + tmEsc(r.description || '') + '" placeholder="e.g. CAT 305 Excavator"></td>' +
-    '<td style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="hours" value="' + (r.hours || '') + '"></td>' +
-    '<td style="padding:4px 6px;text-align:center"><button class="btn btn-sm" onclick="ntmRemoveRow(this,\'eq\')" title="Remove">✕</button></td>';
+    '<td data-label="Type / Manufacturer / Capacity" style="padding:4px 6px"><input style="width:100%;padding:5px 7px;font-size:12px" data-fld="description" value="' + tmEsc(r.description || '') + '" placeholder="e.g. CAT 305 Excavator"></td>' +
+    '<td data-label="Hours" style="padding:4px 6px"><input type="number" min="0" step="0.25" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="hours" value="' + (r.hours || '') + '"></td>' +
+    '<td data-label="Remove" style="padding:4px 6px;text-align:center"><button class="btn btn-sm" onclick="ntmRemoveRow(this,\'eq\')" title="Remove">✕</button></td>';
   tbody.appendChild(tr);
 }
 
@@ -10148,9 +11069,9 @@ function ntmAddMatRow(r) {
   var tr = document.createElement('tr');
   tr.setAttribute('data-row', key);
   tr.innerHTML =
-    '<td style="padding:4px 6px">' + _ntmMaterialPickerHtml(r) + '</td>' +
-    '<td style="padding:4px 6px"><input type="number" min="0" step="0.01" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="quantity" value="' + (r.quantity || '') + '"></td>' +
-    '<td style="padding:4px 6px;text-align:center"><button class="btn btn-sm" onclick="ntmRemoveRow(this,\'mat\')" title="Remove">✕</button></td>';
+    '<td data-label="Description" style="padding:4px 6px">' + _ntmMaterialPickerHtml(r) + '</td>' +
+    '<td data-label="Quantity" style="padding:4px 6px"><input type="number" min="0" step="0.01" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-fld="quantity" value="' + (r.quantity || '') + '"></td>' +
+    '<td data-label="Remove" style="padding:4px 6px;text-align:center"><button class="btn btn-sm" onclick="ntmRemoveRow(this,\'mat\')" title="Remove">✕</button></td>';
   tbody.appendChild(tr);
 }
 
@@ -20477,92 +21398,61 @@ async function sendProposalEmail() {
     showErr('Proposal not found.'); return;
   }
 
-  // Edge Function only accepts a single email address per call. For
-  // multi-recipient sends we fan out: combine To + CC, deduplicate, then
-  // call sendEmail once per recipient. Sender is BCC'd only on the FIRST
-  // send so they get a single record copy, not N duplicates.
-  var allRecipients = toList.concat(ccList);
-  var seen = {};
-  allRecipients = allRecipients.filter(function(e){
-    var k = e.toLowerCase();
-    if (seen[k]) return false;
-    seen[k] = true;
-    return true;
-  });
+  // Single → string, multi → array. Mirrors the project-kickoff send.
+  var toField = (toList.length === 1) ? toList[0] : toList;
+  var payload = {
+    to:                toField,
+    from:              ctx.from,
+    fromName:          ctx.fromName,
+    replyTo:           ctx.from,        // proposal: send-as-user, replies route back to user
+    bcc:               ctx.from,        // BCC sender for inbox copy
+    subject:           subject,
+    text:              body,
+    flowType:          'proposal',
+    sentBy:            _currentUser ? _currentUser.id    : null,
+    sentByEmail:       _currentUser ? _currentUser.email : null,
+    relatedEntityType: 'proposal',
+    relatedEntityId:   prop.id,
+    attachments: [{ filename: ctx.filename, content: ctx.pdfBase64 }]
+  };
+  if (ccList.length) payload.cc = (ccList.length === 1) ? ccList[0] : ccList;
 
-  var successes = [];
-  var failures  = [];
-  var lastResult = null;
+  var result = await sendEmail(payload);
 
-  for (var i = 0; i < allRecipients.length; i++) {
-    var recipient = allRecipients[i];
-    var payload = {
-      to:                recipient,
-      from:              ctx.from,
-      fromName:          ctx.fromName,
-      replyTo:           ctx.from,        // proposal: send-as-user, replies route back to user
-      subject:           subject,
-      text:              body,
-      flowType:          'proposal',
-      sentBy:            _currentUser ? _currentUser.id    : null,
-      sentByEmail:       _currentUser ? _currentUser.email : null,
-      relatedEntityType: 'proposal',
-      relatedEntityId:   prop.id,
-      attachments: [{ filename: ctx.filename, content: ctx.pdfBase64 }]
-    };
-    if (i === 0) payload.bcc = ctx.from;  // single inbox copy for sender
-
-    lastResult = await sendEmail(payload);
-    if (lastResult.success) successes.push(recipient);
-    else                    failures.push({ recipient: recipient, error: lastResult.error || 'Unknown error' });
-  }
-
-  // Display target for activity log / toast — prefer the assigned PM name
-  // when there's a single recipient; otherwise summarize the fan-out.
-  var displayTarget;
-  if (ctx.pmName && allRecipients.length === 1) {
-    displayTarget = ctx.pmName;
-  } else if (successes.length === 1) {
-    displayTarget = successes[0];
-  } else if (successes.length > 1) {
-    displayTarget = successes[0] + ' +' + (successes.length - 1) + ' more';
-  } else {
-    displayTarget = allRecipients[0] || '(unknown)';
-  }
-
-  if (failures.length === 0) {
-    // All sent — flip status if still in draft.
+  if (result.success) {
+    // Update proposal — only flip status from draft \u2192 sent. Leave more advanced
+    // statuses (review, negotiation, won, lost) untouched on resends.
     if (prop.status === 'draft' || !prop.status) prop.status = 'sent';
     prop.lastEmailedAt = new Date().toISOString();
+    // Store the typed string for display — preserves "user@x.com, other@y.com"
+    // as-entered rather than reformatting an array.
     prop.lastEmailedTo = toList.join(', ');
 
+    // Activity / toast: prefer the assigned PM name; otherwise show the
+    // first recipient (with "+N more" suffix when multi).
+    var displayTarget;
+    if (ctx.pmName) {
+      displayTarget = ctx.pmName;
+    } else if (toList.length === 1) {
+      displayTarget = toList[0];
+    } else {
+      displayTarget = toList[0] + ' +' + (toList.length - 1) + ' more';
+    }
     db.activity.unshift({ text: prop.id + ' emailed to ' + displayTarget, type: 'sent', time: 'Just now' });
     saveDB();
 
     closeModal();
     showToast(
-      (lastResult && lastResult.testMode)
+      result.testMode
         ? 'Test mode: proposal redirected (would have gone to ' + displayTarget + ')'
         : 'Proposal sent to ' + displayTarget,
       'success'
     );
     delete window._pendingProposalEmail;
     if (typeof currentOppId !== 'undefined' && currentOppId) renderOppDetail(currentOppId);
-  } else if (successes.length === 0) {
-    sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Proposal';
-    showErr('<strong>Send failed:</strong> ' + _vendorEsc(failures[0].error) + (failures.length > 1 ? ' (and ' + (failures.length - 1) + ' more)' : ''));
   } else {
-    // Partial — stamp progress so the user has a trail, but keep the modal
-    // open so they can fix the failing addresses and resend.
-    if (prop.status === 'draft' || !prop.status) prop.status = 'sent';
-    prop.lastEmailedAt = new Date().toISOString();
-    prop.lastEmailedTo = successes.join(', ');
-    db.activity.unshift({ text: prop.id + ' partially emailed — ' + successes.length + ' delivered, ' + failures.length + ' failed', type: 'sent', time: 'Just now' });
-    saveDB();
-
     sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Proposal';
-    var failList = failures.map(function(f){ return _vendorEsc(f.recipient); }).join(', ');
-    showErr('<strong>Partial send:</strong> ' + successes.length + ' delivered, but ' + failures.length + ' failed: ' + failList + '. You can edit the To/CC fields and resend to just those addresses.');
+    showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
   }
 }
 
@@ -27540,55 +28430,37 @@ async function sendProjectKickoffEmail() {
     return;
   }
 
-  // Edge Function only accepts a single email address per call (it validates
-  // `to` must be a string in 'email@x' or 'Name <email@x>' format). For
-  // multi-recipient sends we fan out client-side: combine To + CC into one
-  // deduplicated list and call sendEmail once per recipient. Each recipient
-  // gets their own copy. The sender is BCC'd only on the FIRST send so they
-  // get a single inbox record copy, not N duplicates.
-  var allRecipients = toList.concat(ccList);
-  var seen = {};
-  allRecipients = allRecipients.filter(function(e){
-    var k = e.toLowerCase();
-    if (seen[k]) return false;
-    seen[k] = true;
-    return true;
-  });
+  // Build the email payload — same shape as sendProposalEmail.
+  // Resend (downstream of the send-email Edge Function) requires `to`
+  // and `cc` to be EITHER a single "email@x" string OR an array of
+  // such strings. A comma-joined multi-recipient string is read as one
+  // malformed address and rejected. So: single → string, multi → array.
+  var toField = (toList.length === 1) ? toList[0] : toList;
+  var payload = {
+    to:                toField,
+    from:              ctx.from,
+    fromName:          ctx.fromName,
+    replyTo:           ctx.from,
+    bcc:               ctx.from,
+    subject:           subject,
+    text:              body,
+    flowType:          'project_kickoff',
+    sentBy:            _currentUser ? _currentUser.id    : null,
+    sentByEmail:       _currentUser ? _currentUser.email : null,
+    relatedEntityType: 'project',
+    relatedEntityId:   p.id,
+    attachments: [{ filename: ctx.filename, content: b64 }]
+  };
+  if (ccList.length) payload.cc = (ccList.length === 1) ? ccList[0] : ccList;
 
-  var successes = [];
-  var failures  = [];
-  var lastResult = null;
+  var result = await sendEmail(payload);
 
-  for (var i = 0; i < allRecipients.length; i++) {
-    var recipient = allRecipients[i];
-    var payload = {
-      to:                recipient,
-      from:              ctx.from,
-      fromName:          ctx.fromName,
-      replyTo:           ctx.from,
-      subject:           subject,
-      text:              body,
-      flowType:          'project_kickoff',
-      sentBy:            _currentUser ? _currentUser.id    : null,
-      sentByEmail:       _currentUser ? _currentUser.email : null,
-      relatedEntityType: 'project',
-      relatedEntityId:   p.id,
-      attachments: [{ filename: ctx.filename, content: b64 }]
-    };
-    // BCC sender on first send only — avoids N duplicate copies in their inbox
-    if (i === 0) payload.bcc = ctx.from;
-
-    lastResult = await sendEmail(payload);
-    if (lastResult.success) successes.push(recipient);
-    else                    failures.push({ recipient: recipient, error: lastResult.error || 'Unknown error' });
-  }
-
-  if (failures.length === 0) {
-    // All sent — stamp the project record and close.
-    p.kickoffSentAt       = new Date().toISOString();
-    p.kickoffSentByUserId = _currentUser ? _currentUser.id : null;
+  if (result.success) {
+    // Stamp kickoff-sent tracking on the project record
+    p.kickoffSentAt         = new Date().toISOString();
+    p.kickoffSentByUserId   = _currentUser ? _currentUser.id : null;
     db.activity.unshift({
-      text: 'Project kickoff sent for ' + (p.number || p.id) + ' to ' + successes.length + ' recipient' + (successes.length === 1 ? '' : 's'),
+      text: 'Project kickoff sent for ' + (p.number || p.id) + ' to ' + (toList.length + ccList.length) + ' recipient' + ((toList.length + ccList.length) === 1 ? '' : 's'),
       type: 'sent',
       time: 'Just now'
     });
@@ -27596,34 +28468,36 @@ async function sendProjectKickoffEmail() {
 
     closeModal();
     showToast(
-      (lastResult && lastResult.testMode)
-        ? 'Test mode: project kickoff redirected (would have gone to ' + successes[0] + (successes.length > 1 ? ' +' + (successes.length - 1) : '') + ')'
-        : 'Project kickoff sent (' + successes.length + ' recipient' + (successes.length === 1 ? '' : 's') + ')',
+      result.testMode
+        ? 'Test mode: project kickoff redirected (would have gone to ' + toList[0] + (toList.length > 1 ? ' +' + (toList.length - 1) : '') + ')'
+        : 'Project kickoff sent (' + toList.length + ' recipient' + (toList.length === 1 ? '' : 's') + ')',
       'success'
     );
     delete window._pendingKickoffEmail;
+    // Re-render the project modal so the "Last sent" indicator updates.
     if (typeof viewProject === 'function') viewProject(p.id);
-  } else if (successes.length === 0) {
-    // Every send failed. Don't stamp anything — let the user retry.
-    sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Project Kickoff';
-    showErr('<strong>Send failed:</strong> ' + _vendorEsc(failures[0].error) + (failures.length > 1 ? ' (and ' + (failures.length - 1) + ' more)' : ''));
   } else {
-    // Partial success — stamp the record (some did go out) but surface
-    // the failures so the user can resend manually to those addresses.
-    p.kickoffSentAt       = new Date().toISOString();
-    p.kickoffSentByUserId = _currentUser ? _currentUser.id : null;
-    db.activity.unshift({
-      text: 'Project kickoff partially sent for ' + (p.number || p.id) + ' — ' + successes.length + ' delivered, ' + failures.length + ' failed',
-      type: 'sent',
-      time: 'Just now'
-    });
-    saveDB();
-
     sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Project Kickoff';
-    var failList = failures.map(function(f){ return _vendorEsc(f.recipient); }).join(', ');
-    showErr('<strong>Partial send:</strong> ' + successes.length + ' delivered, but ' + failures.length + ' failed: ' + failList + '. You can edit the To/CC fields and resend to just those addresses.');
+    showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
   }
 }
 </script>
+
+<!-- Mobile-only bottom tab bar. Hidden on desktop via media query. -->
+<nav class="mob-tabs" id="mob-tabs" style="display:none">
+  <button class="mob-tab" data-mtab="tm-tickets" onclick="mobTabClick('tm-tickets')">
+    <span class="mob-tab-icon">⏱</span>
+    <span>T&amp;M</span>
+  </button>
+  <button class="mob-tab" data-mtab="m-submittals" onclick="mobTabClick('m-submittals')">
+    <span class="mob-tab-icon">▤</span>
+    <span>Submittals</span>
+  </button>
+  <button class="mob-tab" data-mtab="m-projects" onclick="mobTabClick('m-projects')">
+    <span class="mob-tab-icon">⬢</span>
+    <span>Projects</span>
+  </button>
+</nav>
+
 </body>
 </html>
