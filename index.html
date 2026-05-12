@@ -739,6 +739,8 @@ textarea{resize:vertical;min-height:72px}
         <div class="fgr"><label>State</label><select id="nprj-state"><option value="">— Select —</option></select></div>
         <div class="fgr"><label>Zip code</label><input id="nprj-zip" placeholder="e.g. 12345 or 12345-6789" maxlength="10" inputmode="numeric"></div>
         <div class="fgr"><label>Contract amount ($)</label><input type="number" id="nprj-amt" placeholder="0"></div>
+        <div class="fgr"><label>Start date <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional)</span></label><input type="date" id="nprj-start-date"></div>
+        <div class="fgr"><label>End date <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional)</span></label><input type="date" id="nprj-end-date"></div>
         <div class="fgr full">
           <label>Project types <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(select all that apply)</span></label>
           <div id="nprj-type-checks" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px"></div>
@@ -761,6 +763,13 @@ textarea{resize:vertical;min-height:72px}
         </div>
         <div class="fgr"><label>Payroll department</label><input id="nprj-payroll-dept" value="field" placeholder="field"></div>
         <div class="fgr"><label>Customer job number</label><input id="nprj-cust-job-num" placeholder="Customer's PO or internal reference"></div>
+        <div class="fgr full">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:500;text-transform:none;letter-spacing:0;color:#333">
+            <input type="checkbox" id="nprj-ap-tax-exempt" style="width:auto;margin:0">
+            A/P Tax Exempt
+          </label>
+          <div style="font-size:11px;color:#888;margin-top:4px">When checked, the Job File CSV writes "Y" for A/P Tax Exempt; otherwise "N". You can also toggle this from the Send Project Kickoff modal.</div>
+        </div>
       </div>
       <!-- Round 4.4: Default cost codes used when exporting Change Orders to
            Foundation. Labor and Sub default codes are required (CORs don't
@@ -1111,7 +1120,6 @@ textarea{resize:vertical;min-height:72px}
       <div id="bg-version-info" style="font-size:12px;color:#666"></div>
       <select id="bg-version-select" style="padding:6px;font-size:12px;border-radius:4px;border:1px solid #DDD;min-width:200px" onchange="bgLoadVersion(this.value)"></select>
       <button class="btn btn-sm" id="bg-view-pdf-btn" onclick="bgViewSourcePDF()" disabled>View source PDF</button>
-      <button class="btn btn-sm" id="bg-export-job-btn" onclick="bgExportJobFile()" title="Generate the Foundation Job File CSV (project cover sheet)">Export Job File CSV</button>
       <button class="btn btn-sm" id="bg-export-est-btn" onclick="bgExportEstimateFile()" title="Generate the Foundation Estimate CSV (budget line items)">Export Estimate CSV</button>
       <label class="btn btn-sm btn-p" id="bg-upload-btn" style="cursor:pointer">
         Upload Bid Price Report <input type="file" id="bg-upload-input" accept=".pdf" style="display:none" onchange="bgOnPdfChosen(event)">
@@ -1348,7 +1356,6 @@ textarea{resize:vertical;min-height:72px}
       <div class="fgr"><label>Customer</label><input id="ncor-customer-display" disabled style="background:#f5f5f5;color:#666"></div>
       <div class="fgr"><label>Attention *</label><select id="ncor-attention"><option value="">Select contact...</option></select></div>
       <div class="fgr"><label>Customer CO #</label><input id="ncor-customer-co-num" placeholder="Customer's CO reference number (optional)"><div style="font-size:11px;color:#888;margin-top:4px">Set this when the customer issues their own CO number against this COR.</div></div>
-      <div class="fgr"><label>Customer CO Date</label><input type="date" id="ncor-customer-co-date"><div style="font-size:11px;color:#888;margin-top:4px">Date the customer issued their formal CO. Fill in when you receive the actual CO from the customer.</div></div>
       <div class="fgr full"><label id="ncor-desc-label">Description *</label><textarea id="ncor-desc" rows="3" placeholder="Describe the change being requested..."></textarea></div>
     </div>
   </div>
@@ -2070,6 +2077,11 @@ var PERMISSIONS = {
   'templates':          ['full','read','none','none','none','none'],
   'email-log':          ['full','none','none','none','none','none'],
   'email-settings':     ['full','none','none','none','none','none'],
+  // Project Kickoff (post-spec): Admin / PM / PC can send. Mirrors the
+  // create-opportunity / edit-customers trust shape — same people who can
+  // set up the project record can send the kickoff email + Job File CSV.
+  // Field roles can't see projects in detail, so they're none.
+  'send-project-kickoff':  ['full','full','full','none','none','none'],
   // Budget feature: viewable by all roles, editable by Admin/PM/Accounting,
   // exportable by Admin/PM/Accounting (Accounting drives the actual
   // Foundation upload, so they need both edit and export).
@@ -12552,20 +12564,6 @@ function renderCors() {
   var suBtn = g('cor-smart-up-btn');
   if (suBtn) suBtn.style.display = (hasFull('create-cor') && hasFull('smart-upload-cor')) ? '' : 'none';
 
-  // Restore persisted filter values from localStorage (set by filterCors).
-  // Must run AFTER the dropdowns are rebuilt above — innerHTML reassignment
-  // clears any prior selection. Setting .value to an option that no longer
-  // exists (e.g. project deleted) silently resets to empty, which is fine.
-  try {
-    var saved = JSON.parse(localStorage.getItem('kmi_cor_filters') || '{}');
-    if (saved && typeof saved === 'object') {
-      if (g('cor-s')  && typeof saved.search    === 'string') g('cor-s').value  = saved.search;
-      if (g('cor-fp') && typeof saved.projectId === 'string') g('cor-fp').value = saved.projectId;
-      if (g('cor-ft') && typeof saved.corType   === 'string') g('cor-ft').value = saved.corType;
-      if (g('cor-fs') && typeof saved.status    === 'string') g('cor-fs').value = saved.status;
-    }
-  } catch (e) { /* malformed JSON — ignore, filters stay empty */ }
-
   filterCors();
 }
 
@@ -12574,17 +12572,6 @@ function filterCors() {
   var fp = g('cor-fp').value;
   var ft = g('cor-ft').value;
   var fs = g('cor-fs').value;
-
-  // Persist filter state so it survives nav-away/refresh/window close.
-  // Save raw (not lowercased) search so the input restores faithfully.
-  try {
-    localStorage.setItem('kmi_cor_filters', JSON.stringify({
-      search:    g('cor-s').value || '',
-      projectId: fp || '',
-      corType:   ft || '',
-      status:    fs || ''
-    }));
-  } catch (e) { /* localStorage full / unavailable — non-fatal */ }
 
   var list = (db.cors || []).filter(function(c){
     if (fp && String(c.projectId) !== String(fp)) return false;
@@ -12605,9 +12592,6 @@ function filterCors() {
   var draftN     = list.filter(function(c){ return (c.status || 'Draft') === 'Draft'; }).length;
   var pendingN   = list.filter(function(c){ return (c.status || 'Draft') === 'Pending'; }).length;
   var approvedN  = list.filter(function(c){ return (c.status || 'Draft') === 'Approved'; }).length;
-  var pendingTotal = list
-    .filter(function(c){ return (c.status || 'Draft') === 'Pending'; })
-    .reduce(function(sum, c){ return sum + (Number(c.totalAmount) || 0); }, 0);
   var approvedTotal = list
     .filter(function(c){ return (c.status || 'Draft') === 'Approved'; })
     .reduce(function(sum, c){ return sum + (Number(c.totalAmount) || 0); }, 0);
@@ -12616,7 +12600,6 @@ function filterCors() {
     '<div class="mc"><div class="ml">Draft</div><div class="mv">' + draftN + '</div></div>' +
     '<div class="mc"><div class="ml">Pending</div><div class="mv bl">' + pendingN + '</div></div>' +
     '<div class="mc"><div class="ml">Approved</div><div class="mv gn">' + approvedN + '</div></div>' +
-    '<div class="mc"><div class="ml">Pending $ total</div><div class="mv bl">' + corFmtMoney(pendingTotal) + '</div></div>' +
     '<div class="mc"><div class="ml">Approved $ total</div><div class="mv gn">' + corFmtMoney(approvedTotal) + '</div></div>';
 
   // Table
@@ -12719,7 +12702,7 @@ function initNewCor() {
   // which won't open when clicked. Re-enable everything before populating.
   // (ncor-num stays disabled in this flow — it's auto-generated on save.
   // The smart upload flow re-enables it explicitly when needed.)
-  ['ncor-date','ncor-desc','ncor-attention','ncor-customer-co-num','ncor-customer-co-date'].forEach(function(idStr){
+  ['ncor-date','ncor-desc','ncor-attention','ncor-customer-co-num'].forEach(function(idStr){
     var el = g(idStr); if (el) el.disabled = false;
   });
 
@@ -12758,8 +12741,6 @@ function initNewCor() {
   g('ncor-desc').value = '';
   // Customer CO# (added with the smart-upload work) — empty on new
   if (g('ncor-customer-co-num')) g('ncor-customer-co-num').value = '';
-  // Customer CO Date — empty on new
-  if (g('ncor-customer-co-date')) g('ncor-customer-co-date').value = '';
 
   // Trigger project-changed handler to populate customer + attention
   ncorProjectChanged();
@@ -12834,11 +12815,6 @@ function viewCor(id) {
   if (g('ncor-customer-co-num')) {
     g('ncor-customer-co-num').value = c.customerCoNumber || '';
     g('ncor-customer-co-num').disabled = !canEdit;
-  }
-  // Customer CO Date — populate from the record
-  if (g('ncor-customer-co-date')) {
-    g('ncor-customer-co-date').value = c.customerCoDate || '';
-    g('ncor-customer-co-date').disabled = !canEdit;
   }
 
   // Disable inputs if read-only
@@ -12934,8 +12910,6 @@ async function saveCor() {
   var description = (g('ncor-desc').value || '').trim();
   // Customer CO# — added with smart-upload work; optional for any COR
   var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
-  // Customer CO Date — optional; captured when KMI receives the formal CO from the customer
-  var customerCoDate = g('ncor-customer-co-date') ? (g('ncor-customer-co-date').value || '').trim() : '';
 
   if (!projectId) { alert('Please select a project.'); return; }
   if (!corDate)   { alert('Please pick a date.'); return; }
@@ -13016,8 +12990,6 @@ async function saveCor() {
     existingCor.description = description;
     // Customer CO# — empty string normalized to null
     existingCor.customerCoNumber = customerCoNumber || null;
-    // Customer CO Date — empty string normalized to null
-    existingCor.customerCoDate = customerCoDate || null;
     existingCor.rolledUpTicketIds = newRolledIds;
     existingCor.laborRows         = snapshotAutoLabor;       // auto-pivot snapshot
     existingCor.manualLaborRows   = newManualLabor;
@@ -13122,8 +13094,7 @@ async function saveCor() {
     decisionAt: null, decisionByUserId: null,
     voidedAt: null, voidedByUserId: null,
     voidReason: null,
-    customerCoNumber: customerCoNumber || null,
-    customerCoDate: customerCoDate || null
+    customerCoNumber: customerCoNumber || null
   };
 
   // Lock all rolled-up tickets onto the new COR
@@ -13204,7 +13175,6 @@ function renderCorStatusCard(c) {
       '<div style="font-size:12px;color:' + (st === 'Approved' ? '#3B6D11' : '#7A2E2E') + ';margin-bottom:6px">' +
         (st === 'Approved' ? '✓ Approved' : '⊘ Rejected') + ' on ' + corEsc(new Date(c.decisionAt).toLocaleString()) + ' by ' + corEsc(deciderName) +
         (c.customerCoNumber ? ' · Customer CO #: <strong>' + corEsc(c.customerCoNumber) + '</strong>' : '') +
-        (c.customerCoDate   ? ' · Customer CO Date: <strong>' + corEsc(c.customerCoDate) + '</strong>' : '') +
       '</div>'
     );
     if (st === 'Rejected' && c.rejectedReason) {
@@ -13488,7 +13458,6 @@ async function smartUploadCorExtract() {
       '  "description":       "string — the work or change being requested",\n' +
       '  "attentionContactName": "string or null — name of the customer-side person the COR is addressed to",\n' +
       '  "customerCoNumber":  "string or null — the customer\'s own CO reference number, if present (often labeled \'Owner CO\' or similar)",\n' +
-      '  "customerCoDate":    "YYYY-MM-DD or null — date the customer issued their formal CO, if shown",\n' +
       '  "decisionDate":      "YYYY-MM-DD or null — date the customer accepted/rejected, if shown",\n' +
       '  "manualLaborRows":   [{"classification": "...", "hours": 0, "rate": 0}],\n' +
       '  "manualMaterialRows":[{"description": "...", "quantity": 0, "unitPrice": 0}],\n' +
@@ -13658,12 +13627,6 @@ function _smartUpCorApplyPrefill(project, parsed) {
     g('ncor-customer-co-num').value = String(parsed.customerCoNumber || '').trim();
   }
 
-  // Customer CO Date — only set if AI extracted a valid YYYY-MM-DD
-  if (g('ncor-customer-co-date')) {
-    var coDt = String(parsed.customerCoDate || '').trim();
-    g('ncor-customer-co-date').value = /^\d{4}-\d{2}-\d{2}$/.test(coDt) ? coDt : '';
-  }
-
   // Project + type are locked in initNewCor — the project dropdown is
   // already populated and the type display is read-only. Force-lock the
   // project dropdown explicitly (initNewCor leaves it editable for new
@@ -13806,7 +13769,6 @@ async function confirmSmartUploadCor() {
   var attnId  = (g('ncor-attention').value || '').trim();
   var description = (g('ncor-desc').value || '').trim();
   var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
-  var customerCoDate = g('ncor-customer-co-date') ? (g('ncor-customer-co-date').value || '').trim() : '';
   var corNumber = g('ncor-num') ? (g('ncor-num').value || '').trim() : '';
 
   if (!corNumber) { alert('Please enter or confirm the COR # from the original document.'); return; }
@@ -13936,7 +13898,6 @@ async function confirmSmartUploadCor() {
     voidedAt: null, voidedByUserId: null,
     voidReason: null,
     customerCoNumber: customerCoNumber || null,
-    customerCoDate: customerCoDate || null,
     // Smart Upload provenance — synced if the SQL migration ran, local-only otherwise
     smartUploaded: true,
     smartUploadedAt: nowIso,
@@ -15583,13 +15544,10 @@ function markCorApproved() {
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt" style="color:#3B6D11">Mark COR as Approved</div>' +
-    '<div class="msb">The customer has approved this Change Order Request. Capture their formal CO number and CO date now if you have them (you can also fill them in later by editing the COR).</div>' +
+    '<div class="msb">The customer has approved this Change Order Request. Capture their formal CO number now if you have it (you can also fill it in later by editing the COR).</div>' +
     '<div class="fg">' +
-      '<div class="fgr"><label>Customer CO # <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
+      '<div class="fgr full"><label>Customer CO # <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
         '<input type="text" id="cor-app-cno" value="' + corEsc(c.customerCoNumber || '') + '" placeholder="e.g. CO-2026-047">' +
-      '</div>' +
-      '<div class="fgr"><label>Customer CO Date <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
-        '<input type="date" id="cor-app-cdate" value="' + corEsc(c.customerCoDate || '') + '">' +
       '</div>' +
     '</div>' +
     '<div class="mbtns">' +
@@ -15603,13 +15561,11 @@ async function confirmCorApproved() {
   var c = _corCurrent();
   if (!c) { closeModal(); return; }
   var customerCo = (g('cor-app-cno').value || '').trim();
-  var customerCoDt = g('cor-app-cdate') ? (g('cor-app-cdate').value || '').trim() : '';
   var nowIso = new Date().toISOString();
   c.status = 'Approved';
   c.decisionAt = nowIso;
   c.decisionByUserId = _currentUser ? _currentUser.id : null;
   if (customerCo) c.customerCoNumber = customerCo;
-  if (customerCoDt) c.customerCoDate = customerCoDt;
   c.updatedAt = nowIso;
   c.updatedByUserId = _currentUser ? _currentUser.id : null;
   await _corPersistTransition(c);
@@ -17325,11 +17281,10 @@ function bgRefreshButtons() {
   g('bg-upload-btn').style.display = canEdit ? '' : 'none';
   // Export buttons: visible to anyone with export permission. Stays
   // enabled even on a dirty/unsaved working copy — user can export the
-  // current in-memory state if they want.
+  // current in-memory state if they want. (Job File export was moved to
+  // the Project Kickoff workflow; only the Estimate export lives here now.)
   var canExport = hasFull('export_project_budget');
-  var jobBtn = g('bg-export-job-btn');
   var estBtn = g('bg-export-est-btn');
-  if (jobBtn) jobBtn.style.display = canExport ? '' : 'none';
   if (estBtn) estBtn.style.display = canExport ? '' : 'none';
 }
 
@@ -18446,107 +18401,12 @@ function bgShowValidationAndRun(title, validation, runFn) {
   );
 }
 
-// ── Job File CSV export ────────────────────────────────────────────────
-function bgExportJobFile() {
-  if (!hasFull('export_project_budget')) { alert('You do not have permission to export budgets.'); return; }
-  var p = getProj(_bgProjectId);
-  var v = bgValidateForExport(p, _bgWorking);
-  bgShowValidationAndRun('Export Job File CSV', v, bgRunJobFileExport);
-}
-
-function bgRunJobFileExport() {
-  var p = getProj(_bgProjectId);
-  if (!p) return;
-  var working = _bgWorking;
-  // Compute totals so we can write Original Contract / Original Estimated Cost.
-  // Use grand total (net + tax) per chunk 2.6 spec — matches PDF Bid Price.
-  var taxFrac = (Number(working.taxRate) || 0) / 100;
-  var totals  = bgComputeTotals(working.lines, taxFrac);
-
-  // Look up Foundation customer record for address fields
-  var fndCust = (db.customersFoundation || []).find(function(c){
-    return String(c.customerNo) === String(p.foundationCustomerNo);
-  }) || {};
-
-  // Look up assigned Project Manager → foundation_pm_code
-  var pmCode = '';
-  var pmAssign = (p.kmiAssignments || []).find(function(a){ return a && a.role && /project manager/i.test(a.role); });
-  if (pmAssign) {
-    var u = (db.users || []).find(function(x){ return x.id === pmAssign.userId; });
-    if (u && u.foundationPmCode) pmCode = u.foundationPmCode;
-  }
-
-  // Column order MUST match Job_File_Name.xlsx exactly. Foundation's
-  // importer reads CSVs as data-only — no header row is written to the
-  // file. We keep this array here as in-code documentation of the
-  // 23-column order; the actual CSV emits just the data row below.
-  var headers = [
-    'Job No', 'Description', 'Customer No', 'Project Manager',
-    'Geographical Area', 'Project Class', 'Payroll Local Tax', 'Certified Payroll',
-    'Original contract', 'original estimated cost', 'retainage %', 'A/P Tax Exempt',
-    'Attention', 'Address Line 1', 'Address Line 2', 'City', 'State/Prov', 'Zip Code',
-    'A/R Tax Type', 'Sales Tax - A/R', 'Stored Material Retainage %',
-    'Customer Job Number', 'Payroll Department'
-  ];
-  // One data row. Foundation's importer treats numeric columns strictly
-  // and rejects empty strings ("Numeric Column contains a non Numeric
-  // Value"). For nullable numeric columns we emit 0 (formatted with the
-  // appropriate decimal places). For Y/N flag columns we emit 'N' when
-  // unset. Pure text columns can safely stay empty.
-  var origContract  = Number(p.contractAmount) || 0;
-  var origEstimated = Number(totals.grand_total) || 0;
-  // Numeric defaults — if the project field is blank, write 0.0 so the
-  // importer parses it cleanly. Decimal precision matches the template.
-  var retainage    = (p.retainagePct === '' || p.retainagePct == null)
-                       ? 0 : Number(p.retainagePct);
-  var salesTaxAr   = (p.salesTaxAr === '' || p.salesTaxAr == null)
-                       ? 0 : Number(p.salesTaxAr);
-  var storedRet    = (p.storedMaterialRetainagePct === '' || p.storedMaterialRetainagePct == null)
-                       ? 0 : Number(p.storedMaterialRetainagePct);
-  // Y/N flag defaults — Foundation expects either 'Y' or 'N', not blank,
-  // for these flag columns. When the project field is unset, default to 'N'
-  // (the conservative, default-off interpretation).
-  function flagDefault(v) {
-    if (v == null) return 'N';
-    var s = String(v).trim();
-    if (!s) return 'N';
-    var u = s.toUpperCase();
-    if (u === 'Y' || u === 'YES' || u === 'TRUE')  return 'Y';
-    if (u === 'N' || u === 'NO'  || u === 'FALSE') return 'N';
-    return s;  // pass through anything Foundation might accept (e.g. a code)
-  }
-  var row = [
-    p.number || '',
-    p.name   || '',
-    p.foundationCustomerNo || '',
-    pmCode,
-    p.geographicalArea  || '',
-    p.projectClass      || '',
-    flagDefault(p.payrollLocalTax),
-    flagDefault(p.certifiedPayroll),
-    origContract.toFixed(2),
-    origEstimated.toFixed(2),
-    retainage.toFixed(3),
-    flagDefault(p.apTaxExempt),
-    p.attention         || '',
-    fndCust.address1    || '',
-    fndCust.address2    || '',
-    fndCust.city        || '',
-    fndCust.state       || '',
-    fndCust.zip         || '',
-    p.arTaxType         || '',
-    salesTaxAr.toFixed(4),
-    storedRet.toFixed(3),
-    p.customerJobNumber || '',
-    p.payrollDepartment || 'field'
-  ];
-
-  // Foundation's importer reads the CSV as data-only — no header row.
-  // We keep the headers array above for code-level documentation of the
-  // column order, but it's NOT written to the file.
-  var csv = bgRowsToCSV([row]);
-  bgDownloadCSV(csv, (p.number || 'project') + '_JobFile.csv');
-}
+// Note: bgExportJobFile / bgRunJobFileExport were removed in the Project
+// Kickoff round. The Job File CSV is now generated by generateJobFileCSV()
+// (see the Project Kickoff block at the bottom of this file) and emailed
+// via the kickoff workflow rather than downloaded directly from the budget
+// page. The Estimate CSV export below is unaffected — it stays here
+// because it genuinely needs budget line items.
 
 // ── Estimate CSV export ────────────────────────────────────────────────
 function bgExportEstimateFile() {
@@ -21791,6 +21651,11 @@ function initNewProject() {
   // Foundation setup defaults — payroll dept defaults to 'field'.
   if (g('nprj-payroll-dept'))  g('nprj-payroll-dept').value  = 'field';
   if (g('nprj-cust-job-num'))  g('nprj-cust-job-num').value  = '';
+  // Project Kickoff fields: start/end dates blank on a new project.
+  // A/P Tax Exempt defaults to unchecked (most projects are taxable).
+  if (g('nprj-start-date'))    g('nprj-start-date').value    = '';
+  if (g('nprj-end-date'))      g('nprj-end-date').value      = '';
+  if (g('nprj-ap-tax-exempt')) g('nprj-ap-tax-exempt').checked = false;
   populateFoundationCustomerDropdown(prefill ? prefill.foundationCustomerNo : '');
   populateProjectCustDropdown(prefill ? prefill.customerId : '');
   populateProjectStateDropdown(prefill ? prefill.state : '');
@@ -21870,6 +21735,12 @@ function saveProject() {
     payrollDepartment: payrollDeptEl ? (payrollDeptEl.value || '').trim() : 'field',
     customerJobNumber: custJobNumEl  ? (custJobNumEl.value  || '').trim() : '',
     foundationCustomerNo: fndCustEl  ? (fndCustEl.value     || '').trim() : '',
+    // Project Kickoff fields: dates pass through as 'YYYY-MM-DD' or empty.
+    // A/P Tax Exempt persists as Foundation's Y/N format so the Job File CSV
+    // and other consumers can read it directly without translation.
+    startDate:   g('nprj-start-date') ? (g('nprj-start-date').value || '') : '',
+    endDate:     g('nprj-end-date')   ? (g('nprj-end-date').value   || '') : '',
+    apTaxExempt: (g('nprj-ap-tax-exempt') && g('nprj-ap-tax-exempt').checked) ? 'Y' : 'N',
     matEqMarkupPct: matEqMarkup,
     subMarkupPct:   subMarkup,
     // Hunzinger COR form addition: template choice + bond rate
@@ -21937,6 +21808,15 @@ function editProject(id) {
   g('nprj-amt').value  = p.contractAmount || '';
   if (g('nprj-payroll-dept')) g('nprj-payroll-dept').value = p.payrollDepartment || 'field';
   if (g('nprj-cust-job-num')) g('nprj-cust-job-num').value = p.customerJobNumber || '';
+  // Project Kickoff fields
+  if (g('nprj-start-date'))   g('nprj-start-date').value   = p.startDate || '';
+  if (g('nprj-end-date'))     g('nprj-end-date').value     = p.endDate   || '';
+  // A/P Tax Exempt — stored as 'Y'/'N' on the project record (Foundation format).
+  // The checkbox is checked iff the stored value normalises to 'Y'.
+  if (g('nprj-ap-tax-exempt')) {
+    var taxExStored = (p.apTaxExempt || '').toString().trim().toUpperCase();
+    g('nprj-ap-tax-exempt').checked = (taxExStored === 'Y' || taxExStored === 'YES' || taxExStored === 'TRUE');
+  }
   // Round 4.1: COR markup — default to 10/5 if not set on legacy projects
   if (g('nprj-mateq-markup')) g('nprj-mateq-markup').value = (p.matEqMarkupPct !== null && p.matEqMarkupPct !== undefined) ? p.matEqMarkupPct : 10;
   if (g('nprj-cor-form'))     g('nprj-cor-form').value     = (p.corFormType === 'Hunzinger') ? 'Hunzinger' : 'Standard';
@@ -22303,6 +22183,30 @@ function viewProject(id) {
         '</tbody></table></div>';
     })() +
     (p.opportunityId ? '<div class="sb3"><h4>Source opportunity</h4><span class="tag" style="cursor:pointer;color:var(--kmi)" onclick="closeModal();openOppDetail(\'' + p.opportunityId + '\')">' + p.opportunityId + ' ↗</span></div>' : '') +
+    (function(){
+      // Project Kickoff: button + "Last sent" indicator. The button is
+      // permission-gated; viewers without the permission just see the
+      // timestamp (if any) without an action button.
+      var canSend = hasFull('send-project-kickoff');
+      var sentAt  = p.kickoffSentAt || '';
+      var sentBy  = p.kickoffSentByUserId ? getUser(p.kickoffSentByUserId) : null;
+      var sentByName = sentBy ? (((sentBy.firstName || '') + ' ' + (sentBy.lastName || '')).trim() || sentBy.email) : '';
+      var sentLine = '';
+      if (sentAt) {
+        var d = new Date(sentAt);
+        var dateStr = isNaN(d.getTime()) ? sentAt : d.toLocaleString();
+        sentLine = '<div style="font-size:12px;color:#666;margin-top:6px">Last sent: ' + bgEsc(dateStr) + (sentByName ? ' by ' + bgEsc(sentByName) : '') + '</div>';
+      } else {
+        sentLine = '<div style="font-size:12px;color:#888;margin-top:6px">Not sent yet.</div>';
+      }
+      if (!canSend && !sentAt) return '';  // hide entirely if nothing to show
+      return '<div class="sb3" style="background:#F5F5F3"><h4>Project Kickoff</h4>' +
+        (canSend
+          ? '<button class="btn btn-p btn-sm" onclick="closeModal();openProjectKickoffModal(' + p.id + ')">\u{2709}\u{FE0F} Send Project Kickoff</button>'
+          : '<div style="font-size:12px;color:#888">You do not have permission to send the kickoff email.</div>') +
+        sentLine +
+      '</div>';
+    })() +
     '<div class="mf">' +
       '<button class="btn" onclick="closeModal()">Close</button>' +
       '<button class="btn" onclick="closeModal();editProject(' + p.id + ')">✎ Edit</button>' +
@@ -25801,7 +25705,14 @@ function toSBProject(r) {
     // Shape: { "<parameterId>": <value> } where value is a string for
     // single_select/text/number and an array of strings for multi_select.
     // Parameters themselves live in db.projectParameters (Templates).
-    form_parameters:               r.formParameters            || {}
+    form_parameters:               r.formParameters            || {},
+    // Project Kickoff workflow — start/end dates surfaced on the project
+    // form, plus kickoff-sent tracking (timestamp + user id) so we can
+    // show "Last sent" indicators next to the Send Project Kickoff button.
+    start_date:                    r.startDate                 || null,
+    end_date:                      r.endDate                   || null,
+    kickoff_sent_at:               r.kickoffSentAt             || null,
+    kickoff_sent_by_user_id:       r.kickoffSentByUserId       || null
   };
 }
 function fromSBProject(r) {
@@ -25844,7 +25755,14 @@ function fromSBProject(r) {
     coDefaultMaterialCostCode: r.co_default_material_cost_code || '4000',
     coDefaultSubCostCode:      r.co_default_sub_cost_code      || '4000',
     // Form-fill Round 1 — per-project parameter answers (see toSBProject)
-    formParameters:            (r.form_parameters && typeof r.form_parameters === 'object') ? r.form_parameters : {}
+    formParameters:            (r.form_parameters && typeof r.form_parameters === 'object') ? r.form_parameters : {},
+    // Project Kickoff workflow — dates render as 'YYYY-MM-DD' for <input type="date">.
+    // The Supabase JS client returns DATE columns as 'YYYY-MM-DD' strings already, so
+    // pass-through with empty-string default is enough for the form binding.
+    startDate:                 r.start_date || '',
+    endDate:                   r.end_date   || '',
+    kickoffSentAt:             r.kickoff_sent_at         || null,
+    kickoffSentByUserId:       r.kickoff_sent_by_user_id || null
   };
 }
 
@@ -25995,7 +25913,6 @@ function toSBCor(r) {
     void_reason:       r.voidReason       || null,
     rejected_reason:   r.rejectedReason   || null,
     customer_co_number: r.customerCoNumber || null,
-    customer_co_date:   r.customerCoDate   || null,
     // Smart Upload provenance — added with COR Smart Upload feature.
     // Requires a SQL migration to add these four columns. Until the
     // migration is run these fields will fail-silent on upsert; the
@@ -26083,7 +26000,6 @@ function fromSBCor(r) {
     voidReason:       r.void_reason       || null,
     rejectedReason:   r.rejected_reason   || null,
     customerCoNumber: r.customer_co_number || null,
-    customerCoDate:   r.customer_co_date   || null,
     // Smart Upload provenance (only present after the SQL migration runs)
     smartUploaded:         !!r.smart_uploaded,
     smartUploadedFile:     r.smart_uploaded_file        || null,
@@ -26900,7 +26816,7 @@ function viewEmailLogEntry(id) {
 // ================================================================
 // EMAIL SETTINGS (Maintenance \u2192 Email settings)
 // ════════════════════════════════════════════════════════════════
-var _emailSettingsState = { testMode:false, testRecipient:'' };
+var _emailSettingsState = { testMode:false, testRecipient:'', kickoffAccountingRecipients:'' };
 
 async function renderEmailSettings() {
   var el = g('es-content');
@@ -26916,13 +26832,14 @@ async function renderEmailSettings() {
   }
 
   try {
-    var r = await supabaseClient.from('kmi_settings').select('*').in('key', ['emailTestMode','emailTestRecipient']);
+    var r = await supabaseClient.from('kmi_settings').select('*').in('key', ['emailTestMode','emailTestRecipient','kickoffAccountingRecipients']);
     if (r.error) throw r.error;
     var s = _emailSettingsState;
-    s.testMode = false; s.testRecipient = '';
+    s.testMode = false; s.testRecipient = ''; s.kickoffAccountingRecipients = '';
     (r.data || []).forEach(function(row){
       if (row.key === 'emailTestMode')      s.testMode      = row.value === true || row.value === 'true';
       if (row.key === 'emailTestRecipient') s.testRecipient = (typeof row.value === 'string' ? row.value : '');
+      if (row.key === 'kickoffAccountingRecipients') s.kickoffAccountingRecipients = (typeof row.value === 'string' ? row.value : '');
     });
     drawEmailSettings();
   } catch (e) {
@@ -26957,6 +26874,21 @@ function drawEmailSettings() {
         '<button class="btn btn-p" onclick="saveEmailSettings()">Save</button>' +
         '<button class="btn" onclick="renderEmailSettings()">Cancel</button>' +
         '<button class="btn" onclick="sendEmailSettingsTest()" style="margin-left:auto" title="Send a test email to your own address \u2014 verifies the email pipeline is working">Send test email to me</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card" style="max-width:680px;margin-top:14px">' +
+      '<div class="ch"><span class="ct">Project Kickoff: accounting recipients</span></div>' +
+      '<div style="font-size:13px;color:#666;line-height:1.6;margin-bottom:14px">Comma-separated email addresses that get added to the Project Kickoff email alongside the assigned KMI team. Typically your accounting/admin staff who need a heads-up that a new project is starting and the Foundation Job File CSV is attached.</div>' +
+      '<div class="fg">' +
+        '<div class="fgr full">' +
+          '<label>Accounting recipients <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(comma-separated)</span></label>' +
+          '<textarea id="es-kickoff-accounting" rows="2" placeholder="accounting@kmi-construction.com, admin@kmi-construction.com" style="font-family:Menlo,Monaco,Consolas,monospace;font-size:12px">' + _vendorEsc(s.kickoffAccountingRecipients) + '</textarea>' +
+          '<div style="font-size:11px;color:#888;margin-top:4px">Leave blank to skip — the kickoff email will still send to the assigned KMI team. Whitespace and trailing commas are tolerated.</div>' +
+        '</div>' +
+      '</div>' +
+      '<div id="es-kickoff-msg" style="display:none;margin-top:12px;padding:10px 12px;border-radius:7px;font-size:12px;line-height:1.5"></div>' +
+      '<div class="mf" style="margin-top:14px">' +
+        '<button class="btn btn-p" onclick="saveKickoffAccountingRecipients()">Save accounting recipients</button>' +
       '</div>' +
     '</div>';
 }
@@ -27018,6 +26950,527 @@ async function sendEmailSettingsTest() {
     showEmailSettingsMsg('success', msg);
   } else {
     showEmailSettingsMsg('error', 'Send failed: ' + (result.error || 'Unknown error'));
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// PROJECT KICKOFF WORKFLOW
+// ────────────────────────────────────────────────────────────────────────
+// Replaces the old "Export Job File CSV" button on the Budget page. The
+// Job File CSV is project-level data (no budget dependency), so it gets
+// generated at kickoff time, attached to a project-summary email, and
+// emailed to the assigned KMI team + accounting.
+//
+// Flow:
+//   1. User clicks "Send Project Kickoff" on the project view modal.
+//   2. openProjectKickoffModal() validates Foundation requirements
+//      (foundation customer no, project number, PM Foundation code).
+//      Same gates the old bgValidateForExport() used, minus the budget
+//      dependency — origEstimated falls back to contractAmount (or 0).
+//   3. If valid, fetches the accounting-recipient list from kmi_settings
+//      and opens the composer modal pre-filled with KMI team emails,
+//      accounting recipients in CC, subject + body templates.
+//   4. Tax-exempt checkbox in the modal lets the sender flip A/P Tax
+//      Exempt at send-time. The toggle persists back to the project
+//      record AND drives the value baked into the attached CSV.
+//   5. sendProjectKickoffEmail() builds the CSV fresh (using whatever
+//      tax-exempt value is set), base64-encodes it, and posts to the
+//      existing send-email Edge Function with flowType=project_kickoff.
+//   6. On success, stamps p.kickoffSentAt + p.kickoffSentByUserId,
+//      pushes an activity entry, and re-renders the project view.
+// ════════════════════════════════════════════════════════════════════════
+
+// ── Settings helper: load accounting recipients on demand ──────────────
+// Returns a string (comma-separated). Empty string is the legitimate
+// "no extra recipients" state — call sites should fall through silently.
+async function getKickoffAccountingRecipients() {
+  if (!supabaseClient) return '';
+  try {
+    var r = await supabaseClient.from('kmi_settings').select('value').eq('key', 'kickoffAccountingRecipients').maybeSingle();
+    if (r && r.data && typeof r.data.value === 'string') return r.data.value;
+    return '';
+  } catch (e) {
+    console.warn('getKickoffAccountingRecipients failed:', e);
+    return '';
+  }
+}
+
+// Save handler for the Email Settings → Project Kickoff card.
+async function saveKickoffAccountingRecipients() {
+  var msgEl = g('es-kickoff-msg');
+  function show(type, msg) {
+    if (!msgEl) return;
+    if (type === 'success') {
+      msgEl.style.background = '#EAF3DE'; msgEl.style.borderWidth = '1px'; msgEl.style.borderStyle = 'solid'; msgEl.style.borderColor = '#B8D88A'; msgEl.style.color = '#3B6D11';
+    } else {
+      msgEl.style.background = '#FBE9E9'; msgEl.style.borderWidth = '1px'; msgEl.style.borderStyle = 'solid'; msgEl.style.borderColor = '#E8B8B8'; msgEl.style.color = '#7A2E2E';
+    }
+    msgEl.textContent = msg;
+    msgEl.style.display = '';
+  }
+  if (!hasFull('email-settings')) { show('error', 'You do not have permission to change email settings.'); return; }
+  if (!supabaseClient) { show('error', 'Not connected to Supabase.'); return; }
+  var raw = (g('es-kickoff-accounting').value || '').trim();
+  // Normalize: split on commas, trim each, drop empties, re-join.
+  var parts = raw.split(',').map(function(p){ return p.trim(); }).filter(function(p){ return p.length > 0; });
+  // Validate every entry is a well-formed email — easier to catch a typo
+  // here than at send time when the Edge Function bounces the whole batch.
+  var bad = parts.filter(function(p){ return !isValidEmail(p); });
+  if (bad.length) {
+    show('error', 'Invalid email address(es): ' + bad.join(', '));
+    return;
+  }
+  var normalized = parts.join(', ');
+  try {
+    var r = await supabaseClient.from('kmi_settings').upsert({ key: 'kickoffAccountingRecipients', value: normalized });
+    if (r.error) throw r.error;
+    _emailSettingsState.kickoffAccountingRecipients = normalized;
+    show('success', parts.length ? 'Saved. ' + parts.length + ' accounting recipient' + (parts.length === 1 ? '' : 's') + ' will be CCd on Project Kickoff emails.' : 'Saved. No accounting recipients configured — kickoff emails will only go to the KMI team.');
+  } catch (e) {
+    show('error', 'Save failed: ' + (e.message || String(e)));
+  }
+}
+
+// ── Standalone Job File CSV generator (lifted from bgRunJobFileExport) ─
+// Difference from the original: no budget dependency. origEstimated falls
+// back to the project's contractAmount (the "write 0, write contract
+// amount" decision from the spec). Optional taxExemptOverride lets the
+// kickoff modal flip the value at send-time without mutating the project
+// record before the CSV is generated.
+function generateJobFileCSV(project, taxExemptOverride) {
+  var p = project;
+  if (!p) return '';
+
+  // Look up Foundation customer record for address fields
+  var fndCust = (db.customersFoundation || []).find(function(c){
+    return String(c.customerNo) === String(p.foundationCustomerNo);
+  }) || {};
+
+  // Look up assigned Project Manager → foundation_pm_code
+  var pmCode = '';
+  var pmAssign = (p.kmiAssignments || []).find(function(a){ return a && a.role && /project manager/i.test(a.role); });
+  if (pmAssign) {
+    var u = (db.users || []).find(function(x){ return x.id === pmAssign.userId; });
+    if (u && u.foundationPmCode) pmCode = u.foundationPmCode;
+  }
+
+  // origContract from the project record; origEstimated falls back to the
+  // same value at kickoff time since no budget exists yet. Accounting can
+  // re-export from the project edit screen later if/when the budget is
+  // built and they need an updated value.
+  var origContract  = Number(p.contractAmount) || 0;
+  var origEstimated = origContract;
+
+  var retainage    = (p.retainagePct === '' || p.retainagePct == null)
+                       ? 0 : Number(p.retainagePct);
+  var salesTaxAr   = (p.salesTaxAr === '' || p.salesTaxAr == null)
+                       ? 0 : Number(p.salesTaxAr);
+  var storedRet    = (p.storedMaterialRetainagePct === '' || p.storedMaterialRetainagePct == null)
+                       ? 0 : Number(p.storedMaterialRetainagePct);
+
+  function flagDefault(v) {
+    if (v == null) return 'N';
+    var s = String(v).trim();
+    if (!s) return 'N';
+    var u = s.toUpperCase();
+    if (u === 'Y' || u === 'YES' || u === 'TRUE')  return 'Y';
+    if (u === 'N' || u === 'NO'  || u === 'FALSE') return 'N';
+    return s;
+  }
+
+  // Resolve tax-exempt: explicit override (true/false) wins, else use the
+  // project's stored value, else default to 'N'.
+  var taxExempt;
+  if (taxExemptOverride === true)       taxExempt = 'Y';
+  else if (taxExemptOverride === false) taxExempt = 'N';
+  else                                  taxExempt = flagDefault(p.apTaxExempt);
+
+  var row = [
+    p.number || '',
+    p.name   || '',
+    p.foundationCustomerNo || '',
+    pmCode,
+    p.geographicalArea  || '',
+    p.projectClass      || '',
+    flagDefault(p.payrollLocalTax),
+    flagDefault(p.certifiedPayroll),
+    origContract.toFixed(2),
+    origEstimated.toFixed(2),
+    retainage.toFixed(3),
+    taxExempt,
+    p.attention         || '',
+    fndCust.address1    || '',
+    fndCust.address2    || '',
+    fndCust.city        || '',
+    fndCust.state       || '',
+    fndCust.zip         || '',
+    p.arTaxType         || '',
+    salesTaxAr.toFixed(4),
+    storedRet.toFixed(3),
+    p.customerJobNumber || '',
+    p.payrollDepartment || 'field'
+  ];
+
+  return bgRowsToCSV([row]);
+}
+
+// Standalone validator (no budget dependency). Returns { ok, errors, warnings }.
+function validateProjectKickoff(project) {
+  var errors = [];
+  var warnings = [];
+  if (!project) {
+    errors.push('Project not loaded.');
+    return { ok: false, errors: errors, warnings: warnings };
+  }
+  if (!project.foundationCustomerNo) {
+    errors.push('Foundation customer not assigned. Edit the project and choose a Foundation customer in the Foundation Setup section.');
+  }
+  if (!project.number) {
+    errors.push('Project has no project number.');
+  }
+  if (!project.payrollDepartment) {
+    warnings.push('Payroll department is empty. Defaulting to "field" in the CSV.');
+  }
+  var pmAssign = (project.kmiAssignments || []).find(function(a){
+    return a && a.role && /project manager/i.test(a.role);
+  });
+  if (!pmAssign) {
+    warnings.push('No Project Manager assigned to this project. The "Project Manager" column in the Job File CSV will be blank.');
+  } else {
+    var pmUser = (db.users || []).find(function(u){ return u.id === pmAssign.userId; });
+    if (!pmUser) {
+      warnings.push('Assigned Project Manager could not be located in the user list.');
+    } else if (!pmUser.foundationPmCode) {
+      warnings.push('Project Manager (' + (pmUser.firstName || '') + ' ' + (pmUser.lastName || '') + ') has no Foundation PM code set. Edit the user under Users to add one — the "Project Manager" column in the CSV will be blank.');
+    }
+  }
+  // Address sanity warning — not a blocker, but the email body shows it.
+  if (!project.address && !project.city) {
+    warnings.push('Project address is blank. The email body will say "Not specified" for the address.');
+  }
+  return { ok: errors.length === 0, errors: errors, warnings: warnings };
+}
+
+// ── Validation gate: show errors/warnings, route to composer on OK ─────
+function showProjectKickoffValidation(projectId, validation) {
+  var canRun = validation.ok;
+  var content = '';
+  if (validation.errors.length) {
+    content +=
+      '<div class="sb3" style="margin-bottom:12px;background:#FDEBEB;border:1px solid #E24B4A;border-radius:6px;padding:12px">' +
+        '<div style="font-weight:600;color:#A32D2D;margin-bottom:6px;font-size:13px">Cannot send kickoff &mdash; required fields missing:</div>' +
+        '<ul style="font-size:13px;line-height:1.6;margin:0;padding-left:20px">' +
+          validation.errors.map(function(e){ return '<li>' + bgEsc(e) + '</li>'; }).join('') +
+        '</ul>' +
+      '</div>';
+  }
+  if (validation.warnings.length) {
+    content +=
+      '<div class="sb3" style="margin-bottom:12px;background:#FFF8E1;border:1px solid #C8A84B;border-radius:6px;padding:12px">' +
+        '<div style="font-weight:600;color:#9A7A2E;margin-bottom:6px;font-size:13px">Warnings:</div>' +
+        '<ul style="font-size:13px;line-height:1.6;margin:0;padding-left:20px">' +
+          validation.warnings.map(function(w){ return '<li>' + bgEsc(w) + '</li>'; }).join('') +
+        '</ul>' +
+        (canRun ? '<div style="font-size:12px;color:#666;margin-top:8px">You can proceed &mdash; these will be left blank or defaulted in the CSV.</div>' : '') +
+      '</div>';
+  }
+  if (canRun && !validation.warnings.length) {
+    content += '<div style="font-size:13px;color:#666;margin-bottom:12px">Ready to send. Click Continue to open the email composer.</div>';
+  }
+  var actions = canRun
+    ? '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="closeModal();_openProjectKickoffComposer(' + projectId + ')">Continue &rarr;</button>'
+    : '<button class="btn" onclick="closeModal()">Close</button>';
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Send Project Kickoff</div>' +
+    '<div class="msb">Pre-send validation</div>' +
+    content +
+    '<div class="mf">' + actions + '</div>'
+  );
+}
+
+// Entry point — called from the viewProject modal's Send Kickoff button.
+async function openProjectKickoffModal(projectId) {
+  if (!hasFull('send-project-kickoff')) {
+    alert('You do not have permission to send project kickoff emails.');
+    return;
+  }
+  var p = getProj(projectId);
+  if (!p) { alert('Project not found.'); return; }
+  var v = validateProjectKickoff(p);
+  showProjectKickoffValidation(projectId, v);
+}
+
+// Composer modal — opens after validation passes. Stashes context on
+// window._pendingKickoffEmail (same pattern as the proposal composer)
+// so sendProjectKickoffEmail() can read it after the modal re-render.
+async function _openProjectKickoffComposer(projectId) {
+  var p = getProj(projectId);
+  if (!p) { alert('Project not found.'); return; }
+  var c = getCust(p.customerId);
+  var u = _currentUser;
+  if (!u || !u.email) { alert('Your account needs an email address to send a kickoff.'); return; }
+
+  // Resolve recipients:
+  //   - KMI team: all kmiAssignments members who have valid emails
+  //   - Accounting: kmi_settings.kickoffAccountingRecipients (CSV string)
+  // Both pre-fill the To field; the user can edit before sending.
+  var teamEmails = [];
+  (p.kmiAssignments || []).forEach(function(a){
+    var usr = getUser(a.userId);
+    if (usr && usr.email && isValidEmail(usr.email) && teamEmails.indexOf(usr.email) === -1) {
+      teamEmails.push(usr.email);
+    }
+  });
+  var accountingRaw = await getKickoffAccountingRecipients();
+  var accountingEmails = (accountingRaw || '').split(',')
+    .map(function(s){ return s.trim(); })
+    .filter(function(s){ return s.length > 0 && isValidEmail(s); });
+
+  // Build to-field: team first, then accounting. Dedupe.
+  var toList = teamEmails.slice();
+  accountingEmails.forEach(function(e){ if (toList.indexOf(e) === -1) toList.push(e); });
+  var toStr = toList.join(', ');
+
+  // Subject + body templates
+  var subject = 'Project Kickoff: ' + (p.number || '') + ' \u2014 ' + (p.name || '');
+  var addrLine = formatProjAddress(p) || 'Not specified';
+  var startStr = p.startDate || 'TBD';
+  var endStr   = p.endDate   || 'TBD';
+  var amtStr   = '$' + Number(p.contractAmount || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+  // Customer-contacts block
+  var contactLines = [];
+  (p.contactAssignments || []).forEach(function(a){
+    var pm = (db.pms || []).find(function(x){ return x.id === a.pmId; });
+    if (!pm) return;
+    var nm = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim();
+    var title = (a.role || pm.title || '').trim();
+    var emailPart = pm.email ? ' <' + pm.email + '>' : '';
+    contactLines.push('  \u2022 ' + nm + (title ? ' \u2014 ' + title : '') + emailPart);
+  });
+  if (!contactLines.length) contactLines.push('  (none assigned)');
+
+  // KMI-team block
+  var teamLines = [];
+  (p.kmiAssignments || []).forEach(function(a){
+    var usr = getUser(a.userId);
+    if (!usr) return;
+    var nm = ((usr.firstName || '') + ' ' + (usr.lastName || '')).trim();
+    var roleStr = (a.role || usr.role || '').trim();
+    teamLines.push('  \u2022 ' + nm + (roleStr ? ' \u2014 ' + roleStr : ''));
+  });
+  if (!teamLines.length) teamLines.push('  (none assigned)');
+
+  // Initial tax-exempt state mirrors the stored project value
+  var taxExStored = (p.apTaxExempt || '').toString().trim().toUpperCase();
+  var taxExInitial = (taxExStored === 'Y' || taxExStored === 'YES' || taxExStored === 'TRUE');
+
+  function buildBody(taxExemptYes) {
+    var lines = [];
+    lines.push('A new project has been created and is ready for kickoff.');
+    lines.push('');
+    lines.push('Project #:        ' + (p.number || ''));
+    lines.push('Name:             ' + (p.name || ''));
+    lines.push('Address:          ' + addrLine);
+    lines.push('Customer:         ' + (c ? c.name : ''));
+    lines.push('Customer contacts:');
+    contactLines.forEach(function(l){ lines.push(l); });
+    lines.push('KMI team:');
+    teamLines.forEach(function(l){ lines.push(l); });
+    lines.push('Start date:       ' + startStr);
+    lines.push('End date:         ' + endStr);
+    lines.push('Contract amount:  ' + amtStr);
+    lines.push('Tax exempt:       ' + (taxExemptYes ? 'Yes' : 'No'));
+    lines.push('');
+    lines.push('The Foundation Job File CSV is attached.');
+    lines.push('');
+    lines.push('\u2014 KMI Construction');
+    lines.push('  2880 S. 171st Street, New Berlin, WI 53151');
+    lines.push('  T 262-548-0632 | KMI-Construction.com');
+    return lines.join('\r\n');
+  }
+
+  // Filename for the attachment
+  var filename = (p.number || 'project') + '_JobFile.csv';
+
+  // Stash context for the send handler
+  window._pendingKickoffEmail = {
+    projectId: p.id,
+    filename:  filename,
+    from:      u.email,
+    fromName:  ((u.firstName || '') + ' ' + (u.lastName || '')).trim()
+  };
+
+  var fromDisplay = ((u.firstName || '') + ' ' + (u.lastName || '')).trim() + ' <' + u.email + '>';
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Send Project Kickoff</div>' +
+    '<div class="msb">Review and edit before sending. The Foundation Job File CSV will be attached automatically.</div>' +
+    '<div id="pkm-err" style="display:none;background:#FBE9E9;border:1px solid #E8B8B8;border-radius:7px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:#7A2E2E;line-height:1.5"></div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>From</label>' +
+        '<input type="text" value="' + _vendorEsc(fromDisplay) + '" disabled style="background:#f5f5f5;color:#888;cursor:not-allowed">' +
+      '</div>' +
+      '<div class="fgr full"><label>To * <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(comma-separated; KMI team + accounting pre-filled)</span></label>' +
+        '<input id="pkm-to" type="text" value="' + _vendorEsc(toStr) + '">' +
+      '</div>' +
+      '<div class="fgr full"><label>CC <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional, comma-separated)</span></label>' +
+        '<input id="pkm-cc" type="text" placeholder="Leave blank for no CC">' +
+      '</div>' +
+      '<div class="fgr full"><label>Subject *</label>' +
+        '<input id="pkm-subject" type="text" value="' + _vendorEsc(subject) + '">' +
+      '</div>' +
+      '<div class="fgr full"><label>Message *</label>' +
+        '<textarea id="pkm-body" style="min-height:280px;font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5">' + _vendorEsc(buildBody(taxExInitial)) + '</textarea>' +
+      '</div>' +
+      '<div class="fgr full">' +
+        '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:500;text-transform:none;letter-spacing:0;color:#333">' +
+          '<input type="checkbox" id="pkm-tax-exempt"' + (taxExInitial ? ' checked' : '') + ' style="width:auto;margin:0" onchange="_pkmTaxExemptChanged()"> ' +
+          'A/P Tax Exempt' +
+        '</label>' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Toggling this updates the project record AND the value written to the attached CSV. Edits the "Tax exempt" line in the message body too.</div>' +
+      '</div>' +
+      '<div class="fgr full"><label>Attachment</label>' +
+        '<div style="background:#F5F5F3;border-radius:7px;padding:10px 12px;font-size:13px;display:flex;align-items:center;gap:10px">' +
+          '<span style="font-size:18px">\u{1F4CE}</span>' +
+          '<span style="flex:1"><strong>' + _vendorEsc(filename) + '</strong> <span style="color:#888;margin-left:6px">Foundation Job File &mdash; regenerated at send</span></span>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div style="background:#F5F5F3;border-radius:7px;padding:10px 12px;margin-top:12px;font-size:12px;color:#666;line-height:1.5">A copy of this email will be BCCd to you (' + _vendorEsc(u.email) + ') so you have a record.</div>' +
+    '<div class="mf">' +
+      '<button class="btn" id="pkm-cancel" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" id="pkm-send" onclick="sendProjectKickoffEmail()">Send Project Kickoff</button>' +
+    '</div>'
+  );
+}
+
+// Re-stamp the "Tax exempt: Yes/No" line in the body when the checkbox flips.
+// Best-effort: only touches that one line if we can find it, otherwise leaves
+// the body alone (the user may have edited it heavily already).
+function _pkmTaxExemptChanged() {
+  var cb   = g('pkm-tax-exempt');
+  var body = g('pkm-body');
+  if (!cb || !body) return;
+  var nowYes = cb.checked;
+  var rx = /^(Tax exempt:\s+)(Yes|No)\s*$/m;
+  if (rx.test(body.value)) {
+    body.value = body.value.replace(rx, '$1' + (nowYes ? 'Yes' : 'No'));
+  }
+}
+
+async function sendProjectKickoffEmail() {
+  var ctx = window._pendingKickoffEmail;
+  if (!ctx) { alert('Email context lost. Please reopen the kickoff modal.'); return; }
+
+  var to      = (g('pkm-to').value      || '').trim();
+  var ccRaw   = (g('pkm-cc').value      || '').trim();
+  var subject = (g('pkm-subject').value || '').trim();
+  var body    = g('pkm-body').value     || '';
+  var taxExYes = g('pkm-tax-exempt') ? !!g('pkm-tax-exempt').checked : false;
+  var errEl   = g('pkm-err');
+  var sendBtn = g('pkm-send');
+  var cancelBtn = g('pkm-cancel');
+
+  function showErr(msg) {
+    errEl.innerHTML = msg;
+    errEl.style.display = '';
+  }
+  errEl.style.display = 'none';
+
+  // To validation — at least one valid address. Comma-separated allowed.
+  var toList = to.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+  if (!toList.length)                        { showErr('Please enter at least one valid To address.'); return; }
+  var badTo = toList.filter(function(e){ return !isValidEmail(e); });
+  if (badTo.length)                          { showErr('Invalid To address(es): ' + _vendorEsc(badTo.join(', '))); return; }
+
+  // CC validation (optional)
+  var ccList = ccRaw.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+  var badCc = ccList.filter(function(e){ return !isValidEmail(e); });
+  if (badCc.length)                          { showErr('Invalid CC address(es): ' + _vendorEsc(badCc.join(', '))); return; }
+
+  if (!subject)                              { showErr('Subject is required.'); return; }
+  if (!body.trim())                          { showErr('Message body is required.'); return; }
+
+  // Resolve project
+  var p = getProj(ctx.projectId);
+  if (!p)                                    { showErr('Project not found.'); return; }
+
+  sendBtn.disabled = true; cancelBtn.disabled = true;
+  sendBtn.textContent = 'Sending\u2026';
+
+  // Persist the tax-exempt toggle BEFORE generating the CSV so the project
+  // record and the attached file agree. Save flushes to Supabase too.
+  var taxExNew = taxExYes ? 'Y' : 'N';
+  var taxExChanged = (p.apTaxExempt !== taxExNew);
+  if (taxExChanged) {
+    p.apTaxExempt = taxExNew;
+    db.activity.unshift({text: 'Project ' + (p.number || p.id) + ' tax-exempt set to ' + (taxExYes ? 'Y' : 'N') + ' via kickoff modal', type: 'won', time: 'Just now'});
+  }
+
+  // Build the CSV fresh with the current tax-exempt value, then base64-encode.
+  var csv = generateJobFileCSV(p, taxExYes);
+  // Edge Function expects content as base64. Add a UTF-8 BOM so Excel /
+  // Foundation parse it cleanly when the file is opened directly.
+  var withBom = '\ufeff' + csv;
+  var b64;
+  try {
+    // Encode UTF-8 → base64. unescape(encodeURIComponent(...)) is the
+    // standard browser-safe path for non-ASCII content.
+    b64 = btoa(unescape(encodeURIComponent(withBom)));
+  } catch (e) {
+    sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Project Kickoff';
+    showErr('Failed to encode CSV attachment: ' + _vendorEsc(e.message || String(e)));
+    return;
+  }
+
+  // Build the email payload — same shape as sendProposalEmail.
+  var payload = {
+    to:                toList.join(', '),
+    from:              ctx.from,
+    fromName:          ctx.fromName,
+    replyTo:           ctx.from,
+    bcc:               ctx.from,
+    subject:           subject,
+    text:              body,
+    flowType:          'project_kickoff',
+    sentBy:            _currentUser ? _currentUser.id    : null,
+    sentByEmail:       _currentUser ? _currentUser.email : null,
+    relatedEntityType: 'project',
+    relatedEntityId:   p.id,
+    attachments: [{ filename: ctx.filename, content: b64 }]
+  };
+  if (ccList.length) payload.cc = ccList.join(', ');
+
+  var result = await sendEmail(payload);
+
+  if (result.success) {
+    // Stamp kickoff-sent tracking on the project record
+    p.kickoffSentAt         = new Date().toISOString();
+    p.kickoffSentByUserId   = _currentUser ? _currentUser.id : null;
+    db.activity.unshift({
+      text: 'Project kickoff sent for ' + (p.number || p.id) + ' to ' + (toList.length + ccList.length) + ' recipient' + ((toList.length + ccList.length) === 1 ? '' : 's'),
+      type: 'sent',
+      time: 'Just now'
+    });
+    saveDB();
+
+    closeModal();
+    showToast(
+      result.testMode
+        ? 'Test mode: project kickoff redirected (would have gone to ' + toList[0] + (toList.length > 1 ? ' +' + (toList.length - 1) : '') + ')'
+        : 'Project kickoff sent (' + toList.length + ' recipient' + (toList.length === 1 ? '' : 's') + ')',
+      'success'
+    );
+    delete window._pendingKickoffEmail;
+    // Re-render the project modal so the "Last sent" indicator updates.
+    if (typeof viewProject === 'function') viewProject(p.id);
+  } else {
+    sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Project Kickoff';
+    showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
   }
 }
 </script>
