@@ -190,15 +190,19 @@ textarea{resize:vertical;min-height:72px}
 .cg-hdr{font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:12px 4px 6px;border-bottom:0.5px solid #eee;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between}
 .cg-hdr:first-child{padding-top:2px}
 .cg-hdr .cg-ct{color:#aaa;font-weight:500;font-size:10px}
-.npc-sec{margin-bottom:8px;border:1px solid #e5e5e5;border-radius:6px;background:#fafafa;overflow:hidden}
+.npc-sec{margin-bottom:8px;border:1px solid #e5e5e5;border-radius:6px;background:#fff;overflow:hidden}
 .npc-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;background:#f3f3f3;border-bottom:1px solid #e5e5e5}
+.npc-sec.collapsed .npc-hdr{border-bottom:none}
 .npc-tog{background:none;border:none;cursor:pointer;font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.6px;padding:2px 0;display:inline-flex;align-items:center;gap:4px}
 .npc-tog:hover{color:var(--kmi)}
 .npc-chev{display:inline-block;transition:transform .15s ease;font-size:10px;color:#888}
 .npc-sec.collapsed .npc-chev{transform:rotate(-90deg)}
 .npc-ct{margin-left:4px;color:#999;font-weight:500;font-size:10px}
+.npc-hdr-right{display:flex;align-items:center;gap:12px}
+.npc-tools-empty{font-size:10px;color:#bbb;font-style:italic}
 .npc-body{padding:8px 10px}
 .npc-sec.collapsed .npc-body{display:none}
+.npc-custom[data-npc-has-divider="1"]:not(:empty){margin-top:8px;padding-top:8px;border-top:0.5px dashed #ccc}
 .ci input[type=checkbox]{width:auto;margin-top:2px;cursor:pointer;accent-color:var(--kmi)}
 .ci label{font-size:13px;color:#1a1a1a;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0}
 .cr{display:grid;grid-template-columns:1fr 70px 70px 90px 28px;gap:6px;align-items:center;margin-bottom:6px}
@@ -1280,18 +1284,10 @@ textarea{resize:vertical;min-height:72px}
   <div class="card">
     <div class="ch"><span class="ct">Project inclusions</span></div>
     <div id="np-inc"></div>
-    <div style="margin-top:14px;padding-top:10px;border-top:1px dashed #ddd">
-      <div style="font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:0 4px 8px">Project-specific items</div>
-      <div id="np-custom-inc"></div>
-    </div>
   </div>
   <div class="card">
     <div class="ch"><span class="ct">Project exclusions</span></div>
     <div id="np-exc"></div>
-    <div style="margin-top:14px;padding-top:10px;border-top:1px dashed #ddd">
-      <div style="font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:0 4px 8px">Project-specific items</div>
-      <div id="np-custom-exc"></div>
-    </div>
   </div>
   <div class="card">
     <div class="ch">
@@ -21241,40 +21237,16 @@ function npcGroupList() {
   return list;
 }
 
-// Render the empty group sub-sections for one container (inc or exc).
-// Call this once per proposal-page open; rows are then appended with
-// npAddCustomItem(type, group, text).
-function renderCustomGroupedSections(type) {
-  var cont = g('np-custom-' + type);
-  if (!cont) return;
-  var collapsed = npcGetCollapse();
-  var html = '';
-  npcGroupList().forEach(function(grp){
-    var grpSafe = npcCssAttr(grp);
-    var key     = type + ':' + grp;
-    var isCol   = !!collapsed[key];
-    html += '<div class="npc-sec' + (isCol ? ' collapsed' : '') + '" ' +
-            'data-npc-sec="' + type + '" data-npc-grp="' + grpSafe + '">' +
-      '<div class="npc-hdr">' +
-        '<button type="button" class="npc-tog" onclick="npcToggleCollapse(\'' + type + '\', \'' + npcEscJs(grp) + '\')">' +
-          '<span class="npc-chev">&#9662;</span> ' + npcEscHtml(grp) +
-          ' <span class="npc-ct" data-npc-count>0</span>' +
-        '</button>' +
-        '<button type="button" class="btn btn-sm btn-p" onclick="npAddCustomItem(\'' + type + '\', \'' + npcEscJs(grp) + '\')">+ Add item</button>' +
-      '</div>' +
-      '<div class="npc-body" data-npc-body></div>' +
-    '</div>';
-  });
-  cont.innerHTML = html;
-}
-
-// Refresh the count badge in one group's header.
+// Refresh the count badge in one group's header. The badge shows
+// template count + custom rows currently in the group.
 function npcRefreshCount(type, group) {
   var sec = document.querySelector('[data-npc-sec="' + type + '"][data-npc-grp="' + npcCssAttr(group) + '"]');
   if (!sec) return;
-  var n  = sec.querySelectorAll('[data-npc-body] [data-npc-row]').length;
   var ct = sec.querySelector('[data-npc-count]');
-  if (ct) ct.textContent = n;
+  if (!ct) return;
+  var base   = parseInt(ct.getAttribute('data-base') || '0', 10);
+  var custom = sec.querySelectorAll('[data-npc-body] [data-npc-row]').length;
+  ct.textContent = (base + custom);
 }
 
 // Append a custom-item row inside the given group's sub-section.
@@ -21367,12 +21339,13 @@ function npAddCustomItem(type, group, text) {
 
 // Read all custom rows back out as {text, group} objects. Blank rows
 // are dropped silently so a stray empty input doesn't get saved.
+// Rows live inside each group's [data-npc-body] inside np-inc / np-exc.
 function getCustomItems(type) {
-  var cont = g('np-custom-' + type);
+  var cont = g('np-' + type);
   if (!cont) return [];
   var items = [];
   cont.querySelectorAll('[data-npc-row]').forEach(function(row){
-    var inp = row.querySelector('input');
+    var inp = row.querySelector('input[type="text"], input:not([type])');
     var sel = row.querySelector('select');
     var txt = (inp && inp.value || '').trim();
     if (!txt) return;
@@ -22469,10 +22442,8 @@ function openNewProposal(oppId) {
   g('np-project').value              = o.project || '';
   g('np-cust-ro').value              = c.name;
   g('np-type-ro').value              = Array.isArray(o.types) ? o.types.join(', ') : (o.type || '');
-  g('np-inc').innerHTML = renderGroupedCheckboxes(db.stdClar,    'nsc', true);
-  g('np-exc').innerHTML = renderGroupedCheckboxes(db.exclusions, 'nex', false);
-  renderCustomGroupedSections('inc');
-  renderCustomGroupedSections('exc');
+  g('np-inc').innerHTML = renderGroupedCheckboxes(db.stdClar,    'nsc', true,  'inc');
+  g('np-exc').innerHTML = renderGroupedCheckboxes(db.exclusions, 'nex', false, 'exc');
   g('np-rows').innerHTML = ''; g('np-total').textContent = '$0';
   var altEl = g('np-alt-rows'); if (altEl) altEl.innerHTML = '';
   var veEl  = g('np-ve-rows');  if (veEl)  veEl.innerHTML  = '';
@@ -22500,16 +22471,15 @@ function editProposal(propId) {
   g('np-cust-ro').value            = c ? c.name : '';
   g('np-type-ro').value            = Array.isArray(o.types) ? o.types.join(', ') : (o.type || '');
 
-  // Re-render checkbox groups, then pre-check saved selections
-  g('np-inc').innerHTML = renderGroupedCheckboxes(db.stdClar,    'nsc', false);
-  g('np-exc').innerHTML = renderGroupedCheckboxes(db.exclusions, 'nex', false);
+  // Re-render checkbox groups (with embedded +Add buttons and inline
+  // custom-row containers), then pre-check saved selections.
+  g('np-inc').innerHTML = renderGroupedCheckboxes(db.stdClar,    'nsc', false, 'inc');
+  g('np-exc').innerHTML = renderGroupedCheckboxes(db.exclusions, 'nex', false, 'exc');
   (prop.inc || []).forEach(function(id){ var cb = g('nsc' + id); if (cb) cb.checked = true; });
   (prop.exc || []).forEach(function(id){ var cb = g('nex' + id); if (cb) cb.checked = true; });
 
-  // Build empty group sub-sections, then repopulate from saved values.
-  // npcNormalize() handles legacy string entries from older proposals.
-  renderCustomGroupedSections('inc');
-  renderCustomGroupedSections('exc');
+  // Repopulate custom rows under their saved groups. npcNormalize()
+  // handles legacy string entries from older proposals.
   (prop.customIncs || []).forEach(function(it){
     var n = npcNormalize(it);
     if (n.text) npAddCustomItem('inc', n.group, n.text);
@@ -25023,26 +24993,116 @@ function renderGroupedClars(arr, type, prefix, color) {
   });
   return html;
 }
-function renderGroupedCheckboxes(arr, idPrefix, defaultChecked) {
-  var grouped = groupClarItems(arr);
-  if (!grouped.length) return '<div style="padding:8px;color:#aaa;font-size:12px">No template items yet. Add some in Templates.</div>';
+function renderGroupedCheckboxes(arr, idPrefix, defaultChecked, type) {
+  // type ('inc' or 'exc'): when provided, each group renders with a
+  // collapsible header, a "+ Add item" button, and an inline container
+  // for project-specific custom rows. Every managed group plus General
+  // is shown even if empty so the +Add button is always reachable.
+  // When type is omitted, falls back to the original flat grouped
+  // rendering (no custom-item affordances) for any legacy caller.
+
+  // Bucket items by group name.
+  var bucket = {};
+  (arr || []).forEach(function(it){
+    var grp = (it.group || '').trim() || 'General';
+    if (!bucket[grp]) bucket[grp] = [];
+    bucket[grp].push(it);
+  });
+
+  // Build the ordered list of [name, items] pairs.
+  var ordered = [];
+  if (type) {
+    // Every managed group always present, in saved order, then any
+    // legacy groups (referenced by items but not in db.clarGroups)
+    // alphabetically, then General last.
+    (db.clarGroups || []).forEach(function(name){
+      if (name === 'General') return; // pinned last
+      ordered.push([name, bucket[name] || []]);
+      delete bucket[name];
+    });
+    Object.keys(bucket).filter(function(n){ return n !== 'General'; }).sort().forEach(function(name){
+      ordered.push([name, bucket[name]]);
+      delete bucket[name];
+    });
+    ordered.push(['General', bucket['General'] || []]);
+  } else {
+    // Legacy behavior: only groups that actually contain items.
+    (db.clarGroups || []).forEach(function(name){
+      if (bucket[name]) { ordered.push([name, bucket[name]]); delete bucket[name]; }
+    });
+    Object.keys(bucket).filter(function(n){ return n !== 'General'; }).sort().forEach(function(name){
+      ordered.push([name, bucket[name]]);
+    });
+    if (bucket['General']) ordered.push(['General', bucket['General']]);
+    if (!ordered.length) return '<div style="padding:8px;color:#aaa;font-size:12px">No template items yet. Add some in Templates.</div>';
+  }
+
+  var collapsed = type ? npcGetCollapse() : {};
   var html = '';
-  grouped.forEach(function(pair){
+
+  ordered.forEach(function(pair){
     var name = pair[0], items = pair[1];
-    var grpSafe = name.replace(/[^a-zA-Z0-9]/g, '_');
-    html += '<div class="cg-hdr">' +
-      '<span>' + name + ' <span class="cg-ct">' + items.length + '</span></span>' +
-      '<span style="font-size:10px;font-weight:500;text-transform:none;letter-spacing:0">' +
+    var grpSafe = type ? npcCssAttr(name) : name.replace(/[^a-zA-Z0-9]/g, '_');
+    var key = (type || '') + ':' + name;
+    var isCol = false;
+    if (type) {
+      if (key in collapsed) {
+        isCol = !!collapsed[key];
+      } else if (items.length === 0) {
+        // Empty managed groups default to collapsed; user can expand
+        // by clicking the header or by clicking + Add item.
+        isCol = true;
+      }
+    }
+
+    html += '<div class="npc-sec' + (isCol ? ' collapsed' : '') + '"' +
+            (type ? ' data-npc-sec="' + type + '" data-npc-grp="' + grpSafe + '"' : '') + '>';
+
+    // ── Header ─────────────────────────────────────────────────
+    html += '<div class="npc-hdr">' +
+      '<button type="button" class="npc-tog"' +
+        (type ? ' onclick="npcToggleCollapse(\'' + type + '\', \'' + npcEscJs(name) + '\')"' : '') + '>' +
+        '<span class="npc-chev">&#9662;</span> ' + (type ? npcEscHtml(name) : name) +
+        ' <span class="npc-ct" data-npc-count data-base="' + items.length + '">' + items.length + '</span>' +
+      '</button>' +
+      '<div class="npc-hdr-right">';
+
+    if (type) {
+      html += '<button type="button" class="btn btn-sm btn-p" ' +
+              'onclick="npAddCustomItem(\'' + type + '\', \'' + npcEscJs(name) + '\')" ' +
+              'style="font-size:11px;padding:3px 9px;line-height:1.4">+ Add item</button>';
+    }
+
+    if (items.length > 0) {
+      html += '<span style="font-size:10px;font-weight:500;text-transform:none;letter-spacing:0">' +
         '<a href="#" onclick="cgToggleAll(\'' + idPrefix + '\',\'' + grpSafe + '\',true);return false" style="color:var(--kmi);margin-right:8px">All</a>' +
         '<a href="#" onclick="cgToggleAll(\'' + idPrefix + '\',\'' + grpSafe + '\',false);return false" style="color:#888">None</a>' +
-      '</span></div>';
+      '</span>';
+    } else if (type) {
+      html += '<span class="npc-tools-empty">no templates</span>';
+    }
+
+    html += '</div></div>';  // end .npc-hdr-right, end .npc-hdr
+
+    // ── Body: template checkboxes, then custom rows ────────────
+    html += '<div class="npc-body">';
     items.forEach(function(c){
       html += '<div class="ci" data-cg-grp="' + grpSafe + '" data-cg-pfx="' + idPrefix + '">' +
         '<input type="checkbox" id="' + idPrefix + c.id + '"' + (defaultChecked ? ' checked' : '') + '>' +
         '<label for="' + idPrefix + c.id + '">' + (c.text || '') + '</label>' +
       '</div>';
     });
+    if (type) {
+      // Inline container for project-specific rows. The dashed divider
+      // turns on only when templates sit above AND rows are present.
+      html += '<div class="npc-custom" data-npc-body' +
+              (items.length > 0 ? ' data-npc-has-divider="1"' : '') + '></div>';
+    }
+    html += '</div>';  // end .npc-body
+
+    html += '</div>';  // end .npc-sec
   });
+
   return html;
 }
 function cgToggleAll(pfx, grp, checked) {
