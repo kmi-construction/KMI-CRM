@@ -190,6 +190,15 @@ textarea{resize:vertical;min-height:72px}
 .cg-hdr{font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:12px 4px 6px;border-bottom:0.5px solid #eee;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between}
 .cg-hdr:first-child{padding-top:2px}
 .cg-hdr .cg-ct{color:#aaa;font-weight:500;font-size:10px}
+.npc-sec{margin-bottom:8px;border:1px solid #e5e5e5;border-radius:6px;background:#fafafa;overflow:hidden}
+.npc-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;background:#f3f3f3;border-bottom:1px solid #e5e5e5}
+.npc-tog{background:none;border:none;cursor:pointer;font-size:11px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.6px;padding:2px 0;display:inline-flex;align-items:center;gap:4px}
+.npc-tog:hover{color:var(--kmi)}
+.npc-chev{display:inline-block;transition:transform .15s ease;font-size:10px;color:#888}
+.npc-sec.collapsed .npc-chev{transform:rotate(-90deg)}
+.npc-ct{margin-left:4px;color:#999;font-weight:500;font-size:10px}
+.npc-body{padding:8px 10px}
+.npc-sec.collapsed .npc-body{display:none}
 .ci input[type=checkbox]{width:auto;margin-top:2px;cursor:pointer;accent-color:var(--kmi)}
 .ci label{font-size:13px;color:#1a1a1a;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0}
 .cr{display:grid;grid-template-columns:1fr 70px 70px 90px 28px;gap:6px;align-items:center;margin-bottom:6px}
@@ -1269,14 +1278,20 @@ textarea{resize:vertical;min-height:72px}
     </div>
   </div>
   <div class="card">
-    <div class="ch"><span class="ct">Project inclusions</span><button class="btn btn-sm btn-p" onclick="npAddCustomItem('inc')">+ Add item</button></div>
+    <div class="ch"><span class="ct">Project inclusions</span></div>
     <div id="np-inc"></div>
-    <div id="np-custom-inc"></div>
+    <div style="margin-top:14px;padding-top:10px;border-top:1px dashed #ddd">
+      <div style="font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:0 4px 8px">Project-specific items</div>
+      <div id="np-custom-inc"></div>
+    </div>
   </div>
   <div class="card">
-    <div class="ch"><span class="ct">Project exclusions</span><button class="btn btn-sm btn-p" onclick="npAddCustomItem('exc')">+ Add item</button></div>
+    <div class="ch"><span class="ct">Project exclusions</span></div>
     <div id="np-exc"></div>
-    <div id="np-custom-exc"></div>
+    <div style="margin-top:14px;padding-top:10px;border-top:1px dashed #ddd">
+      <div style="font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.7px;padding:0 4px 8px">Project-specific items</div>
+      <div id="np-custom-exc"></div>
+    </div>
   </div>
   <div class="card">
     <div class="ch">
@@ -21164,36 +21179,207 @@ function applySbGroupState() {
 
 
 // ── PROPOSAL CUSTOM INCLUSIONS / EXCLUSIONS ─────────────────────
+// Custom (project-specific) inclusions and exclusions are organized
+// into the same groups the template library uses (brick, CMU, stone
+// veneer, etc.) plus an always-present "General" bucket.
+//
+// Each group is a collapsible sub-section with its own "+ Add item"
+// button. Every row carries a small group dropdown so the user can
+// move an item without delete-and-re-add.
+//
+// Storage shape on the proposal record:
+//   customIncs / customExcs : [{ text: "...", group: "Brick" }, ...]
+// Legacy proposals with plain string entries are auto-normalized on
+// read via npcNormalize() so old data keeps working.
+
 var _npCustomIdx = 0;
 
-function npAddCustomItem(type) {
-  _npCustomIdx++;
-  var cid  = 'ci-' + type + '-' + _npCustomIdx;
-  var cont = g('np-custom-' + type);
-  if (!cont) return;
-  var row  = document.createElement('div');
-  row.id   = cid;
-  row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px';
-  var inp = document.createElement('input');
-  inp.placeholder = type === 'inc' ? 'e.g. Furnish and install expansion joints' : 'e.g. Winter conditions costs';
-  inp.style.flex  = '1';
-  var del = document.createElement('button');
-  del.innerHTML   = '&#215;';
-  del.style.cssText = 'background:none;border:none;cursor:pointer;color:#E24B4A;font-size:18px;padding:0;line-height:1;flex-shrink:0';
-  del.onclick = function(){ row.remove(); };
-  row.appendChild(inp);
-  row.appendChild(del);
-  cont.appendChild(row);
-  inp.focus();
+// Persisted collapse state for the per-group sub-sections.
+// Key shape: "<type>:<group>"  e.g.  "inc:Brick"
+var NP_CUSTOM_COLLAPSE_KEY = 'kmi_crm_proposal_custom_groups_v1';
+function npcGetCollapse() {
+  try { var raw = localStorage.getItem(NP_CUSTOM_COLLAPSE_KEY); if (raw) return JSON.parse(raw) || {}; }
+  catch (e) {}
+  return {};
+}
+function npcSaveCollapse(state) {
+  try { localStorage.setItem(NP_CUSTOM_COLLAPSE_KEY, JSON.stringify(state)); } catch (e) {}
+}
+function npcToggleCollapse(type, group) {
+  var key = type + ':' + group;
+  var state = npcGetCollapse();
+  state[key] = !state[key];
+  npcSaveCollapse(state);
+  var sec = document.querySelector('[data-npc-sec="' + type + '"][data-npc-grp="' + npcCssAttr(group) + '"]');
+  if (sec) sec.classList.toggle('collapsed', !!state[key]);
 }
 
+// Small string helpers, scoped to this module to avoid colliding with
+// anything else in the file.
+function npcCssAttr(s) { return String(s).replace(/[^a-zA-Z0-9]/g, '_'); }
+function npcEscJs(s)   { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+function npcEscHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// Normalize a stored custom item to {text, group}. Accepts the legacy
+// string form so proposals saved before this feature open without
+// breaking. Empty/blank items are filtered out by callers.
+function npcNormalize(v) {
+  if (v && typeof v === 'object') {
+    return {
+      text:  String(v.text  || '').trim(),
+      group: String(v.group || 'General').trim() || 'General'
+    };
+  }
+  return { text: String(v || '').trim(), group: 'General' };
+}
+
+// Canonical group list for custom items: every managed group from
+// db.clarGroups (in saved order), then "General" at the bottom.
+function npcGroupList() {
+  var list = (db.clarGroups || []).slice();
+  if (list.indexOf('General') === -1) list.push('General');
+  return list;
+}
+
+// Render the empty group sub-sections for one container (inc or exc).
+// Call this once per proposal-page open; rows are then appended with
+// npAddCustomItem(type, group, text).
+function renderCustomGroupedSections(type) {
+  var cont = g('np-custom-' + type);
+  if (!cont) return;
+  var collapsed = npcGetCollapse();
+  var html = '';
+  npcGroupList().forEach(function(grp){
+    var grpSafe = npcCssAttr(grp);
+    var key     = type + ':' + grp;
+    var isCol   = !!collapsed[key];
+    html += '<div class="npc-sec' + (isCol ? ' collapsed' : '') + '" ' +
+            'data-npc-sec="' + type + '" data-npc-grp="' + grpSafe + '">' +
+      '<div class="npc-hdr">' +
+        '<button type="button" class="npc-tog" onclick="npcToggleCollapse(\'' + type + '\', \'' + npcEscJs(grp) + '\')">' +
+          '<span class="npc-chev">&#9662;</span> ' + npcEscHtml(grp) +
+          ' <span class="npc-ct" data-npc-count>0</span>' +
+        '</button>' +
+        '<button type="button" class="btn btn-sm btn-p" onclick="npAddCustomItem(\'' + type + '\', \'' + npcEscJs(grp) + '\')">+ Add item</button>' +
+      '</div>' +
+      '<div class="npc-body" data-npc-body></div>' +
+    '</div>';
+  });
+  cont.innerHTML = html;
+}
+
+// Refresh the count badge in one group's header.
+function npcRefreshCount(type, group) {
+  var sec = document.querySelector('[data-npc-sec="' + type + '"][data-npc-grp="' + npcCssAttr(group) + '"]');
+  if (!sec) return;
+  var n  = sec.querySelectorAll('[data-npc-body] [data-npc-row]').length;
+  var ct = sec.querySelector('[data-npc-count]');
+  if (ct) ct.textContent = n;
+}
+
+// Append a custom-item row inside the given group's sub-section.
+// `text` is optional (used when re-populating an existing proposal).
+function npAddCustomItem(type, group, text) {
+  group = group || 'General';
+  text  = text  || '';
+
+  // If the requested group's sub-section doesn't exist (legacy group
+  // no longer in db.clarGroups), fall back to General so the row stays
+  // visible — the dropdown will let the user re-assign.
+  var grpSafe = npcCssAttr(group);
+  var sec = document.querySelector('[data-npc-sec="' + type + '"][data-npc-grp="' + grpSafe + '"]');
+  if (!sec) {
+    group = 'General';
+    grpSafe = npcCssAttr(group);
+    sec = document.querySelector('[data-npc-sec="' + type + '"][data-npc-grp="' + grpSafe + '"]');
+  }
+  if (!sec) return;
+  var body = sec.querySelector('[data-npc-body]');
+  if (!body) return;
+
+  // Expand the section if it's currently collapsed so the new row is
+  // visible immediately.
+  if (sec.classList.contains('collapsed')) {
+    npcToggleCollapse(type, group);
+  }
+
+  _npCustomIdx++;
+  var row = document.createElement('div');
+  row.setAttribute('data-npc-row', '1');
+  row.setAttribute('data-npc-cur', group);
+  row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px';
+
+  // Group dropdown — lets the user re-assign without delete-and-re-add.
+  var sel = document.createElement('select');
+  sel.style.cssText = 'flex:0 0 140px;font-size:12px;padding:4px 6px;border:1px solid #ddd;border-radius:4px;background:#fafafa';
+  sel.title = 'Move to a different section';
+  var groups = npcGroupList();
+  if (groups.indexOf(group) === -1) groups.unshift(group); // legacy fallback
+  groups.forEach(function(grp){
+    var opt = document.createElement('option');
+    opt.value = grp;
+    opt.textContent = grp;
+    if (grp === group) opt.selected = true;
+    sel.appendChild(opt);
+  });
+
+  // Text input
+  var inp = document.createElement('input');
+  inp.placeholder = type === 'inc' ? 'e.g. Furnish and install expansion joints' : 'e.g. Winter conditions costs';
+  inp.style.flex = '1';
+  inp.value = text;
+
+  // Delete
+  var del = document.createElement('button');
+  del.type = 'button';
+  del.innerHTML = '&#215;';
+  del.title = 'Delete';
+  del.style.cssText = 'background:none;border:none;cursor:pointer;color:#E24B4A;font-size:18px;padding:0 4px;line-height:1;flex-shrink:0';
+  del.onclick = function(){
+    var curGrp = row.getAttribute('data-npc-cur') || 'General';
+    row.remove();
+    npcRefreshCount(type, curGrp);
+  };
+
+  // Move row to a different group's body on dropdown change.
+  sel.onchange = function(){
+    var oldGrp = row.getAttribute('data-npc-cur') || group;
+    var newGrp = sel.value || 'General';
+    if (oldGrp === newGrp) return;
+    var newGrpSafe = npcCssAttr(newGrp);
+    var destSec  = document.querySelector('[data-npc-sec="' + type + '"][data-npc-grp="' + newGrpSafe + '"]');
+    var destBody = destSec && destSec.querySelector('[data-npc-body]');
+    if (!destBody) return;
+    destBody.appendChild(row);
+    row.setAttribute('data-npc-cur', newGrp);
+    npcRefreshCount(type, oldGrp);
+    npcRefreshCount(type, newGrp);
+    if (destSec.classList.contains('collapsed')) npcToggleCollapse(type, newGrp);
+  };
+
+  row.appendChild(sel);
+  row.appendChild(inp);
+  row.appendChild(del);
+  body.appendChild(row);
+  npcRefreshCount(type, group);
+  if (!text) inp.focus();
+}
+
+// Read all custom rows back out as {text, group} objects. Blank rows
+// are dropped silently so a stray empty input doesn't get saved.
 function getCustomItems(type) {
   var cont = g('np-custom-' + type);
   if (!cont) return [];
   var items = [];
-  cont.querySelectorAll('input').forEach(function(inp){
-    var v = (inp.value || '').trim();
-    if (v) items.push(v);
+  cont.querySelectorAll('[data-npc-row]').forEach(function(row){
+    var inp = row.querySelector('input');
+    var sel = row.querySelector('select');
+    var txt = (inp && inp.value || '').trim();
+    if (!txt) return;
+    items.push({
+      text:  txt,
+      group: (sel && sel.value || 'General').trim() || 'General'
+    });
   });
   return items;
 }
@@ -21878,10 +22064,10 @@ function renderOppDetail(id) {
         '</div></div>' +
         (function(){
           var allInc = ii.concat(pi).map(function(x){ return '<div class="cd inc">'+x.text+'</div>'; });
-          var custI  = (prop.customIncs||[]).map(function(t){ return '<div class="cd inc">'+t+'</div>'; });
+          var custI  = (prop.customIncs||[]).map(function(t){ var n = npcNormalize(t); return n.text ? '<div class="cd inc">'+n.text+'</div>' : ''; });
           var allIncs = allInc.concat(custI);
           var allExc  = ei.map(function(x){ return '<div class="cd exc">'+x.text+'</div>'; });
-          var custE   = (prop.customExcs||[]).map(function(t){ return '<div class="cd exc">'+t+'</div>'; });
+          var custE   = (prop.customExcs||[]).map(function(t){ var n = npcNormalize(t); return n.text ? '<div class="cd exc">'+n.text+'</div>' : ''; });
           var allExcs = allExc.concat(custE);
           return (allIncs.length ? '<div class="sb3"><h4>Project inclusions</h4>' + allIncs.join('') + '</div>' : '') +
                  (allExcs.length ? '<div class="sb3"><h4>Project exclusions</h4>' + allExcs.join('') + '</div>' : '');
@@ -22285,8 +22471,8 @@ function openNewProposal(oppId) {
   g('np-type-ro').value              = Array.isArray(o.types) ? o.types.join(', ') : (o.type || '');
   g('np-inc').innerHTML = renderGroupedCheckboxes(db.stdClar,    'nsc', true);
   g('np-exc').innerHTML = renderGroupedCheckboxes(db.exclusions, 'nex', false);
-  var ciEl = g('np-custom-inc'); if (ciEl) ciEl.innerHTML = '';
-  var ceEl = g('np-custom-exc'); if (ceEl) ceEl.innerHTML = '';
+  renderCustomGroupedSections('inc');
+  renderCustomGroupedSections('exc');
   g('np-rows').innerHTML = ''; g('np-total').textContent = '$0';
   var altEl = g('np-alt-rows'); if (altEl) altEl.innerHTML = '';
   var veEl  = g('np-ve-rows');  if (veEl)  veEl.innerHTML  = '';
@@ -22320,18 +22506,17 @@ function editProposal(propId) {
   (prop.inc || []).forEach(function(id){ var cb = g('nsc' + id); if (cb) cb.checked = true; });
   (prop.exc || []).forEach(function(id){ var cb = g('nex' + id); if (cb) cb.checked = true; });
 
-  // Reset custom-item containers, then repopulate with saved values
-  var ciEl = g('np-custom-inc'); if (ciEl) ciEl.innerHTML = '';
-  var ceEl = g('np-custom-exc'); if (ceEl) ceEl.innerHTML = '';
-  (prop.customIncs || []).forEach(function(txt){
-    npAddCustomItem('inc');
-    var lastInp = g('np-custom-inc').querySelector('div:last-child input');
-    if (lastInp) lastInp.value = txt;
+  // Build empty group sub-sections, then repopulate from saved values.
+  // npcNormalize() handles legacy string entries from older proposals.
+  renderCustomGroupedSections('inc');
+  renderCustomGroupedSections('exc');
+  (prop.customIncs || []).forEach(function(it){
+    var n = npcNormalize(it);
+    if (n.text) npAddCustomItem('inc', n.group, n.text);
   });
-  (prop.customExcs || []).forEach(function(txt){
-    npAddCustomItem('exc');
-    var lastInp = g('np-custom-exc').querySelector('div:last-child input');
-    if (lastInp) lastInp.value = txt;
+  (prop.customExcs || []).forEach(function(it){
+    var n = npcNormalize(it);
+    if (n.text) npAddCustomItem('exc', n.group, n.text);
   });
 
   // Reset cost rows, then repopulate
@@ -26635,10 +26820,10 @@ function buildProposalPDF(id) {
   // ── Gather data ────────────────────────────────────────────────
   var ii = db.stdClar.filter(function(x){ return p.inc && p.inc.indexOf(x.id) > -1; })
                      .map(function(x){ return x.text; })
-                     .concat(p.customIncs || []);
+                     .concat((p.customIncs || []).map(function(it){ return npcNormalize(it).text; }).filter(Boolean));
   var ei = db.exclusions.filter(function(x){ return p.exc && p.exc.indexOf(x.id) > -1; })
                         .map(function(x){ return x.text; })
-                        .concat(p.customExcs || []);
+                        .concat((p.customExcs || []).map(function(it){ return npcNormalize(it).text; }).filter(Boolean));
   var tot = p.costs.reduce(function(s, r){ return s + r.qty * r.rate; }, 0);
 
   var MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -27085,12 +27270,12 @@ function scopePromoteToProposal(idx) {
   if (!prop) { alert('The linked proposal could not be found.'); return; }
   if (item.inc) {
     if (!Array.isArray(prop.customIncs)) prop.customIncs = [];
-    prop.customIncs.push(item.text);
+    prop.customIncs.push({ text: item.text, group: 'General' });
     saveDB();
     alert('Added to proposal ' + prop.id + ' as a custom inclusion.');
   } else {
     if (!Array.isArray(prop.customExcs)) prop.customExcs = [];
-    prop.customExcs.push(item.text);
+    prop.customExcs.push({ text: item.text, group: 'General' });
     saveDB();
     alert('Added to proposal ' + prop.id + ' as a custom exclusion.');
   }
