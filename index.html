@@ -20477,61 +20477,92 @@ async function sendProposalEmail() {
     showErr('Proposal not found.'); return;
   }
 
-  // Single → string, multi → array. Mirrors the project-kickoff send.
-  var toField = (toList.length === 1) ? toList[0] : toList;
-  var payload = {
-    to:                toField,
-    from:              ctx.from,
-    fromName:          ctx.fromName,
-    replyTo:           ctx.from,        // proposal: send-as-user, replies route back to user
-    bcc:               ctx.from,        // BCC sender for inbox copy
-    subject:           subject,
-    text:              body,
-    flowType:          'proposal',
-    sentBy:            _currentUser ? _currentUser.id    : null,
-    sentByEmail:       _currentUser ? _currentUser.email : null,
-    relatedEntityType: 'proposal',
-    relatedEntityId:   prop.id,
-    attachments: [{ filename: ctx.filename, content: ctx.pdfBase64 }]
-  };
-  if (ccList.length) payload.cc = (ccList.length === 1) ? ccList[0] : ccList;
+  // Edge Function only accepts a single email address per call. For
+  // multi-recipient sends we fan out: combine To + CC, deduplicate, then
+  // call sendEmail once per recipient. Sender is BCC'd only on the FIRST
+  // send so they get a single record copy, not N duplicates.
+  var allRecipients = toList.concat(ccList);
+  var seen = {};
+  allRecipients = allRecipients.filter(function(e){
+    var k = e.toLowerCase();
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
 
-  var result = await sendEmail(payload);
+  var successes = [];
+  var failures  = [];
+  var lastResult = null;
 
-  if (result.success) {
-    // Update proposal — only flip status from draft \u2192 sent. Leave more advanced
-    // statuses (review, negotiation, won, lost) untouched on resends.
+  for (var i = 0; i < allRecipients.length; i++) {
+    var recipient = allRecipients[i];
+    var payload = {
+      to:                recipient,
+      from:              ctx.from,
+      fromName:          ctx.fromName,
+      replyTo:           ctx.from,        // proposal: send-as-user, replies route back to user
+      subject:           subject,
+      text:              body,
+      flowType:          'proposal',
+      sentBy:            _currentUser ? _currentUser.id    : null,
+      sentByEmail:       _currentUser ? _currentUser.email : null,
+      relatedEntityType: 'proposal',
+      relatedEntityId:   prop.id,
+      attachments: [{ filename: ctx.filename, content: ctx.pdfBase64 }]
+    };
+    if (i === 0) payload.bcc = ctx.from;  // single inbox copy for sender
+
+    lastResult = await sendEmail(payload);
+    if (lastResult.success) successes.push(recipient);
+    else                    failures.push({ recipient: recipient, error: lastResult.error || 'Unknown error' });
+  }
+
+  // Display target for activity log / toast — prefer the assigned PM name
+  // when there's a single recipient; otherwise summarize the fan-out.
+  var displayTarget;
+  if (ctx.pmName && allRecipients.length === 1) {
+    displayTarget = ctx.pmName;
+  } else if (successes.length === 1) {
+    displayTarget = successes[0];
+  } else if (successes.length > 1) {
+    displayTarget = successes[0] + ' +' + (successes.length - 1) + ' more';
+  } else {
+    displayTarget = allRecipients[0] || '(unknown)';
+  }
+
+  if (failures.length === 0) {
+    // All sent — flip status if still in draft.
     if (prop.status === 'draft' || !prop.status) prop.status = 'sent';
     prop.lastEmailedAt = new Date().toISOString();
-    // Store the typed string for display — preserves "user@x.com, other@y.com"
-    // as-entered rather than reformatting an array.
     prop.lastEmailedTo = toList.join(', ');
 
-    // Activity / toast: prefer the assigned PM name; otherwise show the
-    // first recipient (with "+N more" suffix when multi).
-    var displayTarget;
-    if (ctx.pmName) {
-      displayTarget = ctx.pmName;
-    } else if (toList.length === 1) {
-      displayTarget = toList[0];
-    } else {
-      displayTarget = toList[0] + ' +' + (toList.length - 1) + ' more';
-    }
     db.activity.unshift({ text: prop.id + ' emailed to ' + displayTarget, type: 'sent', time: 'Just now' });
     saveDB();
 
     closeModal();
     showToast(
-      result.testMode
+      (lastResult && lastResult.testMode)
         ? 'Test mode: proposal redirected (would have gone to ' + displayTarget + ')'
         : 'Proposal sent to ' + displayTarget,
       'success'
     );
     delete window._pendingProposalEmail;
     if (typeof currentOppId !== 'undefined' && currentOppId) renderOppDetail(currentOppId);
-  } else {
+  } else if (successes.length === 0) {
     sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Proposal';
-    showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
+    showErr('<strong>Send failed:</strong> ' + _vendorEsc(failures[0].error) + (failures.length > 1 ? ' (and ' + (failures.length - 1) + ' more)' : ''));
+  } else {
+    // Partial — stamp progress so the user has a trail, but keep the modal
+    // open so they can fix the failing addresses and resend.
+    if (prop.status === 'draft' || !prop.status) prop.status = 'sent';
+    prop.lastEmailedAt = new Date().toISOString();
+    prop.lastEmailedTo = successes.join(', ');
+    db.activity.unshift({ text: prop.id + ' partially emailed — ' + successes.length + ' delivered, ' + failures.length + ' failed', type: 'sent', time: 'Just now' });
+    saveDB();
+
+    sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Proposal';
+    var failList = failures.map(function(f){ return _vendorEsc(f.recipient); }).join(', ');
+    showErr('<strong>Partial send:</strong> ' + successes.length + ' delivered, but ' + failures.length + ' failed: ' + failList + '. You can edit the To/CC fields and resend to just those addresses.');
   }
 }
 
@@ -27509,37 +27540,55 @@ async function sendProjectKickoffEmail() {
     return;
   }
 
-  // Build the email payload — same shape as sendProposalEmail.
-  // Resend (downstream of the send-email Edge Function) requires `to`
-  // and `cc` to be EITHER a single "email@x" string OR an array of
-  // such strings. A comma-joined multi-recipient string is read as one
-  // malformed address and rejected. So: single → string, multi → array.
-  var toField = (toList.length === 1) ? toList[0] : toList;
-  var payload = {
-    to:                toField,
-    from:              ctx.from,
-    fromName:          ctx.fromName,
-    replyTo:           ctx.from,
-    bcc:               ctx.from,
-    subject:           subject,
-    text:              body,
-    flowType:          'project_kickoff',
-    sentBy:            _currentUser ? _currentUser.id    : null,
-    sentByEmail:       _currentUser ? _currentUser.email : null,
-    relatedEntityType: 'project',
-    relatedEntityId:   p.id,
-    attachments: [{ filename: ctx.filename, content: b64 }]
-  };
-  if (ccList.length) payload.cc = (ccList.length === 1) ? ccList[0] : ccList;
+  // Edge Function only accepts a single email address per call (it validates
+  // `to` must be a string in 'email@x' or 'Name <email@x>' format). For
+  // multi-recipient sends we fan out client-side: combine To + CC into one
+  // deduplicated list and call sendEmail once per recipient. Each recipient
+  // gets their own copy. The sender is BCC'd only on the FIRST send so they
+  // get a single inbox record copy, not N duplicates.
+  var allRecipients = toList.concat(ccList);
+  var seen = {};
+  allRecipients = allRecipients.filter(function(e){
+    var k = e.toLowerCase();
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
 
-  var result = await sendEmail(payload);
+  var successes = [];
+  var failures  = [];
+  var lastResult = null;
 
-  if (result.success) {
-    // Stamp kickoff-sent tracking on the project record
-    p.kickoffSentAt         = new Date().toISOString();
-    p.kickoffSentByUserId   = _currentUser ? _currentUser.id : null;
+  for (var i = 0; i < allRecipients.length; i++) {
+    var recipient = allRecipients[i];
+    var payload = {
+      to:                recipient,
+      from:              ctx.from,
+      fromName:          ctx.fromName,
+      replyTo:           ctx.from,
+      subject:           subject,
+      text:              body,
+      flowType:          'project_kickoff',
+      sentBy:            _currentUser ? _currentUser.id    : null,
+      sentByEmail:       _currentUser ? _currentUser.email : null,
+      relatedEntityType: 'project',
+      relatedEntityId:   p.id,
+      attachments: [{ filename: ctx.filename, content: b64 }]
+    };
+    // BCC sender on first send only — avoids N duplicate copies in their inbox
+    if (i === 0) payload.bcc = ctx.from;
+
+    lastResult = await sendEmail(payload);
+    if (lastResult.success) successes.push(recipient);
+    else                    failures.push({ recipient: recipient, error: lastResult.error || 'Unknown error' });
+  }
+
+  if (failures.length === 0) {
+    // All sent — stamp the project record and close.
+    p.kickoffSentAt       = new Date().toISOString();
+    p.kickoffSentByUserId = _currentUser ? _currentUser.id : null;
     db.activity.unshift({
-      text: 'Project kickoff sent for ' + (p.number || p.id) + ' to ' + (toList.length + ccList.length) + ' recipient' + ((toList.length + ccList.length) === 1 ? '' : 's'),
+      text: 'Project kickoff sent for ' + (p.number || p.id) + ' to ' + successes.length + ' recipient' + (successes.length === 1 ? '' : 's'),
       type: 'sent',
       time: 'Just now'
     });
@@ -27547,17 +27596,32 @@ async function sendProjectKickoffEmail() {
 
     closeModal();
     showToast(
-      result.testMode
-        ? 'Test mode: project kickoff redirected (would have gone to ' + toList[0] + (toList.length > 1 ? ' +' + (toList.length - 1) : '') + ')'
-        : 'Project kickoff sent (' + toList.length + ' recipient' + (toList.length === 1 ? '' : 's') + ')',
+      (lastResult && lastResult.testMode)
+        ? 'Test mode: project kickoff redirected (would have gone to ' + successes[0] + (successes.length > 1 ? ' +' + (successes.length - 1) : '') + ')'
+        : 'Project kickoff sent (' + successes.length + ' recipient' + (successes.length === 1 ? '' : 's') + ')',
       'success'
     );
     delete window._pendingKickoffEmail;
-    // Re-render the project modal so the "Last sent" indicator updates.
     if (typeof viewProject === 'function') viewProject(p.id);
-  } else {
+  } else if (successes.length === 0) {
+    // Every send failed. Don't stamp anything — let the user retry.
     sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Project Kickoff';
-    showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
+    showErr('<strong>Send failed:</strong> ' + _vendorEsc(failures[0].error) + (failures.length > 1 ? ' (and ' + (failures.length - 1) + ' more)' : ''));
+  } else {
+    // Partial success — stamp the record (some did go out) but surface
+    // the failures so the user can resend manually to those addresses.
+    p.kickoffSentAt       = new Date().toISOString();
+    p.kickoffSentByUserId = _currentUser ? _currentUser.id : null;
+    db.activity.unshift({
+      text: 'Project kickoff partially sent for ' + (p.number || p.id) + ' — ' + successes.length + ' delivered, ' + failures.length + ' failed',
+      type: 'sent',
+      time: 'Just now'
+    });
+    saveDB();
+
+    sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Project Kickoff';
+    var failList = failures.map(function(f){ return _vendorEsc(f.recipient); }).join(', ');
+    showErr('<strong>Partial send:</strong> ' + successes.length + ' delivered, but ' + failures.length + ' failed: ' + failList + '. You can edit the To/CC fields and resend to just those addresses.');
   }
 }
 </script>
