@@ -14504,23 +14504,50 @@ function buildHunzingerCorPDF(c, p) {
   var jsPDF = window.jspdf.jsPDF;
   var doc = new jsPDF({unit:'pt', format:'letter'});
 
-  // Hunzinger's "Change Request Worksheet" form. Layout matches the form
-  // they fax/scan back, NOT the KMI letterhead. Page numbering ("X of N")
-  // is added at the very end once the final page count is known.
+  // Layout mirrors HCCO_Change_Order_Template.xlsx — Hunzinger's published
+  // form template. Excel prints at 71% scale, giving its 10pt body text an
+  // effective ~7pt printed size; at our 100% scale we use 7.5-9pt to match
+  // that density while staying readable. Column x-positions are derived
+  // from the rendered Excel PDF, translated from Excel's 0.75" left margin
+  // to the app's 0.5" margin (LM=36).
+  //
+  // Excel cell right-edges, mapped to app coords (LM=36, RM=576):
+  //   A=56  B=100  C=137  D=175  E=197  F=267  G=285  H=332
+  //   I=380 J=417  K=440  L=464  M=515  N=576
+  //
+  // Column usage by section:
+  //   LABOR:        Reg/T&H/DT hrs in B/C/D, Classification in E-F,
+  //                 "@" centered in G, Reg/T&H/DT rate in H/I/J,
+  //                 Extension in M.
+  //   MATERIALS:    Description in B-E, Item qty in F, "@" in G, Unit in H,
+  //                 Rate/unit in I, Extension in M.
+  //   EQUIPMENT:    Hrs/Cnt in C, Classification in E-F, "@" in G,
+  //                 Unit in H, Rate/unit in I, Extension in M.
+  //   SUBS:         Name in B-K, Extension in M.
+  //   UNIT PRICING: UP # in B, Quantity in F, "@" in G, Unit in H,
+  //                 Unit Rate in I, Extension in M.
+  //   Section sub-totals/totals: label right-aligned at L, arrow at L+8,
+  //                 value right-aligned at N.
+  //   Bond pct lives in its OWN cell (H column) on row 65, not merged
+  //                 into the BOND label.
 
   var LM = 36, RM = 576, PAGE_W = 612, PAGE_H = 792;
-  var TOP_OF_BODY = 90;          // y where content starts after the title
-  var FOOTER_TOP  = 760;         // bottom safe area for page-number footer
+  var TOP_OF_BODY = 78;
+  var FOOTER_TOP  = 760;
 
-  // ── Resolve printable values ──────────────────────────────────────
+  // Excel column right-edges (mapped):
+  var Bx = 100, Cx = 137, Dx = 175, Ex = 197,
+      Fx = 267, Gx = 285, Hx = 332, Ix = 380,
+      Jx = 417, Kx = 440, Lx = 464, Mx = 515, Nx = RM;
+  var Gc = (Fx + Gx) / 2;  // "@" centered in G column (x~276)
+
+  // -- Resolve printable values --
   var seq = corExtractKmiSeq(c.corNumber) || c.corNumber || '';
   var docRef = 'KMI COR ' + seq;
   var workDesc = c.description || '';
-  var addedScopeText = (c.addedScope && String(c.addedScope).trim()) || workDesc || '';
+  var addedScopeText = (c.addedScope && String(c.addedScope).trim()) || '';
   var omittedScopeText = (c.omittedScope || '').trim();
 
-  // Determine which hour column to populate based on COR type. Hunzinger's
-  // columns are Reg | T&H | DT.
   function hourCol(corType) {
     var t = (corType || '').toLowerCase();
     if (t.indexOf('double') !== -1 || t === 'premium time dt' || t === 'dt') return 'dt';
@@ -14529,7 +14556,7 @@ function buildHunzingerCorPDF(c, p) {
   }
   var hcol = hourCol(c.corType);
 
-  // ── Style helpers ─────────────────────────────────────────────────
+  // -- Style helpers --
   function sf(st, sz, col) {
     doc.setFont('helvetica', st);
     doc.setFontSize(sz);
@@ -14543,105 +14570,123 @@ function buildHunzingerCorPDF(c, p) {
   function wrap(text, maxW) {
     return doc.splitTextToSize(String(text || ''), maxW);
   }
-
-  // Format a multiplier as "X.XX%" (always 2 decimals, like the form)
   function pctFmt(n) {
     var v = Number(n) || 0;
     return v.toFixed(2) + '%';
   }
 
-  // Page top: title and 3-line header (Contractor / Work Description / Doc Ref)
+  // Page title + 3-line Contractor/Work Description/Doc Ref header
+  // (Excel rows 1-3: labels right-aligned at D, values left-aligned in E).
+  // Returns the y position just below the header so callers can start
+  // their body content without colliding with a long (wrapped) work
+  // description.
   function renderPageHeader() {
     sf('bold', 11, [0, 0, 0]);
-    doc.text('Change Request Worksheet', PAGE_W / 2, 36, {align: 'center'});
-    var y = 56;
-    sf('bold', 9.5, [0, 0, 0]);
-    doc.text('Contractor:', LM, y);
-    sf('normal', 9.5);
-    doc.text('KMI Construction LLC', LM + 90, y);
-    y += 12;
-    sf('bold', 9.5);
-    doc.text('Work Description:', LM, y);
-    sf('normal', 9.5);
-    var wdLines = wrap(workDesc, RM - LM - 110);
-    doc.text(wdLines, LM + 110, y);
-    y += Math.max(12, wdLines.length * 11);
-    sf('bold', 9.5);
-    doc.text('Document Reference Number:', LM, y);
-    sf('normal', 9.5);
-    doc.text(docRef, LM + 175, y);
+    doc.text('Change Request Worksheet', PAGE_W / 2, 30, {align: 'center'});
+    var hy = 48;
+    sf('bold', 9, [0, 0, 0]);
+    doc.text('Contractor:', Dx, hy, {align: 'right'});
+    sf('normal', 9);
+    doc.text('KMI Construction LLC', Dx + 4, hy);
+    hy += 11;
+    sf('bold', 9);
+    doc.text('Work Description:', Dx, hy, {align: 'right'});
+    sf('normal', 9);
+    var wdLines = wrap(workDesc, RM - Dx - 8);
+    doc.text(wdLines, Dx + 4, hy);
+    hy += Math.max(11, wdLines.length * 10);
+    sf('bold', 9);
+    doc.text('Document Reference Number:', Dx, hy, {align: 'right'});
+    sf('normal', 9);
+    doc.text(docRef, Dx + 4, hy);
+    return hy + 10;  // body should start clearly below the last header line
   }
 
   function ensureRoom(yNeeded, currentY) {
     if (currentY + yNeeded > FOOTER_TOP - 20) {
       doc.addPage();
-      renderPageHeader();
-      return TOP_OF_BODY + 20;
+      var hdrEnd = renderPageHeader();
+      return Math.max(TOP_OF_BODY, hdrEnd);
     }
     return currentY;
   }
 
-  // Render multiplier sub-table block. Used by all four sections that have
-  // an OH&P line. Columns:
-  //   leftLabel (~LM+90)  | "Multipliers" header / value (~LM+220) | "%" header / pct (~LM+290)
-  //   "of X sub-total" (~LM+340) | extension value (right edge)
-  // Returns the new y after rendering.
+  // Multiplier sub-table (Excel rows 14-15, 29-30, 41-42, 51-52, 61-62).
+  // Row 1: "Multipliers" header (in F), "%" header (in H)
+  // Row 2: leftLabel (in F), pctValue (right-aligned at H, bold),
+  //        "of X sub-total" (in I), extensionValue (right-aligned at N).
   function renderMultiplierBlock(y, leftLabel, pctValue, ofWhat, extensionValue) {
-    var midX = LM + 220;
-    var pctX = LM + 320;
-    sf('bold', 8, [80, 80, 80]);
-    doc.text('Multipliers', midX, y);
-    doc.text('%', pctX, y);
-    y += 11;
-    sf('normal', 9, [0, 0, 0]);
-    doc.text(leftLabel, LM + 90, y);
-    doc.text(pctFmt(pctValue), pctX + 25, y, {align: 'right'});
-    sf('normal', 9, [80, 80, 80]);
-    doc.text('of ' + ofWhat, pctX + 35, y);
+    sf('bold', 7.5, [80, 80, 80]);
+    doc.text('Multipliers', (Ex + Fx) / 2, y, {align: 'center'});
+    doc.text('%', (Gx + Hx) / 2, y, {align: 'center'});
+    y += 9;
+    sf('normal', 8, [0, 0, 0]);
+    doc.text(leftLabel, Ex + 2, y);
+    sf('bold', 8);
+    doc.text(pctFmt(pctValue), Hx, y, {align: 'right'});
+    sf('normal', 8, [80, 80, 80]);
+    doc.text('of ' + ofWhat, Hx + 4, y);
     if (extensionValue !== null && extensionValue !== undefined) {
-      sf('normal', 9, [0, 0, 0]);
-      doc.text('$' + _corPdfMoney(extensionValue), RM, y, {align: 'right'});
+      sf('normal', 8, [0, 0, 0]);
+      doc.text('$' + _corPdfMoney(extensionValue), Nx, y, {align: 'right'});
     }
-    return y + 14;
+    return y + 8;
   }
 
-  // ── Page 1 ────────────────────────────────────────────────────────
-  renderPageHeader();
-  var y = TOP_OF_BODY + 14;
+  // Render the bottom-of-page contractor block (Excel rows 70-72). Same
+  // 3-line label/value pattern as the top header, kept on page 1 below
+  // the bottom totals so the recipient has cross-page reference data.
+  function renderBottomContractorBlock(y) {
+    sf('bold', 8, [0, 0, 0]);
+    doc.text('Contractor:', Dx, y, {align: 'right'});
+    sf('normal', 8);
+    doc.text('KMI Construction LLC', Dx + 4, y);
+    y += 11;
+    sf('bold', 8);
+    doc.text('Work Description:', Dx, y, {align: 'right'});
+    sf('normal', 8);
+    var wd2 = wrap(workDesc, RM - Dx - 8);
+    doc.text(wd2, Dx + 4, y);
+    y += Math.max(11, wd2.length * 10);
+    sf('bold', 8);
+    doc.text('Document Reference Number:', Dx, y, {align: 'right'});
+    sf('normal', 8);
+    doc.text(docRef, Dx + 4, y);
+    return y + 11;
+  }
 
-  // ── LABOR COST ────────────────────────────────────────────────────
-  sf('bold', 10, [0, 0, 0]);
-  doc.text('LABOR COST:', LM, y);
-  y += 14;
+  // -- Page 1 --
+  var headerEnd1 = renderPageHeader();
+  var y = Math.max(TOP_OF_BODY, headerEnd1);
 
-  var Lcols = {
-    reg:   LM + 16,
-    th:    LM + 50,
-    dt:    LM + 84,
-    cls:   LM + 122,
-    rateR: LM + 248,
-    rateT: LM + 308,
-    rateD: LM + 368,
-    ext:   RM
-  };
-  // Group headers: "Hours" centered above Reg/T&H/DT; "Rate/hr per contract" above the 3 rate cols
+  // =================================================================
+  // LABOR COST (Excel rows 5-16)
+  // =================================================================
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('LABOR COST:', LM + 18, y);
+  y += 11;
+
+  // Group headers (row 6): "Hours" centered above B+C+D,
+  // "Rate/hr per contract" centered above H+I+J
   sf('bold', 8, [80, 80, 80]);
-  doc.text('Hours', LM + 50, y, {align: 'center'});
-  doc.text('Rate/hr per contract', LM + 308, y, {align: 'center'});
-  y += 10;
-  // Sub-headers
-  doc.text('Reg.',          Lcols.reg,   y, {align: 'right'});
-  doc.text('T&H',           Lcols.th,    y, {align: 'right'});
-  doc.text('DT',            Lcols.dt,    y, {align: 'right'});
-  doc.text('Classification',Lcols.cls,   y);
-  doc.text('Reg.',          Lcols.rateR, y, {align: 'right'});
-  doc.text('T&H',           Lcols.rateT, y, {align: 'right'});
-  doc.text('DT',            Lcols.rateD, y, {align: 'right'});
-  doc.text('Extension',     Lcols.ext,   y, {align: 'right'});
-  y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
+  doc.text('Hours', (LM + 18 + Dx) / 2, y, {align: 'center'});
+  doc.text('Rate/hr per contract', (Gx + Jx) / 2, y, {align: 'center'});
+  y += 9;
 
+  // Sub-headers (row 7)
+  doc.text('Reg.', (LM + 18 + Bx) / 2, y, {align: 'center'});
+  doc.text('T&H', (Bx + Cx) / 2, y, {align: 'center'});
+  doc.text('DT', (Cx + Dx) / 2, y, {align: 'center'});
+  doc.text('Classification', (Ex + Fx) / 2, y, {align: 'center'});
+  doc.text('Reg.', (Gx + Hx) / 2, y, {align: 'center'});
+  doc.text('T&H', (Hx + Ix) / 2, y, {align: 'center'});
+  doc.text('DT', (Ix + Jx) / 2, y, {align: 'center'});
+  doc.text('Extension', (Lx + Mx) / 2, y, {align: 'center'});
+  y += 4;
+  ln(LM + 18, y, Mx, y, 0.3, [180, 180, 180]);
+  y += 9;
+
+  // Project labor rate lookup (Reg/T&H/DT) by classification
   var laborRows = _corPdfLaborRows(c);
   var laborRates = (typeof corGetProjectLaborRates === 'function')
     ? corGetProjectLaborRates(p)
@@ -14657,324 +14702,342 @@ function buildHunzingerCorPDF(c, p) {
     return 0;
   }
 
-  sf('normal', 9, [0, 0, 0]);
+  // 4 labor slots (Excel rows 8-11). Populated rows render with data,
+  // remaining slots render as blank template rows (zeros + $0.00).
+  sf('normal', 8, [0, 0, 0]);
   var totReg = 0, totTh = 0, totDt = 0;
-  if (!laborRows.length) {
-    sf('italic', 8, [150, 150, 150]);
-    doc.text('(no labor)', Lcols.cls, y);
-    sf('normal', 9, [0, 0, 0]);
-    y += 12;
-  } else {
-    laborRows.forEach(function(r){
-      y = ensureRoom(14, y);
-      var hReg = (hcol === 'reg') ? r.hours : 0;
-      var hTh  = (hcol === 'th')  ? r.hours : 0;
-      var hDt  = (hcol === 'dt')  ? r.hours : 0;
+  var laborSlotCount = Math.max(4, laborRows.length);
+  for (var li = 0; li < laborSlotCount; li++) {
+    var lr = laborRows[li];
+    if (lr) {
+      var hReg = (hcol === 'reg') ? lr.hours : 0;
+      var hTh  = (hcol === 'th')  ? lr.hours : 0;
+      var hDt  = (hcol === 'dt')  ? lr.hours : 0;
       totReg += hReg; totTh += hTh; totDt += hDt;
-      var rReg = rateForCls(r.classification, 'reg') || (hcol === 'reg' ? r.rate : 0);
-      var rTh  = rateForCls(r.classification, 'th')  || (hcol === 'th'  ? r.rate : 0);
-      var rDt  = rateForCls(r.classification, 'dt')  || (hcol === 'dt'  ? r.rate : 0);
-
-      doc.text(_corPdfNum(hReg), Lcols.reg, y, {align: 'right'});
-      doc.text(_corPdfNum(hTh),  Lcols.th,  y, {align: 'right'});
-      doc.text(_corPdfNum(hDt),  Lcols.dt,  y, {align: 'right'});
-      var clsLines = wrap(r.classification || '', 110);
-      doc.text(clsLines, Lcols.cls, y);
-      // "@" separator before rates (matches Hunzinger's form layout)
-      doc.text('@', Lcols.cls + 115, y);
-      doc.text('$' + _corPdfMoney(rReg), Lcols.rateR, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(rTh),  Lcols.rateT, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(rDt),  Lcols.rateD, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(r.total), Lcols.ext, y, {align: 'right'});
-      y += clsLines.length * 11 + 2;
-    });
+      var rReg = rateForCls(lr.classification, 'reg') || (hcol === 'reg' ? lr.rate : 0);
+      var rTh  = rateForCls(lr.classification, 'th')  || (hcol === 'th'  ? lr.rate : 0);
+      var rDt  = rateForCls(lr.classification, 'dt')  || (hcol === 'dt'  ? lr.rate : 0);
+      doc.text(_corPdfNum(hReg), Bx, y, {align: 'right'});
+      doc.text(_corPdfNum(hTh),  Cx, y, {align: 'right'});
+      doc.text(_corPdfNum(hDt),  Dx, y, {align: 'right'});
+      doc.text(String(lr.classification || ''), Ex + 2, y);
+      doc.text('@', Gc, y, {align: 'center'});
+      doc.text('$' + _corPdfMoney(rReg), Hx, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(rTh),  Ix, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(rDt),  Jx, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(lr.total), Mx, y, {align: 'right'});
+    } else {
+      doc.text('0', Bx, y, {align: 'right'});
+      doc.text('0', Cx, y, {align: 'right'});
+      doc.text('0', Dx, y, {align: 'right'});
+      doc.text('@', Gc, y, {align: 'center'});
+      doc.text('$0.00', Hx, y, {align: 'right'});
+      doc.text('$0.00', Ix, y, {align: 'right'});
+      doc.text('$0.00', Jx, y, {align: 'right'});
+      doc.text('$0.00', Mx, y, {align: 'right'});
+    }
+    y += 10;
   }
-  y += 4;
+  y += 2;
 
-  // Labor sub-total
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
-  sf('bold', 9, [0, 0, 0]);
-  doc.text('LABOR - Sub-total', RM - 110, y, {align: 'right'});
-  doc.text('$' + _corPdfMoney(c.totalLabor), Lcols.ext, y, {align: 'right'});
-  y += 16;
-  // Labor multipliers (always 0% for KMI — markups are baked into rates)
+  // LABOR - Sub-total (row 13)
+  sf('normal', 8, [0, 0, 0]);
+  doc.text('LABOR - Sub-total', Lx, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalLabor), Mx, y, {align: 'right'});
+  y += 10;
+
+  // Multipliers row (KMI's labor rates already include burden - 0%)
   y = renderMultiplierBlock(y, 'included in rates above', 0, 'labor sub-total', null);
-  // LABOR Total row, with hour totals on the left
-  sf('bold', 9, [0, 0, 0]);
-  doc.text(_corPdfNum(totReg), Lcols.reg, y, {align: 'right'});
-  doc.text(_corPdfNum(totTh),  Lcols.th,  y, {align: 'right'});
-  doc.text(_corPdfNum(totDt),  Lcols.dt,  y, {align: 'right'});
-  doc.text('LABOR - Total', RM - 110, y, {align: 'right'});
-  sf('normal', 9);
-  doc.text('-------->', RM - 60, y, {align: 'right'});
-  sf('bold', 9);
-  doc.text('$' + _corPdfMoney(c.totalLabor), Lcols.ext, y, {align: 'right'});
-  y += 18;
 
-  // ── MATERIALS ─────────────────────────────────────────────────────
-  y = ensureRoom(80, y);
-  sf('bold', 10, [0, 0, 0]);
-  doc.text('MATERIALS:', LM, y);
-  y += 14;
-  // Columns: Description | Item (qty) | Unit | Rate/unit | Extension
-  var Mcols = {
-    desc: LM,
-    qty:  LM + 240,
-    unit: LM + 290,
-    rate: LM + 360,
-    ext:  RM
-  };
+  // LABOR - Total (row 16) - hour totals on left, label/arrow/value on right
+  sf('bold', 8, [0, 0, 0]);
+  doc.text(_corPdfNum(totReg), Bx, y, {align: 'right'});
+  doc.text(_corPdfNum(totTh),  Cx, y, {align: 'right'});
+  doc.text(_corPdfNum(totDt),  Dx, y, {align: 'right'});
+  doc.text('LABOR - Total', Lx, y, {align: 'right'});
+  sf('normal', 8);
+  doc.text('-------->', Lx + 8, y);
+  sf('bold', 8);
+  doc.text('$' + _corPdfMoney(c.totalLabor), Nx, y, {align: 'right'});
+  y += 8;
+
+  // =================================================================
+  // MATERIALS (Excel rows 17-31)
+  // =================================================================
+  y = ensureRoom(110, y);
+  sf('bold', 9, [0, 0, 0]);
+  doc.text('MATERIALS:', LM + 18, y);
+  y += 11;
+
+  // Sub-headers (row 18)
   sf('bold', 8, [80, 80, 80]);
-  doc.text('Description', Mcols.desc, y);
-  doc.text('Item',        Mcols.qty,  y, {align: 'right'});
-  doc.text('Unit',        Mcols.unit, y, {align: 'right'});
-  doc.text('Rate/unit',   Mcols.rate, y, {align: 'right'});
-  doc.text('Extension',   Mcols.ext,  y, {align: 'right'});
+  doc.text('Description', LM + 18, y);
+  doc.text('Item', (Ex + Fx) / 2, y, {align: 'center'});
+  doc.text('Unit', (Gx + Hx) / 2, y, {align: 'center'});
+  doc.text('Rate/unit', (Hx + Ix) / 2, y, {align: 'center'});
+  doc.text('Extension', (Lx + Mx) / 2, y, {align: 'center'});
   y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
+  ln(LM + 18, y, Mx, y, 0.3, [180, 180, 180]);
+  y += 9;
 
-  sf('normal', 9, [0, 0, 0]);
+  // 5 material slots (Excel rows 19-23)
+  sf('normal', 8, [0, 0, 0]);
   var matRows = _corPdfMaterialRows(c);
-  if (!matRows.length) {
-    sf('italic', 8, [150, 150, 150]);
-    doc.text('(no materials)', Mcols.desc, y);
-    sf('normal', 9, [0, 0, 0]);
-    y += 12;
-  } else {
-    matRows.forEach(function(r){
-      y = ensureRoom(14, y);
-      var dLines = wrap(r.description || '', 230);
-      doc.text(dLines, Mcols.desc, y);
-      doc.text(_corPdfNum(r.quantity), Mcols.qty, y, {align: 'right'});
-      doc.text('@', Mcols.qty + 8, y);
-      // Material unit defaults to LS unless user typed something else
-      // (the legacy data model only stored quantity; 'LS' is a safe default)
-      doc.text((r.unit || 'LS'), Mcols.unit, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(r.unitPrice), Mcols.rate, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(r.cost), Mcols.ext, y, {align: 'right'});
-      y += dLines.length * 11 + 2;
-    });
+  var matSlotCount = Math.max(5, matRows.length);
+  for (var mi = 0; mi < matSlotCount; mi++) {
+    var mr = matRows[mi];
+    if (mr) {
+      var dLine = String(mr.description || '');
+      var dShort = wrap(dLine, Ex - LM - 20);
+      doc.text(dShort[0] || '', LM + 18, y);
+      doc.text(_corPdfNum(mr.quantity), Fx, y, {align: 'right'});
+      doc.text('@', Gc, y, {align: 'center'});
+      doc.text(String(mr.unit || 'LS'), Hx, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(mr.unitPrice), Ix, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(mr.cost), Mx, y, {align: 'right'});
+    } else {
+      doc.text('0', Fx, y, {align: 'right'});
+      doc.text('@', Gc, y, {align: 'center'});
+      doc.text('$0.00', Ix, y, {align: 'right'});
+      doc.text('$0.00', Mx, y, {align: 'right'});
+    }
+    y += 10;
   }
-  y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
+  y += 2;
 
-  sf('bold', 9, [0, 0, 0]);
-  doc.text('Materials / Equipment - Sub-total', RM - 110, y, {align: 'right'});
-  doc.text('$' + _corPdfMoney(c.totalMaterial), Mcols.ext, y, {align: 'right'});
-  y += 14;
-  // Tax row (tax label on left, "0.000% tax %" mirroring the target form)
+  // Materials / Equipment - Sub-total (row 25)
+  sf('normal', 8, [0, 0, 0]);
+  doc.text('Materials / Equipment - Sub-total', Lx, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalMaterial), Mx, y, {align: 'right'});
+  y += 10;
+
+  // Tax row (row 26): pct in its own cell at H, label at L, value at M
+  sf('bold', 8, [0, 0, 0]);
+  doc.text('0.000%', Hx, y, {align: 'right'});
   sf('normal', 8, [80, 80, 80]);
-  doc.text('0.000% tax %', LM, y);
-  sf('normal', 9, [0, 0, 0]);
-  doc.text('Applicable Taxes', RM - 110, y, {align: 'right'});
-  doc.text('$' + _corPdfMoney(0), Mcols.ext, y, {align: 'right'});
-  y += 12;
-  sf('bold', 9, [0, 0, 0]);
-  doc.text("Mat'l.s / Equip. - Sub-total (Taxes inc.)", RM - 110, y, {align: 'right'});
-  doc.text('$' + _corPdfMoney(c.totalMaterial), Mcols.ext, y, {align: 'right'});
-  y += 16;
+  doc.text('tax %', Hx + 4, y);
+  sf('normal', 8, [0, 0, 0]);
+  doc.text('Applicable Taxes', Lx, y, {align: 'right'});
+  doc.text('$0.00', Mx, y, {align: 'right'});
+  y += 10;
+
+  // Mat'l.s / Equip. - Sub-total (Taxes inc.) (row 27)
+  doc.text("Mat'l.s / Equip. - Sub-total (Taxes inc.)", Lx, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalMaterial), Mx, y, {align: 'right'});
+  y += 10;
+
   var matEqPct = Number(c.matEqMarkupPct) || 0;
   y = renderMultiplierBlock(y, 'markup by spec', matEqPct, 'material sub-total', c.mateqOhp);
-  // MATERIAL Total
-  sf('bold', 9, [0, 0, 0]);
-  doc.text('MATERIAL - Total', RM - 110, y, {align: 'right'});
-  sf('normal', 9);
-  doc.text('------->', RM - 60, y, {align: 'right'});
-  sf('bold', 9);
+
+  // MATERIAL - Total (row 31)
+  sf('bold', 8, [0, 0, 0]);
+  doc.text('MATERIAL - Total', Lx, y, {align: 'right'});
+  sf('normal', 8);
+  doc.text('------->', Lx + 8, y);
+  sf('bold', 8);
   var matTotal = (Number(c.totalMaterial) || 0) + (Number(c.mateqOhp) || 0);
-  doc.text('$' + _corPdfMoney(matTotal), Mcols.ext, y, {align: 'right'});
-  y += 18;
+  doc.text('$' + _corPdfMoney(matTotal), Nx, y, {align: 'right'});
+  y += 8;
 
-  // ── EQUIPMENT ─────────────────────────────────────────────────────
-  y = ensureRoom(80, y);
-  sf('bold', 10, [0, 0, 0]);
-  doc.text('EQUIPMENT:', LM, y);
-  y += 14;
-  // Columns: Hrs/Cnt | Classification | Unit | Rate/unit | Extension
-  var Ecols = {
-    qty:  LM + 30,
-    cls:  LM + 50,
-    unit: LM + 290,
-    rate: LM + 360,
-    ext:  RM
-  };
-  sf('bold', 8, [80, 80, 80]);
-  doc.text('Hrs/Cnt',       Ecols.qty,  y, {align: 'right'});
-  doc.text('Classification',Ecols.cls,  y);
-  doc.text('Unit',          Ecols.unit, y, {align: 'right'});
-  doc.text('Rate/unit',     Ecols.rate, y, {align: 'right'});
-  doc.text('Extension',     Ecols.ext,  y, {align: 'right'});
-  y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
-
-  sf('normal', 9, [0, 0, 0]);
-  var equipRows = Array.isArray(c.equipmentRows) ? c.equipmentRows : [];
-  if (!equipRows.length) {
-    sf('italic', 8, [150, 150, 150]);
-    doc.text('(no equipment)', Ecols.cls, y);
-    sf('normal', 9, [0, 0, 0]);
-    y += 12;
-  } else {
-    equipRows.forEach(function(r){
-      y = ensureRoom(14, y);
-      var qty = Number(r.quantity)  || 0;
-      var pr  = Number(r.unitPrice) || 0;
-      var ext = qty * pr;
-      var dLines = wrap(r.description || '', 230);
-      doc.text(_corPdfNum(qty), Ecols.qty, y, {align: 'right'});
-      doc.text(dLines, Ecols.cls, y);
-      doc.text('@', Ecols.cls + 235, y);
-      doc.text((r.unit || 'DAY'), Ecols.unit, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(pr), Ecols.rate, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(ext), Ecols.ext, y, {align: 'right'});
-      y += dLines.length * 11 + 2;
-    });
-  }
-  y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
+  // =================================================================
+  // EQUIPMENT (Excel rows 32-43)
+  // =================================================================
+  y = ensureRoom(110, y);
   sf('bold', 9, [0, 0, 0]);
-  doc.text('Equipment - Sub-total', RM - 110, y, {align: 'right'});
-  doc.text('$' + _corPdfMoney(c.totalEquipment || 0), Ecols.ext, y, {align: 'right'});
-  y += 16;
+  doc.text('EQUIPMENT:', LM + 18, y);
+  y += 11;
+
+  // Sub-headers (row 33)
+  sf('bold', 8, [80, 80, 80]);
+  doc.text('Hrs/Cnt', (Bx + Cx) / 2, y, {align: 'center'});
+  doc.text('Classification', (Ex + Fx) / 2, y, {align: 'center'});
+  doc.text('Unit', (Gx + Hx) / 2, y, {align: 'center'});
+  doc.text('Rate/unit', (Hx + Ix) / 2, y, {align: 'center'});
+  doc.text('Extension', (Lx + Mx) / 2, y, {align: 'center'});
+  y += 4;
+  ln(LM + 18, y, Mx, y, 0.3, [180, 180, 180]);
+  y += 9;
+
+  // 5 equipment slots (Excel rows 34-38)
+  sf('normal', 8, [0, 0, 0]);
+  var equipRows = Array.isArray(c.equipmentRows) ? c.equipmentRows : [];
+  var equipSlotCount = Math.max(5, equipRows.length);
+  for (var ei = 0; ei < equipSlotCount; ei++) {
+    var er = equipRows[ei];
+    if (er) {
+      var eqty = Number(er.quantity)  || 0;
+      var epr  = Number(er.unitPrice) || 0;
+      var eext = eqty * epr;
+      doc.text(_corPdfNum(eqty), Cx, y, {align: 'right'});
+      doc.text(String(er.description || ''), Ex + 2, y);
+      doc.text('@', Gc, y, {align: 'center'});
+      sf('bold', 8);
+      doc.text(String(er.unit || 'DAY'), Hx, y, {align: 'right'});
+      sf('normal', 8);
+      doc.text('$' + _corPdfMoney(epr), Ix, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(eext), Mx, y, {align: 'right'});
+    } else {
+      doc.text('0', Cx, y, {align: 'right'});
+      doc.text('@', Gc, y, {align: 'center'});
+      doc.text('$0.00', Ix, y, {align: 'right'});
+      doc.text('$0.00', Mx, y, {align: 'right'});
+    }
+    y += 10;
+  }
+  y += 2;
+
+  // Equipment - Sub-total (row 40)
+  sf('normal', 8, [0, 0, 0]);
+  doc.text('Equipment - Sub-total', Lx, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalEquipment || 0), Mx, y, {align: 'right'});
+  y += 10;
+
   var equipPct = (c.equipmentMarkupPct !== null && c.equipmentMarkupPct !== undefined) ? Number(c.equipmentMarkupPct) : 10;
   y = renderMultiplierBlock(y, 'markup by spec', equipPct, 'other sub-total', c.equipmentOhp);
-  // EQUIPMENT Total
-  sf('bold', 9, [0, 0, 0]);
-  doc.text('EQUIPMENT - Total', RM - 110, y, {align: 'right'});
-  sf('normal', 9);
-  doc.text('-------->', RM - 60, y, {align: 'right'});
-  sf('bold', 9);
+
+  // EQUIPMENT - Total (row 43)
+  sf('bold', 8, [0, 0, 0]);
+  doc.text('EQUIPMENT - Total', Lx, y, {align: 'right'});
+  sf('normal', 8);
+  doc.text('-------->', Lx + 8, y);
+  sf('bold', 8);
   var equipTotal = (Number(c.totalEquipment) || 0) + (Number(c.equipmentOhp) || 0);
-  doc.text('$' + _corPdfMoney(equipTotal), Ecols.ext, y, {align: 'right'});
-  y += 18;
+  doc.text('$' + _corPdfMoney(equipTotal), Nx, y, {align: 'right'});
+  y += 8;
 
-  // ── SUBCONTRACTORS ────────────────────────────────────────────────
-  y = ensureRoom(70, y);
-  sf('bold', 10, [0, 0, 0]);
-  doc.text('SUBCONTRACTORS', LM, y);
-  y += 14;
-  sf('bold', 8, [80, 80, 80]);
-  doc.text('Name', LM, y);
-  doc.text('Extension', RM, y, {align: 'right'});
-  y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
-
-  sf('normal', 9, [0, 0, 0]);
-  var subRows = Array.isArray(c.subRows) ? c.subRows : [];
-  if (!subRows.length) {
-    // Empty rows like the form template (just blank lines for $0)
-    for (var sbi = 0; sbi < 2; sbi++) {
-      doc.text('$' + _corPdfMoney(0), RM, y, {align: 'right'});
-      y += 12;
-    }
-  } else {
-    subRows.forEach(function(r){
-      y = ensureRoom(14, y);
-      var nLines = wrap(r.name || '', 380);
-      doc.text(nLines, LM, y);
-      doc.text('$' + _corPdfMoney(r.total), RM, y, {align: 'right'});
-      y += nLines.length * 11 + 2;
-    });
-  }
-  y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
+  // =================================================================
+  // SUBCONTRACTORS (Excel rows 44-53)
+  // =================================================================
+  y = ensureRoom(90, y);
   sf('bold', 9, [0, 0, 0]);
-  doc.text('SUBCONTRACTOR - Subtotal', RM - 110, y, {align: 'right'});
-  doc.text('$' + _corPdfMoney(c.totalSub), RM, y, {align: 'right'});
-  y += 16;
+  doc.text('SUBCONTRACTORS', LM + 18, y);
+  y += 11;
+
+  // Header row 45
+  sf('bold', 8, [80, 80, 80]);
+  doc.text('Name', LM + 18, y);
+  doc.text('Extension', (Lx + Mx) / 2, y, {align: 'center'});
+  y += 4;
+  ln(LM + 18, y, Mx, y, 0.3, [180, 180, 180]);
+  y += 9;
+
+  // Sub slots (Excel rows 46-49) - at least 2 visible rows like the template
+  sf('normal', 8, [0, 0, 0]);
+  var subRows = Array.isArray(c.subRows) ? c.subRows : [];
+  var subSlotCount = Math.max(2, subRows.length);
+  for (var si = 0; si < subSlotCount; si++) {
+    var sr = subRows[si];
+    if (sr) {
+      var nLine = String(sr.name || '');
+      var nShort = wrap(nLine, Lx - LM - 22);
+      doc.text(nShort[0] || '', LM + 18, y);
+      doc.text('$' + _corPdfMoney(sr.total), Mx, y, {align: 'right'});
+    } else {
+      doc.text('$0.00', Mx, y, {align: 'right'});
+    }
+    y += 10;
+  }
+  y += 2;
+
+  // SUBCONTRACTOR - Subtotal (row 50)
+  sf('normal', 8, [0, 0, 0]);
+  doc.text('SUBCONTRACTOR - Subtotal', Lx, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalSub), Mx, y, {align: 'right'});
+  y += 10;
+
   var subPct = Number(c.subMarkupPct) || 0;
   y = renderMultiplierBlock(y, 'markup by spec', subPct, 'subcontract', c.subOhp);
-  sf('bold', 9, [0, 0, 0]);
-  doc.text('SUBCONTRACTOR - Total', RM - 110, y, {align: 'right'});
-  sf('normal', 9);
-  doc.text('-------->', RM - 60, y, {align: 'right'});
-  sf('bold', 9);
+
+  // SUBCONTRACTOR - Total (row 53)
+  sf('bold', 8, [0, 0, 0]);
+  doc.text('SUBCONTRACTOR - Total', Lx, y, {align: 'right'});
+  sf('normal', 8);
+  doc.text('-------->', Lx + 8, y);
+  sf('bold', 8);
   var subTotal = (Number(c.totalSub) || 0) + (Number(c.subOhp) || 0);
-  doc.text('$' + _corPdfMoney(subTotal), RM, y, {align: 'right'});
-  y += 18;
+  doc.text('$' + _corPdfMoney(subTotal), Nx, y, {align: 'right'});
+  y += 8;
 
-  // ── UNIT PRICING ──────────────────────────────────────────────────
-  y = ensureRoom(70, y);
-  sf('bold', 10, [0, 0, 0]);
-  doc.text('UNIT PRICING', LM, y);
-  y += 14;
-  // Columns: UP # | Quantity | Unit | Unit Rate | Extension
-  var Ucols = {
-    upn:  LM,
-    qty:  LM + 130,
-    unit: LM + 220,
-    rate: LM + 320,
-    ext:  RM
-  };
-  sf('bold', 8, [80, 80, 80]);
-  doc.text('UP #',        Ucols.upn,  y);
-  doc.text('Quantity',    Ucols.qty,  y, {align: 'right'});
-  doc.text('Unit',        Ucols.unit, y, {align: 'right'});
-  doc.text('Unit Rate',   Ucols.rate, y, {align: 'right'});
-  doc.text('Extension',   Ucols.ext,  y, {align: 'right'});
-  y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
-
-  sf('normal', 9, [0, 0, 0]);
-  var unitPriceRows = Array.isArray(c.unitPriceRows) ? c.unitPriceRows : [];
-  if (!unitPriceRows.length) {
-    // Empty placeholder rows — matches the form's layout when blank
-    for (var upi = 0; upi < 2; upi++) {
-      doc.text('@', Ucols.qty + 8, y);
-      doc.text('$' + _corPdfMoney(0), Ucols.rate, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(0), Ucols.ext,  y, {align: 'right'});
-      y += 12;
-    }
-  } else {
-    unitPriceRows.forEach(function(r, i){
-      y = ensureRoom(14, y);
-      var qty = Number(r.quantity)  || 0;
-      var pr  = Number(r.unitPrice) || 0;
-      var ext = qty * pr;
-      doc.text(String(i + 1) + '. ' + (r.description || ''), Ucols.upn, y);
-      doc.text(_corPdfNum(qty), Ucols.qty, y, {align: 'right'});
-      doc.text('@', Ucols.qty + 8, y);
-      doc.text((r.unit || ''), Ucols.unit, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(pr), Ucols.rate, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(ext), Ucols.ext, y, {align: 'right'});
-      y += 12;
-    });
-  }
-  y += 4;
-  ln(LM, y, RM, y, 0.3, [180, 180, 180]);
-  y += 12;
+  // =================================================================
+  // UNIT PRICING (Excel rows 54-63)
+  // =================================================================
+  y = ensureRoom(100, y);
   sf('bold', 9, [0, 0, 0]);
-  doc.text('UNIT PRICE - Subtotal', RM - 110, y, {align: 'right'});
-  doc.text('$' + _corPdfMoney(c.totalUnitPrice || 0), RM, y, {align: 'right'});
-  y += 16;
+  doc.text('UNIT PRICING', LM + 18, y);
+  y += 11;
+
+  // Header row 55
+  sf('bold', 8, [80, 80, 80]);
+  doc.text('UP #', LM + 18, y);
+  doc.text('Quantity', (Ex + Fx) / 2, y, {align: 'center'});
+  doc.text('Unit', (Gx + Hx) / 2, y, {align: 'center'});
+  doc.text('Unit Rate', (Hx + Ix) / 2, y, {align: 'center'});
+  doc.text('Extension', (Lx + Mx) / 2, y, {align: 'center'});
+  y += 4;
+  ln(LM + 18, y, Mx, y, 0.3, [180, 180, 180]);
+  y += 9;
+
+  // 4 unit pricing slots (Excel rows 56-59)
+  sf('normal', 8, [0, 0, 0]);
+  var unitPriceRows = Array.isArray(c.unitPriceRows) ? c.unitPriceRows : [];
+  var unitSlotCount = Math.max(4, unitPriceRows.length);
+  for (var ui = 0; ui < unitSlotCount; ui++) {
+    var ur = unitPriceRows[ui];
+    if (ur) {
+      var uqty = Number(ur.quantity)  || 0;
+      var upr  = Number(ur.unitPrice) || 0;
+      var uext = uqty * upr;
+      doc.text(String(ui + 1), LM + 18, y);
+      doc.text(String(ur.description || ''), Cx + 2, y);
+      doc.text(_corPdfNum(uqty), Fx, y, {align: 'right'});
+      doc.text('@', Gc, y, {align: 'center'});
+      doc.text(String(ur.unit || ''), Hx, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(upr), Ix, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(uext), Mx, y, {align: 'right'});
+    } else {
+      doc.text('@', Gc, y, {align: 'center'});
+      doc.text('$0.00', Ix, y, {align: 'right'});
+      doc.text('$0.00', Mx, y, {align: 'right'});
+    }
+    y += 10;
+  }
+  y += 2;
+
+  // UNIT PRICE - Subtotal (row 60)
+  sf('normal', 8, [0, 0, 0]);
+  doc.text('UNIT PRICE - Subtotal', Lx, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalUnitPrice || 0), Mx, y, {align: 'right'});
+  y += 10;
+
   var unitPricePct = (c.unitPriceMarkupPct !== null && c.unitPriceMarkupPct !== undefined) ? Number(c.unitPriceMarkupPct) : 0;
   y = renderMultiplierBlock(y, 'markup included', unitPricePct, 'subcontract', c.unitPriceOhp);
-  sf('bold', 9, [0, 0, 0]);
-  doc.text('UNIT PRICE - Total', RM - 110, y, {align: 'right'});
-  sf('normal', 9);
-  doc.text('-------->', RM - 60, y, {align: 'right'});
-  sf('bold', 9);
+
+  // UNIT PRICE - Total (row 63)
+  sf('bold', 8, [0, 0, 0]);
+  doc.text('UNIT PRICE - Total', Lx, y, {align: 'right'});
+  sf('normal', 8);
+  doc.text('-------->', Lx + 8, y);
+  sf('bold', 8);
   var unitPriceTotal = (Number(c.totalUnitPrice) || 0) + (Number(c.unitPriceOhp) || 0);
-  doc.text('$' + _corPdfMoney(unitPriceTotal), RM, y, {align: 'right'});
-  y += 22;
+  doc.text('$' + _corPdfMoney(unitPriceTotal), Nx, y, {align: 'right'});
+  y += 10;
 
-  // ── BOTTOM TOTALS ─────────────────────────────────────────────────
-  // Reserve room for the divider + 3 totals lines + Date/PTE row
-  y = ensureRoom(120, y);
-  y += 4;
-  ln(LM, y, RM, y, 0.6, [60, 60, 60]);
-  y += 14;
+  // =================================================================
+  // BOTTOM TOTALS (Excel rows 64-66) - Option X density
+  // =================================================================
+  // Three rows mirroring HCCO template's rows 64-66:
+  //   64: CHANGE - Sub Total (label-right at L, arrow, value-right at N)
+  //   65: Date: [date]    [bond%]    BOND - Rate per Contract (%) ...
+  //       The bond pct lives in its OWN H-column cell (item 3 fix),
+  //       NOT concatenated into the BOND label string.
+  //   66: Project Time Extension: [N] days    CHANGE - Total (..., Bonds)
+  //       Labels at 8pt; CHANGE-Total label slightly larger (9pt) to
+  //       mirror Excel's 10pt/11pt distinction. Grand total dollar
+  //       value at 11pt navy for visual emphasis.
+  y = ensureRoom(60, y);
+  ln(LM + 18, y, Mx, y, 0.6, [60, 60, 60]);
+  y += 12;
 
-  // Compute change subtotal from the rounded category totals (matches
-  // the value displayed elsewhere in the app).
   var changeSubtotal = (Number(c.totalLabor)     || 0) +
                        (Number(c.totalMaterial)  || 0) + (Number(c.mateqOhp)     || 0) +
                        (Number(c.totalEquipment) || 0) + (Number(c.equipmentOhp) || 0) +
@@ -14984,61 +15047,66 @@ function buildHunzingerCorPDF(c, p) {
   var bondCost = Number(c.bondCost);
   if (isNaN(bondCost) || bondCost === null) bondCost = changeSubtotal * (bondPct / 100);
 
-  // CHANGE Sub Total (right-aligned label + value)
-  sf('bold', 10, [0, 0, 0]);
-  doc.text('CHANGE - Sub Total (Labor, Subs., Material, Other)', RM - 130, y, {align: 'right'});
-  sf('normal', 10);
-  doc.text('-------->', RM - 60, y, {align: 'right'});
-  sf('bold', 10);
-  doc.text('$' + _corPdfMoney(changeSubtotal), RM, y, {align: 'right'});
-  y += 16;
+  // Row 64 - CHANGE Sub Total
+  sf('bold', 8, [0, 0, 0]);
+  doc.text('CHANGE - Sub Total (Labor, Subs., Material, Other)', Lx, y, {align: 'right'});
+  sf('normal', 8);
+  doc.text('-------->', Lx + 8, y);
+  sf('bold', 8);
+  doc.text('$' + _corPdfMoney(changeSubtotal), Nx, y, {align: 'right'});
+  y += 11;
 
-  // Date (left) + BOND row (right) — Date and the BOND line share a row
-  // in the target. Date label/value on the left, BOND with pct on left of label
-  // on the right.
+  // Row 65 - Date + BOND (bond pct in its own H-column cell)
+  sf('normal', 8, [0, 0, 0]);
+  doc.text('Date:', Cx, y, {align: 'right'});
+  doc.text(_corPdfFmtDate(c.corDate) || '', Cx + 4, y);
+  sf('bold', 8);
+  doc.text(pctFmt(bondPct), Hx, y, {align: 'right'});
+  doc.text('BOND - Rate per Contract (%)', Lx, y, {align: 'right'});
+  sf('normal', 8);
+  doc.text('-------->', Lx + 8, y);
+  sf('bold', 8);
+  doc.text('$' + _corPdfMoney(bondCost), Nx, y, {align: 'right'});
+  y += 11;
+
+  // Row 66 - Project Time Extension + CHANGE Total
+  sf('normal', 8, [0, 0, 0]);
+  doc.text('Project Time Extension:', Cx, y, {align: 'right'});
+  var teDays = (c.timeExtensionDays === null || c.timeExtensionDays === undefined || c.timeExtensionDays === '') ? '' : String(c.timeExtensionDays);
+  if (teDays) doc.text(teDays, Dx, y, {align: 'right'});
+  doc.text('days', Dx + 4, y);
   sf('bold', 9, [0, 0, 0]);
-  doc.text('Date:', LM, y);
+  doc.text('CHANGE - Total (Labor, Subs., Material, Other, Bonds)', Lx, y, {align: 'right'});
   sf('normal', 9);
-  doc.text(_corPdfFmtDate(c.corDate), LM + 35, y);
-  // BOND - Rate per Contract — pct is on the LEFT of the label per the target
-  sf('bold', 10, [0, 0, 0]);
-  doc.text(pctFmt(bondPct) + ' BOND - Rate per Contract (%)', RM - 130, y, {align: 'right'});
-  sf('normal', 10);
-  doc.text('-------->', RM - 60, y, {align: 'right'});
-  sf('bold', 10);
-  doc.text('$' + _corPdfMoney(bondCost), RM, y, {align: 'right'});
-  y += 16;
-
-  // Project Time Extension (left) + CHANGE Total (right)
-  sf('bold', 9, [0, 0, 0]);
-  doc.text('Project Time Extension:', LM, y);
-  sf('normal', 9);
-  var teDays = (c.timeExtensionDays === null || c.timeExtensionDays === undefined || c.timeExtensionDays === '') ? '0' : String(c.timeExtensionDays);
-  doc.text(teDays + ' days', LM + 130, y);
-
-  sf('bold', 10);
-  doc.text('CHANGE - Total (incl. Bonds)', RM - 130, y, {align: 'right'});
-  sf('normal', 10);
-  doc.text('-------->', RM - 60, y, {align: 'right'});
+  doc.text('-------->', Lx + 8, y);
   sf('bold', 11, [42, 47, 92]);
-  doc.text('$' + _corPdfMoney(c.totalAmount), RM, y, {align: 'right'});
+  doc.text('$' + _corPdfMoney(c.totalAmount), Nx, y, {align: 'right'});
+  y += 14;
 
-  // ── Page 2: WORK SCOPE NARRATIVE ──────────────────────────────────
+  // =================================================================
+  // BOTTOM CONTRACTOR BLOCK (Excel rows 70-72)
+  // =================================================================
+  y = ensureRoom(40, y);
+  y = renderBottomContractorBlock(y);
+
+  // =================================================================
+  // PAGE 2 - WORK SCOPE NARRATIVE
+  // =================================================================
   doc.addPage();
-  renderPageHeader();
-  y = TOP_OF_BODY + 24;
+  var headerEnd2 = renderPageHeader();
+  y = Math.max(TOP_OF_BODY + 8, headerEnd2 + 4);
 
   // Added Scope
   sf('bold', 10, [0, 0, 0]);
-  doc.text('WORK SCOPE NARRATIVE', LM, y);
+  doc.text('WORK SCOPE NARRATIVE', LM + 18, y);
   y += 14;
-  sf('bold', 9.5);
-  doc.text('Added Scope:', LM, y);
+  sf('bold', 9);
+  doc.text('Added Scope:', LM + 18, y);
   y += 14;
-  sf('normal', 9.5, [0, 0, 0]);
+  sf('normal', 9, [0, 0, 0]);
   if (addedScopeText) {
-    var addedLines = wrap(addedScopeText, RM - LM);
-    doc.text(addedLines, LM, y);
+    var addedLines = wrap(addedScopeText, Mx - LM - 22);
+    doc.text(addedLines, LM + 18, y);
     y += addedLines.length * 11;
   }
   y += 24;
@@ -15046,28 +15114,28 @@ function buildHunzingerCorPDF(c, p) {
   // Omitted Scope
   y = ensureRoom(80, y);
   sf('bold', 10);
-  doc.text('WORK SCOPE NARRATIVE', LM, y);
+  doc.text('WORK SCOPE NARRATIVE', LM + 18, y);
   y += 14;
-  sf('bold', 9.5);
-  doc.text('Omitted Scope:', LM, y);
+  sf('bold', 9);
+  doc.text('Omitted Scope:', LM + 18, y);
   y += 14;
-  sf('normal', 9.5, [0, 0, 0]);
+  sf('normal', 9, [0, 0, 0]);
   if (omittedScopeText) {
-    var omittedLines = wrap(omittedScopeText, RM - LM);
-    doc.text(omittedLines, LM, y);
+    var omittedLines = wrap(omittedScopeText, Mx - LM - 22);
+    doc.text(omittedLines, LM + 18, y);
   }
 
-  // ── Page-number footer ("X of N") on every page ──────────────────
-  // Done at the end so we know the final page count.
+  // Page-number footer ("X of N") on every page (after all pages are added)
   var pageCount = doc.internal.getNumberOfPages();
   for (var pn = 1; pn <= pageCount; pn++) {
     doc.setPage(pn);
-    sf('normal', 9, [0, 0, 0]);
+    sf('normal', 8, [0, 0, 0]);
     doc.text(String(pn) + ' of ' + pageCount, RM, FOOTER_TOP + 14, {align: 'right'});
   }
 
   return doc;
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // COR LIFECYCLE — Send / Approve / Reject / Re-open / Void
