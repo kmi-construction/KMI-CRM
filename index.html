@@ -1356,6 +1356,7 @@ textarea{resize:vertical;min-height:72px}
       <div class="fgr"><label>Customer</label><input id="ncor-customer-display" disabled style="background:#f5f5f5;color:#666"></div>
       <div class="fgr"><label>Attention *</label><select id="ncor-attention"><option value="">Select contact...</option></select></div>
       <div class="fgr"><label>Customer CO #</label><input id="ncor-customer-co-num" placeholder="Customer's CO reference number (optional)"><div style="font-size:11px;color:#888;margin-top:4px">Set this when the customer issues their own CO number against this COR.</div></div>
+      <div class="fgr"><label>Customer CO Date</label><input type="date" id="ncor-customer-co-date"><div style="font-size:11px;color:#888;margin-top:4px">Date the customer issued their formal CO. Fill in when you receive the actual CO from the customer.</div></div>
       <div class="fgr full"><label id="ncor-desc-label">Description *</label><textarea id="ncor-desc" rows="3" placeholder="Describe the change being requested..."></textarea></div>
     </div>
   </div>
@@ -12564,6 +12565,20 @@ function renderCors() {
   var suBtn = g('cor-smart-up-btn');
   if (suBtn) suBtn.style.display = (hasFull('create-cor') && hasFull('smart-upload-cor')) ? '' : 'none';
 
+  // Restore persisted filter values from localStorage (set by filterCors).
+  // Must run AFTER the dropdowns are rebuilt above — innerHTML reassignment
+  // clears any prior selection. Setting .value to an option that no longer
+  // exists (e.g. project deleted) silently resets to empty, which is fine.
+  try {
+    var saved = JSON.parse(localStorage.getItem('kmi_cor_filters') || '{}');
+    if (saved && typeof saved === 'object') {
+      if (g('cor-s')  && typeof saved.search    === 'string') g('cor-s').value  = saved.search;
+      if (g('cor-fp') && typeof saved.projectId === 'string') g('cor-fp').value = saved.projectId;
+      if (g('cor-ft') && typeof saved.corType   === 'string') g('cor-ft').value = saved.corType;
+      if (g('cor-fs') && typeof saved.status    === 'string') g('cor-fs').value = saved.status;
+    }
+  } catch (e) { /* malformed JSON — ignore, filters stay empty */ }
+
   filterCors();
 }
 
@@ -12572,6 +12587,17 @@ function filterCors() {
   var fp = g('cor-fp').value;
   var ft = g('cor-ft').value;
   var fs = g('cor-fs').value;
+
+  // Persist filter state so it survives nav-away/refresh/window close.
+  // Save raw (not lowercased) search so the input restores faithfully.
+  try {
+    localStorage.setItem('kmi_cor_filters', JSON.stringify({
+      search:    g('cor-s').value || '',
+      projectId: fp || '',
+      corType:   ft || '',
+      status:    fs || ''
+    }));
+  } catch (e) { /* localStorage full / unavailable — non-fatal */ }
 
   var list = (db.cors || []).filter(function(c){
     if (fp && String(c.projectId) !== String(fp)) return false;
@@ -12592,6 +12618,9 @@ function filterCors() {
   var draftN     = list.filter(function(c){ return (c.status || 'Draft') === 'Draft'; }).length;
   var pendingN   = list.filter(function(c){ return (c.status || 'Draft') === 'Pending'; }).length;
   var approvedN  = list.filter(function(c){ return (c.status || 'Draft') === 'Approved'; }).length;
+  var pendingTotal = list
+    .filter(function(c){ return (c.status || 'Draft') === 'Pending'; })
+    .reduce(function(sum, c){ return sum + (Number(c.totalAmount) || 0); }, 0);
   var approvedTotal = list
     .filter(function(c){ return (c.status || 'Draft') === 'Approved'; })
     .reduce(function(sum, c){ return sum + (Number(c.totalAmount) || 0); }, 0);
@@ -12600,6 +12629,7 @@ function filterCors() {
     '<div class="mc"><div class="ml">Draft</div><div class="mv">' + draftN + '</div></div>' +
     '<div class="mc"><div class="ml">Pending</div><div class="mv bl">' + pendingN + '</div></div>' +
     '<div class="mc"><div class="ml">Approved</div><div class="mv gn">' + approvedN + '</div></div>' +
+    '<div class="mc"><div class="ml">Pending $ total</div><div class="mv bl">' + corFmtMoney(pendingTotal) + '</div></div>' +
     '<div class="mc"><div class="ml">Approved $ total</div><div class="mv gn">' + corFmtMoney(approvedTotal) + '</div></div>';
 
   // Table
@@ -12741,6 +12771,8 @@ function initNewCor() {
   g('ncor-desc').value = '';
   // Customer CO# (added with the smart-upload work) — empty on new
   if (g('ncor-customer-co-num')) g('ncor-customer-co-num').value = '';
+  // Customer CO Date — empty on new
+  if (g('ncor-customer-co-date')) g('ncor-customer-co-date').value = '';
 
   // Trigger project-changed handler to populate customer + attention
   ncorProjectChanged();
@@ -12815,6 +12847,11 @@ function viewCor(id) {
   if (g('ncor-customer-co-num')) {
     g('ncor-customer-co-num').value = c.customerCoNumber || '';
     g('ncor-customer-co-num').disabled = !canEdit;
+  }
+  // Customer CO Date — populate from the record
+  if (g('ncor-customer-co-date')) {
+    g('ncor-customer-co-date').value = c.customerCoDate || '';
+    g('ncor-customer-co-date').disabled = !canEdit;
   }
 
   // Disable inputs if read-only
@@ -12910,6 +12947,8 @@ async function saveCor() {
   var description = (g('ncor-desc').value || '').trim();
   // Customer CO# — added with smart-upload work; optional for any COR
   var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
+  // Customer CO Date — optional; captured when KMI receives the formal CO from the customer
+  var customerCoDate = g('ncor-customer-co-date') ? (g('ncor-customer-co-date').value || '').trim() : '';
 
   if (!projectId) { alert('Please select a project.'); return; }
   if (!corDate)   { alert('Please pick a date.'); return; }
@@ -12990,6 +13029,8 @@ async function saveCor() {
     existingCor.description = description;
     // Customer CO# — empty string normalized to null
     existingCor.customerCoNumber = customerCoNumber || null;
+    // Customer CO Date — empty string normalized to null
+    existingCor.customerCoDate = customerCoDate || null;
     existingCor.rolledUpTicketIds = newRolledIds;
     existingCor.laborRows         = snapshotAutoLabor;       // auto-pivot snapshot
     existingCor.manualLaborRows   = newManualLabor;
@@ -13094,7 +13135,8 @@ async function saveCor() {
     decisionAt: null, decisionByUserId: null,
     voidedAt: null, voidedByUserId: null,
     voidReason: null,
-    customerCoNumber: customerCoNumber || null
+    customerCoNumber: customerCoNumber || null,
+    customerCoDate: customerCoDate || null
   };
 
   // Lock all rolled-up tickets onto the new COR
@@ -13175,6 +13217,7 @@ function renderCorStatusCard(c) {
       '<div style="font-size:12px;color:' + (st === 'Approved' ? '#3B6D11' : '#7A2E2E') + ';margin-bottom:6px">' +
         (st === 'Approved' ? '✓ Approved' : '⊘ Rejected') + ' on ' + corEsc(new Date(c.decisionAt).toLocaleString()) + ' by ' + corEsc(deciderName) +
         (c.customerCoNumber ? ' · Customer CO #: <strong>' + corEsc(c.customerCoNumber) + '</strong>' : '') +
+        (c.customerCoDate   ? ' · Customer CO Date: <strong>' + corEsc(c.customerCoDate) + '</strong>' : '') +
       '</div>'
     );
     if (st === 'Rejected' && c.rejectedReason) {
@@ -13458,6 +13501,7 @@ async function smartUploadCorExtract() {
       '  "description":       "string — the work or change being requested",\n' +
       '  "attentionContactName": "string or null — name of the customer-side person the COR is addressed to",\n' +
       '  "customerCoNumber":  "string or null — the customer\'s own CO reference number, if present (often labeled \'Owner CO\' or similar)",\n' +
+      '  "customerCoDate":    "YYYY-MM-DD or null — date the customer issued their formal CO, if shown",\n' +
       '  "decisionDate":      "YYYY-MM-DD or null — date the customer accepted/rejected, if shown",\n' +
       '  "manualLaborRows":   [{"classification": "...", "hours": 0, "rate": 0}],\n' +
       '  "manualMaterialRows":[{"description": "...", "quantity": 0, "unitPrice": 0}],\n' +
@@ -13627,6 +13671,12 @@ function _smartUpCorApplyPrefill(project, parsed) {
     g('ncor-customer-co-num').value = String(parsed.customerCoNumber || '').trim();
   }
 
+  // Customer CO Date — only set if AI extracted a valid YYYY-MM-DD
+  if (g('ncor-customer-co-date')) {
+    var coDt = String(parsed.customerCoDate || '').trim();
+    g('ncor-customer-co-date').value = /^\d{4}-\d{2}-\d{2}$/.test(coDt) ? coDt : '';
+  }
+
   // Project + type are locked in initNewCor — the project dropdown is
   // already populated and the type display is read-only. Force-lock the
   // project dropdown explicitly (initNewCor leaves it editable for new
@@ -13769,6 +13819,7 @@ async function confirmSmartUploadCor() {
   var attnId  = (g('ncor-attention').value || '').trim();
   var description = (g('ncor-desc').value || '').trim();
   var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
+  var customerCoDate = g('ncor-customer-co-date') ? (g('ncor-customer-co-date').value || '').trim() : '';
   var corNumber = g('ncor-num') ? (g('ncor-num').value || '').trim() : '';
 
   if (!corNumber) { alert('Please enter or confirm the COR # from the original document.'); return; }
@@ -13898,6 +13949,7 @@ async function confirmSmartUploadCor() {
     voidedAt: null, voidedByUserId: null,
     voidReason: null,
     customerCoNumber: customerCoNumber || null,
+    customerCoDate: customerCoDate || null,
     // Smart Upload provenance — synced if the SQL migration ran, local-only otherwise
     smartUploaded: true,
     smartUploadedAt: nowIso,
@@ -15544,10 +15596,13 @@ function markCorApproved() {
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt" style="color:#3B6D11">Mark COR as Approved</div>' +
-    '<div class="msb">The customer has approved this Change Order Request. Capture their formal CO number now if you have it (you can also fill it in later by editing the COR).</div>' +
+    '<div class="msb">The customer has approved this Change Order Request. Capture their formal CO number and CO date now if you have them (you can also fill them in later by editing the COR).</div>' +
     '<div class="fg">' +
-      '<div class="fgr full"><label>Customer CO # <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
+      '<div class="fgr"><label>Customer CO # <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
         '<input type="text" id="cor-app-cno" value="' + corEsc(c.customerCoNumber || '') + '" placeholder="e.g. CO-2026-047">' +
+      '</div>' +
+      '<div class="fgr"><label>Customer CO Date <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
+        '<input type="date" id="cor-app-cdate" value="' + corEsc(c.customerCoDate || '') + '">' +
       '</div>' +
     '</div>' +
     '<div class="mbtns">' +
@@ -15561,11 +15616,13 @@ async function confirmCorApproved() {
   var c = _corCurrent();
   if (!c) { closeModal(); return; }
   var customerCo = (g('cor-app-cno').value || '').trim();
+  var customerCoDt = g('cor-app-cdate') ? (g('cor-app-cdate').value || '').trim() : '';
   var nowIso = new Date().toISOString();
   c.status = 'Approved';
   c.decisionAt = nowIso;
   c.decisionByUserId = _currentUser ? _currentUser.id : null;
   if (customerCo) c.customerCoNumber = customerCo;
+  if (customerCoDt) c.customerCoDate = customerCoDt;
   c.updatedAt = nowIso;
   c.updatedByUserId = _currentUser ? _currentUser.id : null;
   await _corPersistTransition(c);
@@ -20348,10 +20405,10 @@ function openProposalEmailModal(propId) {
         '<div class="fgr full"><label>From</label>' +
           '<input type="text" value="' + _vendorEsc(fromDisplay) + '" disabled style="background:#f5f5f5;color:#888;cursor:not-allowed">' +
         '</div>' +
-        '<div class="fgr full"><label>To *</label>' +
+        '<div class="fgr full"><label>To * <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(comma-separated for multiple)</span></label>' +
           '<input id="pem-to" type="text" value="' + _vendorEsc(pm.email) + '">' +
         '</div>' +
-        '<div class="fgr full"><label>CC <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional, single address)</span></label>' +
+        '<div class="fgr full"><label>CC <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional, comma-separated)</span></label>' +
           '<input id="pem-cc" type="text" placeholder="Leave blank for no CC">' +
         '</div>' +
         '<div class="fgr full"><label>Subject *</label>' +
@@ -20395,8 +20452,18 @@ async function sendProposalEmail() {
 
   errEl.style.display = 'none';
 
-  if (!to || !isValidEmail(to))           { showErr('Please enter a valid To address.'); return; }
-  if (cc && !isValidEmail(cc))            { showErr('Please enter a valid CC address (or leave it blank).'); return; }
+  // Parse comma-separated lists for both To and CC. Resend requires
+  // multi-recipient sends to use an array; a comma-joined string is read
+  // as one malformed address and rejected. Single recipient stays as a
+  // string (preserves the original behavior).
+  var toList = to.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+  var ccList = cc.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+
+  if (!toList.length)                     { showErr('Please enter at least one valid To address.'); return; }
+  var badTo = toList.filter(function(e){ return !isValidEmail(e); });
+  if (badTo.length)                       { showErr('Invalid To address(es): ' + _vendorEsc(badTo.join(', '))); return; }
+  var badCc = ccList.filter(function(e){ return !isValidEmail(e); });
+  if (badCc.length)                       { showErr('Invalid CC address(es): ' + _vendorEsc(badCc.join(', '))); return; }
   if (!subject)                           { showErr('Subject is required.'); return; }
   if (!body.trim())                       { showErr('Message body is required.'); return; }
 
@@ -20410,8 +20477,10 @@ async function sendProposalEmail() {
     showErr('Proposal not found.'); return;
   }
 
+  // Single → string, multi → array. Mirrors the project-kickoff send.
+  var toField = (toList.length === 1) ? toList[0] : toList;
   var payload = {
-    to:                to,
+    to:                toField,
     from:              ctx.from,
     fromName:          ctx.fromName,
     replyTo:           ctx.from,        // proposal: send-as-user, replies route back to user
@@ -20425,7 +20494,7 @@ async function sendProposalEmail() {
     relatedEntityId:   prop.id,
     attachments: [{ filename: ctx.filename, content: ctx.pdfBase64 }]
   };
-  if (cc) payload.cc = cc;
+  if (ccList.length) payload.cc = (ccList.length === 1) ? ccList[0] : ccList;
 
   var result = await sendEmail(payload);
 
@@ -20434,17 +20503,28 @@ async function sendProposalEmail() {
     // statuses (review, negotiation, won, lost) untouched on resends.
     if (prop.status === 'draft' || !prop.status) prop.status = 'sent';
     prop.lastEmailedAt = new Date().toISOString();
-    prop.lastEmailedTo = to;
+    // Store the typed string for display — preserves "user@x.com, other@y.com"
+    // as-entered rather than reformatting an array.
+    prop.lastEmailedTo = toList.join(', ');
 
-    var name = ctx.pmName || to;
-    db.activity.unshift({ text: prop.id + ' emailed to ' + name, type: 'sent', time: 'Just now' });
+    // Activity / toast: prefer the assigned PM name; otherwise show the
+    // first recipient (with "+N more" suffix when multi).
+    var displayTarget;
+    if (ctx.pmName) {
+      displayTarget = ctx.pmName;
+    } else if (toList.length === 1) {
+      displayTarget = toList[0];
+    } else {
+      displayTarget = toList[0] + ' +' + (toList.length - 1) + ' more';
+    }
+    db.activity.unshift({ text: prop.id + ' emailed to ' + displayTarget, type: 'sent', time: 'Just now' });
     saveDB();
 
     closeModal();
     showToast(
       result.testMode
-        ? 'Test mode: proposal redirected (would have gone to ' + name + ')'
-        : 'Proposal sent to ' + name,
+        ? 'Test mode: proposal redirected (would have gone to ' + displayTarget + ')'
+        : 'Proposal sent to ' + displayTarget,
       'success'
     );
     delete window._pendingProposalEmail;
@@ -25913,6 +25993,7 @@ function toSBCor(r) {
     void_reason:       r.voidReason       || null,
     rejected_reason:   r.rejectedReason   || null,
     customer_co_number: r.customerCoNumber || null,
+    customer_co_date:   r.customerCoDate   || null,
     // Smart Upload provenance — added with COR Smart Upload feature.
     // Requires a SQL migration to add these four columns. Until the
     // migration is run these fields will fail-silent on upsert; the
@@ -26000,6 +26081,7 @@ function fromSBCor(r) {
     voidReason:       r.void_reason       || null,
     rejectedReason:   r.rejected_reason   || null,
     customerCoNumber: r.customer_co_number || null,
+    customerCoDate:   r.customer_co_date   || null,
     // Smart Upload provenance (only present after the SQL migration runs)
     smartUploaded:         !!r.smart_uploaded,
     smartUploadedFile:     r.smart_uploaded_file        || null,
@@ -27428,8 +27510,13 @@ async function sendProjectKickoffEmail() {
   }
 
   // Build the email payload — same shape as sendProposalEmail.
+  // Resend (downstream of the send-email Edge Function) requires `to`
+  // and `cc` to be EITHER a single "email@x" string OR an array of
+  // such strings. A comma-joined multi-recipient string is read as one
+  // malformed address and rejected. So: single → string, multi → array.
+  var toField = (toList.length === 1) ? toList[0] : toList;
   var payload = {
-    to:                toList.join(', '),
+    to:                toField,
     from:              ctx.from,
     fromName:          ctx.fromName,
     replyTo:           ctx.from,
@@ -27443,7 +27530,7 @@ async function sendProjectKickoffEmail() {
     relatedEntityId:   p.id,
     attachments: [{ filename: ctx.filename, content: b64 }]
   };
-  if (ccList.length) payload.cc = ccList.join(', ');
+  if (ccList.length) payload.cc = (ccList.length === 1) ? ccList[0] : ccList;
 
   var result = await sendEmail(payload);
 
