@@ -1354,11 +1354,13 @@ textarea{resize:vertical;min-height:72px}
     <button class="btn" onclick="nav('projects')">← Cancel</button>
   </div>
   <!-- Tabbed layout (mirrors product library pattern). Tab content renders
-       into nprj-tab-details / nprj-tab-directory / nprj-tab-submittals. -->
+       into nprj-tab-details / nprj-tab-directory / nprj-tab-submittals /
+       nprj-tab-pos. -->
   <div class="tabs" style="margin-top:16px">
     <div class="tab active" onclick="npSwTab('details', this)">Project Details</div>
     <div class="tab" onclick="npSwTab('directory', this)">Project Directory</div>
     <div class="tab" onclick="npSwTab('submittals', this)">Submittals</div>
+    <div class="tab" onclick="npSwTab('pos', this)">PO's &amp; Subs</div>
   </div>
 
   <!-- ─── TAB 1: PROJECT DETAILS ─────────────────────────────────── -->
@@ -1500,9 +1502,120 @@ textarea{resize:vertical;min-height:72px}
     <div id="nprj-submittals-section"></div>
   </div>
 
+  <!-- ─── TAB 4: PO'S & SUBS ─────────────────────────────────────── -->
+  <div id="nprj-tab-pos" style="display:none">
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Purchase Orders</span>
+        <button class="btn btn-sm btn-p" onclick="poNew()" id="nprj-po-new-btn">+ New PO</button>
+      </div>
+      <div style="font-size:12px;color:#888;margin-bottom:10px">POs issued to vendors and subcontractors on this project. Numbers auto-generate as <code>{projectNumber}-NNN</code>.</div>
+      <div id="nprj-po-list-section"></div>
+    </div>
+  </div>
+
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
     <button class="btn" onclick="nav('projects')">Cancel</button>
     <button class="btn btn-p" onclick="saveProject()" style="padding:10px 32px;font-size:14px;font-weight:700" id="nprj-save-btn">Create project</button>
+  </div>
+</div>
+
+<!-- ═════════════════════════════════════════════════════════════════
+     PURCHASE ORDER EDITOR (PO Module v1)
+     Mirrors the Excel PO template layout. Reached via the "PO's & Subs"
+     tab on a project; goes back to that tab on save/cancel. We use a
+     dedicated page (not a modal) to avoid the addEventListener-after-
+     innerHTML timing issues that bit the proposal modal.
+     ═════════════════════════════════════════════════════════════════ -->
+<div class="pg" id="pg-new-po">
+  <div class="ph" style="margin-bottom:0">
+    <div>
+      <h1 id="npo-heading">New purchase order</h1>
+      <div class="sub" id="npo-project-sub" style="font-weight:600;color:var(--kmi)"></div>
+      <div class="stripe"></div>
+    </div>
+    <button class="btn" onclick="poBackToProject()">&larr; Back to project</button>
+  </div>
+
+  <!-- ── Header block: PO meta + vendor selector ─────────────────── -->
+  <div class="card">
+    <div class="ch"><span class="ct">Purchase order header</span></div>
+    <div class="fg">
+      <div class="fgr"><label>P.O. # *</label><input id="npo-number" placeholder="e.g. 26104-001"><div style="font-size:11px;color:#888;margin-top:4px">Auto-generated as <code>{projectNumber}-NNN</code>. Editable if needed.</div></div>
+      <div class="fgr"><label>Date *</label><input type="date" id="npo-date"></div>
+      <div class="fgr"><label>Customer ID</label><input id="npo-cust-id" placeholder="e.g. MACAR" maxlength="20"><div style="font-size:11px;color:#888;margin-top:4px">Short vendor code (optional). Auto-fills from vendor record if set.</div></div>
+      <div class="fgr full">
+        <label>Subcontractor / Vendor *</label>
+        <select id="npo-vendor" onchange="poVendorChanged()"><option value="">Select vendor...</option></select>
+      </div>
+      <div class="fgr full" id="npo-vendor-addr-wrap" style="display:none">
+        <div style="font-size:12px;color:#888;background:#fafafa;border-radius:7px;padding:10px 12px;line-height:1.5" id="npo-vendor-addr"></div>
+      </div>
+      <div class="fgr full"><label>Estimated delivery date <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional)</span></label><input type="date" id="npo-est-delivery"></div>
+    </div>
+  </div>
+
+  <!-- ── Project info (read-only display from project record) ────── -->
+  <div class="card">
+    <div class="ch"><span class="ct">Project information</span><span style="font-size:11px;color:#888;font-weight:400">Pulled from the project record — edit on the Project Details tab</span></div>
+    <div id="npo-project-info"></div>
+  </div>
+
+  <!-- ── Line items ─────────────────────────────────────────────── -->
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Line items</span>
+      <span style="display:flex;gap:8px">
+        <button class="btn btn-sm" onclick="poExtractFromQuote()" id="npo-extract-btn" title="Extract line items from a vendor quote PDF attached to this project, using AI">&#10024; Extract from quote</button>
+        <button class="btn btn-sm btn-p" onclick="poAddLine()">+ Add line</button>
+      </span>
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;font-size:12px">
+        <thead>
+          <tr style="background:#f5f5f5">
+            <th style="padding:6px;text-align:left;width:70px">Qty</th>
+            <th style="padding:6px;text-align:left;width:90px">Unit</th>
+            <th style="padding:6px;text-align:left">Description</th>
+            <th style="padding:6px;text-align:left;width:110px">Item #</th>
+            <th style="padding:6px;text-align:left;width:80px">Class</th>
+            <th style="padding:6px;text-align:right;width:100px">Unit price</th>
+            <th style="padding:6px;text-align:right;width:110px">Line total</th>
+            <th style="padding:6px;width:40px"></th>
+          </tr>
+        </thead>
+        <tbody id="npo-lines-tbody"></tbody>
+      </table>
+    </div>
+    <div id="npo-lines-empty" style="display:none;text-align:center;padding:20px;color:#888;font-size:13px">No line items yet. Click <strong>+ Add line</strong> or <strong>Extract from quote</strong> to begin.</div>
+  </div>
+
+  <!-- ── Totals ─────────────────────────────────────────────────── -->
+  <div class="card">
+    <div class="ch"><span class="ct">Totals</span></div>
+    <div class="fg">
+      <div class="fgr"><label>Sales tax (%)</label><input type="number" id="npo-tax-pct" min="0" step="0.001" placeholder="0" oninput="poRecalcTotals()"><div style="font-size:11px;color:#888;margin-top:4px">Default 0%. Enter the rate applicable to the delivery location.</div></div>
+      <div class="fgr">
+        <div style="background:#fafafa;border-radius:7px;padding:14px 18px;font-size:13px;line-height:1.9">
+          <div style="display:flex;justify-content:space-between"><span>Subtotal:</span><strong id="npo-subtotal">$0.00</strong></div>
+          <div style="display:flex;justify-content:space-between"><span>Sales tax:</span><strong id="npo-tax-amount">$0.00</strong></div>
+          <div style="display:flex;justify-content:space-between;font-size:15px;color:var(--kmi);border-top:1px solid #ddd;padding-top:6px;margin-top:4px"><span><strong>Total:</strong></span><strong id="npo-total">$0.00</strong></div>
+        </div>
+      </div>
+      <div class="fgr full"><label>Notes <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(internal, not printed on PDF)</span></label><textarea id="npo-notes" rows="3" style="width:100%;padding:8px;border-radius:7px;border:1px solid #ddd;font-family:inherit;font-size:13px"></textarea></div>
+    </div>
+  </div>
+
+  <!-- ── Action buttons ─────────────────────────────────────────── -->
+  <div style="display:flex;gap:10px;justify-content:space-between;padding-bottom:32px;align-items:center">
+    <div>
+      <button class="btn" onclick="poDeleteCurrent()" id="npo-delete-btn" style="display:none;color:#a33">Delete PO</button>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button class="btn" onclick="poGeneratePDF()" id="npo-pdf-btn">&#8595; Download PDF</button>
+      <button class="btn" onclick="poBackToProject()">Cancel</button>
+      <button class="btn btn-p" onclick="poSave()" style="padding:10px 32px;font-size:14px;font-weight:700" id="npo-save-btn">Save PO</button>
+    </div>
   </div>
 </div>
 
@@ -2539,6 +2652,13 @@ var DB_DEFAULTS = {
   // tickets; Fixed Fee is purely manual. Issued to the customer; not signed
   // (customer runs them through their own CO process).
   cors: [],
+  // Purchase Orders (PO Module v1) — per-project POs issued to vendors.
+  // Each PO has a header (vendor, date, customer ID short, optional est.
+  // delivery date), a JSONB array of line items (qty, unit, description,
+  // costCode, costClass, unitPrice), and a sales tax percentage. PDF
+  // matches the historical Excel template (no KMI letterhead). Future
+  // rounds will layer in delivery tracking, invoice matching, etc.
+  purchaseOrders: [],
   // Foundation master data (imported from CSV on Templates page)
   costCodes:           [],   // { id, code, description, isBudgetable, active }
   costClasses:         [],   // { id, classNo, description, active }
@@ -2637,6 +2757,7 @@ function loadDB() {
         specSections:     p.specSections     || [],
         tmTickets:      p.tmTickets      || [],
         cors:           p.cors           || [],
+        purchaseOrders: p.purchaseOrders || [],
         costCodes:           p.costCodes           || [],
         costClasses:         p.costClasses         || [],
         customersFoundation: p.customersFoundation || [],
@@ -2709,6 +2830,14 @@ var PERMISSIONS = {
   'edit-vendors':       ['full','full','full','full','none','none'],
   'add-vendor-contacts':  ['full','full','full','full','read','read'],
   'edit-vendor-contacts': ['full','full','full','full','none','none'],
+  // Purchase Orders (PO Module v1) — issued to vendors by KMI office staff.
+  // Admin/PM/PC drive PO creation since they handle vendor commitments and
+  // pricing; Accounting needs read access for AP matching; field roles
+  // (Foreman/Super) don't issue POs.
+  'view-purchase-orders':   ['full','full','full','read','none','none'],
+  'add-purchase-orders':    ['full','full','full','none','none','none'],
+  'edit-purchase-orders':   ['full','full','full','none','none','none'],
+  'delete-purchase-orders': ['full','full','none','none','none','none'],
   'analytics':          ['full','read','read','read','none','none'],
   'users':              ['full','none','none','none','none','none'],
   'templates':          ['full','read','none','none','none','none'],
@@ -23783,22 +23912,1036 @@ function getProj(id) { return db.projects.find(function(p){ return p.id === id; 
 // matching tab body. Pass `el` from the inline onclick to keep the
 // click target highlighted; pass `null` when restoring state programmatically.
 function npSwTab(tab, el) {
-  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals') tab = 'details';
+  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos') tab = 'details';
   _npActiveTab = tab;
   var heads = document.querySelectorAll('#pg-new-project .tabs .tab');
   heads.forEach(function(h){ h.classList.remove('active'); });
   if (el) {
     el.classList.add('active');
   } else {
-    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : 0);
+    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : 0));
     if (heads[idx]) heads[idx].classList.add('active');
   }
   var dTab = g('nprj-tab-details');
   var rTab = g('nprj-tab-directory');
   var sTab = g('nprj-tab-submittals');
+  var pTab = g('nprj-tab-pos');
   if (dTab) dTab.style.display = (tab === 'details')    ? '' : 'none';
   if (rTab) rTab.style.display = (tab === 'directory')  ? '' : 'none';
   if (sTab) sTab.style.display = (tab === 'submittals') ? '' : 'none';
+  if (pTab) pTab.style.display = (tab === 'pos')        ? '' : 'none';
+  // Render PO list lazily when the PO tab is opened, so we always reflect
+  // the latest db state (including POs added in another session).
+  if (tab === 'pos' && typeof renderProjectPoList === 'function') {
+    try { renderProjectPoList(); } catch(e) { console.warn('renderProjectPoList error', e); }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PURCHASE ORDER MODULE (PO Module v1)
+// ────────────────────────────────────────────────────────────────────
+// Per-project POs issued to vendors. Reached via the "PO's & Subs"
+// tab on a project. PDF mirrors the historical Excel template (no
+// KMI letterhead). Future rounds: delivery tracking, invoice match.
+//
+// Key design choices (locked in with Mike, May 2026):
+//   • PO numbers auto-generate as {projectNumber}-NNN, zero-padded
+//     to 3 digits, incrementing per project.
+//   • Sales tax is manual % per PO, default 0%.
+//   • Line items can be entered manually or extracted from a vendor
+//     quote PDF (must be a project attachment) using the same
+//     Anthropic API pattern as the scope extraction feature.
+//   • Cost code / cost class dropdowns pull from db.costCodes /
+//     db.costClasses (Foundation master data already imported).
+//
+// State machinery: _editPoId is the currently-loaded PO (null = new).
+// Mirrors _editProjectId / _editVendorId patterns elsewhere in the
+// codebase. Per code conventions: zero-argument onclick handlers
+// only (no string interpolation in onclick="..." — that was painful
+// in earlier rounds).
+// ════════════════════════════════════════════════════════════════════
+
+var _editPoId = null;
+var _newPoProjectId = null;   // project that "+ New PO" was clicked from
+var _poLineSeq = 0;           // local sequence for line item ids
+
+function _poGetProj() {
+  // POs are always scoped to a project. _editProjectId is set by editProject()
+  // and stays set while we navigate to/from the PO editor.
+  return _editProjectId ? getProj(_editProjectId) : null;
+}
+
+function _poEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _poFmtMoney(n) {
+  var v = Number(n);
+  if (!isFinite(v)) v = 0;
+  return '$' + v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// Generate the next PO number for a project: {projectNumber}-NNN, zero-padded
+// to 3 digits, incrementing past the highest existing -NNN for that project.
+// Numbers from earlier eras (e.g. "26104-002" hand-typed before this module)
+// are honored — the regex pulls any trailing digits after the last hyphen,
+// and we add a leading-zero pad on output.
+function _poGenerateNumber(projectId) {
+  var p = getProj(projectId);
+  var pref = (p && p.number) ? String(p.number).trim() : '';
+  if (!pref) pref = 'PO';
+  var max = 0;
+  var re = new RegExp('^' + pref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-(\\d+)$');
+  (db.purchaseOrders || []).forEach(function(po){
+    if (po.projectId !== projectId) return;
+    var m = String(po.number || '').match(re);
+    if (m) {
+      var n = parseInt(m[1], 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return pref + '-' + String(max + 1).padStart(3, '0');
+}
+
+// ── PO list on the project's "PO's & Subs" tab ─────────────────────
+function renderProjectPoList() {
+  var el = g('nprj-po-list-section'); if (!el) return;
+  var pid = _editProjectId;
+  if (!pid) {
+    el.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px">Save the project first to start adding POs.</div>';
+    var btn = g('nprj-po-new-btn'); if (btn) btn.disabled = true;
+    return;
+  }
+  var btn = g('nprj-po-new-btn'); if (btn) btn.disabled = false;
+  var rows = (db.purchaseOrders || []).filter(function(po){ return po.projectId === pid; });
+  // Sort newest first by creation timestamp (falls back to id for legacy rows)
+  rows.sort(function(a, b){
+    var ad = a.created ? Date.parse(a.created) : (a.id || 0);
+    var bd = b.created ? Date.parse(b.created) : (b.id || 0);
+    return bd - ad;
+  });
+  if (!rows.length) {
+    el.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px">No POs on this project yet.</div>';
+    return;
+  }
+  var html = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' +
+    '<th style="padding:8px 10px;text-align:left">PO #</th>' +
+    '<th style="padding:8px 10px;text-align:left">Date</th>' +
+    '<th style="padding:8px 10px;text-align:left">Vendor</th>' +
+    '<th style="padding:8px 10px;text-align:left">Lines</th>' +
+    '<th style="padding:8px 10px;text-align:right">Total</th>' +
+    '<th style="padding:8px 10px;text-align:left">Status</th>' +
+    '<th style="padding:8px 10px;text-align:right">Actions</th>' +
+    '</tr></thead><tbody>';
+  rows.forEach(function(po){
+    var v = (db.vendors || []).find(function(x){ return x.id === po.vendorId; });
+    var vendorName = v ? v.name : '<span style="color:#aaa">— no vendor —</span>';
+    var totals = _poComputeTotals(po);
+    var lineCount = (po.lines || []).length;
+    html += '<tr style="border-bottom:1px solid #eee">' +
+      '<td style="padding:8px 10px;font-family:monospace">' + _poEsc(po.number || '—') + '</td>' +
+      '<td style="padding:8px 10px">' + _poEsc(po.date || '—') + '</td>' +
+      '<td style="padding:8px 10px">' + vendorName + '</td>' +
+      '<td style="padding:8px 10px">' + lineCount + '</td>' +
+      '<td style="padding:8px 10px;text-align:right">' + _poFmtMoney(totals.total) + '</td>' +
+      '<td style="padding:8px 10px">' + _poEsc(po.status || 'draft') + '</td>' +
+      '<td style="padding:8px 10px;text-align:right;white-space:nowrap">' +
+        '<button class="btn btn-sm" onclick="poEditById(' + po.id + ')">Edit</button> ' +
+        '<button class="btn btn-sm" onclick="poGeneratePDFById(' + po.id + ')">PDF</button> ' +
+        '<button class="btn btn-sm" onclick="poDeleteById(' + po.id + ')" style="color:#a33">&times;</button>' +
+      '</td>' +
+      '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+// ── New / Edit PO entry points ─────────────────────────────────────
+function poNew() {
+  if (!requireFull('add-purchase-orders', 'create POs')) return;
+  if (!_editProjectId) { alert('Save the project first before adding POs.'); return; }
+  _editPoId = null;
+  _newPoProjectId = _editProjectId;
+  // Switch to the new-po page
+  setActivePage('projects');
+  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+  g('pg-new-po').classList.add('active');
+  closeModal();
+  _poInitForm(null);
+}
+
+function poEditById(id) {
+  var po = (db.purchaseOrders || []).find(function(x){ return x.id === id; });
+  if (!po) { alert('PO not found.'); return; }
+  // Ensure the project is loaded as the edit context so we can navigate back
+  if (_editProjectId !== po.projectId) _editProjectId = po.projectId;
+  _editPoId = po.id;
+  _newPoProjectId = po.projectId;
+  setActivePage('projects');
+  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+  g('pg-new-po').classList.add('active');
+  closeModal();
+  _poInitForm(po);
+}
+
+function poBackToProject() {
+  // Go back to the project edit page with the PO tab active
+  if (!_editProjectId) { nav('projects'); return; }
+  _editPoId = null;
+  setActivePage('projects');
+  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+  g('pg-new-project').classList.add('active');
+  npSwTab('pos', null);
+}
+
+// ── Form initialization ────────────────────────────────────────────
+function _poInitForm(po) {
+  var pid = _newPoProjectId || _editProjectId;
+  var p = getProj(pid) || {};
+  // Heading + project sub-label
+  g('npo-heading').textContent = po ? ('Edit PO ' + (po.number || '')) : 'New purchase order';
+  var subLabel = (p.number || '') + (p.name ? ' \u2014 ' + p.name : '');
+  g('npo-project-sub').textContent = subLabel;
+
+  // Number + date
+  if (po) {
+    g('npo-number').value = po.number || '';
+    g('npo-date').value = po.date || (new Date().toISOString().slice(0,10));
+    g('npo-cust-id').value = po.customerIdShort || '';
+    g('npo-est-delivery').value = po.estDeliveryDate || '';
+    g('npo-tax-pct').value = (po.salesTaxPct === 0 || po.salesTaxPct) ? po.salesTaxPct : 0;
+    g('npo-notes').value = po.notes || '';
+    g('npo-delete-btn').style.display = '';
+    g('npo-save-btn').textContent = 'Save changes';
+  } else {
+    g('npo-number').value = _poGenerateNumber(pid);
+    g('npo-date').value = new Date().toISOString().slice(0, 10);
+    g('npo-cust-id').value = '';
+    g('npo-est-delivery').value = '';
+    g('npo-tax-pct').value = 0;
+    g('npo-notes').value = '';
+    g('npo-delete-btn').style.display = 'none';
+    g('npo-save-btn').textContent = 'Save PO';
+  }
+
+  // Populate vendor dropdown
+  _poPopulateVendorDropdown(po ? po.vendorId : null);
+
+  // Show vendor address if a vendor was preselected
+  if (po && po.vendorId) {
+    poVendorChanged();
+  } else {
+    g('npo-vendor-addr-wrap').style.display = 'none';
+  }
+
+  // Render project info block
+  _poRenderProjectInfo(p);
+
+  // Load line items into editable rows
+  _poLoadLines(po ? po.lines : []);
+  poRecalcTotals();
+}
+
+function _poPopulateVendorDropdown(selectedId) {
+  var sel = g('npo-vendor');
+  var vendors = (db.vendors || []).slice().sort(function(a, b){
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  var html = '<option value="">Select vendor...</option>';
+  vendors.forEach(function(v){
+    var sel = (selectedId && v.id === selectedId) ? ' selected' : '';
+    html += '<option value="' + v.id + '"' + sel + '>' + _poEsc(v.name || '(unnamed)') + '</option>';
+  });
+  sel.innerHTML = html;
+  if (selectedId) sel.value = String(selectedId);
+}
+
+function poVendorChanged() {
+  var sel = g('npo-vendor');
+  var vid = parseInt(sel.value, 10);
+  if (!vid) {
+    g('npo-vendor-addr-wrap').style.display = 'none';
+    return;
+  }
+  var v = (db.vendors || []).find(function(x){ return x.id === vid; });
+  if (!v) {
+    g('npo-vendor-addr-wrap').style.display = 'none';
+    return;
+  }
+  var parts = [];
+  if (v.address) parts.push(_poEsc(v.address));
+  if (v.cityState) parts.push(_poEsc(v.cityState));
+  if (v.phone) parts.push('Phone: ' + _poEsc(v.phone));
+  if (v.primaryContact) parts.push('Contact: ' + _poEsc(v.primaryContact));
+  g('npo-vendor-addr').innerHTML = '<strong>' + _poEsc(v.name) + '</strong><br>' + parts.join('<br>');
+  g('npo-vendor-addr-wrap').style.display = '';
+}
+
+function _poRenderProjectInfo(p) {
+  var el = g('npo-project-info');
+  if (!el) return;
+  if (!p || !p.id) { el.innerHTML = '<div style="color:#888">No project loaded.</div>'; return; }
+  // Pull KMI assignments by role (snapshotted on the project)
+  var kmi = Array.isArray(p.kmiAssignments) ? p.kmiAssignments : [];
+  function findByRole(roleSubstring) {
+    var found = kmi.filter(function(a){
+      var r = String(a.role || '').toLowerCase();
+      return r.indexOf(roleSubstring.toLowerCase()) !== -1;
+    });
+    if (!found.length) return '—';
+    return found.map(function(a){
+      var u = (db.users || []).find(function(x){ return x.id === a.userId; });
+      if (!u) return '—';
+      return ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+    }).join(', ');
+  }
+  var pmName = findByRole('project manager');
+  var foremanName = findByRole('foreman');
+  var superName = findByRole('superintendent');
+  var addr = p.address || '';
+  var cityLine = [p.city, p.state, p.zip].filter(function(x){ return !!x; }).join(', ');
+
+  el.innerHTML =
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:13px">' +
+      '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">Job name</div><div style="font-weight:600">' + _poEsc(p.name || '—') + '</div></div>' +
+      '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">Project address</div><div>' + _poEsc(addr || '—') + (cityLine ? '<br>' + _poEsc(cityLine) : '') + '</div></div>' +
+      '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">KMI project manager</div><div>' + _poEsc(pmName) + '</div></div>' +
+      '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">KMI foreman</div><div>' + _poEsc(foremanName) + '</div></div>' +
+      '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">KMI superintendent</div><div>' + _poEsc(superName) + '</div></div>' +
+    '</div>';
+}
+
+// ── Line items table ───────────────────────────────────────────────
+function _poLoadLines(lines) {
+  var tbody = g('npo-lines-tbody');
+  tbody.innerHTML = '';
+  _poLineSeq = 0;
+  (lines || []).forEach(function(l){ _poAppendLineRow(l); });
+  _poToggleEmptyMessage();
+}
+
+function _poToggleEmptyMessage() {
+  var tbody = g('npo-lines-tbody');
+  var empty = g('npo-lines-empty');
+  if (!tbody || !empty) return;
+  empty.style.display = tbody.children.length === 0 ? '' : 'none';
+}
+
+function poAddLine() {
+  _poAppendLineRow({});
+  _poToggleEmptyMessage();
+  poRecalcTotals();
+}
+
+function _poAppendLineRow(line) {
+  line = line || {};
+  _poLineSeq++;
+  var rid = 'pol_' + _poLineSeq + '_' + Date.now();
+  var tbody = g('npo-lines-tbody');
+
+  // Cost code dropdown — pull from db.costCodes, filter to active only
+  var ccOpts = '<option value="">—</option>';
+  ((db.costCodes || []).slice().sort(function(a, b){
+    return String(a.code || '').localeCompare(String(b.code || ''));
+  })).forEach(function(c){
+    if (c.active === false) return;
+    var sel = (line.costCode && String(line.costCode) === String(c.code)) ? ' selected' : '';
+    ccOpts += '<option value="' + _poEsc(c.code) + '"' + sel + '>' + _poEsc(c.code) +
+              (c.description ? ' — ' + _poEsc(c.description) : '') + '</option>';
+  });
+
+  // Cost class dropdown — pull from db.costClasses
+  var clOpts = '<option value="">—</option>';
+  ((db.costClasses || []).slice().sort(function(a, b){
+    return String(a.classNo || '').localeCompare(String(b.classNo || ''));
+  })).forEach(function(c){
+    if (c.active === false) return;
+    var sel = (line.costClass && String(line.costClass) === String(c.classNo)) ? ' selected' : '';
+    clOpts += '<option value="' + _poEsc(c.classNo) + '"' + sel + '>' + _poEsc(c.classNo) +
+              (c.description ? ' — ' + _poEsc(c.description) : '') + '</option>';
+  });
+
+  var tr = document.createElement('tr');
+  tr.id = rid;
+  tr.style.borderBottom = '1px solid #eee';
+  tr.innerHTML =
+    '<td style="padding:4px"><input type="number" step="any" data-pof="qty" value="' + _poEsc(line.qty != null ? line.qty : '') + '" oninput="poRecalcTotals()" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:12px;text-align:right"></td>' +
+    '<td style="padding:4px"><input type="text" data-pof="unit" value="' + _poEsc(line.unit || '') + '" placeholder="ea" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:12px"></td>' +
+    '<td style="padding:4px"><input type="text" data-pof="description" value="' + _poEsc(line.description || '') + '" placeholder="Item description" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:12px"></td>' +
+    '<td style="padding:4px"><select data-pof="costCode" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:11px">' + ccOpts + '</select></td>' +
+    '<td style="padding:4px"><select data-pof="costClass" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:11px">' + clOpts + '</select></td>' +
+    '<td style="padding:4px"><input type="number" step="any" data-pof="unitPrice" value="' + _poEsc(line.unitPrice != null ? line.unitPrice : '') + '" oninput="poRecalcTotals()" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:12px;text-align:right"></td>' +
+    '<td style="padding:4px;text-align:right;font-family:monospace;font-size:12px" data-pof="lineTotal">$0.00</td>' +
+    '<td style="padding:4px;text-align:center"><button class="btn btn-sm" onclick="poRemoveLineByRowId(\'' + rid + '\')" title="Remove line" style="padding:3px 8px;color:#a33">&times;</button></td>';
+  tbody.appendChild(tr);
+}
+
+function poRemoveLineByRowId(rid) {
+  var tr = document.getElementById(rid);
+  if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
+  _poToggleEmptyMessage();
+  poRecalcTotals();
+}
+
+function _poReadLinesFromDom() {
+  var lines = [];
+  var trs = g('npo-lines-tbody').querySelectorAll('tr');
+  trs.forEach(function(tr){
+    var inputs = tr.querySelectorAll('[data-pof]');
+    var line = { id: tr.id };
+    inputs.forEach(function(inp){
+      var key = inp.getAttribute('data-pof');
+      if (key === 'lineTotal') return;
+      if (key === 'qty' || key === 'unitPrice') {
+        var v = parseFloat(inp.value);
+        line[key] = isFinite(v) ? v : 0;
+      } else {
+        line[key] = inp.value;
+      }
+    });
+    lines.push(line);
+  });
+  return lines;
+}
+
+function _poComputeTotals(poOrLines) {
+  // Accepts either a PO record (with .lines + .salesTaxPct) or just a lines array
+  var lines, taxPct;
+  if (Array.isArray(poOrLines)) {
+    lines = poOrLines;
+    var taxInput = g('npo-tax-pct');
+    taxPct = taxInput ? (parseFloat(taxInput.value) || 0) : 0;
+  } else if (poOrLines && typeof poOrLines === 'object') {
+    lines = poOrLines.lines || [];
+    taxPct = parseFloat(poOrLines.salesTaxPct) || 0;
+  } else {
+    lines = []; taxPct = 0;
+  }
+  var subtotal = 0;
+  lines.forEach(function(l){
+    var qty = parseFloat(l.qty) || 0;
+    var up = parseFloat(l.unitPrice) || 0;
+    subtotal += qty * up;
+  });
+  var tax = subtotal * (taxPct / 100);
+  return { subtotal: subtotal, tax: tax, total: subtotal + tax, taxPct: taxPct };
+}
+
+function poRecalcTotals() {
+  var tbody = g('npo-lines-tbody');
+  if (!tbody) return;
+  var subtotal = 0;
+  var trs = tbody.querySelectorAll('tr');
+  trs.forEach(function(tr){
+    var qtyEl = tr.querySelector('[data-pof="qty"]');
+    var upEl = tr.querySelector('[data-pof="unitPrice"]');
+    var ltEl = tr.querySelector('[data-pof="lineTotal"]');
+    var qty = qtyEl ? (parseFloat(qtyEl.value) || 0) : 0;
+    var up = upEl ? (parseFloat(upEl.value) || 0) : 0;
+    var lt = qty * up;
+    subtotal += lt;
+    if (ltEl) ltEl.textContent = _poFmtMoney(lt);
+  });
+  var taxPct = parseFloat(g('npo-tax-pct').value) || 0;
+  var tax = subtotal * (taxPct / 100);
+  var total = subtotal + tax;
+  g('npo-subtotal').textContent = _poFmtMoney(subtotal);
+  g('npo-tax-amount').textContent = _poFmtMoney(tax);
+  g('npo-total').textContent = _poFmtMoney(total);
+}
+
+// ── Save / Delete ──────────────────────────────────────────────────
+function poSave() {
+  if (!requireFull(_editPoId ? 'edit-purchase-orders' : 'add-purchase-orders',
+                   _editPoId ? 'edit POs' : 'create POs')) return;
+  var number = (g('npo-number').value || '').trim();
+  if (!number) { alert('Please enter a PO number.'); return; }
+  var date = (g('npo-date').value || '').trim();
+  if (!date) { alert('Please enter a date.'); return; }
+  var vendorIdStr = g('npo-vendor').value;
+  if (!vendorIdStr) { alert('Please select a vendor.'); return; }
+  var vendorId = parseInt(vendorIdStr, 10);
+  var pid = _newPoProjectId || _editProjectId;
+  if (!pid) { alert('Project context lost. Please re-enter from the project page.'); return; }
+
+  // Duplicate number guard within this project (allow same number on a
+  // different project — historical numbering may overlap across projects).
+  var dupe = (db.purchaseOrders || []).find(function(x){
+    return x.projectId === pid && String(x.number).toLowerCase() === number.toLowerCase() && x.id !== _editPoId;
+  });
+  if (dupe) {
+    if (!confirm('PO ' + number + ' already exists on this project. Save anyway?')) return;
+  }
+
+  var lines = _poReadLinesFromDom();
+  // Drop entirely-empty rows
+  lines = lines.filter(function(l){
+    var hasContent = (l.qty && l.qty !== 0) || (l.unitPrice && l.unitPrice !== 0) ||
+                     (l.description && l.description.trim()) ||
+                     (l.unit && l.unit.trim()) || (l.costCode) || (l.costClass);
+    return hasContent;
+  });
+
+  var data = {
+    number: number,
+    projectId: pid,
+    vendorId: vendorId,
+    customerIdShort: (g('npo-cust-id').value || '').trim(),
+    date: date,
+    estDeliveryDate: (g('npo-est-delivery').value || '').trim(),
+    notes: (g('npo-notes').value || '').trim(),
+    lines: lines,
+    salesTaxPct: parseFloat(g('npo-tax-pct').value) || 0,
+    authorizedByUserId: _currentUser ? _currentUser.id : null,
+    authorizedByName: _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : ''
+  };
+
+  if (!Array.isArray(db.purchaseOrders)) db.purchaseOrders = [];
+  if (_editPoId) {
+    var existing = (db.purchaseOrders || []).find(function(x){ return x.id === _editPoId; });
+    if (existing) Object.assign(existing, data);
+  } else {
+    data.id = Date.now();
+    data.status = 'draft';
+    data.created = new Date().toISOString();
+    data.createdByUserId = _currentUser ? _currentUser.id : null;
+    db.purchaseOrders.push(data);
+    _editPoId = data.id;
+  }
+  saveDB();
+
+  // Push to Supabase (non-fatal if table missing — user will see sync warning)
+  if (supabaseClient) {
+    var poRow = (db.purchaseOrders || []).find(function(x){ return x.id === _editPoId; });
+    if (poRow) {
+      (async function(){
+        try {
+          var r = await supabaseClient.from('kmi_purchase_orders').upsert(toSBPurchaseOrder(poRow));
+          if (r && r.error) console.warn('PO push warning:', r.error.message);
+        } catch(e){ console.warn('PO push error:', e); }
+      })();
+    }
+  }
+
+  poBackToProject();
+}
+
+function poDeleteCurrent() {
+  if (_editPoId) poDeleteById(_editPoId);
+}
+
+function poDeleteById(id) {
+  if (!requireFull('delete-purchase-orders', 'delete POs')) return;
+  var po = (db.purchaseOrders || []).find(function(x){ return x.id === id; });
+  if (!po) return;
+  if (!confirm('Delete PO ' + (po.number || '(unnumbered)') + '?\n\nThis cannot be undone.')) return;
+  db.purchaseOrders = (db.purchaseOrders || []).filter(function(x){ return x.id !== id; });
+  saveDB();
+  // Best-effort cloud delete
+  if (supabaseClient) {
+    (async function(){
+      try {
+        var r = await supabaseClient.from('kmi_purchase_orders').delete().eq('id', id);
+        if (r && r.error) console.warn('PO delete warning:', r.error.message);
+      } catch(e){ console.warn('PO delete error:', e); }
+    })();
+  }
+  if (_editPoId === id) {
+    // Was editing the deleted PO — go back to project
+    poBackToProject();
+  } else {
+    renderProjectPoList();
+  }
+}
+
+// ── Extract line items from a quote PDF (AI) ───────────────────────
+function poExtractFromQuote() {
+  if (location.protocol === 'file:') {
+    alert('AI extraction requires the app to be served from a web URL (e.g. GitHub Pages).\nWhen opened directly from a file, browser security rules block API calls.');
+    return;
+  }
+  if (!db.anthropic_api_key) {
+    alert('No Anthropic API key is configured.\nAsk your admin to add one to the kmi_settings table in Supabase.');
+    return;
+  }
+  if (!window.pdfjsLib) {
+    alert('PDF reader library failed to load. Check your internet connection and refresh.');
+    return;
+  }
+  var p = _poGetProj(); if (!p) { alert('No project loaded.'); return; }
+  var atts = (p.attachments || []).filter(function(a){
+    var n = String(a.name || '').toLowerCase();
+    var ct = String(a.contentType || '').toLowerCase();
+    return n.endsWith('.pdf') || ct.indexOf('pdf') !== -1;
+  });
+  if (!atts.length) {
+    alert('No PDF attachments found on this project.\n\nUpload the vendor quote on the Project Details tab (Attached files section) first, then come back here to extract.');
+    return;
+  }
+  // Build a small picker modal
+  var html = '<button class="xbtn" onclick="closeModal()">&times;</button>' +
+    '<div class="mt">Extract line items from a quote</div>' +
+    '<div class="msb">Pick a vendor quote PDF attached to this project. Claude will read it and propose line items, which you can then edit before saving.</div>' +
+    '<div style="max-height:300px;overflow-y:auto;border:1px solid #eee;border-radius:7px">';
+  atts.forEach(function(a){
+    var label = a.label ? ' — ' + _poEsc(a.label) : '';
+    html += '<div style="padding:10px 14px;border-bottom:1px solid #f3f3f3;display:flex;justify-content:space-between;align-items:center">' +
+      '<div><div style="font-weight:600;font-size:13px">' + _poEsc(a.name) + label + '</div>' +
+      '<div style="font-size:11px;color:#888">' + _poEsc(a.uploadedByName || '') + (a.uploadedAt ? ' — ' + _poEsc(a.uploadedAt.slice(0,10)) : '') + '</div></div>' +
+      '<button class="btn btn-sm btn-p" onclick="poRunExtract(\'' + _poEsc(a.id) + '\')">Extract</button>' +
+    '</div>';
+  });
+  html += '</div>' +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button></div>';
+  showModal(html);
+}
+
+async function poRunExtract(attId) {
+  var p = _poGetProj(); if (!p) return;
+  var att = (p.attachments || []).find(function(a){ return String(a.id) === String(attId); });
+  if (!att) { alert('Attachment not found.'); return; }
+  // Show progress in the modal
+  showModal('<div class="mt">Extracting line items\u2026</div>' +
+    '<div class="msb">Reading <strong>' + _poEsc(att.name) + '</strong> and asking Claude to extract line items. This usually takes 10\u201330 seconds.</div>' +
+    '<div style="text-align:center;padding:20px;color:#888;font-size:13px">Please wait\u2026</div>');
+
+  try {
+    // 1) Download the PDF from Supabase storage
+    if (!supabaseClient) throw new Error('Not connected to Supabase.');
+    var signed = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).createSignedUrl(att.path, 300);
+    if (signed.error) throw new Error('Storage error: ' + signed.error.message);
+    var resp = await fetch(signed.data.signedUrl);
+    if (!resp.ok) throw new Error('Download failed: HTTP ' + resp.status);
+    var buffer = await resp.arrayBuffer();
+
+    // 2) Extract text with pdf.js
+    var pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+    var fullText = '';
+    for (var i = 1; i <= pdf.numPages; i++) {
+      var page = await pdf.getPage(i);
+      var content = await page.getTextContent();
+      fullText += content.items.map(function(it){ return it.str; }).join(' ') + '\n';
+    }
+    if (!fullText.trim()) throw new Error('Could not read text from the PDF (may be a scanned image).');
+
+    // 3) Call Anthropic API
+    var MAX_CHARS = 60000;
+    var sendText = fullText.length > MAX_CHARS ? fullText.substring(0, MAX_CHARS) : fullText;
+    var prompt = 'You are extracting line items from a construction vendor quote PDF. ' +
+      'A vendor (e.g. brick supplier, insulation distributor, steel fabricator) has provided a quote to KMI Construction. ' +
+      'Extract each distinct priced line item. For each line item, capture: ' +
+      'quantity (number), unit of measure (e.g. "ea", "sqft", "lnft", "bundles", "sheets"), ' +
+      'description (the product or service description as written), and unit price (number). ' +
+      'If a unit price is not explicitly listed but a line total and quantity are, compute the unit price (line_total / qty). ' +
+      'Ignore subtotals, sales tax, freight/shipping lines unless they have their own quantity, and any terms/conditions text. ' +
+      'Return STRICT JSON only, no markdown, no commentary, no code fences. Schema:\n' +
+      '{"lines":[{"qty":<number>,"unit":"<string>","description":"<string>","unitPrice":<number>}]}\n\n' +
+      'DOCUMENT TEXT:\n' + sendText;
+
+    var apiResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': db.anthropic_api_key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 4000,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    if (!apiResp.ok) {
+      var errText = await apiResp.text();
+      throw new Error('Anthropic API ' + apiResp.status + ': ' + errText.substring(0, 300));
+    }
+    var data = await apiResp.json();
+    var reply = (data.content && data.content[0] && data.content[0].text) || '';
+    reply = reply.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+    var parsed;
+    try { parsed = JSON.parse(reply); }
+    catch(e) { throw new Error('Could not parse AI response as JSON. Response was: ' + reply.substring(0, 300)); }
+    if (!parsed.lines || !Array.isArray(parsed.lines)) {
+      throw new Error('AI response missing "lines" array.');
+    }
+
+    // 4) Show preview / append-or-replace choice
+    closeModal();
+    _poShowExtractPreview(parsed.lines, att.name);
+  } catch(err) {
+    console.error('PO extract error:', err);
+    closeModal();
+    alert('Extraction failed: ' + (err.message || String(err)));
+  }
+}
+
+function _poShowExtractPreview(lines, sourceFileName) {
+  var html = '<button class="xbtn" onclick="closeModal()">&times;</button>' +
+    '<div class="mt">Review extracted line items</div>' +
+    '<div class="msb">Claude extracted <strong>' + lines.length + ' line item' + (lines.length === 1 ? '' : 's') +
+    '</strong> from <strong>' + _poEsc(sourceFileName) + '</strong>. Review below, then choose to append or replace.</div>' +
+    '<div style="max-height:340px;overflow-y:auto;border:1px solid #eee;border-radius:7px">';
+  if (!lines.length) {
+    html += '<div style="padding:20px;color:#888;text-align:center;font-size:13px">No line items found.</div>';
+  } else {
+    html += '<table style="width:100%;font-size:12px"><thead><tr style="background:#f5f5f5">' +
+      '<th style="padding:6px 8px;text-align:left">Qty</th>' +
+      '<th style="padding:6px 8px;text-align:left">Unit</th>' +
+      '<th style="padding:6px 8px;text-align:left">Description</th>' +
+      '<th style="padding:6px 8px;text-align:right">Unit price</th>' +
+      '</tr></thead><tbody>';
+    lines.forEach(function(l){
+      html += '<tr style="border-bottom:1px solid #f3f3f3">' +
+        '<td style="padding:6px 8px;text-align:right">' + _poEsc(l.qty != null ? l.qty : '') + '</td>' +
+        '<td style="padding:6px 8px">' + _poEsc(l.unit || '') + '</td>' +
+        '<td style="padding:6px 8px">' + _poEsc(l.description || '') + '</td>' +
+        '<td style="padding:6px 8px;text-align:right">' + (l.unitPrice != null ? _poFmtMoney(l.unitPrice) : '—') + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+  }
+  html += '</div>' +
+    '<div class="mf" style="gap:8px">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn" onclick="_poApplyExtracted(false)">Append to existing lines</button>' +
+      '<button class="btn btn-p" onclick="_poApplyExtracted(true)">Replace existing lines</button>' +
+    '</div>';
+  // Stash for the apply callback (window-scoped so the zero-arg onclick can reach it)
+  window._poStagedExtractedLines = lines;
+  showModal(html);
+}
+
+function _poApplyExtracted(replace) {
+  var lines = window._poStagedExtractedLines || [];
+  if (replace) {
+    _poLoadLines(lines.map(function(l){
+      return {
+        qty: l.qty || 0,
+        unit: l.unit || '',
+        description: l.description || '',
+        unitPrice: l.unitPrice || 0,
+        costCode: '',
+        costClass: ''
+      };
+    }));
+  } else {
+    lines.forEach(function(l){
+      _poAppendLineRow({
+        qty: l.qty || 0,
+        unit: l.unit || '',
+        description: l.description || '',
+        unitPrice: l.unitPrice || 0,
+        costCode: '',
+        costClass: ''
+      });
+    });
+    _poToggleEmptyMessage();
+  }
+  window._poStagedExtractedLines = null;
+  poRecalcTotals();
+  closeModal();
+}
+
+// ── PDF generation (matches Excel template; no KMI letterhead) ─────
+function poGeneratePDF() {
+  // Save first if there are any unsaved changes? For simplicity, generate
+  // a transient PO object from the current form state.
+  var pid = _newPoProjectId || _editProjectId;
+  if (!pid) { alert('No project loaded.'); return; }
+  var lines = _poReadLinesFromDom().filter(function(l){
+    return (l.qty && l.qty !== 0) || (l.unitPrice && l.unitPrice !== 0) ||
+           (l.description && l.description.trim());
+  });
+  var vendorIdStr = g('npo-vendor').value;
+  var vendorId = vendorIdStr ? parseInt(vendorIdStr, 10) : null;
+  var po = {
+    number: (g('npo-number').value || '').trim(),
+    date: (g('npo-date').value || '').trim(),
+    customerIdShort: (g('npo-cust-id').value || '').trim(),
+    estDeliveryDate: (g('npo-est-delivery').value || '').trim(),
+    vendorId: vendorId,
+    projectId: pid,
+    lines: lines,
+    salesTaxPct: parseFloat(g('npo-tax-pct').value) || 0,
+    authorizedByName: _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : ''
+  };
+  _poRenderPDF(po);
+}
+
+function poGeneratePDFById(id) {
+  var po = (db.purchaseOrders || []).find(function(x){ return x.id === id; });
+  if (!po) { alert('PO not found.'); return; }
+  _poRenderPDF(po);
+}
+
+function _poRenderPDF(po) {
+  if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return; }
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ unit: 'pt', format: 'letter' });
+
+  var PAGE_W = 612, PAGE_H = 792;
+  var LM = 40, RM = PAGE_W - 40;  // 40pt margins (≈ 0.55")
+  var CONTENT_W = RM - LM;
+
+  function sf(style, size, color) {
+    doc.setFont('helvetica', style);
+    doc.setFontSize(size);
+    if (color) doc.setTextColor(color[0], color[1], color[2]);
+    else doc.setTextColor(0, 0, 0);
+  }
+  function ln(x1, y1, x2, y2, w, rgb) {
+    doc.setDrawColor(rgb ? rgb[0] : 0, rgb ? rgb[1] : 0, rgb ? rgb[2] : 0);
+    doc.setLineWidth(w || 0.5);
+    doc.line(x1, y1, x2, y2);
+  }
+  function box(x, y, w, h, fill) {
+    if (fill) {
+      doc.setFillColor(fill[0], fill[1], fill[2]);
+      doc.rect(x, y, w, h, 'F');
+    }
+    doc.setDrawColor(80, 80, 80);
+    doc.setLineWidth(0.5);
+    doc.rect(x, y, w, h, 'S');
+  }
+  function wrap(text, maxW) {
+    return doc.splitTextToSize(String(text == null ? '' : text), maxW);
+  }
+  function money(n) {
+    var v = Number(n);
+    if (!isFinite(v) || v === 0) return '';
+    return '$' + v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  function fmtDate(d) {
+    if (!d) return '';
+    // Already YYYY-MM-DD from <input type="date"> — render as M/D/YYYY
+    var m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return parseInt(m[2], 10) + '/' + parseInt(m[3], 10) + '/' + m[1];
+    return String(d);
+  }
+
+  var p = getProj(po.projectId) || {};
+  var v = (db.vendors || []).find(function(x){ return x.id === po.vendorId; }) || {};
+
+  // ── Title bar ───────────────────────────────────────────────────
+  sf('bold', 22, [42, 47, 92]);
+  doc.text('Purchase Order', LM, 60);
+
+  // Top-right info block (Date / P.O. # / Customer ID)
+  sf('normal', 10);
+  var rightLabelX = RM - 160;
+  var rightValX = RM - 90;
+  var ry = 48;
+  sf('bold', 10);  doc.text('Date:', rightLabelX, ry);
+  sf('normal', 10); doc.text(fmtDate(po.date) || '—', rightValX, ry);
+  ry += 14;
+  sf('bold', 10);  doc.text('P.O. #:', rightLabelX, ry);
+  sf('normal', 10); doc.text(po.number || '—', rightValX, ry);
+  ry += 14;
+  sf('bold', 10);  doc.text('Customer ID:', rightLabelX, ry);
+  sf('normal', 10); doc.text(po.customerIdShort || '', rightValX, ry);
+
+  // Horizontal divider
+  ln(LM, 80, RM, 80, 1, [200, 168, 75]);
+
+  // ── Subcontractor block ─────────────────────────────────────────
+  var y = 100;
+  sf('bold', 10);
+  doc.text('Subcontractor:', LM, y);
+  sf('normal', 10);
+  if (v.name) doc.text(String(v.name), LM + 88, y);
+  y += 14;
+  if (v.address) { doc.text(String(v.address), LM + 88, y); y += 12; }
+  if (v.cityState) { doc.text(String(v.cityState), LM + 88, y); y += 12; }
+  y += 6;
+
+  // ── Project info block (two columns) ────────────────────────────
+  // Pull names from the project's kmiAssignments
+  var kmi = Array.isArray(p.kmiAssignments) ? p.kmiAssignments : [];
+  function findByRole(roleSubstring) {
+    var matches = kmi.filter(function(a){
+      return String(a.role || '').toLowerCase().indexOf(roleSubstring.toLowerCase()) !== -1;
+    });
+    if (!matches.length) return '';
+    return matches.map(function(a){
+      var u = (db.users || []).find(function(x){ return x.id === a.userId; });
+      if (!u) return '';
+      return ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+    }).filter(function(x){ return !!x; }).join(', ');
+  }
+  var pmName = findByRole('project manager');
+  var foremanName = findByRole('foreman');
+  var superName = findByRole('superintendent');
+  var cityLine = [p.city, p.state, p.zip].filter(function(x){ return !!x; }).join(', ');
+
+  var leftLab = LM, leftVal = LM + 110;
+  var midLab  = LM + 200, midVal = LM + 290;
+  var rightLab = LM + 360, rightVal = LM + 470;
+
+  y += 8;
+  // Row 1: Job Name | KMI Foreman | Project Street Address
+  sf('bold', 10);
+  doc.text('Job Name:', leftLab, y);
+  doc.text('KMI Foreman:', midLab, y);
+  doc.text('Project Address:', rightLab, y);
+  sf('normal', 10);
+  y += 14;
+  doc.text(String(p.name || ''), leftLab, y, { maxWidth: 180 });
+  doc.text(String(foremanName || ''), midLab, y, { maxWidth: 140 });
+  doc.text(String(p.address || ''), rightLab, y, { maxWidth: 130 });
+
+  // Row 2: KMI PM | KMI Super | City/State/Zip
+  y += 18;
+  sf('bold', 10);
+  doc.text('KMI Project Manager:', leftLab, y);
+  doc.text('KMI Superintendent:', midLab, y);
+  doc.text('City, State Zip:', rightLab, y);
+  sf('normal', 10);
+  y += 14;
+  doc.text(String(pmName || ''), leftLab, y, { maxWidth: 180 });
+  doc.text(String(superName || ''), midLab, y, { maxWidth: 140 });
+  doc.text(String(cityLine || ''), rightLab, y, { maxWidth: 130 });
+
+  // Optional estimated delivery line
+  if (po.estDeliveryDate) {
+    y += 20;
+    sf('bold', 10);
+    doc.text('Estimated Delivery Date:', LM, y);
+    sf('normal', 10);
+    doc.text(fmtDate(po.estDeliveryDate), LM + 150, y);
+  }
+
+  // ── Line items table ────────────────────────────────────────────
+  y += 26;
+  // Define column geometry. Layout (left → right):
+  //   Qty (45), Unit (55), Description (235), Item # (60), Unit Price (60), Line Total (75)
+  var cQty = LM, wQty = 45;
+  var cUnit = cQty + wQty, wUnit = 55;
+  var cDesc = cUnit + wUnit, wDesc = 235;
+  var cItem = cDesc + wDesc, wItem = 60;
+  var cPrice = cItem + wItem, wPrice = 60;
+  var cTotal = cPrice + wPrice, wTotal = 75;
+  var tableRight = cTotal + wTotal;
+
+  // Header row
+  var rowH = 16;
+  doc.setFillColor(240, 240, 240);
+  doc.rect(LM, y, tableRight - LM, rowH, 'F');
+  doc.setDrawColor(120, 120, 120);
+  doc.setLineWidth(0.5);
+  doc.rect(LM, y, tableRight - LM, rowH, 'S');
+  sf('bold', 9);
+  doc.text('Qty',         cQty + 3,  y + 11);
+  doc.text('Unit',        cUnit + 3, y + 11);
+  doc.text('Description', cDesc + 3, y + 11);
+  doc.text('Item #',      cItem + 3, y + 11);
+  doc.text('Unit Price',  cPrice + wPrice - 3, y + 11, { align: 'right' });
+  doc.text('Line Total',  cTotal + wTotal - 3, y + 11, { align: 'right' });
+  y += rowH;
+
+  // Body rows
+  sf('normal', 9);
+  var lines = po.lines || [];
+  var subtotal = 0;
+  var FOOTER_TOP = PAGE_H - 110;  // leave room for totals + signatures
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    var qty = parseFloat(l.qty) || 0;
+    var up = parseFloat(l.unitPrice) || 0;
+    var lt = qty * up;
+    if (qty || up || (l.description && l.description.trim())) subtotal += lt;
+
+    // Wrap description; row height grows with text
+    var descLines = wrap(l.description || '', wDesc - 6);
+    var thisRowH = Math.max(rowH, descLines.length * 11 + 5);
+
+    // Page break if needed
+    if (y + thisRowH > FOOTER_TOP) {
+      doc.addPage();
+      y = 60;
+      // Repeat header on new page
+      doc.setFillColor(240, 240, 240);
+      doc.rect(LM, y, tableRight - LM, rowH, 'F');
+      doc.setDrawColor(120, 120, 120);
+      doc.setLineWidth(0.5);
+      doc.rect(LM, y, tableRight - LM, rowH, 'S');
+      sf('bold', 9);
+      doc.text('Qty',         cQty + 3,  y + 11);
+      doc.text('Unit',        cUnit + 3, y + 11);
+      doc.text('Description', cDesc + 3, y + 11);
+      doc.text('Item #',      cItem + 3, y + 11);
+      doc.text('Unit Price',  cPrice + wPrice - 3, y + 11, { align: 'right' });
+      doc.text('Line Total',  cTotal + wTotal - 3, y + 11, { align: 'right' });
+      y += rowH;
+      sf('normal', 9);
+    }
+
+    // Cell borders
+    doc.setDrawColor(180, 180, 180);
+    doc.setLineWidth(0.3);
+    doc.rect(cQty,   y, wQty,   thisRowH);
+    doc.rect(cUnit,  y, wUnit,  thisRowH);
+    doc.rect(cDesc,  y, wDesc,  thisRowH);
+    doc.rect(cItem,  y, wItem,  thisRowH);
+    doc.rect(cPrice, y, wPrice, thisRowH);
+    doc.rect(cTotal, y, wTotal, thisRowH);
+
+    doc.text(qty ? String(qty) : '',  cQty + wQty - 3, y + 11, { align: 'right' });
+    doc.text(String(l.unit || ''),    cUnit + 3,       y + 11);
+    doc.text(descLines,               cDesc + 3,       y + 11);
+    doc.text(String(l.costCode || ''),cItem + 3,       y + 11);
+    doc.text(money(up),               cPrice + wPrice - 3, y + 11, { align: 'right' });
+    doc.text(money(lt),               cTotal + wTotal - 3, y + 11, { align: 'right' });
+
+    y += thisRowH;
+  }
+
+  // ── Totals block ────────────────────────────────────────────────
+  y += 10;
+  var totalsLabelX = cPrice;
+  var totalsValueX = cTotal + wTotal - 3;
+  var taxPct = parseFloat(po.salesTaxPct) || 0;
+  var taxAmount = subtotal * (taxPct / 100);
+  var grandTotal = subtotal + taxAmount;
+
+  sf('bold', 10);
+  doc.text('Subtotal:', totalsLabelX, y);
+  sf('normal', 10);
+  doc.text(money(subtotal), totalsValueX, y, { align: 'right' });
+  y += 14;
+
+  sf('bold', 10);
+  doc.text('Sales Tax (' + taxPct + '%):', totalsLabelX, y);
+  sf('normal', 10);
+  doc.text(money(taxAmount), totalsValueX, y, { align: 'right' });
+  y += 14;
+
+  sf('bold', 11, [42, 47, 92]);
+  doc.text('Total:', totalsLabelX, y);
+  doc.text(money(grandTotal), totalsValueX, y, { align: 'right' });
+  sf('normal', 10);
+  y += 30;
+
+  // ── Signature block ─────────────────────────────────────────────
+  if (y > PAGE_H - 80) {
+    doc.addPage();
+    y = 60;
+  } else {
+    y = Math.max(y, PAGE_H - 80);
+  }
+  ln(LM, y, LM + 200, y, 0.5);
+  ln(LM + 250, y, LM + 450, y, 0.5);
+  sf('normal', 9);
+  doc.text('Authorized by: ' + (po.authorizedByName || ''), LM, y + 12);
+  doc.text('Date', LM + 220, y + 12);
+  doc.text('Subcontractor Authorization', LM + 250, y + 12);
+  doc.text('Date', LM + 470, y + 12);
+
+  // ── Save ────────────────────────────────────────────────────────
+  var safeName = String(po.number || 'PO').replace(/[^a-zA-Z0-9._-]/g, '_');
+  doc.save('PO_' + safeName + '.pdf');
 }
 
 // Project numbering scheme: YYNNN
@@ -28404,6 +29547,49 @@ function fromSBCor(r) {
   };
 }
 
+// ── Purchase Order mappers (PO Module v1) ────────────────────────
+// Lines are kept as JSONB on the PO row (matching how proposals store
+// their inc/exc/costs arrays). Each line is:
+//   { id, qty, unit, description, costCode, costClass, unitPrice }
+function toSBPurchaseOrder(r) {
+  return {
+    id: r.id,
+    number: r.number || '',
+    project_id: r.projectId || null,
+    vendor_id: r.vendorId || null,
+    customer_id_short: r.customerIdShort || '',
+    date: r.date || null,
+    est_delivery_date: r.estDeliveryDate || null,
+    notes: r.notes || '',
+    lines: Array.isArray(r.lines) ? r.lines : [],
+    sales_tax_pct: (r.salesTaxPct !== undefined && r.salesTaxPct !== null && r.salesTaxPct !== '') ? r.salesTaxPct : 0,
+    authorized_by_user_id: r.authorizedByUserId || null,
+    authorized_by_name: r.authorizedByName || '',
+    status: r.status || 'draft',
+    created: r.created || '',
+    created_by_user_id: r.createdByUserId || null
+  };
+}
+function fromSBPurchaseOrder(r) {
+  return {
+    id: r.id,
+    number: r.number || '',
+    projectId: r.project_id || null,
+    vendorId: r.vendor_id || null,
+    customerIdShort: r.customer_id_short || '',
+    date: r.date || '',
+    estDeliveryDate: r.est_delivery_date || '',
+    notes: r.notes || '',
+    lines: Array.isArray(r.lines) ? r.lines : [],
+    salesTaxPct: (r.sales_tax_pct !== null && r.sales_tax_pct !== undefined) ? r.sales_tax_pct : 0,
+    authorizedByUserId: r.authorized_by_user_id || null,
+    authorizedByName: r.authorized_by_name || '',
+    status: r.status || 'draft',
+    created: r.created || '',
+    createdByUserId: r.created_by_user_id || null
+  };
+}
+
 // ── Foundation master-data mappers (cost codes / classes / customers) ──
 function toSBCostCode(r) {
   return {
@@ -28571,6 +29757,14 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_cors').upsert(db.cors.map(toSBCor));
       if (r && r.error) errs.push('cors: ' + r.error.message);
     }
+    // Purchase Orders (PO Module v1) — non-fatal if table missing on older
+    // Supabase projects; the kmi_purchase_orders table is created by the
+    // po_round1 migration. Without the table, POs only persist in
+    // localStorage on this device.
+    if ((db.purchaseOrders || []).length) {
+      var r = await supabaseClient.from('kmi_purchase_orders').upsert(db.purchaseOrders.map(toSBPurchaseOrder));
+      if (r && r.error) errs.push('purchase_orders: ' + r.error.message);
+    }
     // Foundation master data — cost codes / classes / customers (Chunk 1).
     // These are populated by CSV import on the Templates page; if local is
     // empty we don't push (avoids wiping a populated cloud copy on a fresh
@@ -28646,7 +29840,7 @@ async function pullFromSupabase() {
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
-         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes] = await Promise.all([
+         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -28669,7 +29863,8 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_product_documents').select('*'),
       supabaseClient.from('kmi_submittals').select('*'),
       supabaseClient.from('kmi_spec_sections').select('*').order('sort_order', {ascending:true}),
-      supabaseClient.from('kmi_project_parameters').select('*').order('sort_order', {ascending:true})
+      supabaseClient.from('kmi_project_parameters').select('*').order('sort_order', {ascending:true}),
+      supabaseClient.from('kmi_purchase_orders').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -28773,6 +29968,17 @@ async function pullFromSupabase() {
     } else if (corsRes && corsRes.error) {
       console.warn('kmi_cors load error (table missing?):', corsRes.error.message);
       if (!Array.isArray(db.cors)) db.cors = [];
+    }
+    // Purchase Orders (PO Module v1) — same preserve-on-missing pattern.
+    // If kmi_purchase_orders doesn't exist yet on this Supabase project (the
+    // po_round1 migration hasn't been run), keep whatever's local instead of
+    // wiping it. Once the migration runs and a sync happens, the cloud copy
+    // becomes the source of truth.
+    if (posRes && !posRes.error) {
+      db.purchaseOrders = (posRes.data || []).map(fromSBPurchaseOrder);
+    } else if (posRes && posRes.error) {
+      console.warn('kmi_purchase_orders load error (table missing?):', posRes.error.message);
+      if (!Array.isArray(db.purchaseOrders)) db.purchaseOrders = [];
     }
 
     // Product Library (Round 1) — same preserve-on-missing pattern.
