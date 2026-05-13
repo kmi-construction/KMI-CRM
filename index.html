@@ -27894,7 +27894,7 @@ function buildProposalPDF(id) {
   var sigName  = _sigUser ? ((_sigUser.firstName || '') + ' ' + (_sigUser.lastName || '')).trim() : 'Michael Kinateder';
   var sigPhone = _sigUser ? (_sigUser.phone || '') : '(414) 573-0694';
   var sigEmail = _sigUser ? (_sigUser.email || '') : 'mike@kmi-construction.com';
-  var sigTitle = _sigUser ? (_userTitle(_sigUser) || (_sigUser.role && _sigUser.role !== 'Admin' ? _sigUser.role : '')) : 'Project Manager';
+  var sigRole  = _sigUser ? (_sigUser.role  || '') : 'Project Manager';
   var sigImage = (_sigUser && _sigUser.signatureImage && _sigUser.signatureImage.data) ? _sigUser.signatureImage : null;
   if (!sigName) sigName = 'KMI Construction';
 
@@ -27969,8 +27969,7 @@ function buildProposalPDF(id) {
   var SP_LETTER_BLOCK     = 14 + 30 + 14*3 + 24 + 24 + 18;       // date + address + Re: + Dear + spacing
   var SP_BODY             = bodyLines.length * 14 + 28;
   var SP_SIGNOFF          = 14*3 + 50;                            // name/phone/email + gap
-  var costRowCount        = (p.costs || []).length;
-  var SP_BID_TABLE        = 20 + (costRowCount * 14) + 18 + 14;          // header + rows + total line
+  var SP_BID_TABLE        = 20 + ((p.costs||[]).length * 14) + 18; // header + N rows + total line
   // Alternate / VE blocks (only counted when non-empty): heading + line + gap
   // per block, plus ~14pt per item row.
   var altCount = (p.alternateCosts || []).length;
@@ -28019,36 +28018,42 @@ function buildProposalPDF(id) {
   doc.text(sigPhone, LM + 160, y); y += 14;
   doc.text(sigEmail, LM + 160, y); y += 50;
 
-  // Bid Proposal — itemized cost breakdown matching the app's table
-  // Columns: Description (left) | Qty | Unit | Bid Amount | Amount
+  // ── Itemized cost breakdown ──────────────────────────────────────
+  // 5-column table: Description / Qty / Unit / Bid Amount / Amount.
+  // Numeric columns right-aligned; Description and Unit left-aligned.
+  var COL_QTY_X  = LM + 250;   // ≈ 304 — left-aligned header, right-aligned value
+  var COL_UNIT_X = LM + 278;   // ≈ 332 — left-aligned
+  var COL_BID_X  = LM + 421;   // ≈ 475 — right edge for Bid Amount column
+  var COL_AMT_X  = RM;         //   558 — right edge for Amount column
   sf('bold', 9.5);
-  doc.text('Description', LM, y);
-  doc.text('Qty', 320, y, {align: 'right'});
-  doc.text('Unit', 332, y);
-  doc.text('Bid Amount', 478, y, {align: 'right'});
-  doc.text('Amount', RM, y, {align: 'right'});
+  doc.text('Description', LM,         y);
+  doc.text('Qty',         COL_QTY_X,  y);
+  doc.text('Unit',        COL_UNIT_X, y);
+  doc.text('Bid Amount',  COL_BID_X,  y, {align:'right'});
+  doc.text('Amount',      COL_AMT_X,  y, {align:'right'});
   y += 6; ln(LM, y, RM, y); y += 14;
   sf('normal', 9.5);
-  (p.costs || []).forEach(function(cost) {
+  (p.costs || []).forEach(function(r){
     if (y + 16 > FOOTER_TOP) {
       doc.addPage(); letterhead();
       y = HEADER_BOTTOM + 30;
       sf('normal', 9.5);
     }
-    var amount = (Number(cost.qty) || 0) * (Number(cost.rate) || 0);
-    var descLines = doc.splitTextToSize(String(cost.desc || ''), 250);
-    doc.text(descLines, LM, y);
-    doc.text(String(cost.qty != null ? cost.qty : 0), 320, y, {align: 'right'});
-    doc.text(String(cost.unit || ''), 332, y);
-    doc.text(fmtM(Number(cost.rate) || 0), 478, y, {align: 'right'});
-    doc.text(fmtM(amount), RM, y, {align: 'right'});
-    y += Math.max(14, descLines.length * 12);
+    var _qty  = Number(r.qty)  || 0;
+    var _rate = Number(r.rate) || 0;
+    var _amt  = _qty * _rate;
+    var _descL = doc.splitTextToSize(String(r.desc || ''), COL_QTY_X - LM - 6);
+    doc.text(_descL,             LM,             y);
+    doc.text(String(_qty),       COL_QTY_X + 14, y, {align:'right'});
+    doc.text(String(r.unit||''), COL_UNIT_X,     y);
+    doc.text(fmtM(_rate),        COL_BID_X,      y, {align:'right'});
+    doc.text(fmtM(_amt),         COL_AMT_X,      y, {align:'right'});
+    y += Math.max(14, _descL.length * 12);
   });
-  // Total row
   y += 4; ln(LM, y, RM, y); y += 14;
   sf('bold', 10);
   doc.text('Total Bid Proposal', LM, y);
-  doc.text(fmtM(tot), RM, y, {align: 'right'});
+  doc.text(fmtM(tot), COL_AMT_X, y, {align:'right'});
   y += 24;
 
   // ── Alternate / VE pricing blocks (if any) ──────────────────────
@@ -28061,7 +28066,7 @@ function buildProposalPDF(id) {
     }
     sf('bold', 10);
     doc.text(title, LM, y);
-    doc.text('Bid Amount', RM - 90, y);
+    doc.text('Bid Amount', RM, y, {align:'right'});
     y += 6; ln(LM, y, RM, y); y += 16;
     sf('normal', 10);
     items.forEach(function(it){
@@ -28071,9 +28076,9 @@ function buildProposalPDF(id) {
         sf('normal', 10);
       }
       var desc  = String(it.desc || '');
-      var descL = doc.splitTextToSize(desc, RM - LM - 110);
+      var descL = doc.splitTextToSize(desc, RM - LM - 100);
       doc.text(descL, LM, y);
-      doc.text(fmtM(it.amount || 0), RM - 90, y);
+      doc.text(fmtM(it.amount || 0), RM, y, {align:'right'});
       y += Math.max(14, descL.length * 12);
     });
     y += 14;
@@ -28129,11 +28134,9 @@ function buildProposalPDF(id) {
   doc.text('KMI Construction', LM, y); y += 18;
 
   // Visual signature: uploaded image takes precedence; otherwise the user's
-  // first+last name in script style. Sacramento renders best; helvetica italic
-  // is the guaranteed fallback if the embedded font fails to register. Typed
-  // name and title always appear below for legibility regardless of which
-  // path is taken.
-  var SIG_TARGET_H = 40;     // pt — keeps the visual signature compact
+  // first+last name in Sacramento script. Typed name and role go beneath
+  // for legibility regardless of which path is taken.
+  var SIG_TARGET_H = 38;     // pt — keeps the visual signature compact
   var SIG_MAX_W    = 240;    // pt — caps very wide images so layout doesn't break
   if (sigImage && sigImage.w && sigImage.h) {
     var aspect = sigImage.w / sigImage.h;
@@ -28141,31 +28144,29 @@ function buildProposalPDF(id) {
     if (sW > SIG_MAX_W) { sW = SIG_MAX_W; sH = sW / aspect; }
     try {
       doc.addImage(sigImage.data, 'PNG', LM, y - 4, sW, sH);
-      y += sH + 4;
+      y += sH;
     } catch (_e) {
-      // Image insertion failed — fall back to the script-font name path.
-      doc.setFont('helvetica', 'italic');           // guaranteed fallback
-      try { doc.setFont('Sacramento', 'normal'); } catch (_) {}
-      doc.setFontSize(24);
+      // Image insertion failed — fall back to italic-helvetica name.
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(22);
       doc.text(sigName, LM, y + 18);
-      y += 34;
+      y += 22;
     }
   } else {
-    // No uploaded signature — render the user's name in script style.
-    // Set italic helvetica FIRST so we have a usable fallback if Sacramento
-    // didn't register (jsPDF silently keeps the previously-set font on
-    // unknown-font setFont calls).
-    doc.setFont('helvetica', 'italic');             // guaranteed fallback
-    try { doc.setFont('Sacramento', 'normal'); } catch (_) {}
-    doc.setFontSize(24);
+    // No uploaded signature image — render the signer's name in italic
+    // helvetica. (Sacramento TTF registers in jsPDF but produces empty
+    // glyphs in some builds; helvetica-oblique is a built-in PDF font
+    // and always renders.)
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(22);
     doc.text(sigName, LM, y + 18);
-    y += 34;
+    y += 22;
   }
-  y += 6;  // gap before typed legibility lines
+  y += 4;  // small gap before typed legibility line
 
   sf('normal', 10, [0,0,0]);  // back to Helvetica for the typed lines
   doc.text(sigName, LM, y); y += 14;
-  if (sigTitle) doc.text(sigTitle, LM, y);
+  if (sigRole) doc.text(sigRole, LM, y);
 
   return { doc: doc, prop: p };
 }
