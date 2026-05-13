@@ -16733,48 +16733,49 @@ function buildStandardCorPDF(c, p) {
   doc.text('$ ' + _corPdfMoney(c.totalSub), RM - 6, y + 10, {align:'right'});
   y += 28;
 
-  // ── UNIT PRICING BREAKDOWN ────────────────────────────────────────
-  // Same shape as Equipment: description / qty / unit / unit price / cost.
-  y = ensureRoom(80, y);
-  sf('bold', 10);
-  doc.text('Unit Pricing Breakdown:', LM, y);
-  y += 14;
-
-  var upRows = (Array.isArray(c.unitPriceRows) ? c.unitPriceRows : []).map(function(r){
-    var q  = Number(r.quantity)  || 0;
-    var up = Number(r.unitPrice) || 0;
-    return {
-      description: r.description || '',
-      quantity: q,
-      unit: r.unit || '',
-      unitPrice: up,
-      cost: q * up
-    };
-  });
-  var uc = {
-    desc: LM,
-    qty:  LM + 220,
-    unit: LM + 290,
-    rate: LM + 380,
-    cost: RM
-  };
-  sf('bold', 9, [80, 80, 80]);
-  doc.text('Description', uc.desc, y);
-  doc.text('Quantity', uc.qty + 60, y, {align:'right'});
-  doc.text('Unit', uc.unit + 30, y, {align:'center'});
-  doc.text('Unit Price', uc.rate + 60, y, {align:'right'});
-  doc.text('Cost', uc.cost - 6, y, {align:'right'});
-  y += 4;
-  ln(LM, y, RM, y, 0.4, [180, 180, 180]);
-  y += 12;
-
-  sf('normal', 10, [0, 0, 0]);
-  if (!upRows.length) {
-    sf('italic', 9, [150, 150, 150]);
-    doc.text('(no unit pricing)', uc.desc, y);
-    sf('normal', 10, [0, 0, 0]);
+  // ── UNIT PRICING BREAKDOWN (conditional) ──────────────────────────
+  // Unit pricing is rarely used on KMI projects, so the entire section
+  // (heading, table, total, AND the OH&P line below) is hidden when no
+  // unit pricing rows are present. Keeps the COR to one page in the
+  // common case while still rendering correctly when the feature IS
+  // used. hasUnitPricing is referenced again below for the OH&P line
+  // so it's declared at function scope.
+  var hasUnitPricing = Array.isArray(c.unitPriceRows) && c.unitPriceRows.length > 0;
+  if (hasUnitPricing) {
+    y = ensureRoom(80, y);
+    sf('bold', 10);
+    doc.text('Unit Pricing Breakdown:', LM, y);
     y += 14;
-  } else {
+
+    var upRows = c.unitPriceRows.map(function(r){
+      var q  = Number(r.quantity)  || 0;
+      var up = Number(r.unitPrice) || 0;
+      return {
+        description: r.description || '',
+        quantity: q,
+        unit: r.unit || '',
+        unitPrice: up,
+        cost: q * up
+      };
+    });
+    var uc = {
+      desc: LM,
+      qty:  LM + 220,
+      unit: LM + 290,
+      rate: LM + 380,
+      cost: RM
+    };
+    sf('bold', 9, [80, 80, 80]);
+    doc.text('Description', uc.desc, y);
+    doc.text('Quantity', uc.qty + 60, y, {align:'right'});
+    doc.text('Unit', uc.unit + 30, y, {align:'center'});
+    doc.text('Unit Price', uc.rate + 60, y, {align:'right'});
+    doc.text('Cost', uc.cost - 6, y, {align:'right'});
+    y += 4;
+    ln(LM, y, RM, y, 0.4, [180, 180, 180]);
+    y += 12;
+
+    sf('normal', 10, [0, 0, 0]);
     upRows.forEach(function(r){
       y = ensureRoom(16, y);
       var dLines = wrap(r.description || '', 210);
@@ -16785,20 +16786,22 @@ function buildStandardCorPDF(c, p) {
       doc.text('$ ' + _corPdfMoney(r.cost), uc.cost - 6, y, {align:'right'});
       y += dLines.length * 12 + 2;
     });
-  }
-  y += 6;
+    y += 6;
 
-  y = ensureRoom(22, y);
-  box(LM, y - 2, RM - LM, 18, YELLOW, [180, 150, 50]);
-  sf('bold', 10, [0, 0, 0]);
-  doc.text('TOTAL UNIT PRICING COST', LM + 6, y + 10);
-  doc.text('$ ' + _corPdfMoney(c.totalUnitPrice || 0), RM - 6, y + 10, {align:'right'});
-  y += 32;
+    y = ensureRoom(22, y);
+    box(LM, y - 2, RM - LM, 18, YELLOW, [180, 150, 50]);
+    sf('bold', 10, [0, 0, 0]);
+    doc.text('TOTAL UNIT PRICING COST', LM + 6, y + 10);
+    doc.text('$ ' + _corPdfMoney(c.totalUnitPrice || 0), RM - 6, y + 10, {align:'right'});
+    y += 32;
+  }
 
   // ── OH&P / Bond summary lines + grand total ───────────────────────
-  // Five lines now (Material, Equipment, Sub, Unit Pricing, Bond). Each
-  // OH&P line is 16pt + 22pt for bond + 22pt for grand total ≈ 124, so
-  // ensureRoom raised to 140 for breathing room.
+  // 4–5 lines (Material, Equipment, Sub, [Unit Pricing], Bond). Worst
+  // case = 5 × 16pt + bond 22pt + grand total 22pt ≈ 124pt, so
+  // ensureRoom raised to 140 for breathing room. When Unit Pricing is
+  // hidden, the extra room is simply unused — ensureRoom is a min-room
+  // check, not a forced reservation.
   y = ensureRoom(140, y);
   var matEqPct      = Number(c.matEqMarkupPct) || 0;
   var equipmentPct  = (c.equipmentMarkupPct  !== null && c.equipmentMarkupPct  !== undefined) ? Number(c.equipmentMarkupPct)  : 10;
@@ -16831,9 +16834,13 @@ function buildStandardCorPDF(c, p) {
   doc.text('$ ' + _corPdfMoney(c.subOhp), RM - 6, y, {align:'right'});
   y += 16;
 
-  doc.text('Contractor Overhead and Profit on Unit Pricing(' + unitPricePct + '%)', LM, y);
-  doc.text('$ ' + _corPdfMoney(c.unitPriceOhp || 0), RM - 6, y, {align:'right'});
-  y += 16;
+  // Unit Pricing OH&P line only renders when the section above did
+  // (hasUnitPricing was declared up there for exactly this reason).
+  if (hasUnitPricing) {
+    doc.text('Contractor Overhead and Profit on Unit Pricing(' + unitPricePct + '%)', LM, y);
+    doc.text('$ ' + _corPdfMoney(c.unitPriceOhp || 0), RM - 6, y, {align:'right'});
+    y += 16;
+  }
 
   // "Conractor Bond Cost" — preserve the typo-as-shown spelling in the
   // canonical KMI form so the rendered PDF matches the existing template.
