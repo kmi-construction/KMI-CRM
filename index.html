@@ -28022,19 +28022,15 @@ function buildProposalPDF(id) {
   doc.text(sigPhone, LM + 160, y); y += 14;
   doc.text(sigEmail, LM + 160, y); y += 50;
 
-  // ── Itemized cost breakdown ──────────────────────────────────────
-  // 5-column table: Description / Qty / Unit / Bid Amount / Amount.
-  // Numeric columns right-aligned; Description and Unit left-aligned.
-  var COL_QTY_X  = LM + 250;   // ≈ 304 — left-aligned header, right-aligned value
-  var COL_UNIT_X = LM + 278;   // ≈ 332 — left-aligned
-  var COL_BID_X  = LM + 421;   // ≈ 475 — right edge for Bid Amount column
-  var COL_AMT_X  = RM;         //   558 — right edge for Amount column
+  // ── Cost breakdown (2 columns: Description + Amount) ─────────────
+  // Qty, Unit, and Bid Amount (rate-per-unit) are intentionally hidden
+  // from the customer-facing proposal — internal estimating still uses
+  // them, but lump-sum totals are what gets quoted. A future enhancement
+  // will surface unit pricing when KMI starts quoting it that way.
+  var COL_AMT_X = RM;  // right edge for Amount column (page right margin)
   sf('bold', 9.5);
-  doc.text('Description', LM,         y);
-  doc.text('Qty',         COL_QTY_X,  y);
-  doc.text('Unit',        COL_UNIT_X, y);
-  doc.text('Bid Amount',  COL_BID_X,  y, {align:'right'});
-  doc.text('Amount',      COL_AMT_X,  y, {align:'right'});
+  doc.text('Description', LM,        y);
+  doc.text('Amount',      COL_AMT_X, y, {align:'right'});
   y += 6; ln(LM, y, RM, y); y += 14;
   sf('normal', 9.5);
   (p.costs || []).forEach(function(r){
@@ -28043,15 +28039,11 @@ function buildProposalPDF(id) {
       y = HEADER_BOTTOM + 30;
       sf('normal', 9.5);
     }
-    var _qty  = Number(r.qty)  || 0;
-    var _rate = Number(r.rate) || 0;
-    var _amt  = _qty * _rate;
-    var _descL = doc.splitTextToSize(String(r.desc || ''), COL_QTY_X - LM - 6);
-    doc.text(_descL,             LM,             y);
-    doc.text(String(_qty),       COL_QTY_X + 14, y, {align:'right'});
-    doc.text(String(r.unit||''), COL_UNIT_X,     y);
-    doc.text(fmtM(_rate),        COL_BID_X,      y, {align:'right'});
-    doc.text(fmtM(_amt),         COL_AMT_X,      y, {align:'right'});
+    var _amt = (Number(r.qty) || 0) * (Number(r.rate) || 0);
+    // Description wraps within the full width minus ~100pt for the money column
+    var _descL = doc.splitTextToSize(String(r.desc || ''), RM - LM - 100);
+    doc.text(_descL,     LM,        y);
+    doc.text(fmtM(_amt), COL_AMT_X, y, {align:'right'});
     y += Math.max(14, _descL.length * 12);
   });
   y += 4; ln(LM, y, RM, y); y += 14;
@@ -28070,7 +28062,7 @@ function buildProposalPDF(id) {
     }
     sf('bold', 10);
     doc.text(title, LM, y);
-    doc.text('Bid Amount', RM, y, {align:'right'});
+    doc.text('Amount', RM, y, {align:'right'});
     y += 6; ln(LM, y, RM, y); y += 16;
     sf('normal', 10);
     items.forEach(function(it){
