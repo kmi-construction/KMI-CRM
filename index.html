@@ -1606,17 +1606,18 @@ textarea{resize:vertical;min-height:72px}
     </div>
   </div>
 
-  <!-- ── Action buttons ─────────────────────────────────────────── -->
-  <div style="display:flex;gap:10px;justify-content:space-between;padding-bottom:32px;align-items:center">
-    <div>
-      <button class="btn" onclick="poDeleteCurrent()" id="npo-delete-btn" style="display:none;color:#a33">Delete PO</button>
-    </div>
-    <div style="display:flex;gap:10px">
-      <button class="btn" onclick="poGeneratePDF()" id="npo-pdf-btn">&#8595; Download PDF</button>
-      <button class="btn" onclick="poBackToProject()">Cancel</button>
-      <button class="btn btn-p" onclick="poSave()" style="padding:10px 32px;font-size:14px;font-weight:700" id="npo-save-btn">Save PO</button>
-    </div>
+  <!-- ── Status card (only shown on saved POs) ──────────────────── -->
+  <div class="card" id="npo-status-card" style="display:none">
+    <div class="ch"><span class="ct">Status</span></div>
+    <div id="npo-status-body" style="font-size:13px;line-height:1.7"></div>
   </div>
+
+  <!-- ── Action buttons ─────────────────────────────────────────── -->
+  <!-- Built dynamically by _poRenderActionBar() so the available actions
+       always match the current PO status (Draft / Issued / Open / Closed /
+       Void). The Save button is only meaningful in Draft; once Issued, edits
+       require Revise. -->
+  <div id="npo-action-bar" style="display:flex;gap:10px;justify-content:space-between;padding-bottom:32px;align-items:center;flex-wrap:wrap"></div>
 </div>
 
 <!-- CUSTOMERS -->
@@ -2838,6 +2839,10 @@ var PERMISSIONS = {
   'add-purchase-orders':    ['full','full','full','none','none','none'],
   'edit-purchase-orders':   ['full','full','full','none','none','none'],
   'delete-purchase-orders': ['full','full','none','none','none','none'],
+  // Status transitions: Issue (Draft→Issued + email), Mark Open, Mark Closed,
+  // Void, Revise. Same trust shape as edit (Admin/PM/PC). Field roles never
+  // transition POs; Accounting reads only.
+  'issue-purchase-orders':  ['full','full','full','none','none','none'],
   'analytics':          ['full','read','read','read','none','none'],
   'users':              ['full','none','none','none','none','none'],
   'templates':          ['full','read','none','none','none','none'],
@@ -24052,7 +24057,9 @@ function renderProjectPoList() {
       '<td style="padding:8px 10px">' + vendorName + '</td>' +
       '<td style="padding:8px 10px">' + lineCount + '</td>' +
       '<td style="padding:8px 10px;text-align:right">' + _poFmtMoney(totals.total) + '</td>' +
-      '<td style="padding:8px 10px">' + _poEsc(po.status || 'draft') + '</td>' +
+      '<td style="padding:8px 10px">' + _poStatusBadgeHtml(_poStatusOf(po)) +
+        (po.revisionNumber && po.revisionNumber > 1 ? ' <span style="color:#888;font-size:11px;margin-left:4px">Rev ' + po.revisionNumber + '</span>' : '') +
+        '</td>' +
       '<td style="padding:8px 10px;text-align:right;white-space:nowrap">' +
         '<button class="btn btn-sm" onclick="poEditById(' + po.id + ')">Edit</button> ' +
         '<button class="btn btn-sm" onclick="poGeneratePDFById(' + po.id + ')">PDF</button> ' +
@@ -24107,7 +24114,11 @@ function _poInitForm(po) {
   var pid = _newPoProjectId || _editProjectId;
   var p = getProj(pid) || {};
   // Heading + project sub-label
-  g('npo-heading').textContent = po ? ('Edit PO ' + (po.number || '')) : 'New purchase order';
+  var headingPo = po ? ('Edit PO ' + (po.number || '')) : 'New purchase order';
+  if (po && po.revisionNumber && po.revisionNumber > 1) {
+    headingPo += ' (Rev ' + po.revisionNumber + ')';
+  }
+  g('npo-heading').textContent = headingPo;
   var subLabel = (p.number || '') + (p.name ? ' \u2014 ' + p.name : '');
   g('npo-project-sub').textContent = subLabel;
 
@@ -24119,8 +24130,6 @@ function _poInitForm(po) {
     g('npo-est-delivery').value = po.estDeliveryDate || '';
     g('npo-tax-pct').value = (po.salesTaxPct === 0 || po.salesTaxPct) ? po.salesTaxPct : 0;
     g('npo-notes').value = po.notes || '';
-    g('npo-delete-btn').style.display = '';
-    g('npo-save-btn').textContent = 'Save changes';
   } else {
     g('npo-number').value = _poGenerateNumber(pid);
     g('npo-date').value = new Date().toISOString().slice(0, 10);
@@ -24128,8 +24137,6 @@ function _poInitForm(po) {
     g('npo-est-delivery').value = '';
     g('npo-tax-pct').value = 0;
     g('npo-notes').value = '';
-    g('npo-delete-btn').style.display = 'none';
-    g('npo-save-btn').textContent = 'Save PO';
   }
 
   // Populate vendor dropdown
@@ -24148,6 +24155,193 @@ function _poInitForm(po) {
   // Load line items into editable rows
   _poLoadLines(po ? po.lines : []);
   poRecalcTotals();
+
+  // Status card + dynamic action bar + form lock state
+  _poRenderStatusCard(po);
+  _poRenderActionBar(po);
+  _poApplyEditableState(po);
+}
+
+// Lock down the form when the PO is not in Draft. Non-Draft POs are
+// read-only — edits require clicking Revise (which clones to a new Draft
+// at an incremented revision number).
+function _poApplyEditableState(po) {
+  var status = _poStatusOf(po);
+  var locked = !!(po && status !== 'Draft');
+  // Field IDs that should be read-only when locked
+  var fieldIds = ['npo-number','npo-date','npo-cust-id','npo-vendor',
+                  'npo-est-delivery','npo-tax-pct','npo-notes'];
+  fieldIds.forEach(function(id){
+    var el = g(id); if (!el) return;
+    if (el.tagName === 'SELECT') {
+      el.disabled = locked;
+    } else {
+      el.readOnly = locked;
+    }
+    el.style.background = locked ? '#f5f5f5' : '';
+    el.style.color = locked ? '#666' : '';
+    el.style.cursor = locked ? 'not-allowed' : '';
+  });
+  // Line item inputs + the +Add line / Extract buttons
+  var tbody = g('npo-lines-tbody');
+  if (tbody) {
+    tbody.querySelectorAll('input,select,button').forEach(function(el){
+      el.disabled = locked;
+      if (locked) el.style.cursor = 'not-allowed';
+    });
+  }
+  var addBtn = g('npo-extract-btn'); if (addBtn) addBtn.style.display = locked ? 'none' : '';
+  // The "+ Add line" button doesn't have an id — disable via the line items card
+  var addLineBtn = document.querySelector('[onclick="poAddLine()"]');
+  if (addLineBtn) addLineBtn.style.display = locked ? 'none' : '';
+}
+
+// ── Status helpers ─────────────────────────────────────────────────
+// Normalize legacy / mixed-case statuses to the canonical 5-state vocab:
+// Draft, Issued, Open, Closed, Void.
+function _poNormalizeStatus(s) {
+  var v = String(s || '').trim().toLowerCase();
+  if (!v || v === 'draft')   return 'Draft';
+  if (v === 'issued')         return 'Issued';
+  if (v === 'open')           return 'Open';
+  if (v === 'closed')         return 'Closed';
+  if (v === 'void' || v === 'voided') return 'Void';
+  // Anything unrecognized — surface as Draft so it stays editable rather
+  // than getting silently locked. Logged so we can spot drift.
+  console.warn('PO: unrecognized status, treating as Draft:', s);
+  return 'Draft';
+}
+function _poStatusOf(po) {
+  if (!po) return 'Draft';
+  return _poNormalizeStatus(po.status);
+}
+function _poStatusColor(status) {
+  switch (status) {
+    case 'Draft':  return { bg:'#F5F5F3', fg:'#666', bd:'#D9D9D6' };
+    case 'Issued': return { bg:'#E3F0FB', fg:'#1F5A8A', bd:'#B8D6EF' };
+    case 'Open':   return { bg:'#E6F4EA', fg:'#1E6B36', bd:'#B7DDC2' };
+    case 'Closed': return { bg:'#EFEAF7', fg:'#4A357A', bd:'#CFBFE5' };
+    case 'Void':   return { bg:'#FBE9E9', fg:'#7A2E2E', bd:'#E8B8B8' };
+    default:       return { bg:'#F5F5F3', fg:'#666', bd:'#D9D9D6' };
+  }
+}
+function _poStatusBadgeHtml(status) {
+  var c = _poStatusColor(status);
+  return '<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600;' +
+    'background:' + c.bg + ';color:' + c.fg + ';border:0.5px solid ' + c.bd + '">' +
+    _poEsc(status) + '</span>';
+}
+
+// Resolve a user id → display name (for status card timestamps).
+function _poUserName(uid) {
+  if (!uid) return '';
+  var u = (db.users || []).find(function(x){ return x.id === uid; });
+  if (!u) return '';
+  return ((u.firstName || '') + ' ' + (u.lastName || '')).trim() || (u.email || '');
+}
+function _poFmtTs(iso) {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleString(); } catch (e) { return String(iso); }
+}
+
+// Render the status card body (timestamps + who-did-what trail).
+function _poRenderStatusCard(po) {
+  var card = g('npo-status-card');
+  var body = g('npo-status-body');
+  if (!card || !body) return;
+  if (!po) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  var status = _poStatusOf(po);
+  var lines = [];
+  lines.push('<div style="margin-bottom:8px"><strong>Current status:</strong> ' + _poStatusBadgeHtml(status) +
+    (po.revisionNumber && po.revisionNumber > 1 ? ' <span style="color:#888;font-size:12px;margin-left:6px">Rev ' + po.revisionNumber + '</span>' : '') +
+    '</div>');
+  if (po.created) {
+    lines.push('<div><strong>Created:</strong> ' + _poEsc(_poFmtTs(po.created)) +
+      (po.createdByUserId ? ' by ' + _poEsc(_poUserName(po.createdByUserId)) : '') + '</div>');
+  }
+  if (po.issuedAt) {
+    lines.push('<div><strong>Issued:</strong> ' + _poEsc(_poFmtTs(po.issuedAt)) +
+      (po.issuedByUserId ? ' by ' + _poEsc(_poUserName(po.issuedByUserId)) : '') + '</div>');
+  }
+  if (po.lastEmailedAt) {
+    lines.push('<div><strong>Last emailed:</strong> ' + _poEsc(_poFmtTs(po.lastEmailedAt)) +
+      (po.lastEmailedTo ? ' to ' + _poEsc(po.lastEmailedTo) : '') + '</div>');
+  }
+  if (po.openedAt) {
+    lines.push('<div><strong>Marked open:</strong> ' + _poEsc(_poFmtTs(po.openedAt)) +
+      (po.openedByUserId ? ' by ' + _poEsc(_poUserName(po.openedByUserId)) : '') + '</div>');
+  }
+  if (po.closedAt) {
+    lines.push('<div><strong>Closed:</strong> ' + _poEsc(_poFmtTs(po.closedAt)) +
+      (po.closedByUserId ? ' by ' + _poEsc(_poUserName(po.closedByUserId)) : '') + '</div>');
+  }
+  if (po.voidedAt) {
+    lines.push('<div><strong>Voided:</strong> ' + _poEsc(_poFmtTs(po.voidedAt)) +
+      (po.voidedByUserId ? ' by ' + _poEsc(_poUserName(po.voidedByUserId)) : '') +
+      (po.voidReason ? ' &mdash; ' + _poEsc(po.voidReason) : '') + '</div>');
+  }
+  if (po.revisedAt) {
+    lines.push('<div><strong>Last revised:</strong> ' + _poEsc(_poFmtTs(po.revisedAt)) +
+      (po.revisedByUserId ? ' by ' + _poEsc(_poUserName(po.revisedByUserId)) : '') + '</div>');
+  }
+  body.innerHTML = lines.join('');
+}
+
+// Render the action bar buttons based on PO status + permissions.
+function _poRenderActionBar(po) {
+  var bar = g('npo-action-bar');
+  if (!bar) return;
+  var status = _poStatusOf(po);
+  var canEdit   = hasFull('edit-purchase-orders');
+  var canIssue  = hasFull('issue-purchase-orders');
+  var canDelete = hasFull('delete-purchase-orders');
+
+  // Left side: destructive actions (Delete only allowed in Draft; Void
+  // is the off-ramp for anything past Draft except Closed/Void).
+  var left = '';
+  if (po && status === 'Draft' && canDelete) {
+    left += '<button class="btn" onclick="poDeleteCurrent()" style="color:#a33">Delete PO</button>';
+  }
+  if (po && canIssue && status !== 'Draft' && status !== 'Closed' && status !== 'Void') {
+    left += ' <button class="btn" onclick="poVoid()" style="color:#a33">Void PO</button>';
+  }
+
+  // Right side: PDF + status-progress actions.
+  var right = '<button class="btn" onclick="poGeneratePDF()" id="npo-pdf-btn">&#8595; Download PDF</button>';
+  right += ' <button class="btn" onclick="poBackToProject()">' + (status === 'Draft' ? 'Cancel' : 'Back') + '</button>';
+
+  if (status === 'Draft') {
+    if (canEdit) {
+      right += ' <button class="btn btn-p" onclick="poSave()" style="padding:10px 32px;font-size:14px;font-weight:700" id="npo-save-btn">' +
+        (po ? 'Save changes' : 'Save PO') + '</button>';
+    }
+    // Issue requires a saved PO (need an id for the email trail / status sync)
+    if (po && canIssue) {
+      right += ' <button class="btn btn-p" onclick="poShowIssueMenu()" style="padding:10px 24px;font-size:14px;font-weight:700;background:var(--kmi);color:#fff;border-color:var(--kmi)">Issue PO &#9662;</button>';
+    }
+  } else if (status === 'Issued') {
+    if (canIssue) {
+      right += ' <button class="btn" onclick="poShowEmailModal()" title="Re-send the PO PDF to the vendor">&#9993;&#65039; Re-send</button>';
+      right += ' <button class="btn" onclick="poRevise()" title="Create a new revision and return to Draft for editing">Revise</button>';
+      right += ' <button class="btn btn-p" onclick="poMarkAsOpen()" style="padding:10px 24px">Mark as Open</button>';
+      right += ' <button class="btn btn-p" onclick="poMarkAsClosed()" style="padding:10px 24px">Mark as Closed</button>';
+    }
+  } else if (status === 'Open') {
+    if (canIssue) {
+      right += ' <button class="btn" onclick="poRevise()" title="Create a new revision and return to Draft for editing">Revise</button>';
+      right += ' <button class="btn btn-p" onclick="poMarkAsClosed()" style="padding:10px 24px">Mark as Closed</button>';
+    }
+  } else if (status === 'Closed') {
+    if (canIssue) {
+      right += ' <button class="btn" onclick="poRevise()" title="Create a new revision and return to Draft for editing">Revise</button>';
+    }
+  }
+  // Void: only PDF + Back; no further transitions.
+
+  bar.innerHTML =
+    '<div>' + left + '</div>' +
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end">' + right + '</div>';
 }
 
 function _poPopulateVendorDropdown(selectedId) {
@@ -24362,6 +24556,15 @@ function poRecalcTotals() {
 function poSave() {
   if (!requireFull(_editPoId ? 'edit-purchase-orders' : 'add-purchase-orders',
                    _editPoId ? 'edit POs' : 'create POs')) return;
+  // Block direct save of non-Draft POs. The Revise flow is the proper path.
+  if (_editPoId) {
+    var current = (db.purchaseOrders || []).find(function(x){ return x.id === _editPoId; });
+    if (current && _poStatusOf(current) !== 'Draft') {
+      alert('This PO is ' + _poStatusOf(current) + ' and cannot be edited directly.\n\n' +
+            'Click Revise to create a new revision (returns the PO to Draft).');
+      return;
+    }
+  }
   var number = (g('npo-number').value || '').trim();
   if (!number) { alert('Please enter a PO number.'); return; }
   var date = (g('npo-date').value || '').trim();
@@ -24410,7 +24613,9 @@ function poSave() {
     if (existing) Object.assign(existing, data);
   } else {
     data.id = Date.now();
-    data.status = 'draft';
+    data.status = 'Draft';
+    data.revisionNumber = 1;
+    data.revisionHistory = [];
     data.created = new Date().toISOString();
     data.createdByUserId = _currentUser ? _currentUser.id : null;
     db.purchaseOrders.push(data);
@@ -24431,7 +24636,13 @@ function poSave() {
     }
   }
 
-  poBackToProject();
+  // Stay on the form after save so the Issue PO button (and status card)
+  // appear and the user can transition without a round-trip through the
+  // project page. The saved record is loaded back through _poInitForm to
+  // pick up any normalization (id, status, etc).
+  var savedPo = (db.purchaseOrders || []).find(function(x){ return x.id === _editPoId; });
+  _poInitForm(savedPo || null);
+  showToast('PO saved.', 'success');
 }
 
 function poDeleteCurrent() {
@@ -24683,6 +24894,529 @@ function poGeneratePDFById(id) {
   _poRenderPDF(po);
 }
 
+// ══════════════════════════════════════════════════════════════════
+// PO STATUS WORKFLOW — Round 2
+// ══════════════════════════════════════════════════════════════════
+// Status machine: Draft → Issued → Open → Closed (+ Void off-ramp from
+// any non-terminal state). Revise from Issued/Open/Closed bumps the
+// revision number and returns the PO to Draft for editing.
+
+// Helper: get the current PO being edited (or null).
+function _poCurrent() {
+  if (!_editPoId) return null;
+  return (db.purchaseOrders || []).find(function(x){ return x.id === _editPoId; }) || null;
+}
+
+// Helper: persist a status transition. saveDB() locally, then best-effort
+// upsert to Supabase. Errors are logged but don't block the UI — mirrors
+// the COR pattern.
+async function _poPersistTransition(po) {
+  saveDB();
+  try {
+    if (supabaseClient) {
+      var res = await supabaseClient.from('kmi_purchase_orders').upsert(toSBPurchaseOrder(po));
+      if (res && res.error) console.warn('PO transition sync error:', res.error.message);
+    }
+  } catch (e) { console.warn('PO transition sync exception:', e); }
+}
+
+// Helper: re-render the form after a transition. _poInitForm rebuilds the
+// status card, action bar, and editable-state lock.
+function _poAfterTransition(po) {
+  _poInitForm(po);
+}
+
+// Helper: resolve vendor contacts for the email picker. Mirrors
+// _corResolveProjectContacts in shape.
+function _poResolveVendorContacts(vendorId) {
+  if (!vendorId) return [];
+  var contacts = [];
+  // First: per-vendor contacts (from kmi_vendor_contacts)
+  (db.vendorContacts || []).forEach(function(vc){
+    if (String(vc.vendorId) !== String(vendorId)) return;
+    if (!vc.email) return;
+    contacts.push({
+      id: vc.id,
+      name: ((vc.firstName || '') + ' ' + (vc.lastName || '')).trim() || vc.email,
+      email: vc.email,
+      role: vc.title || ''
+    });
+  });
+  // Fallback: vendor record's primary email (for vendors with no contacts)
+  var v = (db.vendors || []).find(function(x){ return x.id === vendorId; });
+  if (v && v.email && !contacts.some(function(c){ return (c.email || '').toLowerCase() === v.email.toLowerCase(); })) {
+    contacts.push({
+      id: 'vendor-primary',
+      name: v.primaryContact || v.name || v.email,
+      email: v.email,
+      role: 'Primary contact'
+    });
+  }
+  return contacts;
+}
+
+// ── ISSUE PO menu (Email vendor / Mark as issued) ───────────────────
+function poShowIssueMenu() {
+  var po = _poCurrent();
+  if (!po) { alert('Save the PO before issuing.'); return; }
+  if (_poStatusOf(po) !== 'Draft') {
+    alert('Only Draft POs can be issued. Current status: ' + _poStatusOf(po));
+    return;
+  }
+  if (!hasFull('issue-purchase-orders')) { alert('You do not have permission to issue POs.'); return; }
+  if (!po.vendorId) { alert('Select a vendor before issuing this PO.'); return; }
+  if (!po.lines || !po.lines.length) {
+    if (!confirm('This PO has no line items. Issue anyway?')) return;
+  }
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Issue PO ' + _poEsc(po.number || '') + '</div>' +
+    '<div class="msb">Pick how this PO is being delivered. Either path moves the status from Draft to Issued and stamps the signature date on the PDF.</div>' +
+    '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px">' +
+      '<button class="btn btn-p" onclick="poShowEmailModal()" style="padding:14px 16px;text-align:left;display:flex;flex-direction:column;align-items:flex-start;gap:4px">' +
+        '<div style="font-weight:600;font-size:13px">&#9993;&#65039; Email PDF to vendor</div>' +
+        '<div style="font-size:11px;opacity:0.9;font-weight:400">Open the email composer with the PO PDF auto-attached. Edit recipients, subject, and body before sending.</div>' +
+      '</button>' +
+      '<button class="btn" onclick="poMarkAsIssued()" style="padding:14px 16px;text-align:left;display:flex;flex-direction:column;align-items:flex-start;gap:4px">' +
+        '<div style="font-weight:600;font-size:13px">&#10003; Mark as issued (no email)</div>' +
+        '<div style="font-size:11px;color:#666;font-weight:400">Use this if you delivered the PO outside the CRM (mailed, hand-delivered, sent from your own email client, etc.).</div>' +
+      '</button>' +
+    '</div>' +
+    '<div class="mbtns"><button class="btn" onclick="closeModal()">Cancel</button></div>'
+  );
+}
+
+// ── Email composer modal ────────────────────────────────────────────
+function poShowEmailModal() {
+  var po = _poCurrent();
+  if (!po) { closeModal(); return; }
+  var status = _poStatusOf(po);
+  // Allowed from Draft (Issue path) and Issued (Re-send path)
+  if (status !== 'Draft' && status !== 'Issued') {
+    alert('PO must be Draft or Issued to email. Current status: ' + status);
+    return;
+  }
+  if (!hasFull('issue-purchase-orders')) { alert('You do not have permission to send POs.'); return; }
+  var v = (db.vendors || []).find(function(x){ return x.id === po.vendorId; });
+  if (!v) { alert('Vendor not found on this PO.'); return; }
+  var contacts = _poResolveVendorContacts(po.vendorId);
+
+  if (!contacts.length) {
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt" style="color:#7A2E2E">No vendor contacts with email addresses</div>' +
+      '<div class="msb">This vendor has no contacts with email addresses on file, and no primary email on the vendor record. Open the Vendors page, add at least one contact (with an email) under this vendor, then come back to send the PO. Alternatively, use "Mark as issued (no email)" if you\'ll deliver the PO outside the CRM.</div>' +
+      '<div class="mbtns">' +
+        '<button class="btn" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-p" onclick="closeModal();poShowIssueMenu()">Back to issue menu</button>' +
+      '</div>'
+    );
+    return;
+  }
+
+  // Sender check — POs are sent under the user's identity, same as CORs
+  var u = _currentUser || {};
+  if (!u.email) {
+    alert('Your user account has no email address — POs cannot be sent.');
+    return;
+  }
+
+  // Pre-check the first contact (most common case: vendor has one contact)
+  var recipientHtml = contacts.map(function(co, idx){
+    var checked = (idx === 0) ? 'checked' : '';
+    return '<label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;cursor:pointer">' +
+      '<input type="checkbox" class="po-rcpt" data-email="' + _poEsc(co.email) + '" data-name="' + _poEsc(co.name) + '" ' + checked + '>' +
+      '<span><strong>' + _poEsc(co.name) + '</strong>' + (co.role ? ' \u2014 ' + _poEsc(co.role) : '') + ' &lt;' + _poEsc(co.email) + '&gt;</span>' +
+    '</label>';
+  }).join('');
+
+  // Default subject + body
+  var p = getProj(po.projectId) || {};
+  var projLabel = ((p.number || '') + ' \u2014 ' + (p.name || '')).replace(/^ \u2014 | \u2014 $/g, '');
+  var poNumDisplay = (po.number || '') + ((po.revisionNumber && po.revisionNumber > 1) ? ' Rev ' + po.revisionNumber : '');
+  var defaultSubject = 'KMI Construction \u2014 Purchase Order ' + poNumDisplay + (p.name ? ' (' + p.name + ')' : '');
+
+  var senderName = ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+  var totals = _poComputeTotals(po);
+
+  var bodyLines = [
+    'Hello,',
+    '',
+    'Please find attached KMI Construction Purchase Order ' + poNumDisplay + ' for ' + (p.name || 'your reference') + '.',
+    '',
+    'P.O. #:     ' + poNumDisplay,
+    'Project:    ' + projLabel,
+    'Total:      ' + _poFmtMoney(totals.total),
+  ];
+  if (po.estDeliveryDate) bodyLines.push('Est. delivery: ' + po.estDeliveryDate);
+  bodyLines.push('');
+  bodyLines.push('Please confirm receipt and let me know if you have any questions.');
+  bodyLines.push('');
+  bodyLines.push('Best regards,');
+  bodyLines.push(senderName);
+  if (u.email) bodyLines.push(u.email);
+  if (u.phone) bodyLines.push(u.phone);
+  bodyLines.push('');
+  bodyLines.push('KMI Construction');
+  bodyLines.push('2880 S. 171st Street, New Berlin, WI 53151');
+  bodyLines.push('T 262-548-0632 | KMI-Construction.com');
+  var defaultBody = bodyLines.join('\n');
+
+  var actionLabel = (status === 'Draft') ? 'Issue & email' : 'Re-send';
+  var transitionNote = (status === 'Draft')
+    ? 'PDF will be attached automatically. Once sent, this PO moves to <strong>Issued</strong>.'
+    : 'PDF will be attached automatically. Status stays <strong>Issued</strong> (this is a re-send).';
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Email PO ' + _poEsc(poNumDisplay) + ' to vendor</div>' +
+    '<div class="msb">' + transitionNote + '</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>From</label>' +
+        '<input type="text" value="' + _poEsc(senderName + ' <' + u.email + '>') + '" disabled style="background:#f5f5f5;color:#888;cursor:not-allowed">' +
+      '</div>' +
+      '<div class="fgr full"><label>Recipients (pick one or more)</label>' +
+        '<div style="border:0.5px solid #ddd;border-radius:6px;padding:8px 10px;background:#fafafa">' + recipientHtml + '</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">First recipient becomes "to," the rest "cc."</div>' +
+      '</div>' +
+      '<div class="fgr full"><label>Subject *</label>' +
+        '<input type="text" id="po-em-subject" value="' + _poEsc(defaultSubject) + '">' +
+      '</div>' +
+      '<div class="fgr full"><label>Body</label>' +
+        '<textarea id="po-em-body" rows="12" style="font-family:monospace;font-size:12px">' + _poEsc(defaultBody) + '</textarea>' +
+      '</div>' +
+    '</div>' +
+    '<div id="po-em-err" style="color:#A32D2D;font-size:12px;margin:6px 0;min-height:14px"></div>' +
+    '<div style="background:#F5F5F3;border-radius:7px;padding:10px 12px;margin-top:12px;font-size:12px;color:#666;line-height:1.5">A copy will be BCC\'d to your inbox (' + _poEsc(u.email) + ') so you have a record.</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()" id="po-em-cancel-btn">Cancel</button>' +
+      '<button class="btn btn-p" onclick="poSendEmail()" id="po-em-send-btn">&#9993;&#65039; ' + actionLabel + '</button>' +
+    '</div>'
+  );
+}
+
+// ── Send executor ────────────────────────────────────────────────────
+async function poSendEmail() {
+  var po = _poCurrent();
+  if (!po) return;
+  var errEl = g('po-em-err');
+  if (errEl) errEl.textContent = '';
+
+  var recipients = [];
+  document.querySelectorAll('input.po-rcpt:checked').forEach(function(cb){
+    recipients.push({ email: cb.dataset.email || '', name: cb.dataset.name || '' });
+  });
+  if (!recipients.length) { if (errEl) errEl.textContent = 'Pick at least one recipient.'; return; }
+
+  var subject = (g('po-em-subject').value || '').trim();
+  var body = g('po-em-body').value || '';
+  if (!subject) { if (errEl) errEl.textContent = 'Subject is required.'; return; }
+
+  var sendBtn = g('po-em-send-btn');
+  var cancelBtn = g('po-em-cancel-btn');
+  var origLabel = sendBtn ? sendBtn.innerHTML : '';
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = 'Building PDF\u2026'; }
+  if (cancelBtn) cancelBtn.disabled = true;
+
+  // For the Draft → Issued transition we want the PDF to bake in the
+  // about-to-be-set issuedAt timestamp (so the date prints on the vendor's
+  // copy). Build a snapshot copy for PDF rendering with issuedAt already
+  // populated; the actual write to the record happens after send success.
+  var statusBefore = _poStatusOf(po);
+  var pendingIssuedAt = (statusBefore === 'Draft') ? new Date().toISOString() : (po.issuedAt || '');
+  var pendingIssuedBy = (statusBefore === 'Draft') ? (_currentUser ? _currentUser.id : null) : (po.issuedByUserId || null);
+  var poForPdf = Object.assign({}, po, { issuedAt: pendingIssuedAt, issuedByUserId: pendingIssuedBy });
+
+  // Build PDF as base64. The PO renderer uses doc.save() directly — clone
+  // the rendering path to capture base64 instead.
+  var pdfBase64;
+  try {
+    pdfBase64 = _poBuildPdfBase64(poForPdf);
+    if (!pdfBase64) throw new Error('PDF generation returned empty');
+  } catch (e) {
+    if (errEl) errEl.textContent = 'Could not generate PDF: ' + (e.message || e);
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.innerHTML = origLabel; }
+    if (cancelBtn) cancelBtn.disabled = false;
+    return;
+  }
+  if (sendBtn) sendBtn.textContent = 'Sending\u2026';
+
+  var poNumDisplay = (po.number || 'PO') + ((po.revisionNumber && po.revisionNumber > 1) ? '_Rev' + po.revisionNumber : '');
+  var safeName = String(poNumDisplay).replace(/[^a-zA-Z0-9._-]/g, '_');
+  var filename = 'KMI_PO_' + safeName + '.pdf';
+
+  var u = _currentUser || {};
+  var fromEmail = u.email || '';
+  var fromName = ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+
+  var to = recipients[0].email;
+  var cc = recipients.slice(1).map(function(r){ return r.email; });
+
+  var payload = {
+    to:                to,
+    subject:           subject,
+    text:              body,
+    flowType:          'po_delivery',
+    sentBy:            (_currentUser ? _currentUser.id : null),
+    sentByEmail:       fromEmail,
+    relatedEntityType: 'purchase_order',
+    relatedEntityId:   String(po.id),
+    attachments: [{ filename: filename, content: pdfBase64 }]
+  };
+  if (cc.length) payload.cc = cc;
+  if (fromEmail) {
+    payload.from = fromEmail;
+    payload.fromName = fromName;
+    payload.bcc = fromEmail;  // mirrors proposal — sender gets a record
+  }
+
+  var result = await sendEmail(payload);
+  if (!result.success) {
+    if (errEl) errEl.textContent = 'Send failed: ' + (result.error || 'Unknown error') + '. The PO status was NOT changed.';
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.innerHTML = origLabel; }
+    if (cancelBtn) cancelBtn.disabled = false;
+    return;
+  }
+
+  // Success — record the email trail. On Draft → Issued, also flip status.
+  var nowIso = new Date().toISOString();
+  po.lastEmailedAt = nowIso;
+  po.lastEmailedTo = recipients.map(function(r){ return r.email; }).join(', ');
+  if (statusBefore === 'Draft') {
+    po.status = 'Issued';
+    po.issuedAt = pendingIssuedAt;
+    po.issuedByUserId = pendingIssuedBy;
+  }
+  await _poPersistTransition(po);
+
+  db.activity = db.activity || [];
+  var actionWord = (statusBefore === 'Draft') ? 'issued to' : 're-sent to';
+  var rcptList = recipients.map(function(r){ return r.name || r.email; }).join(', ');
+  db.activity.unshift({
+    text: 'PO ' + (po.number || '') + ' ' + actionWord + ' ' + rcptList,
+    type: 'sent',
+    time: 'Just now'
+  });
+  saveDB();
+
+  closeModal();
+  var msg = (statusBefore === 'Draft')
+    ? 'PO ' + (po.number || '') + ' issued and emailed to ' + rcptList + '.'
+    : 'PO ' + (po.number || '') + ' re-sent to ' + rcptList + '.';
+  if (result.testMode) msg += ' (test mode \u2014 actual recipient: ' + (result.intendedRecipient || to) + ')';
+  showToast(msg, 'success');
+  _poAfterTransition(po);
+  // Refresh the project's PO list too (status badge will have changed)
+  try { renderProjectPoList(); } catch (_e) {}
+}
+
+// ── PDF as base64 (no data: prefix) ─────────────────────────────────
+// jsPDF's output('datauristring') returns "data:application/pdf;filename=...,base64,JVBE...".
+// Strip the prefix and return the raw base64 so it can be used as an email
+// attachment payload. We render the PDF into a fresh doc rather than
+// hijacking _poRenderPDF (which calls doc.save() at the end).
+function _poBuildPdfBase64(po) {
+  // Temporarily monkey-patch jsPDF.save on the doc generated by _poRenderPDF
+  // so it doesn't trigger a download. We capture the doc instance via a
+  // sentinel and return its base64.
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    throw new Error('PDF library not loaded');
+  }
+  // jsPDF doesn't expose a "capture instead of download" mode, and
+  // _poRenderPDF calls doc.save() at the end. Re-running the renderer
+  // here would duplicate ~250 lines of layout code; instead we wrap the
+  // save call by swapping the jsPDF prototype's save method for one call.
+  var Proto = window.jspdf.jsPDF.prototype;
+  var origSave = Proto.save;
+  var captured = null;
+  Proto.save = function() { captured = this; return this; };
+  try {
+    _poRenderPDF(po);
+  } finally {
+    Proto.save = origSave;
+  }
+  if (!captured) throw new Error('PDF renderer did not produce a document');
+  var uri = captured.output('datauristring');
+  var commaIdx = uri.indexOf('base64,');
+  return (commaIdx >= 0) ? uri.substring(commaIdx + 'base64,'.length) : '';
+}
+
+// ── Mark as issued (no email) ───────────────────────────────────────
+async function poMarkAsIssued() {
+  closeModal();
+  var po = _poCurrent();
+  if (!po) return;
+  if (_poStatusOf(po) !== 'Draft') {
+    alert('Only Draft POs can be marked as issued. Current status: ' + _poStatusOf(po));
+    return;
+  }
+  if (!hasFull('issue-purchase-orders')) { alert('You do not have permission to issue POs.'); return; }
+  if (!confirm('Mark this PO as issued?\n\nYou\'re confirming you\'ve delivered it to the vendor outside the CRM. The status will move from Draft to Issued and the PDF signature date will be set to right now.')) return;
+
+  var nowIso = new Date().toISOString();
+  po.status = 'Issued';
+  po.issuedAt = nowIso;
+  po.issuedByUserId = _currentUser ? _currentUser.id : null;
+  await _poPersistTransition(po);
+
+  db.activity = db.activity || [];
+  db.activity.unshift({ text: 'PO ' + (po.number || '') + ' marked as issued', type: 'sent', time: 'Just now' });
+  saveDB();
+
+  showToast('PO ' + (po.number || '') + ' marked as issued.', 'success');
+  _poAfterTransition(po);
+  try { renderProjectPoList(); } catch (_e) {}
+}
+
+// ── Mark as Open ────────────────────────────────────────────────────
+async function poMarkAsOpen() {
+  var po = _poCurrent();
+  if (!po) return;
+  if (_poStatusOf(po) !== 'Issued') {
+    alert('Only Issued POs can be marked as Open. Current status: ' + _poStatusOf(po));
+    return;
+  }
+  if (!hasFull('issue-purchase-orders')) { alert('You do not have permission to transition POs.'); return; }
+  if (!confirm('Mark this PO as Open?\n\nUse this when the vendor has acknowledged the PO or work / delivery has started against it.')) return;
+
+  var nowIso = new Date().toISOString();
+  po.status = 'Open';
+  po.openedAt = nowIso;
+  po.openedByUserId = _currentUser ? _currentUser.id : null;
+  await _poPersistTransition(po);
+
+  db.activity = db.activity || [];
+  db.activity.unshift({ text: 'PO ' + (po.number || '') + ' marked as Open', type: 'sent', time: 'Just now' });
+  saveDB();
+
+  showToast('PO ' + (po.number || '') + ' is now Open.', 'success');
+  _poAfterTransition(po);
+  try { renderProjectPoList(); } catch (_e) {}
+}
+
+// ── Mark as Closed ──────────────────────────────────────────────────
+async function poMarkAsClosed() {
+  var po = _poCurrent();
+  if (!po) return;
+  var status = _poStatusOf(po);
+  if (status !== 'Issued' && status !== 'Open') {
+    alert('Only Issued or Open POs can be closed. Current status: ' + status);
+    return;
+  }
+  if (!hasFull('issue-purchase-orders')) { alert('You do not have permission to transition POs.'); return; }
+  if (!confirm('Mark this PO as Closed?\n\nUse this when the PO is fully received and billed. Closed POs are read-only; use Revise if you need to change anything afterward.')) return;
+
+  var nowIso = new Date().toISOString();
+  po.status = 'Closed';
+  po.closedAt = nowIso;
+  po.closedByUserId = _currentUser ? _currentUser.id : null;
+  await _poPersistTransition(po);
+
+  db.activity = db.activity || [];
+  db.activity.unshift({ text: 'PO ' + (po.number || '') + ' closed', type: 'won', time: 'Just now' });
+  saveDB();
+
+  showToast('PO ' + (po.number || '') + ' closed.', 'success');
+  _poAfterTransition(po);
+  try { renderProjectPoList(); } catch (_e) {}
+}
+
+// ── Void ────────────────────────────────────────────────────────────
+async function poVoid() {
+  var po = _poCurrent();
+  if (!po) return;
+  var status = _poStatusOf(po);
+  if (status === 'Void' || status === 'Closed') {
+    alert(status + ' POs cannot be voided. Current status: ' + status);
+    return;
+  }
+  if (!hasFull('issue-purchase-orders')) { alert('You do not have permission to void POs.'); return; }
+  var reason = prompt('Void PO ' + (po.number || '') + '?\n\nEnter a brief reason (required for the audit trail):', '');
+  if (reason === null) return;  // user cancelled
+  reason = String(reason || '').trim();
+  if (!reason) { alert('A void reason is required.'); return; }
+
+  var nowIso = new Date().toISOString();
+  po.status = 'Void';
+  po.voidedAt = nowIso;
+  po.voidedByUserId = _currentUser ? _currentUser.id : null;
+  po.voidReason = reason;
+  await _poPersistTransition(po);
+
+  db.activity = db.activity || [];
+  db.activity.unshift({ text: 'PO ' + (po.number || '') + ' voided: ' + reason, type: 'lost', time: 'Just now' });
+  saveDB();
+
+  showToast('PO ' + (po.number || '') + ' voided.', 'success');
+  _poAfterTransition(po);
+  try { renderProjectPoList(); } catch (_e) {}
+}
+
+// ── Revise ──────────────────────────────────────────────────────────
+// Bumps the revision number, snapshots the current PO into revisionHistory,
+// and returns status to Draft so the user can edit and re-issue cleanly.
+async function poRevise() {
+  var po = _poCurrent();
+  if (!po) return;
+  var status = _poStatusOf(po);
+  if (status !== 'Issued' && status !== 'Open' && status !== 'Closed') {
+    alert('Only Issued, Open, or Closed POs can be revised. Current status: ' + status);
+    return;
+  }
+  if (!hasFull('issue-purchase-orders')) { alert('You do not have permission to revise POs.'); return; }
+  var currentRev = (po.revisionNumber && po.revisionNumber > 0) ? po.revisionNumber : 1;
+  var nextRev = currentRev + 1;
+  if (!confirm('Create Revision ' + nextRev + '?\n\nThe current version will be snapshotted into the revision history, and the PO will return to Draft so you can edit it. When you re-issue, the new revision number will appear on the PDF.')) return;
+
+  var nowIso = new Date().toISOString();
+  // Snapshot the current state (without revisionHistory itself, to avoid
+  // nesting balloon). Strip large fields if present.
+  var snapshot = {
+    revisionNumber: currentRev,
+    statusAtSnapshot: status,
+    snapshottedAt: nowIso,
+    snapshottedByUserId: _currentUser ? _currentUser.id : null,
+    issuedAt: po.issuedAt || '',
+    issuedByUserId: po.issuedByUserId || null,
+    openedAt: po.openedAt || '',
+    closedAt: po.closedAt || '',
+    lines: Array.isArray(po.lines) ? JSON.parse(JSON.stringify(po.lines)) : [],
+    salesTaxPct: po.salesTaxPct || 0,
+    notes: po.notes || '',
+    vendorId: po.vendorId || null,
+    estDeliveryDate: po.estDeliveryDate || '',
+    lastEmailedAt: po.lastEmailedAt || '',
+    lastEmailedTo: po.lastEmailedTo || ''
+  };
+  if (!Array.isArray(po.revisionHistory)) po.revisionHistory = [];
+  po.revisionHistory.push(snapshot);
+
+  // Bump revision; reset to Draft; clear issue-cycle timestamps so the
+  // re-issue stamps a fresh date on the new PDF.
+  po.revisionNumber = nextRev;
+  po.revisedAt = nowIso;
+  po.revisedByUserId = _currentUser ? _currentUser.id : null;
+  po.status = 'Draft';
+  po.issuedAt = '';
+  po.issuedByUserId = null;
+  po.openedAt = '';
+  po.openedByUserId = null;
+  po.closedAt = '';
+  po.closedByUserId = null;
+  // Keep lastEmailedAt / lastEmailedTo so the audit trail in the status
+  // card still shows when the prior version was sent.
+  await _poPersistTransition(po);
+
+  db.activity = db.activity || [];
+  db.activity.unshift({ text: 'PO ' + (po.number || '') + ' Rev ' + nextRev + ' created', type: 'sent', time: 'Just now' });
+  saveDB();
+
+  showToast('PO ' + (po.number || '') + ' moved to Rev ' + nextRev + ' (Draft). Edit and re-issue when ready.', 'success');
+  _poAfterTransition(po);
+  try { renderProjectPoList(); } catch (_e) {}
+}
+
 function _poRenderPDF(po) {
   if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return; }
   var jsPDF = window.jspdf.jsPDF;
@@ -24766,7 +25500,13 @@ function _poRenderPDF(po) {
   sf('normal', 10); doc.text(fmtDate(po.date) || '\u2014', rightValX, ry);
   ry += 14;
   sf('bold', 10);  doc.text('P.O. #:', rightLabelX, ry);
-  sf('normal', 10); doc.text(po.number || '\u2014', rightValX, ry);
+  // Append "Rev N" to the PO number when revision > 1 so the printed
+  // document is unambiguous about which version the vendor is holding.
+  var poNumDisplay = po.number || '\u2014';
+  if (po.revisionNumber && po.revisionNumber > 1) {
+    poNumDisplay += ' Rev ' + po.revisionNumber;
+  }
+  sf('normal', 10); doc.text(poNumDisplay, rightValX, ry);
   ry += 14;
   sf('bold', 10);  doc.text('Customer ID:', rightLabelX, ry);
   sf('normal', 10); doc.text(po.customerIdShort || '', rightValX, ry);
@@ -25002,12 +25742,35 @@ function _poRenderPDF(po) {
     doc.text(sigName, LM, y - 4);
   }
 
-  // Typed legibility line + role labels (back to Helvetica)
+  // Typed legibility line + role labels (back to Helvetica). The KMI date
+  // is auto-stamped inline after the "Date:" label using the issuance
+  // timestamp (falls back to po.date for historical / un-transitioned POs
+  // so they still print a date). The vendor's date stays blank with an
+  // underline for them to fill in by hand or e-sign.
   sf('normal', 9);
   doc.text('Authorized by: ' + sigName, LM, y + 12);
-  doc.text('Date', LM + 220, y + 12);
+
+  // Compute the KMI signature date
+  var kmiDateIso = po.issuedAt || '';
+  var kmiDateStr = '';
+  if (kmiDateIso) {
+    try {
+      var d = new Date(kmiDateIso);
+      if (!isNaN(d.getTime())) {
+        kmiDateStr = (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
+      }
+    } catch (_e) { /* fall through to po.date */ }
+  }
+  if (!kmiDateStr) kmiDateStr = fmtDate(po.date) || '';
+
+  // KMI date — label + value on the same line, sitting under the right
+  // portion of the left signature underline.
+  doc.text('Date: ' + kmiDateStr, LM + 220, y + 12);
+
+  // Vendor side — label + a short underline for the vendor to date by hand.
   doc.text('Subcontractor Authorization', LM + 250, y + 12);
-  doc.text('Date', LM + 470, y + 12);
+  doc.text('Date:', LM + 470, y + 12);
+  ln(LM + 495, y + 12, LM + 560, y + 12, 0.5);
 
   // ── Save ────────────────────────────────────────────────────────
   var safeName = String(po.number || 'PO').replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -29664,9 +30427,27 @@ function toSBPurchaseOrder(r) {
     sales_tax_pct: (r.salesTaxPct !== undefined && r.salesTaxPct !== null && r.salesTaxPct !== '') ? r.salesTaxPct : 0,
     authorized_by_user_id: r.authorizedByUserId || null,
     authorized_by_name: r.authorizedByName || '',
-    status: r.status || 'draft',
+    status: r.status || 'Draft',
     created: r.created || '',
-    created_by_user_id: r.createdByUserId || null
+    created_by_user_id: r.createdByUserId || null,
+    // Status workflow timestamps
+    issued_at: r.issuedAt || null,
+    issued_by_user_id: r.issuedByUserId || null,
+    opened_at: r.openedAt || null,
+    opened_by_user_id: r.openedByUserId || null,
+    closed_at: r.closedAt || null,
+    closed_by_user_id: r.closedByUserId || null,
+    voided_at: r.voidedAt || null,
+    voided_by_user_id: r.voidedByUserId || null,
+    void_reason: r.voidReason || '',
+    // Email trail (mirrors proposal / COR shape)
+    last_emailed_at: r.lastEmailedAt || null,
+    last_emailed_to: r.lastEmailedTo || '',
+    // Revisions
+    revision_number: (r.revisionNumber && r.revisionNumber > 0) ? r.revisionNumber : 1,
+    revised_at: r.revisedAt || null,
+    revised_by_user_id: r.revisedByUserId || null,
+    revision_history: Array.isArray(r.revisionHistory) ? r.revisionHistory : []
   };
 }
 function fromSBPurchaseOrder(r) {
@@ -29683,9 +30464,24 @@ function fromSBPurchaseOrder(r) {
     salesTaxPct: (r.sales_tax_pct !== null && r.sales_tax_pct !== undefined) ? r.sales_tax_pct : 0,
     authorizedByUserId: r.authorized_by_user_id || null,
     authorizedByName: r.authorized_by_name || '',
-    status: r.status || 'draft',
+    status: _poNormalizeStatus(r.status),
     created: r.created || '',
-    createdByUserId: r.created_by_user_id || null
+    createdByUserId: r.created_by_user_id || null,
+    issuedAt: r.issued_at || '',
+    issuedByUserId: r.issued_by_user_id || null,
+    openedAt: r.opened_at || '',
+    openedByUserId: r.opened_by_user_id || null,
+    closedAt: r.closed_at || '',
+    closedByUserId: r.closed_by_user_id || null,
+    voidedAt: r.voided_at || '',
+    voidedByUserId: r.voided_by_user_id || null,
+    voidReason: r.void_reason || '',
+    lastEmailedAt: r.last_emailed_at || '',
+    lastEmailedTo: r.last_emailed_to || '',
+    revisionNumber: (r.revision_number && r.revision_number > 0) ? r.revision_number : 1,
+    revisedAt: r.revised_at || '',
+    revisedByUserId: r.revised_by_user_id || null,
+    revisionHistory: Array.isArray(r.revision_history) ? r.revision_history : []
   };
 }
 
