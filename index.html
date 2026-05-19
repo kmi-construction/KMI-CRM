@@ -193,7 +193,13 @@ textarea{resize:vertical;min-height:72px}
 .ci input[type=checkbox]{width:auto;margin-top:2px;cursor:pointer;accent-color:var(--kmi)}
 .ci label{font-size:13px;color:#1a1a1a;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0}
 .cg-sect{background:#fafafa;border:0.5px solid #eee;border-radius:8px;padding:10px 12px;margin-bottom:10px}
-.cg-sect .cg-hdr{padding:0 0 8px;margin-bottom:8px;border-bottom:0.5px solid #eee}
+.cg-sect .cg-hdr{padding:0 0 8px;margin-bottom:8px;border-bottom:0.5px solid #eee;cursor:pointer;user-select:none}
+.cg-sect .cg-hdr:hover .cg-chev{color:var(--kmi)}
+.cg-chev{display:inline-block;width:10px;font-size:10px;color:#888;transition:transform .2s ease;margin-right:8px;line-height:1;transform:rotate(90deg)}
+.cg-sect.collapsed .cg-chev{transform:rotate(0deg)}
+.cg-body{overflow:hidden;transition:max-height .25s ease-out;max-height:2000px}
+.cg-sect.collapsed .cg-body{max-height:0;margin-top:-8px}
+.cg-sect.collapsed .cg-hdr{margin-bottom:0;border-bottom:none;padding-bottom:0}
 .cg-sect .ci{background:transparent;padding:6px 4px;margin-bottom:2px}
 .cg-div{border:none;border-top:1px dashed #ddd;margin:8px 4px}
 .cg-crow{display:flex;align-items:center;gap:8px;padding:4px;margin-bottom:4px}
@@ -27075,9 +27081,9 @@ function renderGroupedCheckboxes(arr, idPrefix, defaultChecked) {
     var groupAttr = (name === 'General') ? '' : name;   // empty string = General/no group
     var groupAttrEsc = groupAttr.replace(/"/g, '&quot;');
     html += '<div class="cg-sect" data-cg-pfx="' + idPrefix + '" data-cg-grp="' + grpSafe + '" data-cg-name="' + groupAttrEsc + '">';
-    html += '<div class="cg-hdr">' +
-      '<span>' + name + ' <span class="cg-ct" data-cg-count>' + items.length + '</span></span>' +
-      '<span class="cg-actions">' +
+    html += '<div class="cg-hdr" onclick="cgToggleCollapse(event, this)">' +
+      '<span><span class="cg-chev">&#9656;</span>' + name + ' <span class="cg-ct" data-cg-count>' + items.length + '</span></span>' +
+      '<span class="cg-actions" onclick="event.stopPropagation()">' +
         '<button type="button" class="cg-addbtn" onclick="npAddItemInGroup(\'' + type + '\',\'' + groupAttrEsc + '\')">+ Add item</button>' +
         (items.length
           ? '<span style="font-size:10px;font-weight:500;text-transform:none;letter-spacing:0">' +
@@ -27087,6 +27093,7 @@ function renderGroupedCheckboxes(arr, idPrefix, defaultChecked) {
           : '<span class="cg-empty">no templates</span>'
         ) +
       '</span></div>';
+    html += '<div class="cg-body">';
 
     items.forEach(function(c){
       html += '<div class="ci" data-cg-grp="' + grpSafe + '" data-cg-pfx="' + idPrefix + '">' +
@@ -27098,12 +27105,22 @@ function renderGroupedCheckboxes(arr, idPrefix, defaultChecked) {
     // Container where custom rows for this group are appended. The dashed
     // divider only shows when there's at least one custom row inside.
     html += '<div class="cg-customs" data-cg-customs></div>';
-    html += '</div>';
+    html += '</div>';   // close .cg-body
+    html += '</div>';   // close .cg-sect
   });
   return html;
 }
 function cgToggleAll(pfx, grp, checked) {
   document.querySelectorAll('.ci[data-cg-grp="' + grp + '"][data-cg-pfx="' + pfx + '"] input[type=checkbox]').forEach(function(cb){ cb.checked = checked; });
+}
+// Collapse / expand a group section. Click anywhere on the header outside
+// the action buttons; the .cg-actions span stops propagation so the buttons
+// keep working without toggling the section.
+function cgToggleCollapse(ev, hdr) {
+  if (!hdr) return;
+  var sect = hdr.closest('.cg-sect');
+  if (!sect) return;
+  sect.classList.toggle('collapsed');
 }
 // Toggle dashed divider visibility within a group section
 function _cgRefreshDivider(sect) {
@@ -28970,9 +28987,8 @@ function buildProposalPDF(id) {
 
   var incRows = measureItems(ii, 8.5);
   var excRows = measureItems(ei, 8.5);
-  var SP_GROUP_HDR  = 16;                                          // grey sub-header strip per group
-  var SP_INCL_TABLE = ii.length ? (SP_TABLE_HEADER + incRows * SP_ITEM_BASE + 4*ii.length + 18 + countGroups(ii) * SP_GROUP_HDR) : 0;
-  var SP_EXCL_TABLE = ei.length ? (SP_TABLE_HEADER + excRows * SP_ITEM_BASE + 4*ei.length + 18 + countGroups(ei) * SP_GROUP_HDR) : 0;
+  var SP_INCL_TABLE = ii.length ? (SP_TABLE_HEADER + incRows * SP_ITEM_BASE + 4*ii.length + 18) : 0;
+  var SP_EXCL_TABLE = ei.length ? (SP_TABLE_HEADER + excRows * SP_ITEM_BASE + 4*ei.length + 18) : 0;
   var SP_SUBMIT     = 14 + 18 + 38 + 4 + 14 + 14 + 4;             // Respectfully Submitted block (incl. visual sig + typed name + role)
 
   var usedOnLetter   = HEADER_BOTTOM + SP_LETTER_BLOCK + SP_BODY + SP_SIGNOFF + SP_BID_TABLE + SP_ALT_BLOCK + SP_VE_BLOCK;
@@ -29077,7 +29093,6 @@ function buildProposalPDF(id) {
   function tbl(title, items) {
     if (!items.length) return;
     var lgray = [210,210,210];
-    // Outer section header
     doc.setFillColor(lgray[0], lgray[1], lgray[2]);
     doc.rect(LM, y, RM - LM, 16, 'F');
     doc.setDrawColor(0,0,0); doc.setLineWidth(0.5);
@@ -29085,42 +29100,28 @@ function buildProposalPDF(id) {
     sf('bold', 9.5, [0,0,0]);
     doc.text(title, LM + 4, y + 11);
     y += 16;
-
-    // Group items by their .group, ordered using groupClarItems(), then a
-    // sub-header strip per group followed by the items below it.
-    var grouped = groupClarItems(items);   // [[name, items], …]
-    grouped.forEach(function(pair){
-      var grpName = pair[0];
-      var grpItems = pair[1];
-      if (!grpItems.length) return;
-      // Page-break safety: sub-header + first row should fit
-      if (y + 30 > FOOTER_TOP) {
+    sf('normal', 8.5, [0,0,0]);
+    // Grouping is editor-only; the PDF prints one combined table. Items
+    // arrive as {group, text} objects — we render text only, in the
+    // same order groupClarItems would give to keep brick-veneer next to
+    // brick-veneer etc.
+    var ordered = [];
+    groupClarItems(items).forEach(function(pair){
+      pair[1].forEach(function(it){ ordered.push(it); });
+    });
+    ordered.forEach(function(item){
+      var txt = (typeof item === 'string') ? item : (item && item.text) || '';
+      var ls = doc.splitTextToSize(txt, RM - LM - 8);
+      var rh = Math.max(14, ls.length * 11 + 4);
+      if (y + rh > FOOTER_TOP) {
         doc.addPage(); letterhead();
         y = HEADER_BOTTOM + 30;
+        sf('normal', 8.5, [0,0,0]);
       }
-      // Sub-header strip (lighter than the outer one)
-      doc.setFillColor(236,236,236);
-      doc.rect(LM, y, RM - LM, 14, 'F');
       doc.setDrawColor(180,180,180); doc.setLineWidth(0.3);
-      doc.rect(LM, y, RM - LM, 14, 'S');
-      sf('bold', 8.5, [60,60,60]);
-      doc.text(String(grpName).toUpperCase(), LM + 4, y + 10);
-      y += 14;
-      sf('normal', 8.5, [0,0,0]);
-      grpItems.forEach(function(item){
-        var txt = (typeof item === 'string') ? item : (item && item.text) || '';
-        var ls = doc.splitTextToSize(txt, RM - LM - 8);
-        var rh = Math.max(14, ls.length * 11 + 4);
-        if (y + rh > FOOTER_TOP) {
-          doc.addPage(); letterhead();
-          y = HEADER_BOTTOM + 30;
-          sf('normal', 8.5, [0,0,0]);
-        }
-        doc.setDrawColor(180,180,180); doc.setLineWidth(0.3);
-        doc.rect(LM, y, RM - LM, rh, 'S');
-        doc.text(ls, LM + 4, y + 9);
-        y += rh;
-      });
+      doc.rect(LM, y, RM - LM, rh, 'S');
+      doc.text(ls, LM + 4, y + 9);
+      y += rh;
     });
     y += 18;
   }
