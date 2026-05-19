@@ -25710,15 +25710,18 @@ function _poRenderPDF(po) {
   var sigName = po.authorizedByName || '';
   var sigImage = (sigUser && sigUser.signatureImage && sigUser.signatureImage.data) ? sigUser.signatureImage : null;
 
-  // Underlines for both signatures (drawn first; image / script name renders above)
+  // Underlines for both signatures (drawn first; signature / script / date
+  // all render above; italic captions render below)
   ln(LM, y, LM + 200, y, 0.5);
   ln(LM + 250, y, LM + 450, y, 0.5);
 
-  // KMI authorizer visual signature — above the left underline.
-  // Same target height as the proposal (38pt). Width cap is tighter
-  // (200pt vs. proposal's 240pt) because the PO signature line is shorter.
+  // KMI authorizer visual signature — above the LEFT portion of the left
+  // underline. Width cap reduced to 130pt (from 200pt) so the issuance
+  // date can be stamped at the RIGHT end of the same line, matching the
+  // historical Excel PO template layout (signature on the left of the
+  // line, date on the right of the line, italic captions below).
   var SIG_TARGET_H = 38;
-  var SIG_MAX_W    = 200;
+  var SIG_MAX_W    = 130;
   if (sigImage && sigImage.w && sigImage.h) {
     var aspect = sigImage.w / sigImage.h;
     var sH = SIG_TARGET_H, sW = sH * aspect;
@@ -25729,28 +25732,31 @@ function _poRenderPDF(po) {
       // Image insertion failed — fall back to Dancing Script name above the line
       try { doc.setFont('DancingScript', 'normal'); }
       catch (_) { doc.setFont('helvetica', 'italic'); }
-      doc.setFontSize(24);
+      // Auto-fit so the fallback script name shares the line cleanly with
+      // the date stamp (long names get scaled down rather than overflowing).
+      var fbSize = 20;
+      doc.setFontSize(fbSize);
+      var fbW = doc.getTextWidth(sigName);
+      if (fbW > SIG_MAX_W) { doc.setFontSize(fbSize * (SIG_MAX_W / fbW)); }
       doc.text(sigName, LM, y - 4);
     }
   } else if (sigName) {
     // No uploaded signature image — render the authorizer's name in
     // Dancing Script (embedded TTF). Falls back to italic Helvetica if
-    // the font failed to register on this doc.
+    // the font failed to register on this doc. Auto-fits to SIG_MAX_W
+    // so the name shares the line cleanly with the date stamp.
     try { doc.setFont('DancingScript', 'normal'); }
     catch (_) { doc.setFont('helvetica', 'italic'); }
-    doc.setFontSize(24);
+    var scriptSize = 20;
+    doc.setFontSize(scriptSize);
+    var scriptW = doc.getTextWidth(sigName);
+    if (scriptW > SIG_MAX_W) { doc.setFontSize(scriptSize * (SIG_MAX_W / scriptW)); }
     doc.text(sigName, LM, y - 4);
   }
 
-  // Typed legibility line + role labels (back to Helvetica). The KMI date
-  // is auto-stamped inline after the "Date:" label using the issuance
-  // timestamp (falls back to po.date for historical / un-transitioned POs
-  // so they still print a date). The vendor's date stays blank with an
-  // underline for them to fill in by hand or e-sign.
-  sf('normal', 9);
-  doc.text('Authorized by: ' + sigName, LM, y + 12);
-
-  // Compute the KMI signature date
+  // Compute the KMI signature date (issuedAt timestamp for issued POs,
+  // falls back to po.date for historical / un-transitioned records so
+  // they still print a date).
   var kmiDateIso = po.issuedAt || '';
   var kmiDateStr = '';
   if (kmiDateIso) {
@@ -25763,14 +25769,28 @@ function _poRenderPDF(po) {
   }
   if (!kmiDateStr) kmiDateStr = fmtDate(po.date) || '';
 
-  // KMI date — label + value on the same line, sitting under the right
-  // portion of the left signature underline.
-  doc.text('Date: ' + kmiDateStr, LM + 220, y + 12);
+  // KMI date — stamped ABOVE the left signature line, right-aligned to
+  // the end of the line. Matches the historical Excel PO template where
+  // the date sits ON the signature line next to the signature itself,
+  // not below in the caption row (which previously caused the date text
+  // to physically overlap with the "Subcontractor Authorization" caption).
+  if (kmiDateStr) {
+    sf('normal', 10);
+    doc.text(kmiDateStr, LM + 200, y - 4, { align: 'right' });
+  }
 
-  // Vendor side — label + a short underline for the vendor to date by hand.
-  doc.text('Subcontractor Authorization', LM + 250, y + 12);
-  doc.text('Date:', LM + 470, y + 12);
-  ln(LM + 495, y + 12, LM + 560, y + 12, 0.5);
+  // Italic captions below each signature line (Helvetica italic, matching
+  // the historical Excel template's caption style). KMI side: signer name
+  // + "Date" caption under the date value above. Vendor side: 
+  // "Subcontractor Authorization:" + "Date" caption — the vendor writes
+  // their signature AND date ABOVE their line by hand or e-sign (no
+  // separate date underline needed; their signature line doubles as the
+  // date line, same as the KMI side).
+  sf('italic', 8);
+  doc.text('Authorized by: ' + sigName, LM, y + 12);
+  doc.text('Date', LM + 165, y + 12);
+  doc.text('Subcontractor Authorization:', LM + 250, y + 12);
+  doc.text('Date', LM + 415, y + 12);
 
   // ── Save ────────────────────────────────────────────────────────
   var safeName = String(po.number || 'PO').replace(/[^a-zA-Z0-9._-]/g, '_');
