@@ -24572,10 +24572,11 @@ function _poAppendLineRow(line) {
   var tr = document.createElement('tr');
   tr.id = rid;
   tr.style.borderBottom = '1px solid #eee';
-  // Stash any manual material-list link on the row's dataset so it round-trips
-  // through _poReadLinesFromDom. The link is set/cleared from the Procurement
-  // tab's override picker; the PO editor itself doesn't expose UI for it.
-  if (line.materialListId) tr.dataset.materialListId = String(line.materialListId);
+  // Stash any manual procurement-list link on the row's dataset so it
+  // round-trips through _poReadLinesFromDom. The link is set/cleared from
+  // the Procurement tab's override picker; the PO editor itself doesn't
+  // expose UI for it.
+  if (line.procurementItemId) tr.dataset.procurementItemId = String(line.procurementItemId);
   tr.innerHTML =
     '<td style="padding:4px"><input type="number" step="any" data-pof="qty" value="' + _poEsc(line.qty != null ? line.qty : '') + '" oninput="poRecalcTotals()" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:12px;text-align:right"></td>' +
     '<td style="padding:4px"><input type="text" data-pof="unit" value="' + _poEsc(line.unit || '') + '" placeholder="ea" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:12px"></td>' +
@@ -24611,9 +24612,9 @@ function _poReadLinesFromDom() {
         line[key] = inp.value;
       }
     });
-    // Preserve any manual material-list link set from the Procurement tab.
-    if (tr.dataset && tr.dataset.materialListId) {
-      line.materialListId = tr.dataset.materialListId;
+    // Preserve any manual procurement-list link set from the Procurement tab.
+    if (tr.dataset && tr.dataset.procurementItemId) {
+      line.procurementItemId = tr.dataset.procurementItemId;
     }
     lines.push(line);
   });
@@ -27409,32 +27410,41 @@ async function deleteSpecSection(id) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// PROJECT PROCUREMENT REPORT — Round 1
+// PROJECT PROCUREMENT REPORT — Round 2
 // ═══════════════════════════════════════════════════════════════════
-// Reconciles the project material list (SKU-level) with PO line items
-// (line-level) so PMs can see what's been ordered, what's still
-// outstanding, lead times, order dates, and delivery dates at a glance.
+// A curated, per-project procurement list reconciled against PO line
+// items. Distinct from p.materialList — that's the estimating/COR
+// snapshot; this is the field/PM-facing "what to order, when" view.
 //
-// Row sources (hybrid):
-//   1. Every p.materialList row for the project
-//   2. Any PO line items that don't match a material list row — rendered
-//      as "ghost rows" at the bottom under a separate subheading, with a
-//      "+ Add" button per ghost to promote to the material list
+// Storage: p.procurementItems[] (JSONB). Each item:
+//   { id, description, unit, costCode, unitCost, leadTimeDays,
+//     manualQty, sourceLabel, sourceMaterialListId, addedAt }
+//   - manualQty is the user-entered quantity used ONLY when no PO line
+//     is linked. Once a PO links, qty becomes a read-only rollup of
+//     linked PO line qtys.
 //
-// Match logic:
-//   - If a PO line has line.materialListId set → manual override wins
-//   - If it equals the PROC_UNLINK_SENTINEL → explicitly unmatched
-//   - Else fall back to description match (case-insensitive trim)
+// Match logic for PO lines → procurement items:
+//   - If line.procurementItemId set & valid → manual link (M badge)
+//   - If equals PROC_UNLINK_SENTINEL → explicitly unmatched (ghost)
+//   - Else fall back to case-insensitive description match (A badge)
 //
-// Lead time: stored on the material list row as .leadTimeDays
-// Order date: po.issuedAt (Draft POs still surface but show no order date)
-// Delivery date: po.estDeliveryDate
+// Add flows: "+ From material list" picker (snapshot copy), "+ Custom
+// item" modal, "+ Add to list" on each ghost row.
 //
-// Permissions (Round 1): no new actions. Lead-time edits inherit project
-// edit; PO link overrides inherit edit-purchase-orders.
+// Remove flows: per-row X (confirm if linked POs exist); per-PO unlink
+// inside the expanded drawer (multi-PO rows only — single-PO unlink
+// happens via the ⚙ Link POs picker).
+//
+// Order date = earliest po.issuedAt among linked POs (Draft POs surface
+// but show blank order date until issued). Delivery date = earliest
+// po.estDeliveryDate. Voided POs are excluded entirely.
+//
+// Permissions: lead-time / qty / item add-remove inherit project edit
+// (implicit via _editProjectId). PO link overrides require
+// edit-purchase-orders.
 
 var PROC_UNLINK_SENTINEL = '__procunlinked__';
-var _procDrawerOpen = {};      // rowId -> bool, tracks expanded drawer rows
+var _procDrawerOpen = {};      // itemId -> bool, tracks expanded drawer rows
 var _procVarianceOn = false;   // variance columns toggle
 
 function _procEsc(s) {
@@ -27450,15 +27460,16 @@ function _procFmtMoney(n) {
 
 function _procFmtDate(d) {
   if (!d) return '';
-  // Accept YYYY-MM-DD or ISO timestamp; render M/D/YYYY for display
   var m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) return parseInt(m[2], 10) + '/' + parseInt(m[3], 10) + '/' + m[1];
   return String(d);
 }
 
-// Collect all PO line items on this project. Voided POs are excluded
-// (they don't represent a real order). Drafts ARE included — useful to
-// see "drafted but not yet issued" — but their issuedAt is empty.
+function _procNewItemId() {
+  return 'pci' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+}
+
+// All non-Void PO line entries on this project.
 function _procCollectProjectPoLines(projectId) {
   var out = [];
   (db.purchaseOrders || []).forEach(function(po){
@@ -27472,31 +27483,29 @@ function _procCollectProjectPoLines(projectId) {
   return out;
 }
 
-// Bucket PO line entries by material list row. Returns:
-//   { byMatRowId: { rowId -> [entry+matchKind] }, ghosts: [entry] }
-// matchKind is 'manual' (explicit materialListId) or 'auto' (description match).
+// Bucket PO line entries by procurement item. Returns
+//   { byItemId: { id -> [entry+matchKind] }, ghosts: [entry] }
 function _procBuildMatchIndex(project, poLineEntries) {
-  var matList = (project && project.materialList) || [];
+  var items = (project && project.procurementItems) || [];
   var descIdx = {};
-  matList.forEach(function(m){
-    var key = String(m.description || '').toLowerCase().trim();
-    if (key && !descIdx[key]) descIdx[key] = m.id;
+  items.forEach(function(it){
+    var key = String(it.description || '').toLowerCase().trim();
+    if (key && !descIdx[key]) descIdx[key] = it.id;
   });
-  var rowToId = {};
-  matList.forEach(function(m){ rowToId[String(m.id)] = true; });
+  var idSet = {};
+  items.forEach(function(it){ idSet[String(it.id)] = true; });
 
-  var byMatRowId = {};
+  var byItemId = {};
   var ghosts = [];
   poLineEntries.forEach(function(e){
-    var manualId = e.line.materialListId;
+    var manualId = e.line.procurementItemId;
     if (manualId === PROC_UNLINK_SENTINEL) {
-      // Explicit user unlink — never auto-match, always ghost
       ghosts.push(e);
       return;
     }
     var matchedId = null;
     var matchKind = '';
-    if (manualId && rowToId[String(manualId)]) {
+    if (manualId && idSet[String(manualId)]) {
       matchedId = String(manualId);
       matchKind = 'manual';
     } else {
@@ -27510,12 +27519,12 @@ function _procBuildMatchIndex(project, poLineEntries) {
       var enriched = {};
       Object.keys(e).forEach(function(k){ enriched[k] = e[k]; });
       enriched.matchKind = matchKind;
-      (byMatRowId[matchedId] = byMatRowId[matchedId] || []).push(enriched);
+      (byItemId[matchedId] = byItemId[matchedId] || []).push(enriched);
     } else {
       ghosts.push(e);
     }
   });
-  return { byMatRowId: byMatRowId, ghosts: ghosts };
+  return { byItemId: byItemId, ghosts: ghosts };
 }
 
 function _procRollup(entries) {
@@ -27552,11 +27561,13 @@ function renderProjectProcurement() {
     return;
   }
 
-  var matList = p.materialList || [];
+  p.procurementItems = p.procurementItems || [];
+  var items   = p.procurementItems;
   var poLines = _procCollectProjectPoLines(p.id);
   var idx     = _procBuildMatchIndex(p, poLines);
+  var matListCount = (p.materialList || []).length;
 
-  // Header card (job # / name / address / City, ST Zip)
+  // Header card (job # / name / address / City, ST Zip + add buttons)
   var cs = (p.city || '') + (p.state ? ', ' + p.state : '');
   var cityStateZip = (cs + (p.zip ? ' ' + p.zip : '')).trim();
   if (cityStateZip === ',') cityStateZip = '';
@@ -27565,10 +27576,14 @@ function renderProjectProcurement() {
     '<div class="card">' +
       '<div class="ch">' +
         '<span class="ct">Procurement report</span>' +
-        '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#555;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0">' +
-          '<input type="checkbox" id="proc-var-toggle"' + (_procVarianceOn ? ' checked' : '') + ' onchange="procToggleVariance()" style="width:auto;margin:0">' +
-          'Show variance columns' +
-        '</label>' +
+        '<span style="display:flex;gap:12px;align-items:center">' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#555;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0">' +
+            '<input type="checkbox" id="proc-var-toggle"' + (_procVarianceOn ? ' checked' : '') + ' onchange="procToggleVariance()" style="width:auto;margin:0">' +
+            'Show variance columns' +
+          '</label>' +
+          '<button type="button" class="btn btn-sm" onclick="procOpenFromMatListPicker()"' + (matListCount ? '' : ' disabled title="No material list rows on this project yet"') + '>+ From material list</button>' +
+          '<button type="button" class="btn btn-sm btn-p" onclick="procOpenCustomItemModal(null)">+ Custom item</button>' +
+        '</span>' +
       '</div>' +
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 20px;font-size:12px;line-height:1.6">' +
         '<div><span style="color:#888">Job #:</span> <strong>' + _procEsc(p.number || '—') + '</strong></div>' +
@@ -27578,10 +27593,12 @@ function renderProjectProcurement() {
       '</div>' +
     '</div>';
 
-  if (!matList.length && !idx.ghosts.length) {
+  // Empty state — only when both items AND ghosts are empty.
+  if (!items.length && !idx.ghosts.length) {
     el.innerHTML = headerHtml +
       '<div class="card"><div style="padding:30px;color:#aaa;font-size:13px;text-align:center;line-height:1.6">' +
-        'No materials on this project yet.<br>Add rows to the project material list on the <strong>Project Details</strong> tab, then come back here to see procurement status.' +
+        'No procurement items yet.<br>' +
+        'Click <strong>+ From material list</strong> to pull items from the project material list, or <strong>+ Custom item</strong> to add one manually.' +
       '</div></div>';
     return;
   }
@@ -27590,7 +27607,7 @@ function renderProjectProcurement() {
   var tableHead =
     '<thead style="background:#fafafa"><tr>' +
       '<th style="padding:8px;text-align:left">Description</th>' +
-      '<th style="padding:8px;text-align:right;width:80px">Qty</th>' +
+      '<th style="padding:8px;text-align:right;width:90px">Qty</th>' +
       '<th style="padding:8px;text-align:right;width:80px" title="Lead time in days">Lead (d)</th>' +
       '<th style="padding:8px;text-align:left;width:110px">Order date</th>' +
       '<th style="padding:8px;text-align:left;width:110px">Delivery date</th>' +
@@ -27599,13 +27616,19 @@ function renderProjectProcurement() {
           '<th style="padding:8px;text-align:right;width:100px">Ordered ($)</th>' +
           '<th style="padding:8px;text-align:right;width:100px">Variance ($)</th>'
         : '') +
-      '<th style="padding:8px;width:110px"></th>' +
+      '<th style="padding:8px;width:130px"></th>' +
     '</tr></thead>';
 
   var bodyRows = '';
-  matList.forEach(function(row){
-    bodyRows += _procRenderMatRow(row, idx.byMatRowId[String(row.id)] || []);
-  });
+  if (items.length) {
+    items.forEach(function(item){
+      bodyRows += _procRenderItemRow(item, idx.byItemId[String(item.id)] || []);
+    });
+  } else {
+    bodyRows += '<tr><td colspan="' + totalCols + '" style="padding:18px;color:#aaa;font-size:12px;text-align:center">' +
+      'No procurement items yet — use the buttons above to add some.' +
+    '</td></tr>';
+  }
 
   var ghostsHtml = '';
   if (idx.ghosts.length) {
@@ -27613,7 +27636,7 @@ function renderProjectProcurement() {
       '<tr style="background:#FFF8E1">' +
         '<td colspan="' + totalCols + '" style="padding:10px 12px;font-weight:600;font-size:12px;color:#9A7A2E">' +
           '<span style="margin-right:6px">⚠</span>Unmatched PO lines — ' + idx.ghosts.length + ' line item' + (idx.ghosts.length === 1 ? '' : 's') +
-          ' on this project\'s POs don\'t match any material list row.' +
+          ' on this project\'s POs don\'t match any procurement item.' +
         '</td>' +
       '</tr>';
     idx.ghosts.forEach(function(e){
@@ -27633,32 +27656,42 @@ function renderProjectProcurement() {
 
   var hintHtml =
     '<div style="font-size:11px;color:#888;margin-top:-8px;margin-bottom:16px;line-height:1.6;padding:0 4px">' +
-      '<strong>Order date</strong> = earliest PO issue date linked to this material. ' +
+      '<strong>Qty</strong> is editable when no PO is linked; once linked, it\'s a rollup of PO line qtys (read-only). ' +
+      '<strong>Order date</strong> = earliest PO issue date. ' +
       '<strong>Delivery date</strong> = earliest PO\'s estimated delivery date. ' +
-      'Draft POs surface here but show no order date until issued. ' +
       'Badges: <span style="font-size:10px;color:#1F5A8A;background:#E3F0FB;padding:1px 5px;border-radius:8px">M</span> manual link, ' +
       '<span style="font-size:10px;color:#666;background:#F5F5F3;padding:1px 5px;border-radius:8px">A</span> auto-match by description. ' +
-      'Click <strong>⚙ Link POs</strong> to override.' +
+      'Multi-PO rows expand for per-PO unlink.' +
     '</div>';
 
   el.innerHTML = headerHtml + tableHtml + hintHtml;
 }
 
-function _procRenderMatRow(row, entries) {
-  var rowId = String(row.id);
+function _procRenderItemRow(item, entries) {
+  var itemId = String(item.id);
   var rollup = _procRollup(entries);
-  var leadTime = (row.leadTimeDays != null && row.leadTimeDays !== '') ? row.leadTimeDays : '';
+  var leadTime = (item.leadTimeDays != null && item.leadTimeDays !== '') ? item.leadTimeDays : '';
   var hasPO = entries.length > 0;
   var hasMulti = entries.length > 1;
-  var isOpen = !!_procDrawerOpen[rowId];
+  var isOpen = !!_procDrawerOpen[itemId];
 
-  var qtyCell      = hasPO ? String(rollup.totalQty) : '<span style="color:#aaa">—</span>';
+  // Qty cell: editable manualQty if no POs, else read-only rollup
+  var qtyCell;
+  if (hasPO) {
+    qtyCell = '<span style="font-weight:600">' + rollup.totalQty + '</span>';
+  } else {
+    var mq = (item.manualQty != null && item.manualQty !== '') ? item.manualQty : '';
+    qtyCell = '<input type="number" min="0" step="any" value="' + _procEsc(mq) + '" placeholder="—" ' +
+      'style="width:80px;padding:4px 6px;font-size:12px;text-align:right;border:1px solid #ddd;border-radius:4px" ' +
+      'data-proc-qty="' + _procEsc(itemId) + '" oninput="procUpdateManualQty(this)">';
+  }
+
   var orderCell    = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '<span style="color:#aaa">—</span>';
   var deliveryCell = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '<span style="color:#aaa">—</span>';
 
   var poBadge = '';
   if (hasMulti) {
-    poBadge = ' <button type="button" onclick="procToggleDrawer(\'' + _procEsc(rowId) + '\')" ' +
+    poBadge = ' <button type="button" onclick="procToggleDrawer(\'' + _procEsc(itemId) + '\')" ' +
       'style="padding:2px 8px;font-size:11px;background:#EEF0F8;color:#1F5A8A;border:none;border-radius:8px;cursor:pointer;font-family:inherit" ' +
       'title="Show details for each linked PO">' +
       (isOpen ? '▾' : '▸') + ' ' + entries.length + ' POs</button>';
@@ -27673,8 +27706,11 @@ function _procRenderMatRow(row, entries) {
 
   var varCells = '';
   if (_procVarianceOn) {
-    var estUnit = Number(row.unitCost) || 0;
-    var estDollars = rollup.totalQty * estUnit;
+    var estUnit = Number(item.unitCost) || 0;
+    // Variance basis: ordered qty if POs exist, else manualQty (so a planned
+    // estimate is visible before any PO is cut).
+    var refQty = hasPO ? rollup.totalQty : (Number(item.manualQty) || 0);
+    var estDollars = refQty * estUnit;
     var ordDollars = rollup.orderedDollars;
     var variance = ordDollars - estDollars;
     var varColor = '';
@@ -27693,49 +27729,55 @@ function _procRenderMatRow(row, entries) {
     '<tr style="border-top:1px solid #eee;' + rowBg + '">' +
       '<td style="padding:8px">' +
         '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">' +
-          '<strong>' + _procEsc(row.description || '(no description)') + '</strong>' +
+          '<strong>' + _procEsc(item.description || '(no description)') + '</strong>' +
           poBadge +
         '</div>' +
         '<div style="font-size:10px;color:#888;margin-top:2px">' +
-          (row.unit ? 'Unit: ' + _procEsc(row.unit) : '') +
-          (row.unit && row.costCode ? ' · ' : '') +
-          (row.costCode ? 'CC ' + _procEsc(row.costCode) : '') +
+          (item.unit ? 'Unit: ' + _procEsc(item.unit) : '') +
+          (item.unit && item.costCode ? ' · ' : '') +
+          (item.costCode ? 'CC ' + _procEsc(item.costCode) : '') +
+          ((item.unit || item.costCode) && item.sourceLabel ? ' · ' : '') +
+          (item.sourceLabel ? _procEsc(item.sourceLabel) : '') +
         '</div>' +
       '</td>' +
       '<td style="padding:8px;text-align:right">' + qtyCell + '</td>' +
       '<td style="padding:8px;text-align:right">' +
         '<input type="number" min="0" step="1" value="' + _procEsc(leadTime) + '" placeholder="—" ' +
           'style="width:60px;padding:4px 6px;font-size:12px;text-align:right;border:1px solid #ddd;border-radius:4px" ' +
-          'data-proc-lead="' + _procEsc(rowId) + '" oninput="procUpdateLead(this)">' +
+          'data-proc-lead="' + _procEsc(itemId) + '" oninput="procUpdateLead(this)">' +
       '</td>' +
       '<td style="padding:8px;color:' + (rollup.earliestOrderDate ? '#333' : '#aaa') + '">' + orderCell + '</td>' +
       '<td style="padding:8px;color:' + (rollup.earliestDeliveryDate ? '#333' : '#aaa') + '">' + deliveryCell + '</td>' +
       varCells +
-      '<td style="padding:8px;text-align:right">' +
-        '<button type="button" class="btn btn-sm" onclick="procOpenLinkPicker(\'' + _procEsc(rowId) + '\')" title="Link / unlink PO lines for this material" style="padding:3px 8px;font-size:11px">⚙ Link POs</button>' +
+      '<td style="padding:8px;text-align:right;white-space:nowrap">' +
+        '<button type="button" class="btn btn-sm" onclick="procOpenCustomItemModal(\'' + _procEsc(itemId) + '\')" title="Edit description, unit, cost code, unit cost" style="padding:3px 6px;font-size:11px;margin-right:2px">✎</button>' +
+        '<button type="button" class="btn btn-sm" onclick="procOpenLinkPicker(\'' + _procEsc(itemId) + '\')" title="Link / unlink PO lines for this item" style="padding:3px 8px;font-size:11px;margin-right:2px">⚙ POs</button>' +
+        '<button type="button" class="btn btn-sm" onclick="procRemoveItem(\'' + _procEsc(itemId) + '\')" title="Remove this item from the procurement list" style="padding:3px 8px;font-size:11px;color:#A32D2D">✕</button>' +
       '</td>' +
     '</tr>';
 
   if (hasMulti && isOpen) {
     var totalCols = _procVarianceOn ? 9 : 6;
     html += '<tr><td colspan="' + totalCols + '" style="padding:0;background:#FAFAFA">' +
-      _procRenderDrawer(row, entries) +
+      _procRenderDrawer(item, entries) +
     '</td></tr>';
   }
 
   return html;
 }
 
-function _procRenderDrawer(row, entries) {
+function _procRenderDrawer(item, entries) {
   var rows = entries.map(function(e){
     var qty = Number(e.line.qty) || 0;
-    var up = Number(e.line.unitPrice) || 0;
-    var v = (db.vendors || []).find(function(x){ return String(x.id) === String(e.po.vendorId); });
+    var up  = Number(e.line.unitPrice) || 0;
+    var v   = (db.vendors || []).find(function(x){ return String(x.id) === String(e.po.vendorId); });
     var vendorName = (v && v.name) || '—';
     var poNum = e.po.number || '(no #)';
     var statusBadge = '<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:#F0F0EE;color:#666;margin-left:4px">' + _procEsc(e.status) + '</span>';
     var isManual = e.matchKind === 'manual';
     var kindBadge = '<span style="font-size:10px;color:' + (isManual ? '#1F5A8A' : '#666') + ';background:' + (isManual ? '#E3F0FB' : '#F5F5F3') + ';padding:1px 6px;border-radius:8px;margin-left:4px" title="' + (isManual ? 'Manually linked' : 'Auto-matched by description') + '">' + (isManual ? 'M' : 'A') + '</span>';
+    var lineIdAttr = String(e.line.id || '');
+    var unlinkBtn = '<button type="button" class="btn btn-sm" onclick="procUnlinkPoLine(\'' + _procEsc(String(e.po.id)) + '\',\'' + _procEsc(lineIdAttr) + '\')" title="Unlink this PO line from the procurement item" style="padding:2px 7px;font-size:11px;color:#A32D2D">Unlink</button>';
     return '<tr>' +
       '<td style="padding:6px 10px"><a href="#" onclick="procOpenPo(\'' + _procEsc(String(e.po.id)) + '\');return false" style="color:#1F5A8A;text-decoration:none;font-weight:600">' + _procEsc(poNum) + '</a>' + statusBadge + kindBadge + '</td>' +
       '<td style="padding:6px 10px">' + _procEsc(vendorName) + '</td>' +
@@ -27743,6 +27785,7 @@ function _procRenderDrawer(row, entries) {
       '<td style="padding:6px 10px;text-align:right;font-family:monospace">$' + _procFmtMoney(qty * up) + '</td>' +
       '<td style="padding:6px 10px">' + (e.po.issuedAt ? _procFmtDate(String(e.po.issuedAt).slice(0,10)) : '<span style="color:#aaa">Not issued</span>') + '</td>' +
       '<td style="padding:6px 10px">' + (e.po.estDeliveryDate ? _procFmtDate(e.po.estDeliveryDate) : '<span style="color:#aaa">—</span>') + '</td>' +
+      '<td style="padding:6px 10px;text-align:right">' + unlinkBtn + '</td>' +
     '</tr>';
   }).join('');
   return '<div style="padding:8px 14px 14px 14px">' +
@@ -27754,6 +27797,7 @@ function _procRenderDrawer(row, entries) {
         '<th style="padding:6px 10px;text-align:right">Line $</th>' +
         '<th style="padding:6px 10px;text-align:left">Order date</th>' +
         '<th style="padding:6px 10px;text-align:left">Delivery date</th>' +
+        '<th style="padding:6px 10px;text-align:right;width:80px"></th>' +
       '</tr></thead><tbody>' + rows + '</tbody>' +
     '</table>' +
   '</div>';
@@ -27761,14 +27805,14 @@ function _procRenderDrawer(row, entries) {
 
 function _procRenderGhostRow(entry) {
   var qty = Number(entry.line.qty) || 0;
-  var up = Number(entry.line.unitPrice) || 0;
-  var v = (db.vendors || []).find(function(x){ return String(x.id) === String(entry.po.vendorId); });
+  var up  = Number(entry.line.unitPrice) || 0;
+  var v   = (db.vendors || []).find(function(x){ return String(x.id) === String(entry.po.vendorId); });
   var vendorName = (v && v.name) || '';
   var poNum = entry.po.number || '(no #)';
-  var orderDate    = entry.po.issuedAt ? _procFmtDate(String(entry.po.issuedAt).slice(0,10)) : '<span style="color:#aaa">—</span>';
-  var deliveryDate = entry.po.estDeliveryDate ? _procFmtDate(entry.po.estDeliveryDate) : '<span style="color:#aaa">—</span>';
+  var orderDate    = entry.po.issuedAt        ? _procFmtDate(String(entry.po.issuedAt).slice(0,10)) : '<span style="color:#aaa">—</span>';
+  var deliveryDate = entry.po.estDeliveryDate ? _procFmtDate(entry.po.estDeliveryDate)              : '<span style="color:#aaa">—</span>';
 
-  var addBtn = '<button type="button" class="btn btn-sm" onclick="procAddGhostToMatList(\'' + _procEsc(String(entry.po.id)) + '\',\'' + _procEsc(String(entry.line.id || '')) + '\')" title="Promote this PO line to a project material list row" style="padding:3px 8px;font-size:11px">+ Add to list</button>';
+  var addBtn = '<button type="button" class="btn btn-sm" onclick="procAddGhostToList(\'' + _procEsc(String(entry.po.id)) + '\',\'' + _procEsc(String(entry.line.id || '')) + '\')" title="Promote this PO line to a procurement item" style="padding:3px 8px;font-size:11px">+ Add to list</button>';
 
   var varCells = '';
   if (_procVarianceOn) {
@@ -27782,7 +27826,7 @@ function _procRenderGhostRow(entry) {
     '<td style="padding:8px">' +
       '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
         '<em>' + _procEsc(entry.line.description || '(no description)') + '</em>' +
-        '<span style="font-size:10px;color:#9A7A2E;background:#FFF1CC;padding:1px 6px;border-radius:8px" title="No match in the project material list">unmatched</span>' +
+        '<span style="font-size:10px;color:#9A7A2E;background:#FFF1CC;padding:1px 6px;border-radius:8px" title="Not in the procurement list">unmatched</span>' +
       '</div>' +
       '<div style="font-size:10px;color:#888;margin-top:2px">From PO ' + _procEsc(poNum) + (vendorName ? ' · ' + _procEsc(vendorName) : '') + '</div>' +
     '</td>' +
@@ -27795,30 +27839,48 @@ function _procRenderGhostRow(entry) {
   '</tr>';
 }
 
+// ── Lightweight handlers ─────────────────────────────────────────────
 function procToggleVariance() {
   var cb = g('proc-var-toggle');
   _procVarianceOn = !!(cb && cb.checked);
   renderProjectProcurement();
 }
 
-function procToggleDrawer(rowId) {
-  _procDrawerOpen[rowId] = !_procDrawerOpen[rowId];
+function procToggleDrawer(itemId) {
+  _procDrawerOpen[itemId] = !_procDrawerOpen[itemId];
   renderProjectProcurement();
 }
 
 function procUpdateLead(inp) {
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
-  var rowId = inp.getAttribute('data-proc-lead');
-  var row = (p.materialList || []).find(function(r){ return String(r.id) === String(rowId); });
-  if (!row) return;
+  var itemId = inp.getAttribute('data-proc-lead');
+  var item = (p.procurementItems || []).find(function(r){ return String(r.id) === String(itemId); });
+  if (!item) return;
   var v = inp.value;
   if (v === '' || v == null) {
-    row.leadTimeDays = null;
+    item.leadTimeDays = null;
   } else {
     var n = parseInt(v, 10);
     if (!isFinite(n) || n < 0) n = 0;
-    row.leadTimeDays = n;
+    item.leadTimeDays = n;
+  }
+  saveDB();
+}
+
+function procUpdateManualQty(inp) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var itemId = inp.getAttribute('data-proc-qty');
+  var item = (p.procurementItems || []).find(function(r){ return String(r.id) === String(itemId); });
+  if (!item) return;
+  var v = inp.value;
+  if (v === '' || v == null) {
+    item.manualQty = null;
+  } else {
+    var n = parseFloat(v);
+    if (!isFinite(n) || n < 0) n = 0;
+    item.manualQty = n;
   }
   saveDB();
 }
@@ -27827,10 +27889,75 @@ function procOpenPo(poId) {
   if (typeof poEditById === 'function') poEditById(poId);
 }
 
-// Promote a ghost PO line into the project material list. If a row with
-// the same description already exists, just link the PO line to it
+// Remove a procurement item. Per pick 2.1: confirm if linked POs exist.
+// The PO lines themselves stay intact; they just lose their link (any
+// auto-match by description will naturally re-attach if a same-description
+// item is added later).
+function procRemoveItem(itemId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var items = p.procurementItems || [];
+  var item = items.find(function(r){ return String(r.id) === String(itemId); });
+  if (!item) return;
+  var poLines = _procCollectProjectPoLines(p.id);
+  var idx = _procBuildMatchIndex(p, poLines);
+  var linked = (idx.byItemId[String(itemId)] || []).length;
+
+  var msg;
+  if (linked) {
+    msg = 'Remove "' + (item.description || '(no description)') + '" from the procurement list?\n\n' +
+      'This item is linked to ' + linked + ' PO line' + (linked === 1 ? '' : 's') +
+      '. The PO' + (linked === 1 ? '' : 's') + ' won\'t change — the affected line' + (linked === 1 ? '' : 's') +
+      ' will appear under "Unmatched PO lines" until you add another procurement item with the same description, link them manually, or use the +Add button.';
+  } else {
+    msg = 'Remove "' + (item.description || '(no description)') + '" from the procurement list?';
+  }
+  if (!confirm(msg)) return;
+
+  // Clear procurementItemId on any PO lines that pointed at this item
+  (db.purchaseOrders || []).forEach(function(po){
+    if (String(po.projectId) !== String(p.id)) return;
+    (po.lines || []).forEach(function(line){
+      if (line.procurementItemId && String(line.procurementItemId) === String(itemId)) {
+        delete line.procurementItemId;
+      }
+    });
+  });
+
+  p.procurementItems = items.filter(function(r){ return String(r.id) !== String(itemId); });
+  saveDB();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') showToast('Removed.', 'success');
+}
+
+// Unlink a single PO line from its procurement item. Used from the
+// drawer (multi-PO rows only). If the link was manual, clear the field.
+// If the link was an auto description match, set the sentinel so it
+// doesn't re-match.
+function procUnlinkPoLine(poId, lineId) {
+  if (!_editProjectId) return;
+  if (typeof hasFull === 'function' && !hasFull('edit-purchase-orders')) {
+    alert('You do not have permission to change PO line links.');
+    return;
+  }
+  var po = (db.purchaseOrders || []).find(function(x){ return String(x.id) === String(poId); });
+  if (!po) return;
+  var line = (po.lines || []).find(function(l){ return String(l.id || '') === String(lineId); });
+  if (!line) return;
+  var current = line.procurementItemId;
+  if (current && current !== PROC_UNLINK_SENTINEL) {
+    delete line.procurementItemId;
+  } else if (!current) {
+    line.procurementItemId = PROC_UNLINK_SENTINEL;
+  }
+  saveDB();
+  renderProjectProcurement();
+}
+
+// Promote a ghost PO line to a procurement item.
+// If an item with the same description already exists, manually link
 // instead of creating a duplicate.
-function procAddGhostToMatList(poId, lineId) {
+function procAddGhostToList(poId, lineId) {
   if (!_editProjectId) { alert('Save the project first.'); return; }
   var p = getProj(_editProjectId); if (!p) return;
   var po = (db.purchaseOrders || []).find(function(x){ return String(x.id) === String(poId); });
@@ -27838,83 +27965,273 @@ function procAddGhostToMatList(poId, lineId) {
   var line = (po.lines || []).find(function(l){ return String(l.id || '') === String(lineId); });
   if (!line) { alert('PO line not found.'); return; }
 
-  p.materialList = p.materialList || [];
+  p.procurementItems = p.procurementItems || [];
   var key = String(line.description || '').toLowerCase().trim();
   if (key) {
-    var existing = p.materialList.find(function(r){ return String(r.description || '').toLowerCase().trim() === key; });
+    var existing = p.procurementItems.find(function(r){ return String(r.description || '').toLowerCase().trim() === key; });
     if (existing) {
-      // Same description already exists — just link the PO line manually.
-      line.materialListId = existing.id;
+      line.procurementItemId = existing.id;
       saveDB();
       renderProjectProcurement();
-      if (typeof showToast === 'function') showToast('Linked PO line to existing material "' + (existing.description || '') + '".', 'success');
+      if (typeof showToast === 'function') showToast('Linked PO line to existing "' + (existing.description || '') + '".', 'success');
       return;
     }
   }
 
-  var newRow = {
-    id: 'pml' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+  var newItem = {
+    id: _procNewItemId(),
     description: line.description || '',
     unit: line.unit || '',
     costCode: line.costCode || '',
     unitCost: Number(line.unitPrice) || 0,
     leadTimeDays: null,
-    sourceTemplateId: null,
+    manualQty: null,
     sourceLabel: 'From PO ' + (po.number || ''),
-    appliedAt: new Date().toISOString()
+    sourceMaterialListId: null,
+    addedAt: new Date().toISOString()
   };
-  p.materialList.push(newRow);
-  line.materialListId = newRow.id;
+  p.procurementItems.push(newItem);
+  line.procurementItemId = newItem.id;
   saveDB();
   renderProjectProcurement();
-  if (typeof showToast === 'function') showToast('Added "' + (newRow.description || 'row') + '" to material list.', 'success');
+  if (typeof showToast === 'function') showToast('Added to procurement list.', 'success');
 }
 
-// Manual link picker — modal showing all non-Void PO lines on the project.
-// User checks which ones should link to this material list row.
-function procOpenLinkPicker(rowId) {
+// ── "+ From material list" picker ────────────────────────────────────
+// Modal listing all material list rows. Rows whose description is
+// already represented in procurementItems (case-insensitive trim) are
+// disabled with a hint. Checked rows get snapshotted into procurement.
+function procOpenFromMatListPicker() {
+  if (!_editProjectId) { alert('Save the project first.'); return; }
+  var p = getProj(_editProjectId); if (!p) return;
+  var matList = (p.materialList || []).slice();
+  if (!matList.length) {
+    alert('No material list rows on this project. Add some on the Project Details tab, then come back.');
+    return;
+  }
+  p.procurementItems = p.procurementItems || [];
+  var existingDescs = {};
+  p.procurementItems.forEach(function(it){
+    var k = String(it.description || '').toLowerCase().trim();
+    if (k) existingDescs[k] = true;
+  });
+
+  var rowsHtml = matList.map(function(m, i){
+    var k = String(m.description || '').toLowerCase().trim();
+    var already = !!(k && existingDescs[k]);
+    var disabled = already ? ' disabled title="Already in procurement list — edit the existing item instead"' : '';
+    return '<tr>' +
+      '<td style="padding:6px 8px;text-align:center"><input type="checkbox" data-proc-mat="' + i + '"' + disabled + '></td>' +
+      '<td style="padding:6px 8px;font-size:11px">' + _procEsc(m.description || '(no description)') + (already ? ' <span style="font-size:10px;color:#888">(already added)</span>' : '') + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px">' + _procEsc(m.unit || '') + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px">' + _procEsc(m.costCode || '') + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px;text-align:right">' + (Number(m.unitCost) ? '$' + _procFmtMoney(m.unitCost) : '') + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px;text-align:right">' + (m.leadTimeDays != null && m.leadTimeDays !== '' ? m.leadTimeDays : '') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&times;</button>' +
+    '<div class="mt">Add from material list</div>' +
+    '<div class="msb">Pick the material list rows you want in the procurement report. Each pick is a <strong>snapshot</strong> — later edits to the material list don\'t propagate.</div>' +
+    '<div style="display:flex;gap:8px;margin-bottom:8px">' +
+      '<button type="button" class="btn btn-sm" onclick="procFromMatListSelectAll(true)">Select all</button>' +
+      '<button type="button" class="btn btn-sm" onclick="procFromMatListSelectAll(false)">Select none</button>' +
+    '</div>' +
+    '<div style="max-height:50vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin:6px 0">' +
+      '<table style="width:100%;font-size:12px">' +
+        '<thead style="background:#f5f5f5;position:sticky;top:0;z-index:1">' +
+          '<tr>' +
+            '<th style="padding:6px 8px;width:36px"></th>' +
+            '<th style="padding:6px 8px;text-align:left">Description</th>' +
+            '<th style="padding:6px 8px;text-align:left;width:60px">Unit</th>' +
+            '<th style="padding:6px 8px;text-align:left;width:80px">CC</th>' +
+            '<th style="padding:6px 8px;text-align:right;width:90px">Unit cost</th>' +
+            '<th style="padding:6px 8px;text-align:right;width:60px">Lead (d)</th>' +
+          '</tr>' +
+        '</thead>' +
+        '<tbody>' + rowsHtml + '</tbody>' +
+      '</table>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procSaveFromMatListPicker()">Add selected</button>' +
+    '</div>'
+  );
+}
+
+function procFromMatListSelectAll(state) {
+  document.querySelectorAll('[data-proc-mat]').forEach(function(cb){
+    if (!cb.disabled) cb.checked = !!state;
+  });
+}
+
+function procSaveFromMatListPicker() {
+  if (!_editProjectId) { closeModal(); return; }
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var matList = (p.materialList || []);
+  p.procurementItems = p.procurementItems || [];
+  var added = 0;
+  document.querySelectorAll('[data-proc-mat]').forEach(function(cb){
+    if (!cb.checked || cb.disabled) return;
+    var i = parseInt(cb.getAttribute('data-proc-mat'), 10);
+    var m = matList[i];
+    if (!m) return;
+    p.procurementItems.push({
+      id: _procNewItemId(),
+      description: m.description || '',
+      unit: m.unit || '',
+      costCode: m.costCode || '',
+      unitCost: Number(m.unitCost) || 0,
+      leadTimeDays: (m.leadTimeDays != null && m.leadTimeDays !== '') ? m.leadTimeDays : null,
+      manualQty: null,
+      sourceLabel: 'From material list' + (m.sourceLabel ? ' (' + m.sourceLabel + ')' : ''),
+      sourceMaterialListId: m.id || null,
+      addedAt: new Date().toISOString()
+    });
+    added++;
+  });
+  if (added) saveDB();
+  closeModal();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') {
+    showToast(added ? ('Added ' + added + ' item' + (added === 1 ? '' : 's') + '.') : 'No items selected.', added ? 'success' : 'info');
+  }
+}
+
+// ── "+ Custom item" / Edit item modal ────────────────────────────────
+// Used for both creating new custom items (itemId = null) and editing
+// existing items (itemId set). Edits cover the fields that aren't
+// rolled-up from POs: description, unit, cost code, unit cost.
+function procOpenCustomItemModal(itemId) {
+  if (!_editProjectId) { alert('Save the project first.'); return; }
+  var p = getProj(_editProjectId); if (!p) return;
+  var editing = !!itemId;
+  var existing = editing ? (p.procurementItems || []).find(function(r){ return String(r.id) === String(itemId); }) : null;
+  if (editing && !existing) { closeModal(); return; }
+
+  var ccOpts = '<option value="">— None —</option>' +
+    ((db.costCodes || []).filter(function(c){ return c.isBudgetable && c.active !== false; })
+      .sort(function(a,b){ return String(a.code).localeCompare(String(b.code)); })
+      .map(function(c){
+        var sel = (existing && existing.costCode === c.code) ? ' selected' : '';
+        return '<option value="' + _procEsc(c.code) + '"' + sel + '>' + _procEsc(c.code) + (c.description ? ' — ' + _procEsc(c.description) : '') + '</option>';
+      }).join(''));
+
+  var matUnits = (typeof MATERIAL_UNITS !== 'undefined' && Array.isArray(MATERIAL_UNITS)) ? MATERIAL_UNITS : ['EA','SF','LF','SY','CF','CY','LB','TON','BAG','BNDL','LS','DAY','HR'];
+  var unitOpts = '<option value="">—</option>' + matUnits.map(function(u){
+    var sel = (existing && existing.unit === u) ? ' selected' : '';
+    return '<option value="' + u + '"' + sel + '>' + u + '</option>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&times;</button>' +
+    '<div class="mt">' + (editing ? 'Edit procurement item' : 'Add custom procurement item') + '</div>' +
+    '<div class="fg" style="margin:12px 0">' +
+      '<div class="fgr full"><label>Description *</label>' +
+        '<input id="proc-edit-desc" value="' + _procEsc(existing ? existing.description : '') + '" placeholder="e.g. 8&quot; CMU Block"></div>' +
+      '<div class="fgr"><label>Unit</label><select id="proc-edit-unit">' + unitOpts + '</select></div>' +
+      '<div class="fgr"><label>Cost code</label><select id="proc-edit-cc">' + ccOpts + '</select></div>' +
+      '<div class="fgr"><label>Unit cost ($)</label><input type="number" min="0" step="0.01" id="proc-edit-unitcost" value="' + (existing && Number(existing.unitCost) ? existing.unitCost : '') + '"></div>' +
+      '<div class="fgr"><label>Lead time (days)</label><input type="number" min="0" step="1" id="proc-edit-lead" value="' + (existing && existing.leadTimeDays != null && existing.leadTimeDays !== '' ? existing.leadTimeDays : '') + '" placeholder="—"></div>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procSaveCustomItem(' + (editing ? "'" + _procEsc(String(itemId)) + "'" : 'null') + ')">' + (editing ? 'Save' : 'Add item') + '</button>' +
+    '</div>'
+  );
+  setTimeout(function(){ var el = g('proc-edit-desc'); if (el) el.focus(); }, 50);
+}
+
+function procSaveCustomItem(itemId) {
+  if (!_editProjectId) { closeModal(); return; }
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var desc = (g('proc-edit-desc').value || '').trim();
+  if (!desc) { alert('Description is required.'); return; }
+  var unit = (g('proc-edit-unit').value || '').trim();
+  var cc   = (g('proc-edit-cc').value   || '').trim();
+  var ucRaw = g('proc-edit-unitcost').value;
+  var ltRaw = g('proc-edit-lead').value;
+  var unitCost = parseFloat(ucRaw); if (!isFinite(unitCost) || unitCost < 0) unitCost = 0;
+  var leadTimeDays;
+  if (ltRaw === '' || ltRaw == null) leadTimeDays = null;
+  else { leadTimeDays = parseInt(ltRaw, 10); if (!isFinite(leadTimeDays) || leadTimeDays < 0) leadTimeDays = 0; }
+
+  p.procurementItems = p.procurementItems || [];
+  if (itemId) {
+    var existing = p.procurementItems.find(function(r){ return String(r.id) === String(itemId); });
+    if (!existing) { closeModal(); return; }
+    existing.description  = desc;
+    existing.unit         = unit;
+    existing.costCode     = cc;
+    existing.unitCost     = unitCost;
+    existing.leadTimeDays = leadTimeDays;
+  } else {
+    // Dedupe by description case-insensitive trim
+    var key = desc.toLowerCase();
+    var dup = p.procurementItems.find(function(r){ return String(r.description || '').toLowerCase().trim() === key; });
+    if (dup) { alert('An item with this description is already in the procurement list.'); return; }
+    p.procurementItems.push({
+      id: _procNewItemId(),
+      description: desc,
+      unit: unit,
+      costCode: cc,
+      unitCost: unitCost,
+      leadTimeDays: leadTimeDays,
+      manualQty: null,
+      sourceLabel: 'Custom',
+      sourceMaterialListId: null,
+      addedAt: new Date().toISOString()
+    });
+  }
+  saveDB();
+  closeModal();
+  renderProjectProcurement();
+}
+
+// ── ⚙ Link POs picker — bulk link/unlink ─────────────────────────────
+function procOpenLinkPicker(itemId) {
   if (!_editProjectId) return;
   if (typeof hasFull === 'function' && !hasFull('edit-purchase-orders')) {
     alert('You do not have permission to change PO line links.');
     return;
   }
   var p = getProj(_editProjectId); if (!p) return;
-  var row = (p.materialList || []).find(function(r){ return String(r.id) === String(rowId); });
-  if (!row) return;
+  var item = (p.procurementItems || []).find(function(r){ return String(r.id) === String(itemId); });
+  if (!item) return;
   var entries = _procCollectProjectPoLines(p.id);
   if (!entries.length) {
     alert('No PO line items on this project yet. Create a PO first, then come back to link lines.');
     return;
   }
 
-  var rowDescKey = String(row.description || '').toLowerCase().trim();
+  var itemDescKey = String(item.description || '').toLowerCase().trim();
   var rowsHtml = entries.map(function(e, i){
     var v = (db.vendors || []).find(function(x){ return String(x.id) === String(e.po.vendorId); });
     var vendorName = (v && v.name) || '—';
-    var manualId = e.line.materialListId;
+    var manualId = e.line.procurementItemId;
     var linkedHere = false;
     var linkedElsewhere = false;
     var elsewhereLabel = '';
 
     if (manualId === PROC_UNLINK_SENTINEL) {
-      // Explicitly unlinked — appears as available, not linked anywhere
+      // Available — explicitly unlinked
     } else if (manualId) {
-      if (String(manualId) === String(rowId)) linkedHere = true;
+      if (String(manualId) === String(itemId)) linkedHere = true;
       else {
         linkedElsewhere = true;
-        var otherRow = (p.materialList || []).find(function(r){ return String(r.id) === String(manualId); });
-        elsewhereLabel = (otherRow && otherRow.description) || 'another row';
+        var other = (p.procurementItems || []).find(function(r){ return String(r.id) === String(manualId); });
+        elsewhereLabel = (other && other.description) || 'another item';
       }
     } else {
-      // Auto-match check
       var descKey = String(e.line.description || '').toLowerCase().trim();
-      if (descKey && rowDescKey && descKey === rowDescKey) linkedHere = true;
+      if (descKey && itemDescKey && descKey === itemDescKey) linkedHere = true;
     }
 
     var disabled = linkedElsewhere ? ' disabled' : '';
     var checked  = linkedHere ? ' checked' : '';
     var titleAttr = linkedElsewhere
-      ? ' title="Currently linked to a different material row — uncheck it from that row\'s picker first."'
+      ? ' title="Linked to a different procurement item — uncheck it from that item\'s picker first."'
       : '';
     var noteTxt = linkedElsewhere ? ' <span style="color:#9A7A2E;font-size:10px">(linked to ' + _procEsc(elsewhereLabel) + ')</span>' : '';
     var qty = Number(e.line.qty) || 0;
@@ -27930,7 +28247,7 @@ function procOpenLinkPicker(rowId) {
   showModal(
     '<button class="xbtn" onclick="closeModal()">&times;</button>' +
     '<div class="mt">Link PO lines</div>' +
-    '<div class="msb">Choose which PO line items should be linked to <strong>' + _procEsc(row.description || '(no description)') + '</strong>. Lines auto-match by description by default; use this picker to override the auto-match.</div>' +
+    '<div class="msb">Choose which PO line items should link to <strong>' + _procEsc(item.description || '(no description)') + '</strong>. Description auto-matches are on; use this picker to override.</div>' +
     '<div style="max-height:50vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin:10px 0">' +
       '<table style="width:100%;font-size:12px">' +
         '<thead style="background:#f5f5f5;position:sticky;top:0;z-index:1">' +
@@ -27946,18 +28263,18 @@ function procOpenLinkPicker(rowId) {
     '</div>' +
     '<div class="mbtns">' +
       '<button class="btn" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-p" onclick="procSaveLinkPicker(\'' + _procEsc(rowId) + '\')">Save links</button>' +
+      '<button class="btn btn-p" onclick="procSaveLinkPicker(\'' + _procEsc(itemId) + '\')">Save links</button>' +
     '</div>'
   );
 }
 
-function procSaveLinkPicker(rowId) {
+function procSaveLinkPicker(itemId) {
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
   var entries = _procCollectProjectPoLines(p.id);
-  var row = (p.materialList || []).find(function(r){ return String(r.id) === String(rowId); });
-  if (!row) { closeModal(); return; }
-  var rowDescKey = String(row.description || '').toLowerCase().trim();
+  var item = (p.procurementItems || []).find(function(r){ return String(r.id) === String(itemId); });
+  if (!item) { closeModal(); return; }
+  var itemDescKey = String(item.description || '').toLowerCase().trim();
   var changed = 0;
 
   entries.forEach(function(e, i){
@@ -27965,26 +28282,25 @@ function procSaveLinkPicker(rowId) {
     if (!cb) return;
     if (cb.disabled) return;
     var wantLinked = cb.checked;
-    var currentManual = e.line.materialListId;
+    var currentManual = e.line.procurementItemId;
     var descKey = String(e.line.description || '').toLowerCase().trim();
-    var autoMatchesHere = (!currentManual || currentManual === PROC_UNLINK_SENTINEL) ? false : false;
+    var autoMatchesHere = false;
     if (!currentManual) {
-      autoMatchesHere = !!(descKey && rowDescKey && descKey === rowDescKey);
+      autoMatchesHere = !!(descKey && itemDescKey && descKey === itemDescKey);
     }
     var currentlyLinkedHere =
-      (currentManual && currentManual !== PROC_UNLINK_SENTINEL && String(currentManual) === String(rowId)) ||
+      (currentManual && currentManual !== PROC_UNLINK_SENTINEL && String(currentManual) === String(itemId)) ||
       autoMatchesHere;
 
     if (wantLinked && !currentlyLinkedHere) {
-      e.line.materialListId = rowId;
+      e.line.procurementItemId = itemId;
       changed++;
     } else if (!wantLinked && currentlyLinkedHere) {
-      if (currentManual && currentManual !== PROC_UNLINK_SENTINEL && String(currentManual) === String(rowId)) {
-        delete e.line.materialListId;
+      if (currentManual && currentManual !== PROC_UNLINK_SENTINEL && String(currentManual) === String(itemId)) {
+        delete e.line.procurementItemId;
         changed++;
       } else if (autoMatchesHere) {
-        // Stop auto-matching this row by description — explicit unlink sentinel.
-        e.line.materialListId = PROC_UNLINK_SENTINEL;
+        e.line.procurementItemId = PROC_UNLINK_SENTINEL;
         changed++;
       }
     }
@@ -27997,6 +28313,7 @@ function procSaveLinkPicker(rowId) {
     showToast(changed ? ('Updated ' + changed + ' PO line link' + (changed === 1 ? '' : 's') + '.') : 'No changes.', 'success');
   }
 }
+
 
 // ═══════════════════════════════════════════════════════════════════
 // PROJECT PARAMETERS — Form-fill Round 1
@@ -30900,6 +31217,10 @@ function toSBProject(r) {
     // Round 2 — project material list snapshot and labor rate snapshot
     material_list:                 r.materialList                 || [],
     labor_rates:                   r.laborRates                   || null,
+    // Procurement Round 2 — curated per-project procurement list (separate
+    // from material_list — see PROJECT PROCUREMENT REPORT module). JSONB
+    // pass-through, no migration needed.
+    procurement_items:             r.procurementItems             || [],
     // Round 2.5 — project file attachments (quotes, drawings, anything)
     attachments:                   r.attachments                  || [],
     // Round 4.1 — COR markup percentages
@@ -30953,6 +31274,8 @@ function fromSBProject(r) {
     // Round 2 — project material list snapshot and labor rate snapshot
     materialList:                Array.isArray(r.material_list) ? r.material_list : [],
     laborRates:                  r.labor_rates                   || null,
+    // Procurement Round 2 — curated per-project procurement list
+    procurementItems:            Array.isArray(r.procurement_items) ? r.procurement_items : [],
     // Round 2.5 — project file attachments
     attachments:                 Array.isArray(r.attachments) ? r.attachments : [],
     // Round 4.1 — COR markup percentages (legacy projects fall back to defaults)
