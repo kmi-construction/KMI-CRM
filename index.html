@@ -1371,12 +1371,13 @@ textarea{resize:vertical;min-height:72px}
   </div>
   <!-- Tabbed layout (mirrors product library pattern). Tab content renders
        into nprj-tab-details / nprj-tab-directory / nprj-tab-submittals /
-       nprj-tab-pos. -->
+       nprj-tab-pos / nprj-tab-procurement. -->
   <div class="tabs" style="margin-top:16px">
     <div class="tab active" onclick="npSwTab('details', this)">Project Details</div>
     <div class="tab" onclick="npSwTab('directory', this)">Project Directory</div>
     <div class="tab" onclick="npSwTab('submittals', this)">Submittals</div>
     <div class="tab" onclick="npSwTab('pos', this)">PO's &amp; Subs</div>
+    <div class="tab" onclick="npSwTab('procurement', this)">Procurement</div>
   </div>
 
   <!-- ─── TAB 1: PROJECT DETAILS ─────────────────────────────────── -->
@@ -1528,6 +1529,14 @@ textarea{resize:vertical;min-height:72px}
       <div style="font-size:12px;color:#888;margin-bottom:10px">POs issued to vendors and subcontractors on this project. Numbers auto-generate as <code>{projectNumber}-NNN</code>.</div>
       <div id="nprj-po-list-section"></div>
     </div>
+  </div>
+
+  <!-- ─── TAB 5: PROCUREMENT ─────────────────────────────────────── -->
+  <!-- Reconciles project material list rows with PO line items so PMs can see
+       at a glance what's been ordered, what hasn't, lead times, and dates.
+       Renders lazily via renderProjectProcurement() when the tab opens. -->
+  <div id="nprj-tab-procurement" style="display:none">
+    <div id="nprj-procurement-section"></div>
   </div>
 
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
@@ -6090,9 +6099,10 @@ function renderProjectMaterialList() {
         '<th style="padding:6px 8px;text-align:left">Description</th>' +
         '<th style="padding:6px 8px;text-align:left;width:80px">Unit</th>' +
         '<th style="padding:6px 8px;text-align:left;width:140px">Cost code</th>' +
-        '<th style="padding:6px 8px;text-align:right;width:140px">Unit cost ($)</th>' +
-        '<th style="padding:6px 8px;text-align:left;width:160px">Source</th>' +
-        '<th style="padding:6px 8px;width:80px"></th>' +
+        '<th style="padding:6px 8px;text-align:right;width:120px">Unit cost ($)</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:90px" title="Lead time in days — used by the Procurement report to suggest when to order">Lead (d)</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:140px">Source</th>' +
+        '<th style="padding:6px 8px;width:60px"></th>' +
       '</tr></thead><tbody>';
     list.forEach(function(row){
       html += '<tr>' +
@@ -6100,6 +6110,7 @@ function renderProjectMaterialList() {
         '<td style="padding:4px 6px">' + _matUnitSelect(row) + '</td>' +
         '<td style="padding:4px 6px">' + _matCostCodeSelect(row) + '</td>' +
         '<td style="padding:4px 6px"><input type="number" min="0" step="0.01" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-mat-id="' + matEsc(row.id) + '" data-mat-fld="unitCost" value="' + (row.unitCost || 0) + '" oninput="onProjMatRowEdit(this)"></td>' +
+        '<td style="padding:4px 6px"><input type="number" min="0" step="1" style="width:100%;padding:5px 7px;font-size:12px;text-align:right" data-mat-id="' + matEsc(row.id) + '" data-mat-fld="leadTimeDays" value="' + (row.leadTimeDays != null ? row.leadTimeDays : '') + '" placeholder="—" oninput="onProjMatRowEdit(this)"></td>' +
         '<td style="padding:4px 6px;font-size:11px;color:#888">' + matEsc(row.sourceLabel || 'Custom') + '</td>' +
         '<td style="padding:4px 6px;text-align:center">' +
           '<button type="button" class="btn btn-sm" onclick="rmProjMatRow(\'' + matEsc(row.id) + '\')" style="color:#A32D2D">✕</button>' +
@@ -6142,6 +6153,12 @@ function onProjMatRowEdit(inp) {
   if (!row) return;
   var val = inp.value;
   if (fld === 'unitCost') val = parseFloat(val) || 0;
+  else if (fld === 'leadTimeDays') {
+    // Empty string clears the field (so it shows as blank "—" rather than 0).
+    // Otherwise coerce to a non-negative integer.
+    if (val === '' || val == null) val = null;
+    else { val = parseInt(val, 10); if (!isFinite(val) || val < 0) val = 0; }
+  }
   row[fld] = val;
   saveDB();
 }
@@ -24000,28 +24017,34 @@ function getProj(id) { return db.projects.find(function(p){ return p.id === id; 
 // matching tab body. Pass `el` from the inline onclick to keep the
 // click target highlighted; pass `null` when restoring state programmatically.
 function npSwTab(tab, el) {
-  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos') tab = 'details';
+  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'procurement') tab = 'details';
   _npActiveTab = tab;
   var heads = document.querySelectorAll('#pg-new-project .tabs .tab');
   heads.forEach(function(h){ h.classList.remove('active'); });
   if (el) {
     el.classList.add('active');
   } else {
-    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : 0));
+    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : (tab === 'procurement' ? 4 : 0)));
     if (heads[idx]) heads[idx].classList.add('active');
   }
   var dTab = g('nprj-tab-details');
   var rTab = g('nprj-tab-directory');
   var sTab = g('nprj-tab-submittals');
   var pTab = g('nprj-tab-pos');
-  if (dTab) dTab.style.display = (tab === 'details')    ? '' : 'none';
-  if (rTab) rTab.style.display = (tab === 'directory')  ? '' : 'none';
-  if (sTab) sTab.style.display = (tab === 'submittals') ? '' : 'none';
-  if (pTab) pTab.style.display = (tab === 'pos')        ? '' : 'none';
+  var mTab = g('nprj-tab-procurement');
+  if (dTab) dTab.style.display = (tab === 'details')     ? '' : 'none';
+  if (rTab) rTab.style.display = (tab === 'directory')   ? '' : 'none';
+  if (sTab) sTab.style.display = (tab === 'submittals')  ? '' : 'none';
+  if (pTab) pTab.style.display = (tab === 'pos')         ? '' : 'none';
+  if (mTab) mTab.style.display = (tab === 'procurement') ? '' : 'none';
   // Render PO list lazily when the PO tab is opened, so we always reflect
   // the latest db state (including POs added in another session).
   if (tab === 'pos' && typeof renderProjectPoList === 'function') {
     try { renderProjectPoList(); } catch(e) { console.warn('renderProjectPoList error', e); }
+  }
+  // Same pattern for procurement — render lazily so PO data is fresh.
+  if (tab === 'procurement' && typeof renderProjectProcurement === 'function') {
+    try { renderProjectProcurement(); } catch(e) { console.warn('renderProjectProcurement error', e); }
   }
 }
 
@@ -24549,6 +24572,10 @@ function _poAppendLineRow(line) {
   var tr = document.createElement('tr');
   tr.id = rid;
   tr.style.borderBottom = '1px solid #eee';
+  // Stash any manual material-list link on the row's dataset so it round-trips
+  // through _poReadLinesFromDom. The link is set/cleared from the Procurement
+  // tab's override picker; the PO editor itself doesn't expose UI for it.
+  if (line.materialListId) tr.dataset.materialListId = String(line.materialListId);
   tr.innerHTML =
     '<td style="padding:4px"><input type="number" step="any" data-pof="qty" value="' + _poEsc(line.qty != null ? line.qty : '') + '" oninput="poRecalcTotals()" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:12px;text-align:right"></td>' +
     '<td style="padding:4px"><input type="text" data-pof="unit" value="' + _poEsc(line.unit || '') + '" placeholder="ea" style="width:100%;padding:5px;border-radius:5px;border:1px solid #ddd;font-size:12px"></td>' +
@@ -24584,6 +24611,10 @@ function _poReadLinesFromDom() {
         line[key] = inp.value;
       }
     });
+    // Preserve any manual material-list link set from the Procurement tab.
+    if (tr.dataset && tr.dataset.materialListId) {
+      line.materialListId = tr.dataset.materialListId;
+    }
     lines.push(line);
   });
   return lines;
@@ -27375,6 +27406,596 @@ async function deleteSpecSection(id) {
     }
   }
   renderSpecSections();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// PROJECT PROCUREMENT REPORT — Round 1
+// ═══════════════════════════════════════════════════════════════════
+// Reconciles the project material list (SKU-level) with PO line items
+// (line-level) so PMs can see what's been ordered, what's still
+// outstanding, lead times, order dates, and delivery dates at a glance.
+//
+// Row sources (hybrid):
+//   1. Every p.materialList row for the project
+//   2. Any PO line items that don't match a material list row — rendered
+//      as "ghost rows" at the bottom under a separate subheading, with a
+//      "+ Add" button per ghost to promote to the material list
+//
+// Match logic:
+//   - If a PO line has line.materialListId set → manual override wins
+//   - If it equals the PROC_UNLINK_SENTINEL → explicitly unmatched
+//   - Else fall back to description match (case-insensitive trim)
+//
+// Lead time: stored on the material list row as .leadTimeDays
+// Order date: po.issuedAt (Draft POs still surface but show no order date)
+// Delivery date: po.estDeliveryDate
+//
+// Permissions (Round 1): no new actions. Lead-time edits inherit project
+// edit; PO link overrides inherit edit-purchase-orders.
+
+var PROC_UNLINK_SENTINEL = '__procunlinked__';
+var _procDrawerOpen = {};      // rowId -> bool, tracks expanded drawer rows
+var _procVarianceOn = false;   // variance columns toggle
+
+function _procEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _procFmtMoney(n) {
+  var v = Number(n);
+  if (!isFinite(v)) v = 0;
+  return v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function _procFmtDate(d) {
+  if (!d) return '';
+  // Accept YYYY-MM-DD or ISO timestamp; render M/D/YYYY for display
+  var m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return parseInt(m[2], 10) + '/' + parseInt(m[3], 10) + '/' + m[1];
+  return String(d);
+}
+
+// Collect all PO line items on this project. Voided POs are excluded
+// (they don't represent a real order). Drafts ARE included — useful to
+// see "drafted but not yet issued" — but their issuedAt is empty.
+function _procCollectProjectPoLines(projectId) {
+  var out = [];
+  (db.purchaseOrders || []).forEach(function(po){
+    if (String(po.projectId) !== String(projectId)) return;
+    var status = (typeof _poStatusOf === 'function') ? _poStatusOf(po) : (po.status || 'Draft');
+    if (status === 'Void') return;
+    (po.lines || []).forEach(function(line, idx){
+      out.push({ po: po, line: line, lineIdx: idx, status: status });
+    });
+  });
+  return out;
+}
+
+// Bucket PO line entries by material list row. Returns:
+//   { byMatRowId: { rowId -> [entry+matchKind] }, ghosts: [entry] }
+// matchKind is 'manual' (explicit materialListId) or 'auto' (description match).
+function _procBuildMatchIndex(project, poLineEntries) {
+  var matList = (project && project.materialList) || [];
+  var descIdx = {};
+  matList.forEach(function(m){
+    var key = String(m.description || '').toLowerCase().trim();
+    if (key && !descIdx[key]) descIdx[key] = m.id;
+  });
+  var rowToId = {};
+  matList.forEach(function(m){ rowToId[String(m.id)] = true; });
+
+  var byMatRowId = {};
+  var ghosts = [];
+  poLineEntries.forEach(function(e){
+    var manualId = e.line.materialListId;
+    if (manualId === PROC_UNLINK_SENTINEL) {
+      // Explicit user unlink — never auto-match, always ghost
+      ghosts.push(e);
+      return;
+    }
+    var matchedId = null;
+    var matchKind = '';
+    if (manualId && rowToId[String(manualId)]) {
+      matchedId = String(manualId);
+      matchKind = 'manual';
+    } else {
+      var descKey = String(e.line.description || '').toLowerCase().trim();
+      if (descKey && descIdx[descKey]) {
+        matchedId = descIdx[descKey];
+        matchKind = 'auto';
+      }
+    }
+    if (matchedId) {
+      var enriched = {};
+      Object.keys(e).forEach(function(k){ enriched[k] = e[k]; });
+      enriched.matchKind = matchKind;
+      (byMatRowId[matchedId] = byMatRowId[matchedId] || []).push(enriched);
+    } else {
+      ghosts.push(e);
+    }
+  });
+  return { byMatRowId: byMatRowId, ghosts: ghosts };
+}
+
+function _procRollup(entries) {
+  var totalQty = 0;
+  var orderedDollars = 0;
+  var earliestOrderDate = null;
+  var earliestDeliveryDate = null;
+  (entries || []).forEach(function(e){
+    var q  = Number(e.line.qty) || 0;
+    var up = Number(e.line.unitPrice) || 0;
+    totalQty += q;
+    orderedDollars += q * up;
+    var od = e.po.issuedAt ? String(e.po.issuedAt).slice(0,10) : '';
+    if (od && (!earliestOrderDate || od < earliestOrderDate)) earliestOrderDate = od;
+    var dd = e.po.estDeliveryDate ? String(e.po.estDeliveryDate).slice(0,10) : '';
+    if (dd && (!earliestDeliveryDate || dd < earliestDeliveryDate)) earliestDeliveryDate = dd;
+  });
+  return {
+    totalQty: totalQty,
+    orderedDollars: orderedDollars,
+    earliestOrderDate: earliestOrderDate,
+    earliestDeliveryDate: earliestDeliveryDate,
+    poCount: (entries || []).length
+  };
+}
+
+function renderProjectProcurement() {
+  var el = g('nprj-procurement-section'); if (!el) return;
+  var p = _editProjectId ? getProj(_editProjectId) : null;
+  if (!p) {
+    el.innerHTML = '<div class="card"><div style="padding:30px;color:#aaa;font-size:13px;text-align:center">' +
+      'Save the project first, then re-open it to use the Procurement tab.' +
+    '</div></div>';
+    return;
+  }
+
+  var matList = p.materialList || [];
+  var poLines = _procCollectProjectPoLines(p.id);
+  var idx     = _procBuildMatchIndex(p, poLines);
+
+  // Header card (job # / name / address / City, ST Zip)
+  var cs = (p.city || '') + (p.state ? ', ' + p.state : '');
+  var cityStateZip = (cs + (p.zip ? ' ' + p.zip : '')).trim();
+  if (cityStateZip === ',') cityStateZip = '';
+
+  var headerHtml =
+    '<div class="card">' +
+      '<div class="ch">' +
+        '<span class="ct">Procurement report</span>' +
+        '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#555;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0">' +
+          '<input type="checkbox" id="proc-var-toggle"' + (_procVarianceOn ? ' checked' : '') + ' onchange="procToggleVariance()" style="width:auto;margin:0">' +
+          'Show variance columns' +
+        '</label>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 20px;font-size:12px;line-height:1.6">' +
+        '<div><span style="color:#888">Job #:</span> <strong>' + _procEsc(p.number || '—') + '</strong></div>' +
+        '<div><span style="color:#888">Job name:</span> <strong>' + _procEsc(p.name || '—') + '</strong></div>' +
+        '<div style="grid-column:span 2"><span style="color:#888">Address:</span> ' + _procEsc(p.address || '—') + '</div>' +
+        '<div><span style="color:#888">City, ST Zip:</span> ' + _procEsc(cityStateZip || '—') + '</div>' +
+      '</div>' +
+    '</div>';
+
+  if (!matList.length && !idx.ghosts.length) {
+    el.innerHTML = headerHtml +
+      '<div class="card"><div style="padding:30px;color:#aaa;font-size:13px;text-align:center;line-height:1.6">' +
+        'No materials on this project yet.<br>Add rows to the project material list on the <strong>Project Details</strong> tab, then come back here to see procurement status.' +
+      '</div></div>';
+    return;
+  }
+
+  var totalCols = _procVarianceOn ? 9 : 6;
+  var tableHead =
+    '<thead style="background:#fafafa"><tr>' +
+      '<th style="padding:8px;text-align:left">Description</th>' +
+      '<th style="padding:8px;text-align:right;width:80px">Qty</th>' +
+      '<th style="padding:8px;text-align:right;width:80px" title="Lead time in days">Lead (d)</th>' +
+      '<th style="padding:8px;text-align:left;width:110px">Order date</th>' +
+      '<th style="padding:8px;text-align:left;width:110px">Delivery date</th>' +
+      (_procVarianceOn
+        ? '<th style="padding:8px;text-align:right;width:90px">Est unit ($)</th>' +
+          '<th style="padding:8px;text-align:right;width:100px">Ordered ($)</th>' +
+          '<th style="padding:8px;text-align:right;width:100px">Variance ($)</th>'
+        : '') +
+      '<th style="padding:8px;width:110px"></th>' +
+    '</tr></thead>';
+
+  var bodyRows = '';
+  matList.forEach(function(row){
+    bodyRows += _procRenderMatRow(row, idx.byMatRowId[String(row.id)] || []);
+  });
+
+  var ghostsHtml = '';
+  if (idx.ghosts.length) {
+    ghostsHtml +=
+      '<tr style="background:#FFF8E1">' +
+        '<td colspan="' + totalCols + '" style="padding:10px 12px;font-weight:600;font-size:12px;color:#9A7A2E">' +
+          '<span style="margin-right:6px">⚠</span>Unmatched PO lines — ' + idx.ghosts.length + ' line item' + (idx.ghosts.length === 1 ? '' : 's') +
+          ' on this project\'s POs don\'t match any material list row.' +
+        '</td>' +
+      '</tr>';
+    idx.ghosts.forEach(function(e){
+      ghostsHtml += _procRenderGhostRow(e);
+    });
+  }
+
+  var tableHtml =
+    '<div class="card" style="padding:0;overflow:hidden">' +
+      '<div style="overflow-x:auto">' +
+        '<table style="width:100%;font-size:12px">' +
+          tableHead +
+          '<tbody>' + bodyRows + ghostsHtml + '</tbody>' +
+        '</table>' +
+      '</div>' +
+    '</div>';
+
+  var hintHtml =
+    '<div style="font-size:11px;color:#888;margin-top:-8px;margin-bottom:16px;line-height:1.6;padding:0 4px">' +
+      '<strong>Order date</strong> = earliest PO issue date linked to this material. ' +
+      '<strong>Delivery date</strong> = earliest PO\'s estimated delivery date. ' +
+      'Draft POs surface here but show no order date until issued. ' +
+      'Badges: <span style="font-size:10px;color:#1F5A8A;background:#E3F0FB;padding:1px 5px;border-radius:8px">M</span> manual link, ' +
+      '<span style="font-size:10px;color:#666;background:#F5F5F3;padding:1px 5px;border-radius:8px">A</span> auto-match by description. ' +
+      'Click <strong>⚙ Link POs</strong> to override.' +
+    '</div>';
+
+  el.innerHTML = headerHtml + tableHtml + hintHtml;
+}
+
+function _procRenderMatRow(row, entries) {
+  var rowId = String(row.id);
+  var rollup = _procRollup(entries);
+  var leadTime = (row.leadTimeDays != null && row.leadTimeDays !== '') ? row.leadTimeDays : '';
+  var hasPO = entries.length > 0;
+  var hasMulti = entries.length > 1;
+  var isOpen = !!_procDrawerOpen[rowId];
+
+  var qtyCell      = hasPO ? String(rollup.totalQty) : '<span style="color:#aaa">—</span>';
+  var orderCell    = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '<span style="color:#aaa">—</span>';
+  var deliveryCell = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '<span style="color:#aaa">—</span>';
+
+  var poBadge = '';
+  if (hasMulti) {
+    poBadge = ' <button type="button" onclick="procToggleDrawer(\'' + _procEsc(rowId) + '\')" ' +
+      'style="padding:2px 8px;font-size:11px;background:#EEF0F8;color:#1F5A8A;border:none;border-radius:8px;cursor:pointer;font-family:inherit" ' +
+      'title="Show details for each linked PO">' +
+      (isOpen ? '▾' : '▸') + ' ' + entries.length + ' POs</button>';
+  } else if (hasPO) {
+    var e = entries[0];
+    var isManual = e.matchKind === 'manual';
+    poBadge = ' <span style="font-size:10px;color:' + (isManual ? '#1F5A8A' : '#666') +
+      ';background:' + (isManual ? '#E3F0FB' : '#F5F5F3') + ';padding:1px 6px;border-radius:8px" ' +
+      'title="' + (isManual ? 'Manually linked' : 'Auto-matched by description') + '">' +
+      (isManual ? 'M' : 'A') + '</span>';
+  }
+
+  var varCells = '';
+  if (_procVarianceOn) {
+    var estUnit = Number(row.unitCost) || 0;
+    var estDollars = rollup.totalQty * estUnit;
+    var ordDollars = rollup.orderedDollars;
+    var variance = ordDollars - estDollars;
+    var varColor = '';
+    if (hasPO && Math.abs(variance) > 0.005) {
+      varColor = variance > 0 ? 'color:#A32D2D' : 'color:#1E6B36';
+    }
+    varCells =
+      '<td style="padding:8px;text-align:right;font-family:monospace">' + (estUnit > 0 ? '$' + _procFmtMoney(estUnit) : '<span style="color:#aaa">—</span>') + '</td>' +
+      '<td style="padding:8px;text-align:right;font-family:monospace">' + (hasPO ? '$' + _procFmtMoney(ordDollars) : '<span style="color:#aaa">—</span>') + '</td>' +
+      '<td style="padding:8px;text-align:right;font-family:monospace;' + varColor + '">' + (hasPO ? (variance >= 0 ? '+$' : '-$') + _procFmtMoney(Math.abs(variance)) : '<span style="color:#aaa">—</span>') + '</td>';
+  }
+
+  var rowBg = hasPO ? '' : 'background:#FCFCFA';
+
+  var html =
+    '<tr style="border-top:1px solid #eee;' + rowBg + '">' +
+      '<td style="padding:8px">' +
+        '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">' +
+          '<strong>' + _procEsc(row.description || '(no description)') + '</strong>' +
+          poBadge +
+        '</div>' +
+        '<div style="font-size:10px;color:#888;margin-top:2px">' +
+          (row.unit ? 'Unit: ' + _procEsc(row.unit) : '') +
+          (row.unit && row.costCode ? ' · ' : '') +
+          (row.costCode ? 'CC ' + _procEsc(row.costCode) : '') +
+        '</div>' +
+      '</td>' +
+      '<td style="padding:8px;text-align:right">' + qtyCell + '</td>' +
+      '<td style="padding:8px;text-align:right">' +
+        '<input type="number" min="0" step="1" value="' + _procEsc(leadTime) + '" placeholder="—" ' +
+          'style="width:60px;padding:4px 6px;font-size:12px;text-align:right;border:1px solid #ddd;border-radius:4px" ' +
+          'data-proc-lead="' + _procEsc(rowId) + '" oninput="procUpdateLead(this)">' +
+      '</td>' +
+      '<td style="padding:8px;color:' + (rollup.earliestOrderDate ? '#333' : '#aaa') + '">' + orderCell + '</td>' +
+      '<td style="padding:8px;color:' + (rollup.earliestDeliveryDate ? '#333' : '#aaa') + '">' + deliveryCell + '</td>' +
+      varCells +
+      '<td style="padding:8px;text-align:right">' +
+        '<button type="button" class="btn btn-sm" onclick="procOpenLinkPicker(\'' + _procEsc(rowId) + '\')" title="Link / unlink PO lines for this material" style="padding:3px 8px;font-size:11px">⚙ Link POs</button>' +
+      '</td>' +
+    '</tr>';
+
+  if (hasMulti && isOpen) {
+    var totalCols = _procVarianceOn ? 9 : 6;
+    html += '<tr><td colspan="' + totalCols + '" style="padding:0;background:#FAFAFA">' +
+      _procRenderDrawer(row, entries) +
+    '</td></tr>';
+  }
+
+  return html;
+}
+
+function _procRenderDrawer(row, entries) {
+  var rows = entries.map(function(e){
+    var qty = Number(e.line.qty) || 0;
+    var up = Number(e.line.unitPrice) || 0;
+    var v = (db.vendors || []).find(function(x){ return String(x.id) === String(e.po.vendorId); });
+    var vendorName = (v && v.name) || '—';
+    var poNum = e.po.number || '(no #)';
+    var statusBadge = '<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:#F0F0EE;color:#666;margin-left:4px">' + _procEsc(e.status) + '</span>';
+    var isManual = e.matchKind === 'manual';
+    var kindBadge = '<span style="font-size:10px;color:' + (isManual ? '#1F5A8A' : '#666') + ';background:' + (isManual ? '#E3F0FB' : '#F5F5F3') + ';padding:1px 6px;border-radius:8px;margin-left:4px" title="' + (isManual ? 'Manually linked' : 'Auto-matched by description') + '">' + (isManual ? 'M' : 'A') + '</span>';
+    return '<tr>' +
+      '<td style="padding:6px 10px"><a href="#" onclick="procOpenPo(\'' + _procEsc(String(e.po.id)) + '\');return false" style="color:#1F5A8A;text-decoration:none;font-weight:600">' + _procEsc(poNum) + '</a>' + statusBadge + kindBadge + '</td>' +
+      '<td style="padding:6px 10px">' + _procEsc(vendorName) + '</td>' +
+      '<td style="padding:6px 10px;text-align:right">' + qty + (e.line.unit ? ' ' + _procEsc(e.line.unit) : '') + '</td>' +
+      '<td style="padding:6px 10px;text-align:right;font-family:monospace">$' + _procFmtMoney(qty * up) + '</td>' +
+      '<td style="padding:6px 10px">' + (e.po.issuedAt ? _procFmtDate(String(e.po.issuedAt).slice(0,10)) : '<span style="color:#aaa">Not issued</span>') + '</td>' +
+      '<td style="padding:6px 10px">' + (e.po.estDeliveryDate ? _procFmtDate(e.po.estDeliveryDate) : '<span style="color:#aaa">—</span>') + '</td>' +
+    '</tr>';
+  }).join('');
+  return '<div style="padding:8px 14px 14px 14px">' +
+    '<table style="width:100%;font-size:11px;background:#fff;border:1px solid #eee;border-radius:6px;overflow:hidden">' +
+      '<thead style="background:#f5f5f5"><tr>' +
+        '<th style="padding:6px 10px;text-align:left">PO #</th>' +
+        '<th style="padding:6px 10px;text-align:left">Vendor</th>' +
+        '<th style="padding:6px 10px;text-align:right">Qty</th>' +
+        '<th style="padding:6px 10px;text-align:right">Line $</th>' +
+        '<th style="padding:6px 10px;text-align:left">Order date</th>' +
+        '<th style="padding:6px 10px;text-align:left">Delivery date</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody>' +
+    '</table>' +
+  '</div>';
+}
+
+function _procRenderGhostRow(entry) {
+  var qty = Number(entry.line.qty) || 0;
+  var up = Number(entry.line.unitPrice) || 0;
+  var v = (db.vendors || []).find(function(x){ return String(x.id) === String(entry.po.vendorId); });
+  var vendorName = (v && v.name) || '';
+  var poNum = entry.po.number || '(no #)';
+  var orderDate    = entry.po.issuedAt ? _procFmtDate(String(entry.po.issuedAt).slice(0,10)) : '<span style="color:#aaa">—</span>';
+  var deliveryDate = entry.po.estDeliveryDate ? _procFmtDate(entry.po.estDeliveryDate) : '<span style="color:#aaa">—</span>';
+
+  var addBtn = '<button type="button" class="btn btn-sm" onclick="procAddGhostToMatList(\'' + _procEsc(String(entry.po.id)) + '\',\'' + _procEsc(String(entry.line.id || '')) + '\')" title="Promote this PO line to a project material list row" style="padding:3px 8px;font-size:11px">+ Add to list</button>';
+
+  var varCells = '';
+  if (_procVarianceOn) {
+    varCells =
+      '<td style="padding:8px;text-align:right;font-family:monospace">' + (up > 0 ? '$' + _procFmtMoney(up) : '<span style="color:#aaa">—</span>') + '</td>' +
+      '<td style="padding:8px;text-align:right;font-family:monospace">$' + _procFmtMoney(qty * up) + '</td>' +
+      '<td style="padding:8px;text-align:right;font-family:monospace"><span style="color:#aaa">—</span></td>';
+  }
+
+  return '<tr style="border-top:1px solid #eee;background:#FFFBF0">' +
+    '<td style="padding:8px">' +
+      '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        '<em>' + _procEsc(entry.line.description || '(no description)') + '</em>' +
+        '<span style="font-size:10px;color:#9A7A2E;background:#FFF1CC;padding:1px 6px;border-radius:8px" title="No match in the project material list">unmatched</span>' +
+      '</div>' +
+      '<div style="font-size:10px;color:#888;margin-top:2px">From PO ' + _procEsc(poNum) + (vendorName ? ' · ' + _procEsc(vendorName) : '') + '</div>' +
+    '</td>' +
+    '<td style="padding:8px;text-align:right">' + qty + (entry.line.unit ? ' ' + _procEsc(entry.line.unit) : '') + '</td>' +
+    '<td style="padding:8px;text-align:right"><span style="color:#aaa">—</span></td>' +
+    '<td style="padding:8px">' + orderDate + '</td>' +
+    '<td style="padding:8px">' + deliveryDate + '</td>' +
+    varCells +
+    '<td style="padding:8px;text-align:right">' + addBtn + '</td>' +
+  '</tr>';
+}
+
+function procToggleVariance() {
+  var cb = g('proc-var-toggle');
+  _procVarianceOn = !!(cb && cb.checked);
+  renderProjectProcurement();
+}
+
+function procToggleDrawer(rowId) {
+  _procDrawerOpen[rowId] = !_procDrawerOpen[rowId];
+  renderProjectProcurement();
+}
+
+function procUpdateLead(inp) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var rowId = inp.getAttribute('data-proc-lead');
+  var row = (p.materialList || []).find(function(r){ return String(r.id) === String(rowId); });
+  if (!row) return;
+  var v = inp.value;
+  if (v === '' || v == null) {
+    row.leadTimeDays = null;
+  } else {
+    var n = parseInt(v, 10);
+    if (!isFinite(n) || n < 0) n = 0;
+    row.leadTimeDays = n;
+  }
+  saveDB();
+}
+
+function procOpenPo(poId) {
+  if (typeof poEditById === 'function') poEditById(poId);
+}
+
+// Promote a ghost PO line into the project material list. If a row with
+// the same description already exists, just link the PO line to it
+// instead of creating a duplicate.
+function procAddGhostToMatList(poId, lineId) {
+  if (!_editProjectId) { alert('Save the project first.'); return; }
+  var p = getProj(_editProjectId); if (!p) return;
+  var po = (db.purchaseOrders || []).find(function(x){ return String(x.id) === String(poId); });
+  if (!po) { alert('PO not found.'); return; }
+  var line = (po.lines || []).find(function(l){ return String(l.id || '') === String(lineId); });
+  if (!line) { alert('PO line not found.'); return; }
+
+  p.materialList = p.materialList || [];
+  var key = String(line.description || '').toLowerCase().trim();
+  if (key) {
+    var existing = p.materialList.find(function(r){ return String(r.description || '').toLowerCase().trim() === key; });
+    if (existing) {
+      // Same description already exists — just link the PO line manually.
+      line.materialListId = existing.id;
+      saveDB();
+      renderProjectProcurement();
+      if (typeof showToast === 'function') showToast('Linked PO line to existing material "' + (existing.description || '') + '".', 'success');
+      return;
+    }
+  }
+
+  var newRow = {
+    id: 'pml' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+    description: line.description || '',
+    unit: line.unit || '',
+    costCode: line.costCode || '',
+    unitCost: Number(line.unitPrice) || 0,
+    leadTimeDays: null,
+    sourceTemplateId: null,
+    sourceLabel: 'From PO ' + (po.number || ''),
+    appliedAt: new Date().toISOString()
+  };
+  p.materialList.push(newRow);
+  line.materialListId = newRow.id;
+  saveDB();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') showToast('Added "' + (newRow.description || 'row') + '" to material list.', 'success');
+}
+
+// Manual link picker — modal showing all non-Void PO lines on the project.
+// User checks which ones should link to this material list row.
+function procOpenLinkPicker(rowId) {
+  if (!_editProjectId) return;
+  if (typeof hasFull === 'function' && !hasFull('edit-purchase-orders')) {
+    alert('You do not have permission to change PO line links.');
+    return;
+  }
+  var p = getProj(_editProjectId); if (!p) return;
+  var row = (p.materialList || []).find(function(r){ return String(r.id) === String(rowId); });
+  if (!row) return;
+  var entries = _procCollectProjectPoLines(p.id);
+  if (!entries.length) {
+    alert('No PO line items on this project yet. Create a PO first, then come back to link lines.');
+    return;
+  }
+
+  var rowDescKey = String(row.description || '').toLowerCase().trim();
+  var rowsHtml = entries.map(function(e, i){
+    var v = (db.vendors || []).find(function(x){ return String(x.id) === String(e.po.vendorId); });
+    var vendorName = (v && v.name) || '—';
+    var manualId = e.line.materialListId;
+    var linkedHere = false;
+    var linkedElsewhere = false;
+    var elsewhereLabel = '';
+
+    if (manualId === PROC_UNLINK_SENTINEL) {
+      // Explicitly unlinked — appears as available, not linked anywhere
+    } else if (manualId) {
+      if (String(manualId) === String(rowId)) linkedHere = true;
+      else {
+        linkedElsewhere = true;
+        var otherRow = (p.materialList || []).find(function(r){ return String(r.id) === String(manualId); });
+        elsewhereLabel = (otherRow && otherRow.description) || 'another row';
+      }
+    } else {
+      // Auto-match check
+      var descKey = String(e.line.description || '').toLowerCase().trim();
+      if (descKey && rowDescKey && descKey === rowDescKey) linkedHere = true;
+    }
+
+    var disabled = linkedElsewhere ? ' disabled' : '';
+    var checked  = linkedHere ? ' checked' : '';
+    var titleAttr = linkedElsewhere
+      ? ' title="Currently linked to a different material row — uncheck it from that row\'s picker first."'
+      : '';
+    var noteTxt = linkedElsewhere ? ' <span style="color:#9A7A2E;font-size:10px">(linked to ' + _procEsc(elsewhereLabel) + ')</span>' : '';
+    var qty = Number(e.line.qty) || 0;
+
+    return '<tr>' +
+      '<td style="padding:6px 8px;text-align:center"><input type="checkbox" data-proc-pick="' + i + '"' + checked + disabled + titleAttr + '></td>' +
+      '<td style="padding:6px 8px;font-size:11px"><strong>' + _procEsc(e.po.number || '(no #)') + '</strong><div style="color:#888">' + _procEsc(vendorName) + ' · ' + _procEsc(e.status) + '</div></td>' +
+      '<td style="padding:6px 8px;font-size:11px">' + _procEsc(e.line.description || '(no description)') + noteTxt + '</td>' +
+      '<td style="padding:6px 8px;font-size:11px;text-align:right">' + qty + (e.line.unit ? ' ' + _procEsc(e.line.unit) : '') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&times;</button>' +
+    '<div class="mt">Link PO lines</div>' +
+    '<div class="msb">Choose which PO line items should be linked to <strong>' + _procEsc(row.description || '(no description)') + '</strong>. Lines auto-match by description by default; use this picker to override the auto-match.</div>' +
+    '<div style="max-height:50vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin:10px 0">' +
+      '<table style="width:100%;font-size:12px">' +
+        '<thead style="background:#f5f5f5;position:sticky;top:0;z-index:1">' +
+          '<tr>' +
+            '<th style="padding:6px 8px;width:36px"></th>' +
+            '<th style="padding:6px 8px;text-align:left">PO</th>' +
+            '<th style="padding:6px 8px;text-align:left">Line description</th>' +
+            '<th style="padding:6px 8px;text-align:right;width:80px">Qty</th>' +
+          '</tr>' +
+        '</thead>' +
+        '<tbody>' + rowsHtml + '</tbody>' +
+      '</table>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procSaveLinkPicker(\'' + _procEsc(rowId) + '\')">Save links</button>' +
+    '</div>'
+  );
+}
+
+function procSaveLinkPicker(rowId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var entries = _procCollectProjectPoLines(p.id);
+  var row = (p.materialList || []).find(function(r){ return String(r.id) === String(rowId); });
+  if (!row) { closeModal(); return; }
+  var rowDescKey = String(row.description || '').toLowerCase().trim();
+  var changed = 0;
+
+  entries.forEach(function(e, i){
+    var cb = document.querySelector('[data-proc-pick="' + i + '"]');
+    if (!cb) return;
+    if (cb.disabled) return;
+    var wantLinked = cb.checked;
+    var currentManual = e.line.materialListId;
+    var descKey = String(e.line.description || '').toLowerCase().trim();
+    var autoMatchesHere = (!currentManual || currentManual === PROC_UNLINK_SENTINEL) ? false : false;
+    if (!currentManual) {
+      autoMatchesHere = !!(descKey && rowDescKey && descKey === rowDescKey);
+    }
+    var currentlyLinkedHere =
+      (currentManual && currentManual !== PROC_UNLINK_SENTINEL && String(currentManual) === String(rowId)) ||
+      autoMatchesHere;
+
+    if (wantLinked && !currentlyLinkedHere) {
+      e.line.materialListId = rowId;
+      changed++;
+    } else if (!wantLinked && currentlyLinkedHere) {
+      if (currentManual && currentManual !== PROC_UNLINK_SENTINEL && String(currentManual) === String(rowId)) {
+        delete e.line.materialListId;
+        changed++;
+      } else if (autoMatchesHere) {
+        // Stop auto-matching this row by description — explicit unlink sentinel.
+        e.line.materialListId = PROC_UNLINK_SENTINEL;
+        changed++;
+      }
+    }
+  });
+
+  if (changed) saveDB();
+  closeModal();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') {
+    showToast(changed ? ('Updated ' + changed + ' PO line link' + (changed === 1 ? '' : 's') + '.') : 'No changes.', 'success');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
