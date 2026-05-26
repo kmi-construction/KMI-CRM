@@ -27596,7 +27596,7 @@ function renderProjectProcurement() {
 
   // Empty state — only when both items AND ghosts are empty.
   if (!items.length && !idx.ghosts.length) {
-    el.innerHTML = headerHtml +
+    el.innerHTML = headerHtml + renderBprWorklist(p) +
       '<div class="card"><div style="padding:30px;color:#aaa;font-size:13px;text-align:center;line-height:1.6">' +
         'No procurement items yet.<br>' +
         'Click <strong>+ From material list</strong> to pull items from the project material list, or <strong>+ Custom item</strong> to add one manually.' +
@@ -27665,7 +27665,7 @@ function renderProjectProcurement() {
       'Multi-PO rows expand for per-PO unlink.' +
     '</div>';
 
-  el.innerHTML = headerHtml + tableHtml + hintHtml;
+  el.innerHTML = headerHtml + renderBprWorklist(p) + tableHtml + hintHtml;
 }
 
 function _procRenderItemRow(item, entries) {
@@ -27785,6 +27785,10 @@ function _procRenderItemRow(item, entries) {
       '<td style="padding:8px;text-align:right;white-space:nowrap">' +
         '<button type="button" class="btn btn-sm" onclick="procOpenCustomItemModal(\'' + _procEsc(itemId) + '\')" title="Edit description, unit, cost code, unit cost" style="padding:3px 6px;font-size:11px;margin-right:2px">✎</button>' +
         '<button type="button" class="btn btn-sm" onclick="procOpenLinkPicker(\'' + _procEsc(itemId) + '\')" title="Link / unlink PO lines for this item" style="padding:3px 8px;font-size:11px;margin-right:2px">⚙ POs</button>' +
+        '<button type="button" class="btn btn-sm" onclick="procOpenMergeDialog(\'' + _procEsc(itemId) + '\')" title="Merge this item into another procurement item" style="padding:3px 6px;font-size:11px;margin-right:2px">⊕</button>' +
+        (bprAssignments.length === 1
+          ? '<button type="button" class="btn btn-sm" onclick="procOpenSplitDialog(\'' + _procEsc(itemId) + '\')" title="Split this BPR-backed item into multiple items (e.g. by color)" style="padding:3px 6px;font-size:11px;margin-right:2px">✂</button>'
+          : '') +
         '<button type="button" class="btn btn-sm" onclick="procRemoveItem(\'' + _procEsc(itemId) + '\')" title="Remove this item from the procurement list" style="padding:3px 8px;font-size:11px;color:#A32D2D">✕</button>' +
       '</td>' +
     '</tr>';
@@ -29021,7 +29025,7 @@ async function procBprUploadChosen(evt) {
 }
 
 // ── UI: import picker ───────────────────────────────────────────────
-function procOpenBprPicker() {
+function procOpenBprPicker(preserveState) {
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
   var bpr = p.bprMaterials || [];
@@ -29047,34 +29051,68 @@ function procOpenBprPicker() {
     groups[k].push(b);
   });
 
-  // Reset transient selection state
-  _bprPickerSelections = {};
-  bpr.forEach(function(b){
-    var assigned = assignedById[String(b.id)] || 0;
-    var fullyAssigned = assigned >= (Number(b.quantity) || 0) - 0.001;
-    // Default checked = not in skip categories AND not already fully assigned
-    _bprPickerSelections[b.id] = !b.defaultSkip && !fullyAssigned;
-  });
+  // Fresh open resets selection + grouping state. Re-opens triggered by
+  // group/ungroup/rename actions pass preserveState=true to keep state.
+  if (!preserveState) {
+    _bprPickerSelections = {};
+    _bprPickerGroups = [];
+    _bprPickerGroupOf = {};
+    bpr.forEach(function(b){
+      var assigned = assignedById[String(b.id)] || 0;
+      var fullyAssigned = assigned >= (Number(b.quantity) || 0) - 0.001;
+      _bprPickerSelections[b.id] = !b.defaultSkip && !fullyAssigned;
+    });
+  }
 
   showModal(_bprPickerHtml(p, groups, classOrder, assignedById));
 }
 
 function _bprPickerHtml(p, groups, classOrder, assignedById) {
+  // Compute count of selected ungrouped rows (eligible for grouping)
+  var ungroupedCheckedCount = Object.keys(_bprPickerSelections).filter(function(id){
+    return _bprPickerSelections[id] && !_bprPickerGroupOf[id];
+  }).length;
+
   // Build the grouped table
   var html =
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Import from Bid Price Report</div>' +
-    '<div class="msb">Check the materials you want as procurement items. Scaffold, cleaning, air deduction, and patching are unchecked by default. Lump-sum "Other Cost Breakdown" entries are at the bottom.</div>' +
-    '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">' +
+    '<div class="msb">Check the materials you want as procurement items. Use <strong>Group selected</strong> to combine multiple BPR lines into a single procurement item (e.g. Modular Brick + Modular Brick Piers → one item). Scaffold, cleaning, air deduction, and patching default to unchecked.</div>' +
+    '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">' +
       '<button type="button" class="btn btn-sm" onclick="procBprSelectAll(true)">Select all</button>' +
       '<button type="button" class="btn btn-sm" onclick="procBprSelectAll(false)">Select none</button>' +
       '<button type="button" class="btn btn-sm" onclick="procBprSelectDefaults()" title="Re-apply the default selection (skip categories unchecked)">Reset to defaults</button>' +
+      '<button type="button" class="btn btn-sm" onclick="procBprPickerCreateGroup()"' +
+        (ungroupedCheckedCount >= 2 ? '' : ' disabled') +
+        ' title="' + (ungroupedCheckedCount >= 2 ? 'Combine the ' + ungroupedCheckedCount + ' checked rows into a single procurement item' : 'Check at least 2 ungrouped rows first') + '">' +
+        '⊕ Group selected' + (ungroupedCheckedCount >= 2 ? ' (' + ungroupedCheckedCount + ')' : '') +
+      '</button>' +
       '<span style="margin-left:auto;font-size:11px;color:#888">' +
         (p.bprMaterials || []).length + ' materials' +
+        (_bprPickerGroups.length ? ' · ' + _bprPickerGroups.length + ' group' + (_bprPickerGroups.length === 1 ? '' : 's') : '') +
       '</span>' +
       '<button type="button" class="btn btn-sm" onclick="procOpenBprUploadModal(true)" title="Re-upload to replace stored BPR materials">Re-upload BPR</button>' +
-    '</div>' +
-    '<div style="max-height:55vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin-bottom:10px">';
+    '</div>';
+
+  // Active groups summary
+  if (_bprPickerGroups.length) {
+    html += '<div style="background:#EEF6E9;border:1px solid #C8E0BB;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:11px">' +
+      '<div style="font-weight:600;color:#2E6B36;margin-bottom:4px">Active groups (will become single procurement items on save):</div>';
+    _bprPickerGroups.forEach(function(grp){
+      var memberCount = grp.memberIds.filter(function(id){ return _bprPickerSelections[id]; }).length;
+      html += '<div style="margin:2px 0;display:flex;align-items:center;gap:8px">' +
+        '<span style="font-weight:600;color:#1E6B36">⊕ ' + _procEsc(grp.label) + '</span>' +
+        '<span style="color:#666">— ' + memberCount + '/' + grp.memberIds.length + ' members checked</span>' +
+        '<span style="margin-left:auto;display:flex;gap:6px">' +
+          '<button type="button" onclick="procBprPickerRenameGroup(\'' + _procEsc(grp.id) + '\')" style="font-size:11px;background:none;border:none;color:#1F5A8A;cursor:pointer">rename</button>' +
+          '<button type="button" onclick="procBprPickerUngroup(\'' + _procEsc(grp.id) + '\')" style="font-size:11px;background:none;border:none;color:#A32D2D;cursor:pointer">ungroup</button>' +
+        '</span>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '<div style="max-height:50vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin-bottom:10px">';
 
   // Sort so OTH (lump-sum) comes last; others in declaration order
   classOrder.sort(function(a, b){
@@ -29125,9 +29163,21 @@ function _bprPickerHtml(p, groups, classOrder, assignedById) {
         rodHint = ' <span style="font-size:10px;color:#888">≈ ' + rods + ' rod' + (rods === 1 ? '' : 's') + '</span>';
       }
 
-      html += '<tr>' +
+      // Group state: if this row is in a group, render with a colored
+      // left border + group badge.
+      var groupId = _bprPickerGroupOf[b.id];
+      var rowStyle = '';
+      var groupBadge = '';
+      if (groupId) {
+        var grp = _bprPickerGroups.find(function(g){ return g.id === groupId; });
+        var groupLabel = grp ? grp.label : '(group)';
+        rowStyle = 'background:#FAFCF7;box-shadow:inset 3px 0 0 #6B9A4D';
+        groupBadge = ' <span style="font-size:10px;color:#2E6B36;background:#D7EBC4;padding:1px 6px;border-radius:8px" title="In group: ' + _procEsc(groupLabel) + '">⊕ ' + _procEsc(groupLabel) + '</span>';
+      }
+
+      html += '<tr style="' + rowStyle + '">' +
         '<td style="padding:5px 8px;text-align:center"><input type="checkbox" data-bpr-pick="' + _procEsc(b.id) + '"' + checked + disabled + ' onchange="procBprToggle(this)"></td>' +
-        '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.description || '(no description)') + statusBadge + rodHint + '</td>' +
+        '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.description || '(no description)') + statusBadge + rodHint + groupBadge + '</td>' +
         '<td style="padding:5px 8px;font-size:10px;color:#888;font-family:monospace">' + _procEsc(b.materialCode || '') + '</td>' +
         '<td style="padding:5px 8px;font-size:11px;text-align:right">' + _procFmtBprQty(b.quantity) + '</td>' +
         '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.unit || '') + '</td>' +
@@ -29200,31 +29250,101 @@ function procBprSavePicker() {
   });
 
   p.procurementItems = p.procurementItems || [];
+  var bprById = {};
+  (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+
   var added = 0;
   var skippedFullyAssigned = 0;
+  var groupedAdded = 0;
 
+  // Helper: build a per-BPR-line assignment with the remaining unassigned
+  // portion. Returns null when the line is fully assigned already (in
+  // which case the row is skipped and the skip counter incremented).
+  function buildAssignment(b) {
+    var qty = Number(b.quantity) || 0;
+    var alreadyAssigned = assignedById[String(b.id)] || 0;
+    var remaining = qty - alreadyAssigned;
+    if (remaining <= 0.001) { skippedFullyAssigned++; return null; }
+    return { bprMaterialId: String(b.id), qty: remaining };
+  }
+
+  // ── Pass 1: groups → one combined item per group
+  // A group's combined item description uses the group label; unit comes
+  // from any member (we validated all members shared the same unit when
+  // the group was created); unit cost is weighted-average by ext-cost.
+  // Only CHECKED members participate; unchecked members are excluded from
+  // the combined item (and not re-added separately).
+  _bprPickerGroups.forEach(function(grp){
+    var members = grp.memberIds
+      .filter(function(id){ return _bprPickerSelections[id]; })
+      .map(function(id){ return bprById[id]; })
+      .filter(Boolean);
+    if (!members.length) return;
+
+    var assignments = [];
+    var totalQty = 0;
+    var totalDollars = 0;
+    var firstUnit = '';
+    var firstRodLength = null;
+    var firstClassCode = '';
+    members.forEach(function(b){
+      var a = buildAssignment(b);
+      if (!a) return;
+      assignments.push(a);
+      totalQty += a.qty;
+      // Weighted ext-cost contribution = (assigned qty / BPR qty) × ext-cost
+      var bprQty = Number(b.quantity) || 0;
+      if (bprQty > 0) {
+        totalDollars += (a.qty / bprQty) * (Number(b.extendedMatCost) || 0);
+      } else {
+        totalDollars += a.qty * (Number(b.unitCost) || 0);
+      }
+      if (!firstUnit) firstUnit = b.unit || '';
+      if (b.classCode === 'REB' && b.rodLengthLinFt && !firstRodLength) firstRodLength = b.rodLengthLinFt;
+      if (!firstClassCode) firstClassCode = b.classCode || '';
+    });
+    if (!assignments.length) return;  // every member fully assigned
+
+    var weightedUnitCost = totalQty > 0 ? (totalDollars / totalQty) : 0;
+    var newItem = {
+      id: _procNewItemId(),
+      description: grp.label,
+      unit: firstUnit,
+      costCode: '',
+      unitCost: weightedUnitCost,
+      leadTimeDays: null,
+      manualQty: null,
+      sourceLabel: 'From BPR — grouped (' + assignments.length + ' member' + (assignments.length === 1 ? '' : 's') + ')',
+      sourceMaterialListId: null,
+      addedAt: new Date().toISOString(),
+      bprAssignments: assignments
+    };
+    if (firstRodLength) newItem.bprRodLengthLinFt = firstRodLength;
+    p.procurementItems.push(newItem);
+    added++;
+    groupedAdded++;
+  });
+
+  // ── Pass 2: ungrouped checked rows → one item per row
   (p.bprMaterials || []).forEach(function(b){
     if (!_bprPickerSelections[b.id]) return;
-    var bprId = String(b.id);
-    var qty = Number(b.quantity) || 0;
-    var alreadyAssigned = assignedById[bprId] || 0;
-    var remaining = qty - alreadyAssigned;
-    if (remaining <= 0.001) { skippedFullyAssigned++; return; }
+    if (_bprPickerGroupOf[b.id]) return;  // already handled in Pass 1 (or excluded)
+
+    var a = buildAssignment(b);
+    if (!a) return;
 
     var newItem = {
       id: _procNewItemId(),
       description: b.description || b.materialCode || '(BPR material)',
       unit: b.unit || '',
-      costCode: '',  // not auto-mapped — BPR classification != Foundation cost code
+      costCode: '',
       unitCost: Number(b.unitCost) || 0,
       leadTimeDays: null,
       manualQty: null,
       sourceLabel: 'From BPR — ' + (b.classCode || '') + ' / ' + (b.materialCode || ''),
       sourceMaterialListId: null,
       addedAt: new Date().toISOString(),
-      bprAssignments: [
-        { bprMaterialId: bprId, qty: remaining }
-      ]
+      bprAssignments: [a]
     };
 
     // Snapshot rebar rod length so the procurement row can show piece count
@@ -29236,11 +29356,16 @@ function procBprSavePicker() {
     added++;
   });
 
+  // Clear transient picker state so the next open starts fresh
+  _bprPickerGroups = [];
+  _bprPickerGroupOf = {};
+
   if (added) saveDB();
   closeModal();
   renderProjectProcurement();
   if (typeof showToast === 'function') {
-    var msg = 'Added ' + added + ' item' + (added === 1 ? '' : 's') + '.';
+    var msg = 'Added ' + added + ' item' + (added === 1 ? '' : 's') +
+      (groupedAdded ? ' (' + groupedAdded + ' from group' + (groupedAdded === 1 ? '' : 's') + ')' : '') + '.';
     if (skippedFullyAssigned) msg += ' Skipped ' + skippedFullyAssigned + ' fully-assigned.';
     showToast(added ? msg : 'No items selected.', added ? 'success' : 'info');
   }
@@ -29249,6 +29374,837 @@ function procBprSavePicker() {
 // Cleanup: when a procurement item is removed, its bprAssignments[] go
 // with it (the array is inline on the item, no global cleanup needed —
 // the existing procRemoveItem already drops the item entry).
+
+// ═══════════════════════════════════════════════════════════════════
+// BPR WORKLIST + ASSIGNMENT + MERGE + SPLIT — Procurement Round 3.3
+// ═══════════════════════════════════════════════════════════════════
+// Builds on Round 3.1/3.2 data: p.bprMaterials[] (parsed BPR rows) and
+// procurementItem.bprAssignments[] (each {bprMaterialId, qty}). One item
+// can absorb portions from N BPR lines; one BPR line can fan out to N
+// items. The UI below makes both flows explicit:
+//
+//  • Pre-import grouping in the BPR picker — check multiple rows, hit
+//    "Group selected" to combine them into a single procurement item on
+//    save. Supports the AFF Hospitality "Modular Brick + Modular Brick
+//    Piers → one item" case.
+//
+//  • BPR worklist at the top of the Procurement tab — read-only status
+//    view of every BPR line (unassigned / partial / fully assigned).
+//    Each unassigned or partial line offers an "+ Assign" action.
+//
+//  • Assignment picker — assign a portion of a BPR line to either a
+//    new procurement item or an existing one. The "to existing" path
+//    is constrained to items with a matching unit so PO reconciliation
+//    stays sane.
+//
+//  • Post-import merge — ⊕ action on each procurement row to combine
+//    with another. Unit cost becomes weighted-average by BPR ext-cost;
+//    PO links stay linked to the surviving item.
+//
+//  • Split — ✂ action on items backed by exactly one BPR assignment
+//    (e.g. Mortar[T]). Splits into N named portions (e.g. Tan / Buff
+//    / Black) summing to the original assignment qty. The original
+//    item is replaced by the splits; PO-linked items can't be split.
+
+// ── Worklist state ───────────────────────────────────────────────────
+var _bprWorklistExpanded     = false;
+var _bprWorklistFilter       = 'all';   // 'all' | 'attention' | 'assigned'
+var _bprWorklistClassClosed  = {};      // classCode → true if collapsed
+
+// ── Pre-import grouping state ────────────────────────────────────────
+// _bprPickerGroups: array of {id, label, memberIds:[bprMaterialId]}
+// _bprPickerGroupOf: bprMaterialId → groupId (for fast lookup)
+var _bprPickerGroups   = [];
+var _bprPickerGroupOf  = {};
+
+function _bprNewGroupId() {
+  return 'pg' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// WORKLIST RENDER
+// ─────────────────────────────────────────────────────────────────────
+
+function renderBprWorklist(p) {
+  if (!p || !Array.isArray(p.bprMaterials) || !p.bprMaterials.length) return '';
+
+  var bpr = p.bprMaterials;
+  var items = p.procurementItems || [];
+
+  // Compute per-BPR-line assignment summary
+  var assignedById = {};
+  var assignedItemsById = {};
+  items.forEach(function(item){
+    (item.bprAssignments || []).forEach(function(a){
+      if (a._orphaned) return;
+      var k = String(a.bprMaterialId);
+      assignedById[k] = (assignedById[k] || 0) + (Number(a.qty) || 0);
+      (assignedItemsById[k] = assignedItemsById[k] || []).push(String(item.id));
+    });
+  });
+
+  // Per-line status + class grouping
+  var stats = { total: bpr.length, assigned: 0, partial: 0, unassigned: 0 };
+  var byClass = {}, classOrder = [];
+  bpr.forEach(function(b){
+    var assignedQty = assignedById[String(b.id)] || 0;
+    var totalQty = Number(b.quantity) || 0;
+    var status;
+    if (totalQty <= 0) status = 'assigned'; // degenerate — treat as done
+    else if (assignedQty <= 0.001) status = 'unassigned';
+    else if (assignedQty >= totalQty - 0.001) status = 'assigned';
+    else status = 'partial';
+    stats[status]++;
+    b._wlStatus = status;
+    b._wlAssigned = assignedQty;
+    b._wlAssignedItemIds = assignedItemsById[String(b.id)] || [];
+
+    var cls = b.classCode || 'UNC';
+    if (!byClass[cls]) { byClass[cls] = []; classOrder.push(cls); }
+    byClass[cls].push(b);
+  });
+
+  // ── Summary header (always visible)
+  var summaryHtml =
+    '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">' +
+      '<span style="font-weight:600;font-size:13px">Bid Price Report — ' + bpr.length + ' materials</span>' +
+      '<span style="font-size:11px;color:#666;display:flex;gap:10px;align-items:center">' +
+        '<span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#1E6B36;margin-right:4px"></span>' + stats.assigned + ' assigned</span>' +
+        '<span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#9A7A2E;margin-right:4px"></span>' + stats.partial + ' partial</span>' +
+        '<span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#A32D2D;margin-right:4px"></span>' + stats.unassigned + ' unassigned</span>' +
+      '</span>' +
+      '<span style="margin-left:auto;display:flex;gap:6px;align-items:center">' +
+        (_bprWorklistExpanded ?
+          '<select onchange="procSetBprWorklistFilter(this.value)" style="font-size:11px;padding:2px 6px">' +
+            '<option value="all"' + (_bprWorklistFilter === 'all' ? ' selected' : '') + '>All</option>' +
+            '<option value="attention"' + (_bprWorklistFilter === 'attention' ? ' selected' : '') + '>Needs attention</option>' +
+            '<option value="assigned"' + (_bprWorklistFilter === 'assigned' ? ' selected' : '') + '>Assigned only</option>' +
+          '</select>' : '') +
+        '<button type="button" class="btn btn-sm" onclick="procToggleBprWorklist()" style="padding:3px 8px;font-size:11px">' +
+          (_bprWorklistExpanded ? '▲ Collapse' : '▼ Expand') +
+        '</button>' +
+      '</span>' +
+    '</div>';
+
+  if (!_bprWorklistExpanded) {
+    return '<div class="card" style="padding:10px 16px">' + summaryHtml + '</div>';
+  }
+
+  // ── Expanded body: classifications with rows
+  // Sort: OTH last, otherwise BPR declaration order
+  classOrder.sort(function(a, b){
+    if (a === 'OTH' && b !== 'OTH') return 1;
+    if (b === 'OTH' && a !== 'OTH') return -1;
+    return 0;
+  });
+
+  var body = '';
+  classOrder.forEach(function(cls){
+    var list = byClass[cls];
+
+    // Apply filter
+    var filtered = list.filter(function(b){
+      if (_bprWorklistFilter === 'all') return true;
+      if (_bprWorklistFilter === 'attention') return b._wlStatus !== 'assigned';
+      if (_bprWorklistFilter === 'assigned') return b._wlStatus === 'assigned';
+      return true;
+    });
+    if (!filtered.length) return;
+
+    var classDesc = (list[0] && list[0].classDescription) || cls;
+    var attnCount = list.filter(function(b){ return b._wlStatus !== 'assigned'; }).length;
+    var assignedCount = list.length - attnCount;
+    var closed = !!_bprWorklistClassClosed[cls];
+    var isOther = (cls === 'OTH');
+
+    var bandColor = isOther ? '#EFEAF8' : '#F0F4FB';
+    var bandTextColor = isOther ? '#5D4391' : '#1F5A8A';
+
+    body += '<div style="background:' + bandColor + ';padding:7px 14px;font-size:12px;font-weight:600;color:' + bandTextColor + ';border-top:1px solid #eee;cursor:pointer;display:flex;align-items:center;gap:8px" onclick="procToggleBprWorklistClass(\'' + _procEsc(cls) + '\')">' +
+      '<span style="font-size:10px;width:10px;display:inline-block">' + (closed ? '▶' : '▼') + '</span>' +
+      _procEsc(cls) + ' — ' + _procEsc(classDesc) +
+      ' <span style="font-weight:400;font-size:10px;color:#666;margin-left:4px">' +
+        assignedCount + '/' + list.length + ' assigned' +
+        (attnCount > 0 ? ' · ' + attnCount + ' need attention' : '') +
+      '</span>' +
+    '</div>';
+
+    if (closed) return;
+
+    body += '<table style="width:100%;font-size:12px"><tbody>';
+    filtered.forEach(function(b){
+      body += _bprWorklistRow(b, items);
+    });
+    body += '</tbody></table>';
+  });
+
+  if (!body) {
+    body = '<div style="padding:18px;font-size:12px;color:#aaa;text-align:center">No BPR materials match the current filter.</div>';
+  }
+
+  return '<div class="card" style="padding:0;overflow:hidden">' +
+    '<div style="padding:10px 16px;border-bottom:1px solid #eee">' + summaryHtml + '</div>' +
+    '<div style="max-height:50vh;overflow-y:auto">' + body + '</div>' +
+  '</div>';
+}
+
+function _bprWorklistRow(b, items) {
+  var status = b._wlStatus;
+  var assignedQty = b._wlAssigned;
+  var totalQty = Number(b.quantity) || 0;
+  var unit = b.unit || '';
+
+  var statusDot, statusText;
+  if (status === 'assigned') {
+    statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#1E6B36"></span>';
+    statusText = '<span style="color:#1E6B36">assigned</span>';
+  } else if (status === 'partial') {
+    statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#9A7A2E"></span>';
+    statusText = '<span style="color:#9A7A2E">' + _procFmtBprQty(assignedQty) + ' / ' + _procFmtBprQty(totalQty) + '</span>';
+  } else {
+    statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#A32D2D"></span>';
+    statusText = '<span style="color:#A32D2D">unassigned</span>';
+  }
+
+  // Assigned items list — names of procurement items absorbing this BPR line
+  var assignedNames = b._wlAssignedItemIds.map(function(iid){
+    var it = items.find(function(x){ return String(x.id) === iid; });
+    return it ? (it.description || '(unnamed)') : null;
+  }).filter(Boolean);
+  var toCell = '';
+  if (assignedNames.length) {
+    var displayList = assignedNames.length > 2 ?
+      _procEsc(assignedNames.slice(0, 2).join(', ')) + ' <span style="color:#888">+ ' + (assignedNames.length - 2) + ' more</span>' :
+      _procEsc(assignedNames.join(', '));
+    toCell = '<span style="color:#555">→ ' + displayList + '</span>';
+  }
+
+  // Action button(s)
+  var actionCell = '';
+  if (status === 'unassigned') {
+    actionCell = '<button type="button" class="btn btn-sm" onclick="procOpenBprAssignmentDialog(\'' + _procEsc(b.id) + '\')" style="padding:2px 8px;font-size:11px">+ Assign</button>';
+  } else if (status === 'partial') {
+    var remaining = totalQty - assignedQty;
+    actionCell = '<button type="button" class="btn btn-sm" onclick="procOpenBprAssignmentDialog(\'' + _procEsc(b.id) + '\')" style="padding:2px 8px;font-size:11px" title="Assign the remaining ' + _procFmtBprQty(remaining) + ' ' + _procEsc(unit) + '">+ Assign ' + _procFmtBprQty(remaining) + '</button>';
+  }
+
+  // Rod hint for rebar
+  var rodHint = '';
+  if (b.classCode === 'REB' && b.rodLengthLinFt && totalQty > 0) {
+    var rods = Math.ceil(totalQty / b.rodLengthLinFt);
+    rodHint = ' <span style="font-size:10px;color:#888">≈ ' + rods + ' rod' + (rods === 1 ? '' : 's') + '</span>';
+  }
+
+  return '<tr style="border-top:1px solid #f0f0ec">' +
+    '<td style="padding:6px 10px 6px 24px;width:14px;vertical-align:middle">' + statusDot + '</td>' +
+    '<td style="padding:6px 10px;font-size:11px">' +
+      '<strong>' + _procEsc(b.materialCode || '') + '</strong> · ' +
+      _procEsc(b.description || '') + rodHint +
+    '</td>' +
+    '<td style="padding:6px 10px;font-size:11px;text-align:right;font-family:monospace;color:#444;width:120px">' +
+      _procFmtBprQty(totalQty) + ' ' + _procEsc(unit) +
+    '</td>' +
+    '<td style="padding:6px 10px;font-size:11px;width:180px">' + statusText + '</td>' +
+    '<td style="padding:6px 10px;font-size:11px">' + toCell + '</td>' +
+    '<td style="padding:6px 10px;text-align:right;width:140px">' + actionCell + '</td>' +
+  '</tr>';
+}
+
+function procToggleBprWorklist() {
+  _bprWorklistExpanded = !_bprWorklistExpanded;
+  renderProjectProcurement();
+}
+
+function procSetBprWorklistFilter(f) {
+  _bprWorklistFilter = f;
+  renderProjectProcurement();
+}
+
+function procToggleBprWorklistClass(cls) {
+  _bprWorklistClassClosed[cls] = !_bprWorklistClassClosed[cls];
+  renderProjectProcurement();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// ASSIGNMENT DIALOG — assign a portion of a BPR line
+// ─────────────────────────────────────────────────────────────────────
+
+function procOpenBprAssignmentDialog(bprMaterialId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var b = (p.bprMaterials || []).find(function(x){ return String(x.id) === String(bprMaterialId); });
+  if (!b) { alert('BPR material not found.'); return; }
+
+  // Compute remaining portion
+  var assignedQty = 0;
+  (p.procurementItems || []).forEach(function(it){
+    (it.bprAssignments || []).forEach(function(a){
+      if (a._orphaned) return;
+      if (String(a.bprMaterialId) === String(bprMaterialId)) {
+        assignedQty += Number(a.qty) || 0;
+      }
+    });
+  });
+  var totalQty = Number(b.quantity) || 0;
+  var remaining = Math.max(0, totalQty - assignedQty);
+  if (remaining <= 0.001) {
+    alert('This BPR material is already fully assigned.');
+    return;
+  }
+
+  // Build list of compatible existing items (same unit)
+  var compatibleItems = (p.procurementItems || []).filter(function(it){
+    return (it.unit || '') === (b.unit || '') && (it.bprAssignments || []).every(function(a){
+      // Don't allow re-adding the same bprMaterialId to an item (would duplicate)
+      return String(a.bprMaterialId) !== String(bprMaterialId);
+    });
+  });
+
+  var compatHtml = compatibleItems.length ?
+    compatibleItems.map(function(it){
+      return '<option value="' + _procEsc(String(it.id)) + '">' +
+        _procEsc(it.description || '(unnamed)') + ' (' + (it.bprAssignments || []).length + ' BPR line' + ((it.bprAssignments || []).length === 1 ? '' : 's') + ')' +
+        '</option>';
+    }).join('') :
+    '<option value="" disabled>No compatible items (must match unit "' + _procEsc(b.unit || '') + '")</option>';
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Assign BPR material</div>' +
+    '<div class="msb">' +
+      '<strong>' + _procEsc(b.materialCode || '') + '</strong> · ' + _procEsc(b.description || '') +
+      '<br><span style="font-size:11px;color:#666">BPR qty: ' + _procFmtBprQty(totalQty) + ' ' + _procEsc(b.unit || '') +
+      ' · Already assigned: ' + _procFmtBprQty(assignedQty) +
+      ' · Remaining: <strong>' + _procFmtBprQty(remaining) + ' ' + _procEsc(b.unit || '') + '</strong></span>' +
+    '</div>' +
+    '<div class="sb3" style="margin-bottom:14px">' +
+      '<h4>Assign to</h4>' +
+      '<div class="fgr full" style="margin-bottom:10px">' +
+        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0">' +
+          '<input type="radio" name="bpr-asgn-target" value="new" id="bpr-asgn-new" checked onchange="_bprAsgnTargetChanged()" style="width:auto;margin:0">' +
+          '<span>New procurement item</span>' +
+        '</label>' +
+      '</div>' +
+      '<div class="fgr full" style="margin-bottom:14px">' +
+        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0' + (compatibleItems.length ? '' : ';color:#aaa') + '">' +
+          '<input type="radio" name="bpr-asgn-target" value="existing" id="bpr-asgn-existing"' + (compatibleItems.length ? '' : ' disabled') + ' onchange="_bprAsgnTargetChanged()" style="width:auto;margin:0">' +
+          '<span>Existing item:</span>' +
+        '</label>' +
+        '<select id="bpr-asgn-existing-sel" disabled style="margin-top:6px">' + compatHtml + '</select>' +
+      '</div>' +
+      '<div id="bpr-asgn-new-fields">' +
+        '<div class="fgr full"><label>Description</label>' +
+          '<input type="text" id="bpr-asgn-desc" value="' + _procEsc(b.description || '') + '">' +
+        '</div>' +
+        '<div class="fgr"><label>Unit cost ($)</label>' +
+          '<input type="number" step="0.01" id="bpr-asgn-unitcost" value="' + (Number(b.unitCost) || 0).toFixed(3).replace(/\.?0+$/, '') + '">' +
+        '</div>' +
+        '<div class="fgr"><label>Cost code (optional)</label>' +
+          '<input type="text" id="bpr-asgn-costcode">' +
+        '</div>' +
+      '</div>' +
+      '<div class="fgr full" style="margin-top:8px">' +
+        '<label>Portion (' + _procEsc(b.unit || '') + ')</label>' +
+        '<input type="number" step="any" min="0" id="bpr-asgn-qty" value="' + _procFmtBprQty(remaining) + '">' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Up to <strong>' + _procFmtBprQty(remaining) + '</strong>. Leave at remaining to assign everything left.</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procDoBprAssignment(\'' + _procEsc(bprMaterialId) + '\', ' + remaining + ')">Assign</button>' +
+    '</div>'
+  );
+}
+
+function _bprAsgnTargetChanged() {
+  var isNew = !!(g('bpr-asgn-new') && g('bpr-asgn-new').checked);
+  var sel = g('bpr-asgn-existing-sel');
+  var newFields = g('bpr-asgn-new-fields');
+  if (sel) sel.disabled = isNew;
+  if (newFields) newFields.style.opacity = isNew ? '1' : '0.4';
+}
+
+function procDoBprAssignment(bprMaterialId, maxRemaining) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var b = (p.bprMaterials || []).find(function(x){ return String(x.id) === String(bprMaterialId); });
+  if (!b) { alert('BPR material not found.'); return; }
+
+  var qtyInput = g('bpr-asgn-qty');
+  var qty = qtyInput ? parseFloat(qtyInput.value) : 0;
+  if (!isFinite(qty) || qty <= 0) { alert('Enter a positive portion.'); return; }
+  if (qty > maxRemaining + 0.001) {
+    alert('Portion exceeds the remaining unassigned quantity (' + _procFmtBprQty(maxRemaining) + ').');
+    return;
+  }
+
+  var isNew = !!(g('bpr-asgn-new') && g('bpr-asgn-new').checked);
+
+  p.procurementItems = p.procurementItems || [];
+
+  if (isNew) {
+    var desc = (g('bpr-asgn-desc') && g('bpr-asgn-desc').value || b.description || b.materialCode || '(BPR material)').trim();
+    var unitCost = parseFloat(g('bpr-asgn-unitcost') && g('bpr-asgn-unitcost').value || '0') || 0;
+    var costCode = (g('bpr-asgn-costcode') && g('bpr-asgn-costcode').value || '').trim();
+    var newItem = {
+      id: _procNewItemId(),
+      description: desc,
+      unit: b.unit || '',
+      costCode: costCode,
+      unitCost: unitCost,
+      leadTimeDays: null,
+      manualQty: null,
+      sourceLabel: 'From BPR — ' + (b.classCode || '') + ' / ' + (b.materialCode || ''),
+      sourceMaterialListId: null,
+      addedAt: new Date().toISOString(),
+      bprAssignments: [ { bprMaterialId: String(bprMaterialId), qty: qty } ]
+    };
+    if (b.classCode === 'REB' && b.rodLengthLinFt) {
+      newItem.bprRodLengthLinFt = b.rodLengthLinFt;
+    }
+    p.procurementItems.push(newItem);
+  } else {
+    var sel = g('bpr-asgn-existing-sel');
+    var targetId = sel && sel.value;
+    if (!targetId) { alert('Pick an existing item.'); return; }
+    var target = p.procurementItems.find(function(x){ return String(x.id) === String(targetId); });
+    if (!target) { alert('Target item not found.'); return; }
+    target.bprAssignments = target.bprAssignments || [];
+    target.bprAssignments.push({ bprMaterialId: String(bprMaterialId), qty: qty });
+  }
+
+  saveDB();
+  closeModal();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') {
+    showToast('Assigned ' + _procFmtBprQty(qty) + ' ' + (b.unit || '') + ' of ' + (b.materialCode || '') + '.', 'success');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// MERGE — combine one procurement item into another
+// ─────────────────────────────────────────────────────────────────────
+
+function procOpenMergeDialog(itemId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var source = (p.procurementItems || []).find(function(x){ return String(x.id) === String(itemId); });
+  if (!source) { alert('Item not found.'); return; }
+
+  // Find compatible merge targets: same unit, different item id
+  var candidates = (p.procurementItems || []).filter(function(it){
+    return String(it.id) !== String(itemId) && (it.unit || '') === (source.unit || '');
+  });
+  if (!candidates.length) {
+    alert('No compatible items to merge into. The target must have the same unit ("' + (source.unit || '(none)') + '").');
+    return;
+  }
+
+  var opts = candidates.map(function(it){
+    var bprCount = (it.bprAssignments || []).length;
+    var manualQty = it.manualQty != null ? ' · manual qty: ' + it.manualQty : '';
+    return '<option value="' + _procEsc(String(it.id)) + '">' +
+      _procEsc(it.description || '(unnamed)') +
+      ' (' + bprCount + ' BPR line' + (bprCount === 1 ? '' : 's') + manualQty + ')' +
+    '</option>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Merge item</div>' +
+    '<div class="msb">' +
+      'Merge <strong>' + _procEsc(source.description || '(unnamed)') + '</strong> into another procurement item. ' +
+      'The two items\' BPR assignments will be combined on the target, then this item will be removed. Unit cost on the target is recomputed as a weighted average by BPR extended-cost.' +
+      '<br><br><span style="font-size:11px;color:#9A7A2E">Note: Any POs already linked to this item will move to the target.</span>' +
+    '</div>' +
+    '<div class="fgr full" style="margin-bottom:14px">' +
+      '<label>Merge into</label>' +
+      '<select id="proc-merge-target">' + opts + '</select>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procDoMerge(\'' + _procEsc(itemId) + '\')">Merge</button>' +
+    '</div>'
+  );
+}
+
+function procDoMerge(sourceId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var sel = g('proc-merge-target');
+  var targetId = sel && sel.value;
+  if (!targetId) { alert('Pick a target.'); return; }
+
+  var items = p.procurementItems || [];
+  var source = items.find(function(x){ return String(x.id) === String(sourceId); });
+  var target = items.find(function(x){ return String(x.id) === String(targetId); });
+  if (!source || !target) { alert('Source or target item missing.'); return; }
+  if (String(source.id) === String(target.id)) { alert('Cannot merge into itself.'); return; }
+
+  // Combine BPR assignments. If the same bprMaterialId already exists on the
+  // target, add the qty rather than duplicating the row.
+  var existing = {};
+  (target.bprAssignments || []).forEach(function(a){
+    existing[String(a.bprMaterialId)] = a;
+  });
+  (source.bprAssignments || []).forEach(function(a){
+    var k = String(a.bprMaterialId);
+    if (existing[k]) {
+      existing[k].qty = (Number(existing[k].qty) || 0) + (Number(a.qty) || 0);
+    } else {
+      target.bprAssignments = target.bprAssignments || [];
+      target.bprAssignments.push({ bprMaterialId: k, qty: Number(a.qty) || 0 });
+      existing[k] = target.bprAssignments[target.bprAssignments.length - 1];
+    }
+  });
+
+  // Weighted-average unit cost: sum across the merged target's assignments,
+  // using BPR ext-cost as the weight. Falls back to qty × current unitCost
+  // when the backing BPR material isn't found (shouldn't happen normally).
+  function extDollars(item) {
+    var d = 0;
+    (item.bprAssignments || []).forEach(function(a){
+      var bm = (p.bprMaterials || []).find(function(x){ return String(x.id) === String(a.bprMaterialId); });
+      if (bm) {
+        var portion = (Number(bm.quantity) > 0) ? (Number(a.qty) || 0) / Number(bm.quantity) : 0;
+        d += portion * (Number(bm.extendedMatCost) || 0);
+      } else {
+        d += (Number(a.qty) || 0) * (Number(item.unitCost) || 0);
+      }
+    });
+    return d;
+  }
+  var totalDollars = extDollars(target);
+  var totalQty = 0;
+  (target.bprAssignments || []).forEach(function(a){ totalQty += Number(a.qty) || 0; });
+  if (totalQty > 0) {
+    target.unitCost = totalDollars / totalQty;
+  }
+
+  // Carry over manualQty if target had none and source had one (defensive)
+  if ((target.manualQty == null || target.manualQty === '') && source.manualQty != null && source.manualQty !== '') {
+    target.manualQty = source.manualQty;
+  }
+
+  // Carry over rod length when applicable
+  if (!target.bprRodLengthLinFt && source.bprRodLengthLinFt) {
+    target.bprRodLengthLinFt = source.bprRodLengthLinFt;
+  }
+
+  // Reassign PO lines pointing to source → target (preserves linkage)
+  (p.poList || []).forEach(function(po){
+    (po.lines || []).forEach(function(L){
+      if (L.procurementItemId && String(L.procurementItemId) === String(sourceId)) {
+        L.procurementItemId = String(targetId);
+      }
+    });
+  });
+
+  // Note: PROC_UNLINK_SENTINEL entries on the source's POs (if any) are left
+  // alone — they reference the source item, but since the source is going
+  // away, they no longer have meaning. The PO line will be re-evaluated
+  // against the target's auto-match index on next render.
+
+  // Remove source item
+  p.procurementItems = items.filter(function(x){ return String(x.id) !== String(sourceId); });
+
+  saveDB();
+  closeModal();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') {
+    showToast('Merged into "' + (target.description || '(unnamed)') + '".', 'success');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SPLIT — break one procurement item into N portions
+// ─────────────────────────────────────────────────────────────────────
+
+function procOpenSplitDialog(itemId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var item = (p.procurementItems || []).find(function(x){ return String(x.id) === String(itemId); });
+  if (!item) { alert('Item not found.'); return; }
+  var assignments = item.bprAssignments || [];
+  if (assignments.length !== 1) {
+    alert('Split is available for items backed by exactly one BPR line. This item has ' + assignments.length + '.');
+    return;
+  }
+
+  // Block if PO is linked to this item
+  var poLines = _procCollectProjectPoLines(p.id);
+  var hasPoLink = poLines.some(function(e){
+    return e.line.procurementItemId && String(e.line.procurementItemId) === String(itemId);
+  });
+  if (hasPoLink) {
+    alert('Cannot split an item that has PO lines linked. Unlink the POs first (⚙ POs button), then try again.');
+    return;
+  }
+
+  var bprId = assignments[0].bprMaterialId;
+  var bm = (p.bprMaterials || []).find(function(x){ return String(x.id) === String(bprId); });
+  if (!bm) { alert('Backing BPR material not found.'); return; }
+
+  _splitDialogState = {
+    itemId: String(itemId),
+    bprMaterialId: String(bprId),
+    totalQty: Number(assignments[0].qty) || 0,
+    unit: item.unit || bm.unit || ''
+  };
+
+  // Smart defaults
+  var totalQty = _splitDialogState.totalQty;
+  var isMortarT = (bm.materialCode === 'Mortar[T]') || (bm.classCode === 'MOR' && /colored/i.test(bm.description || ''));
+  if (isMortarT) {
+    var half = Math.round((totalQty / 2) * 100) / 100;
+    _splitRowsState = [
+      { name: 'Tan',  qty: half },
+      { name: 'Buff', qty: totalQty - half }
+    ];
+  } else {
+    var halfG = Math.round((totalQty / 2) * 100) / 100;
+    _splitRowsState = [
+      { name: (item.description || 'Split') + ' — A', qty: halfG },
+      { name: (item.description || 'Split') + ' — B', qty: totalQty - halfG }
+    ];
+  }
+
+  _renderSplitDialog(item, bm);
+}
+
+var _splitRowsState = [];
+var _splitDialogState = null;
+
+function _renderSplitDialog(item, bm) {
+  var totalQty = _splitDialogState.totalQty;
+  var unit = _splitDialogState.unit;
+  var rowsHtml = _splitRowsState.map(function(r, i){
+    return '<tr>' +
+      '<td style="padding:4px 8px;width:30px;color:#888;font-size:11px">' + (i + 1) + '.</td>' +
+      '<td style="padding:4px 4px"><input type="text" value="' + _procEsc(r.name || '') + '" oninput="_splitRowsState[' + i + '].name = this.value" placeholder="Name (e.g. Tan)" style="width:100%;padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:4px"></td>' +
+      '<td style="padding:4px 4px;width:120px"><input type="number" step="any" min="0" value="' + r.qty + '" oninput="_splitRowsState[' + i + '].qty = parseFloat(this.value) || 0; _splitUpdateSumDisplay()" style="width:100%;padding:4px 6px;font-size:12px;text-align:right;border:1px solid #ddd;border-radius:4px"></td>' +
+      '<td style="padding:4px 4px;width:40px"><button type="button" onclick="_splitRowRemove(' + i + ')" style="padding:2px 6px;font-size:11px;color:#A32D2D;background:none;border:none;cursor:pointer">✕</button></td>' +
+    '</tr>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Split item</div>' +
+    '<div class="msb">' +
+      'Split <strong>' + _procEsc(item.description || '') + '</strong> into multiple procurement items. ' +
+      'Each split absorbs a portion of the backing BPR line (<strong>' + _procEsc(bm.materialCode || '') + '</strong>, ' + _procFmtBprQty(totalQty) + ' ' + _procEsc(unit) + '). ' +
+      'Splits must sum to the total.' +
+    '</div>' +
+    '<div class="sb3" style="margin-bottom:14px">' +
+      '<table style="width:100%"><thead style="background:#fafafa"><tr>' +
+        '<th></th>' +
+        '<th style="padding:4px 8px;text-align:left;font-size:11px">Split name</th>' +
+        '<th style="padding:4px 8px;text-align:right;font-size:11px">Qty (' + _procEsc(unit) + ')</th>' +
+        '<th></th>' +
+      '</tr></thead><tbody id="proc-split-rows">' + rowsHtml + '</tbody></table>' +
+      '<div style="margin-top:8px;display:flex;gap:8px;align-items:center">' +
+        '<button type="button" class="btn btn-sm" onclick="_splitRowAdd()" style="padding:3px 8px;font-size:11px">+ Add split</button>' +
+        '<span style="margin-left:auto;font-size:11px">' +
+          'Sum: <strong id="proc-split-sum">' + _procFmtBprQty(_splitSum()) + ' ' + _procEsc(unit) + '</strong> · ' +
+          '<span id="proc-split-diff" style="color:' + _splitDiffColor() + '">' + _splitDiffText() + '</span>' +
+        '</span>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procDoSplit()">Split into ' + _splitRowsState.length + ' items</button>' +
+    '</div>'
+  );
+}
+
+function _splitSum() {
+  return _splitRowsState.reduce(function(s, r){ return s + (Number(r.qty) || 0); }, 0);
+}
+function _splitDiff() {
+  if (!_splitDialogState) return 0;
+  return _splitSum() - _splitDialogState.totalQty;
+}
+function _splitDiffColor() {
+  return Math.abs(_splitDiff()) < 0.01 ? '#1E6B36' : '#A32D2D';
+}
+function _splitDiffText() {
+  var d = _splitDiff();
+  if (Math.abs(d) < 0.01) return '✓ balanced';
+  return (d > 0 ? 'over by ' : 'short by ') + _procFmtBprQty(Math.abs(d)) + ' ' + (_splitDialogState ? _splitDialogState.unit : '');
+}
+function _splitUpdateSumDisplay() {
+  var sumEl = g('proc-split-sum');
+  var diffEl = g('proc-split-diff');
+  if (sumEl && _splitDialogState) sumEl.textContent = _procFmtBprQty(_splitSum()) + ' ' + _splitDialogState.unit;
+  if (diffEl) {
+    diffEl.textContent = _splitDiffText();
+    diffEl.style.color = _splitDiffColor();
+  }
+}
+
+function _splitRowAdd() {
+  _splitRowsState.push({ name: 'New split', qty: 0 });
+  _splitDialogReRender();
+}
+function _splitRowRemove(i) {
+  if (_splitRowsState.length <= 2) {
+    alert('At least 2 splits are required.');
+    return;
+  }
+  _splitRowsState.splice(i, 1);
+  _splitDialogReRender();
+}
+function _splitDialogReRender() {
+  if (!_splitDialogState) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var item = (p.procurementItems || []).find(function(x){ return String(x.id) === _splitDialogState.itemId; });
+  var bm = (p.bprMaterials || []).find(function(x){ return String(x.id) === _splitDialogState.bprMaterialId; });
+  if (item && bm) _renderSplitDialog(item, bm);
+}
+
+function procDoSplit() {
+  if (!_editProjectId || !_splitDialogState) return;
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var itemId = _splitDialogState.itemId;
+  var item = (p.procurementItems || []).find(function(x){ return String(x.id) === String(itemId); });
+  if (!item) { alert('Item not found.'); return; }
+  var assignments = item.bprAssignments || [];
+  if (assignments.length !== 1) { alert('Item is no longer single-BPR-backed.'); return; }
+  var bprId = assignments[0].bprMaterialId;
+  var totalQty = Number(assignments[0].qty) || 0;
+
+  // Validate splits
+  var splits = _splitRowsState.filter(function(r){ return (Number(r.qty) || 0) > 0; });
+  if (splits.length < 2) { alert('Provide at least 2 splits with positive quantities.'); return; }
+  var sum = splits.reduce(function(s, r){ return s + Number(r.qty); }, 0);
+  if (Math.abs(sum - totalQty) > 0.01) {
+    alert('Splits sum to ' + _procFmtBprQty(sum) + ' but the BPR portion is ' + _procFmtBprQty(totalQty) + '. They must match.');
+    return;
+  }
+  if (splits.some(function(r){ return !r.name || !r.name.trim(); })) {
+    alert('All splits need a name.');
+    return;
+  }
+
+  // Create N new items based on the source
+  var bm = (p.bprMaterials || []).find(function(x){ return String(x.id) === String(bprId); });
+  var newItems = splits.map(function(r){
+    var copy = {
+      id: _procNewItemId(),
+      description: r.name.trim(),
+      unit: item.unit || (bm ? bm.unit : ''),
+      costCode: item.costCode || '',
+      unitCost: Number(item.unitCost) || 0,
+      leadTimeDays: item.leadTimeDays || null,
+      manualQty: null,
+      sourceLabel: item.sourceLabel || ('From BPR — ' + (bm ? (bm.classCode + ' / ' + bm.materialCode) : '')),
+      sourceMaterialListId: null,
+      addedAt: new Date().toISOString(),
+      bprAssignments: [ { bprMaterialId: String(bprId), qty: Number(r.qty) } ]
+    };
+    if (item.bprRodLengthLinFt) copy.bprRodLengthLinFt = item.bprRodLengthLinFt;
+    return copy;
+  });
+
+  // Replace source with new items (preserves array ordering)
+  var idx = p.procurementItems.findIndex(function(x){ return String(x.id) === String(itemId); });
+  if (idx >= 0) {
+    p.procurementItems.splice.apply(p.procurementItems, [idx, 1].concat(newItems));
+  } else {
+    p.procurementItems = p.procurementItems.concat(newItems);
+  }
+
+  saveDB();
+  _splitDialogState = null;
+  _splitRowsState = [];
+  closeModal();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') {
+    showToast('Split into ' + splits.length + ' items.', 'success');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PRE-IMPORT GROUPING — picker support
+// ─────────────────────────────────────────────────────────────────────
+// Groups bind multiple checked BPR rows together so they save as a single
+// procurement item with multiple bprAssignments. Group state is transient
+// (modal-lifetime only) — closing the picker clears it.
+
+function procBprPickerCreateGroup() {
+  if (!_editProjectId) return;
+  // Collect currently-checked rows not already in a group
+  var checked = Object.keys(_bprPickerSelections).filter(function(id){
+    return _bprPickerSelections[id] && !_bprPickerGroupOf[id];
+  });
+  if (checked.length < 2) {
+    alert('Check at least 2 BPR rows (not already in a group) to combine them.');
+    return;
+  }
+  var p = getProj(_editProjectId);
+  if (!p) return;
+  var bprById = {};
+  (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+
+  // Verify all checked rows share the same unit (must match for combination)
+  var units = {};
+  checked.forEach(function(id){
+    var b = bprById[id];
+    if (b) units[b.unit || ''] = true;
+  });
+  var unitList = Object.keys(units);
+  if (unitList.length > 1) {
+    alert('All grouped items must share the same unit. Selected units: ' + unitList.join(', '));
+    return;
+  }
+
+  // Build a default label by combining shortest meaningful descriptions
+  var defaultLabel = checked.slice(0, 2).map(function(id){
+    var b = bprById[id];
+    return b ? (b.description || b.materialCode || '') : '';
+  }).filter(Boolean).join(' + ');
+  if (checked.length > 2) defaultLabel += ' + ' + (checked.length - 2) + ' more';
+
+  var label = prompt('Label for the combined procurement item:', defaultLabel);
+  if (label === null) return; // cancelled
+  label = (label || '').trim();
+  if (!label) {
+    alert('Group needs a label.');
+    return;
+  }
+
+  var groupId = _bprNewGroupId();
+  _bprPickerGroups.push({ id: groupId, label: label, memberIds: checked.slice() });
+  checked.forEach(function(id){ _bprPickerGroupOf[id] = groupId; });
+
+  procOpenBprPicker(true);   // re-render to show the new group
+}
+
+function procBprPickerUngroup(groupId) {
+  var grp = _bprPickerGroups.find(function(g){ return g.id === groupId; });
+  if (!grp) return;
+  grp.memberIds.forEach(function(id){ delete _bprPickerGroupOf[id]; });
+  _bprPickerGroups = _bprPickerGroups.filter(function(g){ return g.id !== groupId; });
+  procOpenBprPicker(true);
+}
+
+function procBprPickerRenameGroup(groupId) {
+  var grp = _bprPickerGroups.find(function(g){ return g.id === groupId; });
+  if (!grp) return;
+  var newLabel = prompt('Rename group:', grp.label);
+  if (newLabel === null) return;
+  newLabel = (newLabel || '').trim();
+  if (!newLabel) { alert('Label cannot be empty.'); return; }
+  grp.label = newLabel;
+  procOpenBprPicker(true);
+}
+
+// Clear group state when picker closes — wired via procOpenBprPicker
+// reset at the top.
+
+// ─────────────────────────────────────────────────────────────────────
+// END BPR ROUND 3.3 MODULE
+// ─────────────────────────────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════
 // END BPR MODULE
