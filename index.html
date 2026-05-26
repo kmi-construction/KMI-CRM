@@ -28510,7 +28510,6 @@ function _bprParseLines(lines) {
   // heuristic at flush time.
   var pendingHeader = null;       // {labelChunk, unitCost}
   var pendingSubRows = [];        // [{qty, unit, matCost}]
-  var inOtherCost = false;
 
   // Patterns
   var reClassification    = /^Classification\s+(\S+)\s+(.+?)(?:\s+(?:Quantity|sqft|SqFt|Pieces|LinFt|CbcFt|Each))?$/;
@@ -28518,9 +28517,9 @@ function _bprParseLines(lines) {
   var reMaterialTotals    = /^Material \[([^\]]+)\] Totals\s+([\d,]+(?:\.\d+)?)\s+(\S+)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})/;
   var reMortarTotals      = /^Mortar \[([^\]]+)\] Totals\s+([\d,]+(?:\.\d+)?)\s+(\S+)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})/;
   var reOtherCostItem     = /^([A-Z][^:]+?):\s*\$([\d,]+\.\d{2})$/;
-  // Sub-row: starts with single letter + digits + underscore
-  var reSubRowMarker      = /^[A-Z]\s+\d+_/;
-  // Sub-row qty/unit/cost extraction
+  // Sub-row data: qty + unit + matcost + laycost + decimal-qty. This is
+  // the canonical "data tail" of any wall-area / area-name sub-row in
+  // either Mishicot-style or AFF-style BPRs.
   var reSubRowData        = /\b(\d{1,3}(?:,\d{3})*)\s+(Pieces|LinFt|SqFt|CbcFt|Each)\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+([\d,]+\.\d+)/;
   // Mortar header (new format: $price /unit unit Show as): "Mortar[S] [S] desc... $7.75 /CbcFt CbcFt Show as CbcFt"
   var reMortarHeader      = /^(Mortar\[[^\]]+\])\s+(.+?)\s+\$(\d+(?:\.\d{1,3})?)\s*\/(\w+)\s+(\w+)\s+Show as/;
@@ -28585,20 +28584,56 @@ function _bprParseLines(lines) {
   // Heuristic: for single-sub-row materials (no Material Totals line),
   // split a labelChunk into code + description without external help.
   //
-  // The first token is always part of the code. Subsequent tokens are
-  // appended to the code until we hit a clear "description-start" token:
-  //  - Title Case word (e.g. "Ashler", "Modular", "Patching")
-  //  - A standalone size indicator: `12"`, `8"`, `6'8"`, `#4`, `#5`
-  //  - A long all-caps word (length ≥ 7) — likely an expanded form
-  // If the derived description ends up empty or single-word (suggesting
-  // the heuristic ate too many tokens), fall back to "first token is
-  // code, rest is description" so the row still has readable text.
+  // Detection patterns, in priority order:
+  //
+  //   A) Compact code expanded as two tokens — first token is
+  //      "<DIGITS><LETTERS>" (e.g. "3000PSI", "8BB"), and the next two
+  //      tokens are the same parts split apart. Example:
+  //        "3000PSI 3000 PSI Grout in Cu.Ft."
+  //      → code = "3000PSI", desc = "3000 PSI Grout in Cu.Ft."
+  //
+  //   B) Two-token code expanded — first two tokens of code repeat as
+  //      the next two tokens with the SECOND expanded (prefix-match).
+  //      Example:
+  //        "8 BURN 8 BURNISHED"  →  code = "8 BURN", desc = "8 BURNISHED"
+  //
+  //   C) Default tokenwise walk — first token is always code; subsequent
+  //      tokens are appended to code until we hit a clear "description-
+  //      start" token (Title Case word, size indicator like 12" or 6'8",
+  //      # rebar size like #4, or long all-caps ≥ 7 chars). Handles
+  //      "ASHLER P Ashler Stone Piers", "MOD PIER Modular Brick Piers",
+  //      "#4BB REBA #4 Bond Beam Rebar - 240"", etc.
+  //
+  //   D) Final fallback — if pattern C produces 0-1 description words
+  //      (heuristic over-ate the boundary), revert to "first token is
+  //      code, rest is description".
   function _bprSplitHeader(labelChunk) {
     var s = (labelChunk || '').trim();
     if (!s) return { code: '', description: '' };
     var tokens = s.split(/\s+/);
     if (tokens.length === 1) return { code: tokens[0], description: '' };
 
+    // Pattern A: compact code expansion (e.g. "3000PSI 3000 PSI ...")
+    var splitDL = /^(\d+)([A-Za-z].*)$/.exec(tokens[0]);
+    if (splitDL && tokens.length >= 3 && tokens[1] === splitDL[1] && tokens[2] === splitDL[2]) {
+      return {
+        code: tokens[0],
+        description: tokens.slice(1).join(' ')
+      };
+    }
+
+    // Pattern B: two-token code expansion (e.g. "8 BURN 8 BURNISHED")
+    if (tokens.length >= 4 &&
+        tokens[0] === tokens[2] &&
+        tokens[3].indexOf(tokens[1]) === 0 &&
+        tokens[3].length > tokens[1].length) {
+      return {
+        code: tokens[0] + ' ' + tokens[1],
+        description: tokens.slice(2).join(' ')
+      };
+    }
+
+    // Pattern C: tokenwise walk
     var codeTokens = [tokens[0]];
     var descTokens = [];
     var inDesc = false;
@@ -28620,11 +28655,9 @@ function _bprParseLines(lines) {
     }
 
     var heur = { code: codeTokens.join(' '), description: descTokens.join(' ') };
-    // Fallback: if heuristic produced 0-1 description words, the
-    // descriptive content is more useful in the desc field. Revert to
-    // simple first-token-as-code split.
-    var descWordCount = descTokens.length;
-    if (descWordCount <= 1) {
+
+    // Pattern D: fallback if heuristic over-ate
+    if (descTokens.length <= 1) {
       var sp = s.indexOf(' ');
       if (sp > 0) {
         return { code: s.slice(0, sp), description: s.slice(sp + 1).trim() };
@@ -28758,39 +28791,54 @@ function _bprParseLines(lines) {
       continue;
     }
 
-    // Other Cost Breakdown section — note the project may emit this on a
-    // shared line with "Project Notes:" so we look for the phrase anywhere.
+    // Lump-sum / "Other Cost Breakdown" items appear in the tail of the
+    // report. Format: "<Label>: $<Amount>" on a line. Two BPR variants:
+    //   Mishicot — section preceded by explicit "Other Cost Breakdown:"
+    //              header; items each on their own line.
+    //   AFF     — no section header; items appear after "Project Notes:".
+    //              The first item is often merged onto the "Project Notes:"
+    //              line itself (e.g. "Project Notes: Precast Veneer:
+    //              $59,880.00"), and "Other Cost Breakdown" can be merged
+    //              the same way.
+    //
+    // Strategy: always look for the item pattern, anywhere in the doc.
+    // First, strip any leading "Project Notes:" / "Other Cost Breakdown:"
+    // prefix so a merged item is recoverable. Then filter out known totals
+    // (Contract Amount / Final Bid Proposal / etc.) so they're not emitted
+    // as procurement items. The state-tracked inOtherCost flag is no
+    // longer needed for the AFF format, but we still recognize the
+    // explicit "Other Cost Breakdown" marker as a noise-suppressor for
+    // the Mishicot variant.
     if (/Other Cost Breakdown/.test(line)) {
       flushPending();
-      inOtherCost = true;
+      // No mode change needed — the items that follow will be picked up by
+      // the always-scan code below. Skip this label line itself.
       continue;
     }
-    if (inOtherCost) {
-      if (/^CONTRACT AMOUNT/i.test(line)) {
-        inOtherCost = false;
-        continue;
-      }
-      var oc = reOtherCostItem.exec(line);
-      if (oc) {
-        var lbl = oc[1].trim();
-        var amt = parseFloat(oc[2].replace(/,/g, ''));
-        if (isFinite(amt) && amt > 0) {
-          results.push({
-            id: _bprNewId('_oc'),
-            classCode: 'OTH',
-            classDescription: 'Other Cost Breakdown',
-            materialCode: lbl.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase().slice(0, 24),
-            description: lbl,
-            unit: 'LS',
-            quantity: 1,
-            unitCost: amt,
-            extendedMatCost: amt,
-            rodLengthLinFt: null,
-            sourceCategory: 'lump_sum_other',
-            defaultSkip: false,
-            extractedAt: new Date().toISOString()
-          });
-        }
+    var stripped = line.replace(/^\s*(?:Project Notes|Other Cost Breakdown)\s*:\s*/, '');
+    var oc = reOtherCostItem.exec(stripped);
+    if (oc) {
+      var lbl = oc[1].trim();
+      var amt = parseFloat(oc[2].replace(/,/g, ''));
+      // Skip lines that are project totals, not procurement items
+      var isTotal = /^(CONTRACT AMOUNT|Contract Amount|FINAL BID PROPOSAL|Final Bid Proposal|Bid Price|Grand Total[s]?|Total Square Feet)$/i.test(lbl);
+      if (isFinite(amt) && amt > 0 && !isTotal) {
+        flushPending();
+        results.push({
+          id: _bprNewId('_oc'),
+          classCode: 'OTH',
+          classDescription: 'Other Cost Breakdown',
+          materialCode: lbl.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase().slice(0, 32),
+          description: lbl,
+          unit: 'LS',
+          quantity: 1,
+          unitCost: amt,
+          extendedMatCost: amt,
+          rodLengthLinFt: null,
+          sourceCategory: 'lump_sum_other',
+          defaultSkip: false,
+          extractedAt: new Date().toISOString()
+        });
       }
       continue;
     }
@@ -28824,7 +28872,16 @@ function _bprParseLines(lines) {
     // Sub-row detection (for the single-sub-row materials that won't have
     // a Totals line). Only relevant when we have a pendingHeader awaiting
     // its sub-rows.
-    if (pendingHeader && reSubRowMarker.test(line)) {
+    //
+    // Sub-row formats vary by BPR shape: Mishicot-style "A 12_Exterior
+    // CMU Wall(X8B) 129 SqFt $0.00 $0.00 129.333 ..." uses wall-coded
+    // prefixes (letter + digits + underscore), but newer reports (e.g.
+    // AFF Hospitality) use area names like "CMU Elevator 219 Pieces
+    // $764.31 $1,883.78 194.667 ...". The data shape at the END of the
+    // line is identical in both, so we rely on reSubRowData (qty + unit
+    // + two dollar amounts + decimal qty) as the positive identifier
+    // rather than the prefix.
+    if (pendingHeader) {
       var sd = reSubRowData.exec(line);
       if (sd) {
         var sQty = parseFloat(sd[1].replace(/,/g, ''));
@@ -28833,8 +28890,8 @@ function _bprParseLines(lines) {
         if (isFinite(sQty)) {
           pendingSubRows.push({ qty: sQty, unit: sUnit, matCost: isFinite(sMatCost) ? sMatCost : 0 });
         }
+        continue;
       }
-      continue;
     }
 
     // Anything else — ignored
