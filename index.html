@@ -27582,6 +27582,7 @@ function renderProjectProcurement() {
             'Show variance columns' +
           '</label>' +
           '<button type="button" class="btn btn-sm" onclick="procOpenFromMatListPicker()"' + (matListCount ? '' : ' disabled title="No material list rows on this project yet"') + '>+ From material list</button>' +
+          '<button type="button" class="btn btn-sm" onclick="procOpenBprFlow()" title="' + (p.bprMaterials && p.bprMaterials.length ? 'Import items from the Bid Price Report' : 'Upload the Bid Price Report PDF to extract material quantities') + '">+ From BPR' + (p.bprMaterials && p.bprMaterials.length ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
           '<button type="button" class="btn btn-sm btn-p" onclick="procOpenCustomItemModal(null)">+ Custom item</button>' +
         '</span>' +
       '</div>' +
@@ -27675,10 +27676,19 @@ function _procRenderItemRow(item, entries) {
   var hasMulti = entries.length > 1;
   var isOpen = !!_procDrawerOpen[itemId];
 
-  // Qty cell: editable manualQty if no POs, else read-only rollup
+  // Qty cell — three-state precedence: linked POs → rollup; else
+  // BPR assignments → sum of portions (read-only, edited via assignment
+  // picker); else manualQty editable input.
+  var bprAssignments = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
+  var bprQtySum = 0;
+  bprAssignments.forEach(function(a){ bprQtySum += Number(a.qty) || 0; });
+  var hasBprAssignments = bprAssignments.length > 0;
+
   var qtyCell;
   if (hasPO) {
     qtyCell = '<span style="font-weight:600">' + rollup.totalQty + '</span>';
+  } else if (hasBprAssignments) {
+    qtyCell = '<span style="font-weight:600" title="Quantity from BPR assignment(s) — edit via the ⚙ button or by re-assigning portions">' + _procFmtBprQty(bprQtySum) + '</span>';
   } else {
     var mq = (item.manualQty != null && item.manualQty !== '') ? item.manualQty : '';
     qtyCell = '<input type="number" min="0" step="any" value="' + _procEsc(mq) + '" placeholder="—" ' +
@@ -27707,9 +27717,13 @@ function _procRenderItemRow(item, entries) {
   var varCells = '';
   if (_procVarianceOn) {
     var estUnit = Number(item.unitCost) || 0;
-    // Variance basis: ordered qty if POs exist, else manualQty (so a planned
-    // estimate is visible before any PO is cut).
-    var refQty = hasPO ? rollup.totalQty : (Number(item.manualQty) || 0);
+    // Variance basis: PO rollup if linked POs exist; else BPR-assigned qty
+    // if any assignments exist; else manualQty (planned estimate). Lets a
+    // PM see the estimated cost variance even before a PO is cut.
+    var refQty;
+    if (hasPO) refQty = rollup.totalQty;
+    else if (hasBprAssignments) refQty = bprQtySum;
+    else refQty = Number(item.manualQty) || 0;
     var estDollars = refQty * estUnit;
     var ordDollars = rollup.orderedDollars;
     var variance = ordDollars - estDollars;
@@ -27725,12 +27739,31 @@ function _procRenderItemRow(item, entries) {
 
   var rowBg = hasPO ? '' : 'background:#FCFCFA';
 
+  // BPR badge — small "B" next to description if this item is backed
+  // by Bid Price Report assignment(s).
+  var bprBadge = hasBprAssignments
+    ? ' <span style="font-size:10px;color:#5D4391;background:#EEE8F8;padding:1px 6px;border-radius:8px" title="Quantity sourced from Bid Price Report assignment' + (bprAssignments.length === 1 ? '' : 's') + '">B' + (bprAssignments.length > 1 ? '×' + bprAssignments.length : '') + '</span>'
+    : '';
+
+  // Rebar rod-count derivation — when the item carries a rod length
+  // (snapshotted from the BPR description "240"" or "6'8""), show the
+  // derived piece count as a secondary line under the qty.
+  var rodHint = '';
+  if (item.bprRodLengthLinFt && (hasBprAssignments || hasPO)) {
+    var lfForRodCalc = hasPO ? rollup.totalQty : bprQtySum;
+    if (lfForRodCalc > 0 && item.bprRodLengthLinFt > 0) {
+      var pieces = Math.ceil(lfForRodCalc / item.bprRodLengthLinFt);
+      rodHint = '<div style="font-size:10px;color:#888;margin-top:2px;text-align:right">≈ ' + pieces + ' rod' + (pieces === 1 ? '' : 's') + '</div>';
+    }
+  }
+
   var html =
     '<tr style="border-top:1px solid #eee;' + rowBg + '">' +
       '<td style="padding:8px">' +
         '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">' +
           '<strong>' + _procEsc(item.description || '(no description)') + '</strong>' +
           poBadge +
+          bprBadge +
         '</div>' +
         '<div style="font-size:10px;color:#888;margin-top:2px">' +
           (item.unit ? 'Unit: ' + _procEsc(item.unit) : '') +
@@ -27740,7 +27773,7 @@ function _procRenderItemRow(item, entries) {
           (item.sourceLabel ? _procEsc(item.sourceLabel) : '') +
         '</div>' +
       '</td>' +
-      '<td style="padding:8px;text-align:right">' + qtyCell + '</td>' +
+      '<td style="padding:8px;text-align:right">' + qtyCell + rodHint + '</td>' +
       '<td style="padding:8px;text-align:right">' +
         '<input type="number" min="0" step="1" value="' + _procEsc(leadTime) + '" placeholder="—" ' +
           'style="width:60px;padding:4px 6px;font-size:12px;text-align:right;border:1px solid #ddd;border-radius:4px" ' +
@@ -28314,6 +28347,855 @@ function procSaveLinkPicker(itemId) {
   }
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+// BPR PARSER + IMPORT PICKER — Procurement Round 3
+// ═══════════════════════════════════════════════════════════════════
+// Parses Tradesmen On-Screen 3D "Quantity/Bid Price Report" PDFs and
+// emits per-project p.bprMaterials[] — one entry per "Material Totals"
+// row plus the "Other Cost Breakdown" lump-sum items. Procurement items
+// then reference these entries through procurementItem.bprAssignments[]
+// (each {bprMaterialId, qty}). One BPR line can fan out to N items;
+// one item can absorb portions from N lines.
+//
+// Parsing is client-side and deterministic (regex on text reconstructed
+// from pdf.js positional output). The Tradesmen format is rigid enough
+// that this is more reliable — and faster — than LLM extraction.
+//
+// SCA / CLE / AIR / PA classifications come through but default to
+// unchecked in the picker. "Other Cost Breakdown" items (Mold, Caulk,
+// Misc. Patching, etc.) come through with quantity=1, unit=LS, dollar
+// amount in unitCost. Equipment / Sub / OH&P / Labor are never emitted.
+//
+// Rebar SKUs get a derived rodLengthLinFt (20 for "240"", 6.667 for
+// "6'8"") so the procurement row can display piece count. Rebar
+// quantities stay in LinFt — pieces are display-only (rounded up).
+//
+// Permissions: BPR upload + picker save require edit_project_budget
+// (parsing modifies project data adjacent to budgets).
+
+var _bprPendingItems = null;     // parser output staged for the picker
+var _bprPickerSelections = {};   // tracks checkbox state in the picker
+
+function _bprNewId(suffix) {
+  return 'bpr' + Date.now() + '_' + Math.random().toString(36).slice(2, 8) + (suffix || '');
+}
+
+function _bprFileToArrayBuffer(file) {
+  return new Promise(function(resolve, reject){
+    var r = new FileReader();
+    r.onload = function(e){ resolve(e.target.result); };
+    r.onerror = function(){ reject(new Error('Failed to read file.')); };
+    r.readAsArrayBuffer(file);
+  });
+}
+
+// Pretty-print a BPR qty: keep up to 3 decimals when meaningful, else integer.
+function _procFmtBprQty(n) {
+  var v = Number(n);
+  if (!isFinite(v)) return '0';
+  if (Math.abs(v - Math.round(v)) < 0.005) return String(Math.round(v));
+  return v.toFixed(2).replace(/\.?0+$/, '');
+}
+
+// Extract logical lines from a PDF ArrayBuffer using pdf.js, reconstructing
+// reading order from text-item Y-coordinates so the parser can rely on
+// "one BPR row = one line".
+async function _bprPdfToLines(arrayBuffer) {
+  if (!window.pdfjsLib) throw new Error('pdf.js library is not loaded.');
+  var pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  var allLines = [];
+  var Y_TOLERANCE = 2;   // points — items within this Y range belong to same line
+
+  for (var pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    var page = await pdf.getPage(pageNum);
+    var content = await page.getTextContent();
+
+    // Build items array with positional info
+    var items = content.items
+      .filter(function(it){ return it.str && it.str.trim(); })
+      .map(function(it){
+        return {
+          str: it.str,
+          x: it.transform[4],
+          y: it.transform[5]
+        };
+      });
+
+    // Sort by Y descending (top of page first), then X ascending
+    items.sort(function(a, b){
+      if (Math.abs(a.y - b.y) > Y_TOLERANCE) return b.y - a.y;
+      return a.x - b.x;
+    });
+
+    // Group items with very close Y values into lines
+    var currentY = null;
+    var currentLine = [];
+
+    function flushLine() {
+      if (!currentLine.length) return;
+      // Sort by X just in case (already roughly sorted)
+      currentLine.sort(function(a, b){ return a.x - b.x; });
+      var joined = currentLine.map(function(x){ return x.str; }).join(' ');
+      // Collapse runs of whitespace
+      joined = joined.replace(/\s+/g, ' ').trim();
+      if (joined) allLines.push(joined);
+      currentLine = [];
+    }
+
+    items.forEach(function(it){
+      if (currentY === null || Math.abs(it.y - currentY) <= Y_TOLERANCE) {
+        currentLine.push(it);
+        currentY = it.y;
+      } else {
+        flushLine();
+        currentLine.push(it);
+        currentY = it.y;
+      }
+    });
+    flushLine();
+  }
+
+  return allLines;
+}
+
+// Detect rebar rod length (in LinFt) from a description like:
+//   "#5 Rebar Vert. 6'8""  →  6.667
+//   "#5 Bond Beam Rebar - 240""  →  20
+//   "#4 Bond Beam Rebar - 240""  →  20
+// Returns null if no recognizable length token.
+function _bprDetectRodLength(desc) {
+  if (!desc) return null;
+  // Feet'inches" first (more specific, must check before inches alone)
+  var mFi = /(\d+)\s*'\s*(\d+)\s*"/.exec(desc);
+  if (mFi) {
+    var ft = parseInt(mFi[1], 10);
+    var inch = parseInt(mFi[2], 10);
+    if (isFinite(ft) && isFinite(inch)) return ft + inch / 12;
+  }
+  // Inches alone: "240"" → /12
+  var mIn = /(\d+)\s*"(?!\s*\w)/.exec(desc);
+  if (mIn) {
+    var inOnly = parseInt(mIn[1], 10);
+    if (isFinite(inOnly) && inOnly > 0) return inOnly / 12;
+  }
+  // Feet alone: "6'" → 6
+  var mFt = /(\d+)\s*'/.exec(desc);
+  if (mFt) {
+    var ftOnly = parseInt(mFt[1], 10);
+    if (isFinite(ftOnly)) return ftOnly;
+  }
+  return null;
+}
+
+// Parse reconstructed lines into bprMaterial objects.
+function _bprParseLines(lines) {
+  var results = [];
+  var currentClass = null;
+  var currentClassDesc = '';
+
+  // State tracking: pendingHeader is a material we've seen the header for
+  // but not yet seen a "Material/Mortar Totals" line. pendingSubRows
+  // accumulates wall-area sub-rows under it. When a new header / class /
+  // totals / class-totals line arrives, we either emit using the totals
+  // (preferred — more authoritative) or "flush" using the sub-row sum
+  // (for single-sub-row materials like #4BB REBA where Tradesmen omits
+  // the Totals line entirely).
+  //
+  // pendingHeader stores the FULL labelChunk (everything before " Lay ")
+  // rather than a pre-split code/description, because the code may
+  // contain spaces (e.g. "ASHLER P", "#4BB REBA", "MOD PIER") and the
+  // only reliable splitter is the Totals line's bracketed code when one
+  // is available. For single-sub-row materials we fall back to a
+  // heuristic at flush time.
+  var pendingHeader = null;       // {labelChunk, unitCost}
+  var pendingSubRows = [];        // [{qty, unit, matCost}]
+  var inOtherCost = false;
+
+  // Patterns
+  var reClassification    = /^Classification\s+(\S+)\s+(.+?)(?:\s+(?:Quantity|sqft|SqFt|Pieces|LinFt|CbcFt|Each))?$/;
+  var reClassTotals       = /^Class Totals\b/;
+  var reMaterialTotals    = /^Material \[([^\]]+)\] Totals\s+([\d,]+(?:\.\d+)?)\s+(\S+)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})/;
+  var reMortarTotals      = /^Mortar \[([^\]]+)\] Totals\s+([\d,]+(?:\.\d+)?)\s+(\S+)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})/;
+  var reOtherCostItem     = /^([A-Z][^:]+?):\s*\$([\d,]+\.\d{2})$/;
+  // Sub-row: starts with single letter + digits + underscore
+  var reSubRowMarker      = /^[A-Z]\s+\d+_/;
+  // Sub-row qty/unit/cost extraction
+  var reSubRowData        = /\b(\d{1,3}(?:,\d{3})*)\s+(Pieces|LinFt|SqFt|CbcFt|Each)\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+([\d,]+\.\d+)/;
+  // Mortar header (new format: $price /unit unit Show as): "Mortar[S] [S] desc... $7.75 /CbcFt CbcFt Show as CbcFt"
+  var reMortarHeader      = /^(Mortar\[[^\]]+\])\s+(.+?)\s+\$(\d+(?:\.\d{1,3})?)\s*\/(\w+)\s+(\w+)\s+Show as/;
+
+  function emitFromTotals(code, qty, unit, extMatCost, headerInfo) {
+    // headerInfo (when present) carries the labelChunk so we can derive
+    // the description by removing the leading code. The unit cost comes
+    // from the header when available, otherwise from the totals line
+    // (extMatCost / qty).
+    var description = code;
+    var unitCost;
+    if (headerInfo) {
+      unitCost = (headerInfo.unitCost != null) ? headerInfo.unitCost : (qty > 0 ? extMatCost / qty : 0);
+      var lc = headerInfo.labelChunk || '';
+      // Try to peel the code off the front of the labelChunk to get the
+      // human-readable description. Tradesmen always lays out the header
+      // as "<code> <description>", so a prefix match is reliable.
+      if (lc) {
+        // Escape regex specials in the code, then strip
+        var esc = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        var re = new RegExp('^' + esc + '\\s+');
+        if (re.test(lc)) {
+          description = lc.replace(re, '').trim() || code;
+        } else if (lc.indexOf(code) === 0) {
+          description = lc.slice(code.length).trim() || code;
+        } else {
+          description = lc;  // header didn't start with totals code — keep whole label
+        }
+      }
+    } else {
+      unitCost = (qty > 0 ? extMatCost / qty : 0);
+    }
+
+    var classCode = currentClass || 'UNC';
+    var classDesc = currentClassDesc || '';
+    var defaultSkip = (classCode === 'SCA' || classCode === 'CLE' || classCode === 'AIR' || classCode === 'PA');
+
+    var item = {
+      id: _bprNewId(),
+      classCode: classCode,
+      classDescription: classDesc,
+      materialCode: code,
+      description: description,
+      unit: unit,
+      quantity: qty,
+      unitCost: unitCost,
+      extendedMatCost: extMatCost,
+      rodLengthLinFt: null,
+      sourceCategory: 'material',
+      defaultSkip: defaultSkip,
+      extractedAt: new Date().toISOString()
+    };
+
+    if (classCode === 'REB') {
+      var rod = _bprDetectRodLength(item.description);
+      if (rod) item.rodLengthLinFt = rod;
+    }
+
+    results.push(item);
+  }
+
+  // Heuristic: for single-sub-row materials (no Material Totals line),
+  // split a labelChunk into code + description without external help.
+  //
+  // The first token is always part of the code. Subsequent tokens are
+  // appended to the code until we hit a clear "description-start" token:
+  //  - Title Case word (e.g. "Ashler", "Modular", "Patching")
+  //  - A standalone size indicator: `12"`, `8"`, `6'8"`, `#4`, `#5`
+  //  - A long all-caps word (length ≥ 7) — likely an expanded form
+  // If the derived description ends up empty or single-word (suggesting
+  // the heuristic ate too many tokens), fall back to "first token is
+  // code, rest is description" so the row still has readable text.
+  function _bprSplitHeader(labelChunk) {
+    var s = (labelChunk || '').trim();
+    if (!s) return { code: '', description: '' };
+    var tokens = s.split(/\s+/);
+    if (tokens.length === 1) return { code: tokens[0], description: '' };
+
+    var codeTokens = [tokens[0]];
+    var descTokens = [];
+    var inDesc = false;
+    for (var i = 1; i < tokens.length; i++) {
+      var t = tokens[i];
+      if (inDesc) { descTokens.push(t); continue; }
+      var isDescStart =
+        /^[A-Z][a-z]/.test(t)          ||  // Title Case
+        /^\d+"$/.test(t)               ||  // 12"
+        /^\d+'\d+"$/.test(t)           ||  // 6'8"
+        /^#\d+$/.test(t)               ||  // #4, #5
+        (/^[A-Z]+$/.test(t) && t.length >= 7);  // long all-caps
+      if (isDescStart) {
+        inDesc = true;
+        descTokens.push(t);
+      } else {
+        codeTokens.push(t);
+      }
+    }
+
+    var heur = { code: codeTokens.join(' '), description: descTokens.join(' ') };
+    // Fallback: if heuristic produced 0-1 description words, the
+    // descriptive content is more useful in the desc field. Revert to
+    // simple first-token-as-code split.
+    var descWordCount = descTokens.length;
+    if (descWordCount <= 1) {
+      var sp = s.indexOf(' ');
+      if (sp > 0) {
+        return { code: s.slice(0, sp), description: s.slice(sp + 1).trim() };
+      }
+    }
+    return heur;
+  }
+
+  function flushPending() {
+    // Called when we leave a material without seeing a Totals line.
+    // Single-sub-row case: emit using the sub-row's own qty/cost and
+    // a heuristic split of the buffered header label.
+    if (!pendingHeader) { pendingSubRows = []; return; }
+    if (pendingSubRows.length === 0) {
+      // Header with no sub-rows — likely a parse miss, drop silently
+      pendingHeader = null;
+      return;
+    }
+    var totalQty = 0, totalMatCost = 0, unit = '';
+    pendingSubRows.forEach(function(s){
+      totalQty += s.qty;
+      totalMatCost += s.matCost;
+      if (!unit && s.unit) unit = s.unit;
+    });
+    var split = _bprSplitHeader(pendingHeader.labelChunk);
+    emitFromTotals(
+      split.code || (pendingHeader.labelChunk || 'UNK'),
+      totalQty,
+      unit,
+      totalMatCost,
+      { labelChunk: pendingHeader.labelChunk, unitCost: pendingHeader.unitCost }
+    );
+    pendingHeader = null;
+    pendingSubRows = [];
+  }
+
+  function setPendingHeader(labelChunk, unitCost) {
+    flushPending();
+    pendingHeader = {
+      labelChunk: (labelChunk || '').trim(),
+      unitCost: (unitCost != null && isFinite(unitCost)) ? unitCost : null
+    };
+    pendingSubRows = [];
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (!line) continue;
+
+    // Skip page chrome / column headers
+    if (/^Report Run\b/.test(line)) continue;
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}\b/.test(line)) continue;
+    if (/^\d+ of \d+\b/.test(line)) continue;
+    if (/^Quantity\/Bid Price Report\b/.test(line)) continue;
+    if (/^Quantity\b.*Mat\.\s*Cost/.test(line)) continue;
+    if (/Mat\.\s*Cost\s+Lay-Cost\s+Amount/.test(line)) continue;
+    if (/^Wall\s*$/.test(line)) continue;
+    if (/^Extended\s*$/.test(line)) continue;
+    if (/^Quantity\s*$/.test(line)) continue;
+    if (/Continued\s+Quantity/.test(line)) continue;
+    if (/^\w+\s+Continued\b/.test(line)) continue;
+
+    // Classification — flushes any pending material
+    var mc = reClassification.exec(line);
+    if (mc) {
+      flushPending();
+      currentClass = mc[1];
+      currentClassDesc = (mc[2] || '').trim();
+      continue;
+    }
+
+    // Class totals — flushes pending (closing out a classification group)
+    if (reClassTotals.test(line)) {
+      flushPending();
+      continue;
+    }
+
+    // Material totals (standard) — preferred emit path
+    var mt = reMaterialTotals.exec(line);
+    if (mt) {
+      var mtCode  = mt[1];
+      var mtQty   = parseFloat(mt[2].replace(/,/g, ''));
+      var mtUnit  = mt[3];
+      var mtExtMt = parseFloat(mt[4].replace(/,/g, ''));
+      if (isFinite(mtQty) && isFinite(mtExtMt)) {
+        // Use pendingHeader's labelChunk to derive description from the
+        // authoritative code in the totals line. The labelChunk
+        // typically starts with the code, but if it doesn't, we'll fall
+        // back gracefully inside emitFromTotals.
+        var hdrM = null;
+        if (pendingHeader) {
+          var lcM = pendingHeader.labelChunk || '';
+          if (lcM.indexOf(mtCode) === 0 || lcM === mtCode) {
+            hdrM = { labelChunk: lcM, unitCost: pendingHeader.unitCost };
+          } else {
+            // Code doesn't match — header is unrelated. Still surface
+            // unitCost from header IF the labelChunk's first token
+            // matches the totals code (loose match).
+            var firstTok = lcM.split(/\s+/)[0] || '';
+            if (firstTok === mtCode) {
+              hdrM = { labelChunk: lcM, unitCost: pendingHeader.unitCost };
+            }
+          }
+        }
+        emitFromTotals(mtCode, mtQty, mtUnit, mtExtMt, hdrM);
+      }
+      pendingHeader = null;
+      pendingSubRows = [];
+      continue;
+    }
+
+    // Mortar totals
+    var mtm = reMortarTotals.exec(line);
+    if (mtm) {
+      var mortCode  = 'Mortar[' + mtm[1] + ']';
+      var mortQty   = parseFloat(mtm[2].replace(/,/g, ''));
+      var mortUnit  = mtm[3];
+      var mortExtMt = parseFloat(mtm[4].replace(/,/g, ''));
+      if (isFinite(mortQty) && isFinite(mortExtMt)) {
+        var hdrMo = null;
+        if (pendingHeader) {
+          var lcMo = pendingHeader.labelChunk || '';
+          if (lcMo.indexOf(mortCode) === 0) {
+            hdrMo = { labelChunk: lcMo, unitCost: pendingHeader.unitCost };
+          }
+        }
+        emitFromTotals(mortCode, mortQty, mortUnit, mortExtMt, hdrMo);
+      }
+      pendingHeader = null;
+      pendingSubRows = [];
+      continue;
+    }
+
+    // Other Cost Breakdown section — note the project may emit this on a
+    // shared line with "Project Notes:" so we look for the phrase anywhere.
+    if (/Other Cost Breakdown/.test(line)) {
+      flushPending();
+      inOtherCost = true;
+      continue;
+    }
+    if (inOtherCost) {
+      if (/^CONTRACT AMOUNT/i.test(line)) {
+        inOtherCost = false;
+        continue;
+      }
+      var oc = reOtherCostItem.exec(line);
+      if (oc) {
+        var lbl = oc[1].trim();
+        var amt = parseFloat(oc[2].replace(/,/g, ''));
+        if (isFinite(amt) && amt > 0) {
+          results.push({
+            id: _bprNewId('_oc'),
+            classCode: 'OTH',
+            classDescription: 'Other Cost Breakdown',
+            materialCode: lbl.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase().slice(0, 24),
+            description: lbl,
+            unit: 'LS',
+            quantity: 1,
+            unitCost: amt,
+            extendedMatCost: amt,
+            rodLengthLinFt: null,
+            sourceCategory: 'lump_sum_other',
+            defaultSkip: false,
+            extractedAt: new Date().toISOString()
+          });
+        }
+      }
+      continue;
+    }
+
+    // Mortar header detection (new format: $price comes before unit).
+    // Buffer the full labelChunk (everything before the unit token) so
+    // the matching Mortar Totals line can resolve the description.
+    var mh = reMortarHeader.exec(line);
+    if (mh) {
+      var mortLabel = (mh[1] + ' ' + mh[2]).trim();
+      setPendingHeader(mortLabel, parseFloat(mh[3]));
+      continue;
+    }
+
+    // Standard header detection: has " Lay " keyword and a $X.XXX or $X.XX
+    // unit-cost token, and isn't a totals/class-totals line (already caught
+    // above). Strategy: split on " Lay ", treat the left side as the
+    // labelChunk (code + description, to be resolved later), and pull the
+    // first dollar amount after " Lay " as the unit cost.
+    if (/ Lay /.test(line) && /\$\d+(?:\.\d{2,3})?/.test(line)) {
+      var layIdx = line.indexOf(' Lay ');
+      var labelChunk = line.slice(0, layIdx).trim();
+      var afterLay = line.slice(layIdx);
+      var costMatch = /\$(\d+(?:\.\d{2,3})?)/.exec(afterLay);
+      if (labelChunk && costMatch) {
+        setPendingHeader(labelChunk, parseFloat(costMatch[1]));
+        continue;
+      }
+    }
+
+    // Sub-row detection (for the single-sub-row materials that won't have
+    // a Totals line). Only relevant when we have a pendingHeader awaiting
+    // its sub-rows.
+    if (pendingHeader && reSubRowMarker.test(line)) {
+      var sd = reSubRowData.exec(line);
+      if (sd) {
+        var sQty = parseFloat(sd[1].replace(/,/g, ''));
+        var sUnit = sd[2];
+        var sMatCost = parseFloat(sd[3].replace(/,/g, ''));
+        if (isFinite(sQty)) {
+          pendingSubRows.push({ qty: sQty, unit: sUnit, matCost: isFinite(sMatCost) ? sMatCost : 0 });
+        }
+      }
+      continue;
+    }
+
+    // Anything else — ignored
+  }
+
+  // End of input — flush any final pending material
+  flushPending();
+
+  return results;
+}
+
+// Top-level entry: file → parsed bprMaterials.
+async function _bprParsePdf(file) {
+  var buf = await _bprFileToArrayBuffer(file);
+  var lines = await _bprPdfToLines(buf);
+  return _bprParseLines(lines);
+}
+
+// ── UI: entry point button on the procurement toolbar ────────────────
+function procOpenBprFlow() {
+  if (!_editProjectId) { alert('Save the project first.'); return; }
+  if (typeof hasFull === 'function' && !hasFull('edit_project_budget')) {
+    alert('You do not have permission to upload Bid Price Reports.');
+    return;
+  }
+  var p = getProj(_editProjectId); if (!p) return;
+  p.bprMaterials = p.bprMaterials || [];
+  if (p.bprMaterials.length) {
+    procOpenBprPicker();
+  } else {
+    procOpenBprUploadModal();
+  }
+}
+
+function procOpenBprUploadModal(reUpload) {
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">' + (reUpload ? 'Re-upload Bid Price Report' : 'Upload Bid Price Report') + '</div>' +
+    '<div class="msb">Pick the BPR PDF for this project. We\'ll parse Material Totals and the Other Cost Breakdown section to populate the procurement list. Scaffold, cleaning, air deduction, and patching are extracted but default to unchecked — opt in if you want them.</div>' +
+    (reUpload ?
+      '<div class="sb3" style="background:#FFF8E1;color:#9A7A2E;font-size:12px;margin-bottom:12px"><strong>Heads up:</strong> Re-uploading replaces the stored BPR materials. Existing procurement-item assignments will be carried forward where the new BPR has a matching classification + material code; assignments to materials that disappear become orphaned (visible but no longer reconciling).</div>' :
+      ''
+    ) +
+    '<div class="fgr full"><label>BPR PDF</label>' +
+      '<input type="file" id="bpr-upload-input" accept=".pdf" onchange="procBprUploadChosen(event)">' +
+    '</div>' +
+    '<div id="bpr-upload-status" style="font-size:12px;color:#666;margin-top:8px"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+    '</div>'
+  );
+}
+
+async function procBprUploadChosen(evt) {
+  var file = evt.target.files && evt.target.files[0];
+  evt.target.value = '';
+  if (!file) return;
+  if (!/\.pdf$/i.test(file.name)) {
+    alert('Please choose a PDF file.');
+    return;
+  }
+  if (file.size > 15 * 1024 * 1024) {
+    alert('PDF too large (max 15 MB).');
+    return;
+  }
+
+  var statusEl = g('bpr-upload-status');
+  if (statusEl) statusEl.innerHTML = '<span style="color:#1F5A8A">Parsing PDF…</span>';
+
+  var parsed;
+  try {
+    parsed = await _bprParsePdf(file);
+  } catch (e) {
+    console.error('BPR parse error', e);
+    if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">Parse failed: ' + _procEsc(String(e && e.message ? e.message : e)) + '</span>';
+    return;
+  }
+
+  if (!parsed || !parsed.length) {
+    if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">No Material Totals rows found. Is this a Tradesmen Quantity/Bid Price Report?</span>';
+    return;
+  }
+
+  // Carry-forward: if procurement items currently reference bprMaterials,
+  // try to remap to new entries by (classCode, materialCode).
+  var p = getProj(_editProjectId);
+  if (!p) { if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">Project not found.</span>'; return; }
+  var oldById = {};
+  (p.bprMaterials || []).forEach(function(b){ oldById[String(b.id)] = b; });
+  var newByKey = {};
+  parsed.forEach(function(b){
+    newByKey[(b.classCode || '') + '|' + (b.materialCode || '')] = b;
+  });
+
+  // Remap assignments
+  var remapped = 0, orphaned = 0;
+  (p.procurementItems || []).forEach(function(item){
+    if (!Array.isArray(item.bprAssignments)) return;
+    item.bprAssignments.forEach(function(a){
+      var oldMat = oldById[String(a.bprMaterialId)];
+      if (!oldMat) { a._orphaned = true; orphaned++; return; }
+      var key = (oldMat.classCode || '') + '|' + (oldMat.materialCode || '');
+      var newMat = newByKey[key];
+      if (newMat) {
+        a.bprMaterialId = newMat.id;
+        delete a._orphaned;
+        remapped++;
+      } else {
+        a._orphaned = true;
+        orphaned++;
+      }
+    });
+  });
+
+  p.bprMaterials = parsed;
+  saveDB();
+
+  if (statusEl) {
+    var summary = 'Parsed ' + parsed.length + ' material' + (parsed.length === 1 ? '' : 's') + '.';
+    if (remapped) summary += ' Re-pointed ' + remapped + ' existing assignment' + (remapped === 1 ? '' : 's') + '.';
+    if (orphaned) summary += ' ' + orphaned + ' orphaned (no match in new BPR).';
+    statusEl.innerHTML = '<span style="color:#1E6B36">' + _procEsc(summary) + '</span>';
+  }
+
+  // Brief delay so user sees the success message, then open the picker
+  setTimeout(function(){ closeModal(); procOpenBprPicker(); }, 700);
+}
+
+// ── UI: import picker ───────────────────────────────────────────────
+function procOpenBprPicker() {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var bpr = p.bprMaterials || [];
+  if (!bpr.length) { procOpenBprUploadModal(); return; }
+
+  // Compute assigned-portion totals per BPR material id, so the picker
+  // can show "X / Y assigned" and disable fully-assigned rows.
+  var assignedById = {};
+  (p.procurementItems || []).forEach(function(item){
+    (item.bprAssignments || []).forEach(function(a){
+      if (a._orphaned) return;
+      var k = String(a.bprMaterialId);
+      assignedById[k] = (assignedById[k] || 0) + (Number(a.qty) || 0);
+    });
+  });
+
+  // Group materials by classification
+  var groups = {};   // classCode → [bprMaterial]
+  var classOrder = [];
+  bpr.forEach(function(b){
+    var k = b.classCode || 'UNC';
+    if (!groups[k]) { groups[k] = []; classOrder.push(k); }
+    groups[k].push(b);
+  });
+
+  // Reset transient selection state
+  _bprPickerSelections = {};
+  bpr.forEach(function(b){
+    var assigned = assignedById[String(b.id)] || 0;
+    var fullyAssigned = assigned >= (Number(b.quantity) || 0) - 0.001;
+    // Default checked = not in skip categories AND not already fully assigned
+    _bprPickerSelections[b.id] = !b.defaultSkip && !fullyAssigned;
+  });
+
+  showModal(_bprPickerHtml(p, groups, classOrder, assignedById));
+}
+
+function _bprPickerHtml(p, groups, classOrder, assignedById) {
+  // Build the grouped table
+  var html =
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Import from Bid Price Report</div>' +
+    '<div class="msb">Check the materials you want as procurement items. Scaffold, cleaning, air deduction, and patching are unchecked by default. Lump-sum "Other Cost Breakdown" entries are at the bottom.</div>' +
+    '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">' +
+      '<button type="button" class="btn btn-sm" onclick="procBprSelectAll(true)">Select all</button>' +
+      '<button type="button" class="btn btn-sm" onclick="procBprSelectAll(false)">Select none</button>' +
+      '<button type="button" class="btn btn-sm" onclick="procBprSelectDefaults()" title="Re-apply the default selection (skip categories unchecked)">Reset to defaults</button>' +
+      '<span style="margin-left:auto;font-size:11px;color:#888">' +
+        (p.bprMaterials || []).length + ' materials' +
+      '</span>' +
+      '<button type="button" class="btn btn-sm" onclick="procOpenBprUploadModal(true)" title="Re-upload to replace stored BPR materials">Re-upload BPR</button>' +
+    '</div>' +
+    '<div style="max-height:55vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin-bottom:10px">';
+
+  // Sort so OTH (lump-sum) comes last; others in declaration order
+  classOrder.sort(function(a, b){
+    if (a === 'OTH' && b !== 'OTH') return 1;
+    if (b === 'OTH' && a !== 'OTH') return -1;
+    return 0;
+  });
+
+  classOrder.forEach(function(classCode){
+    var list = groups[classCode];
+    var firstClassDesc = (list[0] && list[0].classDescription) || classCode;
+    var isSkipClass = (classCode === 'SCA' || classCode === 'CLE' || classCode === 'AIR' || classCode === 'PA');
+    var isOther = (classCode === 'OTH');
+    var bandColor = isOther ? '#EFEAF8' : (isSkipClass ? '#FFF8E1' : '#F0F4FB');
+    var bandTextColor = isOther ? '#5D4391' : (isSkipClass ? '#9A7A2E' : '#1F5A8A');
+
+    html += '<div style="background:' + bandColor + ';padding:8px 12px;font-size:12px;font-weight:600;color:' + bandTextColor + ';border-top:1px solid #eee">' +
+      _procEsc(classCode) + ' — ' + _procEsc(firstClassDesc) +
+      (isSkipClass ? ' <span style="font-weight:400;font-size:10px;color:#9A7A2E">(default: skip — opt in per item)</span>' : '') +
+      (isOther ? ' <span style="font-weight:400;font-size:10px;color:#5D4391">(lump-sum, no breakdown)</span>' : '') +
+      '</div>';
+
+    html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa">' +
+      '<tr>' +
+        '<th style="padding:6px 8px;width:36px"></th>' +
+        '<th style="padding:6px 8px;text-align:left">Description</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:80px">Code</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:90px">Quantity</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:60px">Unit</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:90px">Unit cost</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:100px">Ext. cost</th>' +
+      '</tr></thead><tbody>';
+
+    list.forEach(function(b){
+      var assigned = assignedById[String(b.id)] || 0;
+      var qty = Number(b.quantity) || 0;
+      var fullyAssigned = assigned >= qty - 0.001 && qty > 0;
+      var partlyAssigned = assigned > 0 && !fullyAssigned;
+      var checked = _bprPickerSelections[b.id] ? ' checked' : '';
+      var disabled = fullyAssigned ? ' disabled title="This BPR material is fully assigned across existing procurement items. Use the procurement table to edit those assignments."' : '';
+      var statusBadge = '';
+      if (fullyAssigned) statusBadge = ' <span style="font-size:10px;color:#1E6B36;background:#E3F4E8;padding:1px 6px;border-radius:8px">assigned</span>';
+      else if (partlyAssigned) statusBadge = ' <span style="font-size:10px;color:#9A7A2E;background:#FFF1CC;padding:1px 6px;border-radius:8px">partial ' + _procFmtBprQty(assigned) + '/' + _procFmtBprQty(qty) + '</span>';
+
+      var rodHint = '';
+      if (b.classCode === 'REB' && b.rodLengthLinFt && qty > 0) {
+        var rods = Math.ceil(qty / b.rodLengthLinFt);
+        rodHint = ' <span style="font-size:10px;color:#888">≈ ' + rods + ' rod' + (rods === 1 ? '' : 's') + '</span>';
+      }
+
+      html += '<tr>' +
+        '<td style="padding:5px 8px;text-align:center"><input type="checkbox" data-bpr-pick="' + _procEsc(b.id) + '"' + checked + disabled + ' onchange="procBprToggle(this)"></td>' +
+        '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.description || '(no description)') + statusBadge + rodHint + '</td>' +
+        '<td style="padding:5px 8px;font-size:10px;color:#888;font-family:monospace">' + _procEsc(b.materialCode || '') + '</td>' +
+        '<td style="padding:5px 8px;font-size:11px;text-align:right">' + _procFmtBprQty(b.quantity) + '</td>' +
+        '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.unit || '') + '</td>' +
+        '<td style="padding:5px 8px;font-size:11px;text-align:right;font-family:monospace">$' + _procFmtMoney(b.unitCost) + '</td>' +
+        '<td style="padding:5px 8px;font-size:11px;text-align:right;font-family:monospace">$' + _procFmtMoney(b.extendedMatCost) + '</td>' +
+      '</tr>';
+    });
+
+    html += '</tbody></table>';
+  });
+
+  html += '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procBprSavePicker()">Add selected</button>' +
+    '</div>';
+
+  return html;
+}
+
+function procBprToggle(cb) {
+  var id = cb.getAttribute('data-bpr-pick');
+  _bprPickerSelections[id] = !!cb.checked;
+}
+
+function procBprSelectAll(state) {
+  document.querySelectorAll('[data-bpr-pick]').forEach(function(cb){
+    if (cb.disabled) return;
+    cb.checked = !!state;
+    _bprPickerSelections[cb.getAttribute('data-bpr-pick')] = !!state;
+  });
+}
+
+function procBprSelectDefaults() {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var assignedById = {};
+  (p.procurementItems || []).forEach(function(item){
+    (item.bprAssignments || []).forEach(function(a){
+      if (a._orphaned) return;
+      var k = String(a.bprMaterialId);
+      assignedById[k] = (assignedById[k] || 0) + (Number(a.qty) || 0);
+    });
+  });
+  (p.bprMaterials || []).forEach(function(b){
+    var assigned = assignedById[String(b.id)] || 0;
+    var fullyAssigned = assigned >= (Number(b.quantity) || 0) - 0.001;
+    var want = !b.defaultSkip && !fullyAssigned;
+    _bprPickerSelections[b.id] = want;
+    var cb = document.querySelector('[data-bpr-pick="' + b.id + '"]');
+    if (cb && !cb.disabled) cb.checked = want;
+  });
+}
+
+// Save: for each checked BPR material, create a procurement item with a
+// single assignment covering the remaining un-assigned portion (defaults
+// to the full quantity if nothing's been allocated yet).
+function procBprSavePicker() {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+
+  // Recompute assigned totals (in case state changed since modal opened)
+  var assignedById = {};
+  (p.procurementItems || []).forEach(function(item){
+    (item.bprAssignments || []).forEach(function(a){
+      if (a._orphaned) return;
+      var k = String(a.bprMaterialId);
+      assignedById[k] = (assignedById[k] || 0) + (Number(a.qty) || 0);
+    });
+  });
+
+  p.procurementItems = p.procurementItems || [];
+  var added = 0;
+  var skippedFullyAssigned = 0;
+
+  (p.bprMaterials || []).forEach(function(b){
+    if (!_bprPickerSelections[b.id]) return;
+    var bprId = String(b.id);
+    var qty = Number(b.quantity) || 0;
+    var alreadyAssigned = assignedById[bprId] || 0;
+    var remaining = qty - alreadyAssigned;
+    if (remaining <= 0.001) { skippedFullyAssigned++; return; }
+
+    var newItem = {
+      id: _procNewItemId(),
+      description: b.description || b.materialCode || '(BPR material)',
+      unit: b.unit || '',
+      costCode: '',  // not auto-mapped — BPR classification != Foundation cost code
+      unitCost: Number(b.unitCost) || 0,
+      leadTimeDays: null,
+      manualQty: null,
+      sourceLabel: 'From BPR — ' + (b.classCode || '') + ' / ' + (b.materialCode || ''),
+      sourceMaterialListId: null,
+      addedAt: new Date().toISOString(),
+      bprAssignments: [
+        { bprMaterialId: bprId, qty: remaining }
+      ]
+    };
+
+    // Snapshot rebar rod length so the procurement row can show piece count
+    if (b.classCode === 'REB' && b.rodLengthLinFt) {
+      newItem.bprRodLengthLinFt = b.rodLengthLinFt;
+    }
+
+    p.procurementItems.push(newItem);
+    added++;
+  });
+
+  if (added) saveDB();
+  closeModal();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') {
+    var msg = 'Added ' + added + ' item' + (added === 1 ? '' : 's') + '.';
+    if (skippedFullyAssigned) msg += ' Skipped ' + skippedFullyAssigned + ' fully-assigned.';
+    showToast(added ? msg : 'No items selected.', added ? 'success' : 'info');
+  }
+}
+
+// Cleanup: when a procurement item is removed, its bprAssignments[] go
+// with it (the array is inline on the item, no global cleanup needed —
+// the existing procRemoveItem already drops the item entry).
+
+// ═══════════════════════════════════════════════════════════════════
+// END BPR MODULE
+// ═══════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════
 // PROJECT PARAMETERS — Form-fill Round 1
@@ -31221,6 +32103,11 @@ function toSBProject(r) {
     // from material_list — see PROJECT PROCUREMENT REPORT module). JSONB
     // pass-through, no migration needed.
     procurement_items:             r.procurementItems             || [],
+    // Procurement Round 3 — Bid Price Report materials, parsed from PDF
+    // upload on the Procurement tab. Source-of-truth quantities for
+    // procurement assignments. Independent of projectBudgets (cost-code
+    // accounting aggregate). See BPR PARSER + PICKER module.
+    bpr_materials:                 r.bprMaterials                 || [],
     // Round 2.5 — project file attachments (quotes, drawings, anything)
     attachments:                   r.attachments                  || [],
     // Round 4.1 — COR markup percentages
@@ -31276,6 +32163,8 @@ function fromSBProject(r) {
     laborRates:                  r.labor_rates                   || null,
     // Procurement Round 2 — curated per-project procurement list
     procurementItems:            Array.isArray(r.procurement_items) ? r.procurement_items : [],
+    // Procurement Round 3 — BPR materials parsed from PDF
+    bprMaterials:                Array.isArray(r.bpr_materials)     ? r.bpr_materials     : [],
     // Round 2.5 — project file attachments
     attachments:                 Array.isArray(r.attachments) ? r.attachments : [],
     // Round 4.1 — COR markup percentages (legacy projects fall back to defaults)
