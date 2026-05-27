@@ -27876,8 +27876,12 @@ function _procRenderItemRow(item, entries) {
         '<button type="button" class="btn btn-sm" onclick="procOpenCustomItemModal(\'' + _procEsc(itemId) + '\')" title="Edit description, unit, cost code, unit cost" style="padding:3px 6px;font-size:11px;margin-right:2px">✎</button>' +
         '<button type="button" class="btn btn-sm" onclick="procOpenLinkPicker(\'' + _procEsc(itemId) + '\')" title="Link / unlink PO lines for this item" style="padding:3px 8px;font-size:11px;margin-right:2px">⚙ POs</button>' +
         '<button type="button" class="btn btn-sm" onclick="procOpenMergeDialog(\'' + _procEsc(itemId) + '\')" title="Merge this item into another procurement item" style="padding:3px 6px;font-size:11px;margin-right:2px">⊕</button>' +
-        (bprAssignments.length === 1
-          ? '<button type="button" class="btn btn-sm" onclick="procOpenSplitDialog(\'' + _procEsc(itemId) + '\')" title="Split this BPR-backed item into multiple items (e.g. by color)" style="padding:3px 6px;font-size:11px;margin-right:2px">✂</button>'
+        (bprAssignments.length >= 1
+          ? '<button type="button" class="btn btn-sm" onclick="procOpenSplitOrUnmerge(\'' + _procEsc(itemId) + '\')" title="' +
+            (bprAssignments.length === 1
+              ? 'Split this BPR-backed item into multiple items (e.g. by color)'
+              : 'Unmerge — break this back into ' + bprAssignments.length + ' separate items (one per BPR line)') +
+            '" style="padding:3px 6px;font-size:11px;margin-right:2px">✂</button>'
           : '') +
         '<button type="button" class="btn btn-sm" onclick="procRemoveItem(\'' + _procEsc(itemId) + '\')" title="Remove this item from the procurement list" style="padding:3px 8px;font-size:11px;color:#A32D2D">✕</button>' +
       '</td>' +
@@ -30122,6 +30126,147 @@ function procDoMerge(sourceId) {
 // ─────────────────────────────────────────────────────────────────────
 // SPLIT — break one procurement item into N portions
 // ─────────────────────────────────────────────────────────────────────
+
+// Router for the ✂ action button — branches based on how many BPR lines
+// back the item: a single backing means the user wants to split (e.g.
+// colored mortar into Tan / Buff / Black portions); multiple backings
+// mean the item is a merge product and the user wants to undo the
+// merge, restoring one item per original BPR line.
+function procOpenSplitOrUnmerge(itemId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var item = (p.procurementItems || []).find(function(x){ return String(x.id) === String(itemId); });
+  if (!item) return;
+  var n = (item.bprAssignments || []).length;
+  if (n === 1)      procOpenSplitDialog(itemId);
+  else if (n > 1)   procOpenUnmergeDialog(itemId);
+  else              alert('This item is not backed by any BPR line, so there is nothing to split.');
+}
+
+// Unmerge — reverse of the post-import merge action. Replaces one item
+// (containing N bprAssignments) with N new items, each carrying a
+// single bprAssignment. The merged item's cost code, vendor list, lead
+// time, and unit are copied to every split; per-item unit cost comes
+// from the underlying BPR line itself (more accurate than the merged
+// weighted average). PO-linked items are blocked — the user must
+// unlink first so we don't have to guess which split should keep each
+// PO.
+function procOpenUnmergeDialog(itemId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var item = (p.procurementItems || []).find(function(x){ return String(x.id) === String(itemId); });
+  if (!item) { alert('Item not found.'); return; }
+  var assignments = item.bprAssignments || [];
+  if (assignments.length < 2) {
+    alert('Unmerge is for items composed of 2+ BPR lines. This item has ' + assignments.length + '.');
+    return;
+  }
+
+  // Block if PO is linked to this item
+  var poLines = _procCollectProjectPoLines(p.id);
+  var hasPoLink = poLines.some(function(e){
+    return e.line.procurementItemId && String(e.line.procurementItemId) === String(itemId);
+  });
+  if (hasPoLink) {
+    alert('Cannot unmerge an item that has PO lines linked. Unlink the POs first (⚙ POs button), then try again.');
+    return;
+  }
+
+  // Preview the splits
+  var bprById = {};
+  (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+  var rows = assignments.map(function(a){
+    if (a._orphaned) return null;
+    var bm = bprById[String(a.bprMaterialId)];
+    if (!bm) return null;
+    return {
+      desc: bm.description || bm.materialCode || '(missing)',
+      qty:  Number(a.qty) || 0,
+      unit: bm.unit || ''
+    };
+  }).filter(Boolean);
+
+  if (rows.length < 2) {
+    alert('Not enough valid BPR backings to unmerge (some may be orphaned). Re-import the BPR if needed.');
+    return;
+  }
+
+  var previewHtml = rows.map(function(r, i){
+    return '<div style="display:flex;justify-content:space-between;padding:5px 0;' + (i ? 'border-top:1px solid #f0f0ec' : '') + '">' +
+      '<span>' + _procEsc(r.desc) + '</span>' +
+      '<span style="font-family:monospace;color:#666">' + _procFmtBprQty(r.qty) + ' ' + _procEsc(r.unit) + '</span>' +
+    '</div>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Unmerge item</div>' +
+    '<div class="msb">' +
+      'Unmerge <strong>' + _procEsc(item.description || '(unnamed)') + '</strong> back into ' + rows.length + ' separate procurement items, one per BPR line. ' +
+      'Cost code, vendor list, and lead time are copied to each split; unit cost on each comes from its own BPR line.' +
+    '</div>' +
+    '<div class="sb3" style="margin-bottom:14px;font-size:12px">' +
+      '<h4 style="margin:0 0 6px 0">Will become:</h4>' +
+      previewHtml +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procDoUnmerge(\'' + _procEsc(itemId) + '\')">Unmerge into ' + rows.length + ' items</button>' +
+    '</div>'
+  );
+}
+
+function procDoUnmerge(itemId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var arr = p.procurementItems || [];
+  var idxPos = arr.findIndex(function(x){ return String(x.id) === String(itemId); });
+  if (idxPos < 0) { alert('Item not found.'); return; }
+  var item = arr[idxPos];
+  var assignments = item.bprAssignments || [];
+  if (assignments.length < 2) { closeModal(); return; }
+
+  var bprById = {};
+  (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+
+  var newItems = assignments.map(function(a){
+    if (a._orphaned) return null;
+    var bm = bprById[String(a.bprMaterialId)];
+    if (!bm) return null;
+    var copy = {
+      id: _procNewItemId(),
+      description: bm.description || bm.materialCode || (item.description || ''),
+      unit: bm.unit || item.unit || '',
+      costCode: item.costCode || '',
+      unitCost: Number(bm.unitCost) || Number(item.unitCost) || 0,
+      leadTimeDays: item.leadTimeDays || null,
+      manualQty: null,
+      vendorIds: Array.isArray(item.vendorIds) ? item.vendorIds.slice() : [],
+      sourceLabel: 'From BPR — ' + (bm.classCode || '') + ' / ' + (bm.materialCode || ''),
+      sourceMaterialListId: null,
+      addedAt: new Date().toISOString(),
+      bprAssignments: [ { bprMaterialId: String(a.bprMaterialId), qty: Number(a.qty) || 0 } ]
+    };
+    if (bm.classCode === 'REB' && bm.rodLengthLinFt) copy.bprRodLengthLinFt = bm.rodLengthLinFt;
+    return copy;
+  }).filter(Boolean);
+
+  if (!newItems.length) {
+    alert('No valid BPR assignments to unmerge.');
+    return;
+  }
+
+  // Replace source at the same array position so ordering is preserved
+  arr.splice.apply(arr, [idxPos, 1].concat(newItems));
+  p.procurementItems = arr;
+
+  saveDB();
+  closeModal();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') {
+    showToast('Unmerged into ' + newItems.length + ' items.', 'success');
+  }
+}
 
 function procOpenSplitDialog(itemId) {
   if (!_editProjectId) return;
