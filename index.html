@@ -30479,12 +30479,31 @@ function procGeneratePdf() {
   function wrap(text, maxW) {
     return doc.splitTextToSize(String(text || ''), maxW);
   }
+
+  // Section state for page-break continuation. When a section spans
+  // pages, the new page redraws the section header with " (continued)"
+  // so the reader keeps context.
+  var _currentSection = null;
+
+  function drawSectionHeader(text, currentY) {
+    doc.setFillColor(248, 240, 220);
+    doc.rect(LM, currentY, RM - LM, 16, 'F');
+    sf('bold', 10, [42, 47, 92]);
+    doc.text(text, LM + 8, currentY + 11);
+    sf('normal', 9, [0, 0, 0]);
+    return currentY + 22;
+  }
+
   function ensureRoom(yNeeded, currentY) {
     if (currentY + yNeeded > FOOTER_TOP - 20) {
       doc.addPage();
       letterhead();
       drawTableHeader(130);
-      return 130 + 22;
+      var newY = 130 + 22;
+      if (_currentSection) {
+        newY = drawSectionHeader(_currentSection + ' (continued)', newY);
+      }
+      return newY;
     }
     return currentY;
   }
@@ -30562,68 +30581,142 @@ function procGeneratePdf() {
   drawTableHeader(y);
   y += 22;
 
-  // ── Item rows ───────────────────────────────────────────────────────
-  sf('normal', 9, [0, 0, 0]);
-  items.forEach(function(item){
-    var entries = idx.byItemId[String(item.id)] || [];
-    var rollup = _procRollup(entries);
-
-    var descLines = wrap(item.description || '(no description)', COL_DESC_W - 4);
-    // Append source/unit hint as a dim secondary line
-    var hintPieces = [];
-    if (item.unit)     hintPieces.push('Unit: ' + item.unit);
-    if (item.costCode) hintPieces.push('CC ' + item.costCode);
-    if (item.sourceLabel) hintPieces.push(item.sourceLabel);
-    var hintLine = hintPieces.join(' · ');
-    var hintLines = hintLine ? wrap(hintLine, COL_DESC_W - 4) : [];
-
-    // Vendor lines
-    var vendorNames = (Array.isArray(item.vendorIds) ? item.vendorIds : []).map(function(vid){
-      var v = vendorMap[String(vid)];
-      return v ? (v.name || '(unnamed)') : null;
-    }).filter(Boolean);
-    var vendorLines = vendorNames.length
-      ? vendorNames.reduce(function(acc, n){ return acc.concat(wrap(n, COL_VEND_W - 4)); }, [])
-      : ['—'];
-
-    // Qty: prefer linked-PO rollup, then BPR sum, then manualQty
-    var bprAssignments = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
-    var bprQtySum = 0;
-    bprAssignments.forEach(function(a){ bprQtySum += Number(a.qty) || 0; });
-    var qty;
-    if (entries.length > 0) qty = rollup.totalQty;
-    else if (bprAssignments.length > 0) qty = bprQtySum;
-    else qty = (item.manualQty != null && item.manualQty !== '') ? Number(item.manualQty) : null;
-    var qtyText = (qty != null && isFinite(qty)) ? _procFmtBprQty(qty) + (item.unit ? ' ' + item.unit : '') : '—';
-
-    var leadText  = (item.leadTimeDays != null && item.leadTimeDays !== '') ? String(item.leadTimeDays) : '—';
-    var orderText = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '—';
-    var delivText = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '—';
-
-    // Row height: max line count across multi-line cells × 11pt + hint spacing
-    var bodyLineCount = Math.max(descLines.length, vendorLines.length, 1);
-    var hintLineCount = hintLines.length;
-    var rowH = bodyLineCount * 11 + hintLineCount * 9 + 4;
-
-    y = ensureRoom(rowH, y);
-
-    // Draw cells
-    doc.text(descLines, COL_DESC_X, y);
-    if (hintLines.length) {
-      sf('normal', 7, [120, 120, 120]);
-      doc.text(hintLines, COL_DESC_X, y + descLines.length * 11);
-      sf('normal', 9, [0, 0, 0]);
-    }
-    doc.text(vendorLines, COL_VEND_X, y);
-    doc.text(qtyText,     COL_QTY_RIGHT,  y, { align: 'right' });
-    doc.text(leadText,    COL_LEAD_RIGHT, y, { align: 'right' });
-    doc.text(orderText,   COL_ORDER_X,    y);
-    doc.text(delivText,   COL_DELIV_X,    y);
-
-    y += rowH;
-    // Light divider between rows
-    ln(LM, y - 2, RM, y - 2, 0.2, [220, 220, 220]);
+  // ── Group items by cost code ────────────────────────────────────────
+  // Items are organized by their assigned cost code, with the cost
+  // code's description as the section header. Items with no cost code
+  // fall into a final "Uncategorized" section, signaling to the PM
+  // that those items need cost-code assignment.
+  var ccByCode = {};
+  (db.costCodes || []).forEach(function(c){
+    if (c && c.code) ccByCode[String(c.code)] = c;
   });
+
+  // Build BPR material lookup for merged-item component sub-rows
+  var bprById = {};
+  (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+
+  var byCC = {};
+  var ccCodes = [];
+  items.forEach(function(item){
+    var code = String(item.costCode || '');
+    if (!byCC[code]) {
+      byCC[code] = [];
+      ccCodes.push(code);
+    }
+    byCC[code].push(item);
+  });
+
+  // Sort: by cost code ascending (numeric-aware), uncategorized last
+  ccCodes.sort(function(a, b){
+    if (!a && b) return 1;
+    if (a && !b) return -1;
+    return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+  });
+
+  // ── Render sections ─────────────────────────────────────────────────
+  sf('normal', 9, [0, 0, 0]);
+  ccCodes.forEach(function(code){
+    var sectionItems = byCC[code];
+    var cc = ccByCode[code];
+    var headerText = code
+      ? (cc && cc.description ? cc.description : 'Code ' + code)
+      : 'Uncategorized';
+
+    // Clear section state so ensureRoom doesn't re-add the PREVIOUS
+    // section header, then ensure room for header + at least one row.
+    _currentSection = null;
+    y = ensureRoom(34, y);
+    y = drawSectionHeader(headerText, y);
+    _currentSection = headerText;
+
+    sectionItems.forEach(function(item){
+      var entries = idx.byItemId[String(item.id)] || [];
+      var rollup = _procRollup(entries);
+      var bprAssignments = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
+      var bprQtySum = 0;
+      bprAssignments.forEach(function(a){ bprQtySum += Number(a.qty) || 0; });
+      var isMerged = bprAssignments.length > 1;
+
+      // Description — single line, no subtitle
+      var descLines = wrap(item.description || '(no description)', COL_DESC_W - 4);
+
+      // Vendor lines
+      var vendorNames = (Array.isArray(item.vendorIds) ? item.vendorIds : []).map(function(vid){
+        var v = vendorMap[String(vid)];
+        return v ? (v.name || '(unnamed)') : null;
+      }).filter(Boolean);
+      var vendorLines = vendorNames.length
+        ? vendorNames.reduce(function(acc, n){ return acc.concat(wrap(n, COL_VEND_W - 4)); }, [])
+        : ['—'];
+
+      // Qty: linked-PO rollup → BPR sum → manualQty
+      var qty;
+      if (entries.length > 0)             qty = rollup.totalQty;
+      else if (bprAssignments.length > 0) qty = bprQtySum;
+      else                                qty = (item.manualQty != null && item.manualQty !== '') ? Number(item.manualQty) : null;
+      var qtyText = (qty != null && isFinite(qty)) ? _procFmtBprQty(qty) + (item.unit ? ' ' + item.unit : '') : '—';
+
+      var leadText  = (item.leadTimeDays != null && item.leadTimeDays !== '') ? String(item.leadTimeDays) : '—';
+      var orderText = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '—';
+      var delivText = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '—';
+
+      var bodyLineCount = Math.max(descLines.length, vendorLines.length, 1);
+      var rowH = bodyLineCount * 11 + 4;
+
+      // Reserve room for the main row plus at least one component sub-row
+      // when merged (so we don't orphan the header on the page).
+      var roomNeeded = rowH + (isMerged ? 11 : 0);
+      y = ensureRoom(roomNeeded, y);
+
+      // Draw the main row
+      sf('normal', 9, [0, 0, 0]);
+      doc.text(descLines, COL_DESC_X, y);
+      doc.text(vendorLines, COL_VEND_X, y);
+      doc.text(qtyText,     COL_QTY_RIGHT,  y, { align: 'right' });
+      doc.text(leadText,    COL_LEAD_RIGHT, y, { align: 'right' });
+      doc.text(orderText,   COL_ORDER_X,    y);
+      doc.text(delivText,   COL_DELIV_X,    y);
+
+      y += rowH;
+
+      // For merged items: indented component sub-rows show each BPR
+      // line that was combined into this procurement item. Foremen need
+      // to see the breakdown so they know what the order actually
+      // covers — without this, "Burnished CMU 1,565 EA" hides the fact
+      // that it's a roll-up of 12BBB + 12BURN + 8 BURN + 8BURN.BBM.
+      if (isMerged) {
+        sf('normal', 8, [110, 110, 110]);
+        bprAssignments.forEach(function(a){
+          if (a._orphaned) return;
+          var bm = bprById[String(a.bprMaterialId)];
+          if (!bm) return;
+
+          var compDesc = bm.description || bm.materialCode || '(missing)';
+          var compQty  = Number(a.qty) || 0;
+          var compUnit = bm.unit || '';
+          var compQtyText = _procFmtBprQty(compQty) + (compUnit ? ' ' + compUnit : '');
+
+          var compLines = wrap('• ' + compDesc, COL_DESC_W - 16);
+          var compH = compLines.length * 10;
+
+          y = ensureRoom(compH + 2, y);
+          doc.text(compLines, COL_DESC_X + 12, y);
+          doc.text(compQtyText, COL_QTY_RIGHT, y, { align: 'right' });
+          y += compH;
+        });
+        sf('normal', 9, [0, 0, 0]);
+      }
+
+      // Light divider between items
+      ln(LM, y + 1, RM, y + 1, 0.2, [220, 220, 220]);
+      y += 5;
+    });
+
+    // Small gap between sections
+    y += 4;
+  });
+
+  _currentSection = null;
 
   // ── Footer summary ──────────────────────────────────────────────────
   y += 8;
