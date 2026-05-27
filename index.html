@@ -1517,6 +1517,10 @@ textarea{resize:vertical;min-height:72px}
     <!-- Submittals on this project (Round 2B) — populated by
          renderProjectSubmittalsSection() once the project has been saved. -->
     <div id="nprj-submittals-section"></div>
+    <!-- Transmittals on this project — populated by
+         renderProjectTransmittalsSection(). Sibling to the submittals
+         block; shows compile-event history with edit/delete. -->
+    <div id="nprj-transmittals-section" style="margin-top:12px"></div>
   </div>
 
   <!-- ─── TAB 4: PO'S & SUBS ─────────────────────────────────────── -->
@@ -2657,6 +2661,13 @@ var DB_DEFAULTS = {
   // Library-linked items reference a product (productId); custom items
   // (shop drawings, samples, RFI placeholders) set isCustom=true.
   submittals: [],
+  // Transmittals (each act of compiling/sending a submittal package as
+  // a PDF transmittal). One row per compile event. Persists the
+  // assigned transmittal number, date, and which submittals were
+  // included so the autonumber + history features work correctly.
+  // Project-scoped via projectId. Each transmittal is uniquely numbered
+  // within its project (max(no) + 1).
+  transmittals: [],
   // Spec sections (Round 5) — master list managed via Templates.
   // Replaces the hardcoded CSI_SECTIONS constant; that constant remains
   // as a fallback for environments where the round5 migration hasn't
@@ -5378,7 +5389,7 @@ function renderMobileSubmittalDetail() {
       '<div class="mob-sub-kv"><div class="k">Due date</div><div class="v ' + dueCls + '">' + _mobEsc(dueDisplay) + '</div></div>' +
       '<div class="mob-sub-kv"><div class="k">Response date</div><div class="v">' + _mobEsc(respDisplay) + '</div></div>' +
       '<div class="mob-sub-kv"><div class="k">Sent date</div><div class="v">' + _mobEsc(sentDisplay) + '</div></div>' +
-      '<div class="mob-sub-kv"><div class="k">Transmittal #</div><div class="v">' + _mobEsc(s.transmittalNo || '—') + '</div></div>' +
+      '<div class="mob-sub-kv"><div class="k">Transmittal #</div><div class="v">' + (function(){ var _t = _latestTransmittalForSubmittal(s.id); return _mobEsc(_t ? String(_t.no) : '—'); })() + '</div></div>' +
       (s.notes ? '<div class="mob-sub-kv full"><div class="k">Notes</div><div class="v" style="white-space:pre-wrap;font-weight:400">' + _mobEsc(s.notes) + '</div></div>' : '') +
     '</div>' +
     contactBlock +
@@ -8302,6 +8313,27 @@ function getSubmittal(id) {
   return (db.submittals || []).find(function(s){ return String(s.id) === String(id); });
 }
 
+// Returns the most-recent transmittal (compile event) that included the
+// given submittal id, or null if the submittal hasn't been transmitted
+// yet. Sort order: date desc, then createdAt desc, then no desc. Used
+// by the mobile submittal detail view and the project Transmittals
+// section.
+function _latestTransmittalForSubmittal(submittalId) {
+  if (!Array.isArray(db.transmittals)) return null;
+  var matches = db.transmittals.filter(function(t){
+    return Array.isArray(t.submittalIds) && t.submittalIds.some(function(id){ return String(id) === String(submittalId); });
+  });
+  if (!matches.length) return null;
+  matches.sort(function(a, b){
+    var da = String(a.date || ''), dbb = String(b.date || '');
+    if (dbb !== da) return dbb < da ? -1 : 1;
+    var ca = String(a.createdAt || ''), cb = String(b.createdAt || '');
+    if (cb !== ca) return cb < ca ? -1 : 1;
+    return (b.no || 0) - (a.no || 0);
+  });
+  return matches[0];
+}
+
 function getProjectName(id) {
   var p = (db.projects || []).find(function(x){ return String(x.id) === String(id); });
   if (!p) return '—';
@@ -11209,17 +11241,15 @@ function showSubmittalPackageCompile(submittalId) {
   // Today's date (yyyy-mm-dd) for the date inputs
   var todayIso = (new Date()).toISOString().slice(0, 10);
 
-  // Auto-number transmittals per-project: max(transmittalNo) across every
-  // submittal on this project + 1. Each compile bumps to a new number
+  // Auto-number transmittals per-project: max(no) across every
+  // transmittal on this project + 1. Each compile bumps to a new number
   // (matches Procore behavior — each act of transmitting is its own
   // event). Field stays editable so the user can override if needed.
-  // Computing at dialog-open instead of save-time means cancelling the
-  // dialog doesn't burn a number, and it self-heals if a submittal with
-  // a transmittal# gets deleted.
+  // Self-healing: deleting a transmittal frees its number for reuse.
   var nextTransmittalNo = 1;
-  (db.submittals || []).forEach(function(s){
-    if (String(s.projectId) !== String(anchor.projectId)) return;
-    var n = parseInt(s.transmittalNo, 10);
+  (db.transmittals || []).forEach(function(t){
+    if (String(t.projectId) !== String(anchor.projectId)) return;
+    var n = parseInt(t.no, 10);
     if (!isNaN(n) && n >= nextTransmittalNo) nextTransmittalNo = n + 1;
   });
 
@@ -11786,6 +11816,41 @@ async function compileSubmittalPackage() {
     else                       fname = 'KMI_Submittal_' + (new Date()).toISOString().slice(0, 10) + '.pdf';
     doc.save(fname);
 
+    // Persist this transmittal event so it shows up in history, drives
+    // the autonumber on the next compile, and lets the user edit/delete
+    // it later. Captures every INCLUDED submittal (not skipped ones).
+    try {
+      var _includedIds = allInPkg
+        .filter(function(s){ return includedSet[String(s.id)]; })
+        .map(function(s){ return s.id; });
+      var _transNoInt = parseInt(transNo, 10);
+      if (!Array.isArray(db.transmittals)) db.transmittals = [];
+      var _transRec = {
+        id:              Date.now(),
+        projectId:       anchor ? anchor.projectId : null,
+        no:              isNaN(_transNoInt) ? 0 : _transNoInt,
+        date:            sentDateIso || dateCreatedIso || (new Date().toISOString().slice(0,10)),
+        submittalIds:    _includedIds,
+        createdAt:       new Date().toISOString(),
+        createdByUserId: (_currentUser && _currentUser.id) ? _currentUser.id : null
+      };
+      db.transmittals.push(_transRec);
+      saveDB();
+      if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+        try {
+          var _r = await supabaseClient.from('kmi_transmittals').upsert(toSBTransmittal(_transRec));
+          if (_r && _r.error) console.warn('transmittal push warning:', _r.error.message);
+        } catch (e) { console.warn('transmittal push threw:', e); }
+      }
+      // Refresh the project-detail Transmittals section in case the user
+      // is viewing it (no-op otherwise).
+      if (typeof renderProjectTransmittalsSection === 'function') {
+        renderProjectTransmittalsSection();
+      }
+    } catch (e) {
+      console.warn('Persist transmittal failed:', e);
+    }
+
     if (status) {
       var msg = '<span style="color:#3B6D11">Generated ' + docItems.length + ' transmittal item(s), ' + totalAppendedPages + ' attached page(s)</span>';
       if (skipped.length) msg += ' <span style="color:#9A7A2E">— ' + skipped.length + ' not appended (see last page)</span>';
@@ -11930,6 +11995,159 @@ function renderProjectSubmittalsSection() {
     return;
   }
   el.innerHTML = renderProjectSubmittalsBlock(_editProjectId);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TRANSMITTALS — Project Detail block
+// ═══════════════════════════════════════════════════════════════════════
+// Each row in db.transmittals captures one compile event: project, no,
+// date, included submittal IDs. This block lists them under the project,
+// most recent first, with override (edit) and delete buttons.
+
+function renderProjectTransmittalsBlock(projectId) {
+  if (!projectId) return '';
+  var rows = (db.transmittals || []).filter(function(t){
+    return String(t.projectId) === String(projectId);
+  });
+  // Most recent first: by no desc (within a project, no roughly tracks time)
+  rows.sort(function(a, b){ return (b.no || 0) - (a.no || 0); });
+
+  var canEdit = canAccess('edit-submittals') === 'full';
+  var header =
+    '<div class="ch" style="display:flex;align-items:center;justify-content:space-between">' +
+      '<div class="mt" style="margin:0">Transmittals</div>' +
+      '<div style="font-size:11px;color:#888">Compile events for this project</div>' +
+    '</div>';
+
+  if (!rows.length) {
+    return '<div class="card">' + header +
+      '<div style="padding:14px;color:#888;font-size:13px">No transmittals yet. Generate one from a submittal package via Compile transmittal.</div>' +
+    '</div>';
+  }
+
+  function _fmtDate(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso + (iso.length === 10 ? 'T00:00:00' : ''));
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString('en-US', {year:'numeric', month:'short', day:'numeric'});
+  }
+
+  function _summarize(t) {
+    var subs = (Array.isArray(t.submittalIds) ? t.submittalIds : [])
+      .map(function(id){ return getSubmittal(id); })
+      .filter(Boolean);
+    if (!subs.length) return '<span style="color:#888">(none)</span>';
+    // Show distinct packageName(s) + count, plus the first kmiSubmittalNo
+    var pkgs = {};
+    subs.forEach(function(s){ if (s.packageName) pkgs[s.packageName] = true; });
+    var pkgNames = Object.keys(pkgs);
+    var first = subs[0];
+    var firstNo = subEsc(first.kmiSubmittalNo || ('#' + first.id));
+    var pkgLabel = pkgNames.length === 1 ? subEsc(pkgNames[0])
+                  : pkgNames.length > 1  ? (pkgNames.length + ' packages')
+                  : '';
+    return firstNo + (subs.length > 1 ? ' + ' + (subs.length - 1) + ' more' : '') +
+           (pkgLabel ? ' <span style="color:#888;font-size:11px">— ' + pkgLabel + '</span>' : '');
+  }
+
+  var body = rows.map(function(t){
+    var actions = canEdit
+      ? '<button class="btn" style="font-size:11px;padding:3px 8px" onclick="editTransmittal(\'' + subEsc(t.id) + '\')">Edit</button> ' +
+        '<button class="btn" style="font-size:11px;padding:3px 8px;color:#A32D2D" onclick="deleteTransmittal(\'' + subEsc(t.id) + '\')">Delete</button>'
+      : '';
+    return '<tr>' +
+      '<td style="padding:6px 8px;font-weight:600">#' + subEsc(String(t.no || '?')) + '</td>' +
+      '<td style="padding:6px 8px">' + subEsc(_fmtDate(t.date)) + '</td>' +
+      '<td style="padding:6px 8px;font-size:12px">' + _summarize(t) + '</td>' +
+      '<td style="padding:6px 8px;text-align:right">' + actions + '</td>' +
+    '</tr>';
+  }).join('');
+
+  return '<div class="card">' + header +
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">' +
+      '<thead><tr style="border-bottom:1px solid #ddd;color:#666;font-size:11px;text-transform:uppercase">' +
+        '<th style="padding:6px 8px;text-align:left;width:80px">Trans. #</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:120px">Date</th>' +
+        '<th style="padding:6px 8px;text-align:left">Submittals</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:130px"></th>' +
+      '</tr></thead><tbody>' + body + '</tbody></table></div>' +
+  '</div>';
+}
+
+// Wrapper used by Project Detail; fills the nprj-transmittals-section div.
+function renderProjectTransmittalsSection() {
+  var el = g('nprj-transmittals-section');
+  if (!el) return;
+  if (!_editProjectId) { el.innerHTML = ''; return; }
+  if (canAccess('view-submittals') === 'none') { el.innerHTML = ''; return; }
+  el.innerHTML = renderProjectTransmittalsBlock(_editProjectId);
+}
+
+// Edit modal — override transmittal number and/or date for an existing
+// transmittal record. Useful when a number was assigned wrong and only
+// caught after the fact.
+function editTransmittal(transmittalId) {
+  if (!requireFull('edit-submittals', 'edit transmittals')) return;
+  var t = (db.transmittals || []).find(function(x){ return String(x.id) === String(transmittalId); });
+  if (!t) { alert('Transmittal not found.'); return; }
+  var html =
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Edit transmittal #' + subEsc(String(t.no || '')) + '</div>' +
+    '<div class="msb">Override the assigned number or date. Affects history and the next autonumber.</div>' +
+    '<div class="fg">' +
+      '<div class="fgr"><label>Transmittal #</label>' +
+        '<input id="et-no" type="number" min="1" step="1" value="' + subEsc(String(t.no || '')) + '" style="width:120px"></div>' +
+      '<div class="fgr"><label>Date</label>' +
+        '<input id="et-date" type="date" value="' + subEsc(t.date || '') + '"></div>' +
+    '</div>' +
+    '<div class="mfooter">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveTransmittalEdit(\'' + subEsc(t.id) + '\')">Save</button>' +
+    '</div>';
+  openModal(html);
+}
+
+async function saveTransmittalEdit(transmittalId) {
+  var t = (db.transmittals || []).find(function(x){ return String(x.id) === String(transmittalId); });
+  if (!t) { closeModal(); return; }
+  var newNo   = parseInt(g('et-no').value, 10);
+  var newDate = (g('et-date').value || '').trim();
+  if (isNaN(newNo) || newNo < 1) { alert('Transmittal # must be a positive number.'); return; }
+  // Warn if newNo collides with another transmittal on the same project
+  var collision = (db.transmittals || []).find(function(x){
+    return String(x.id) !== String(t.id) &&
+           String(x.projectId) === String(t.projectId) &&
+           parseInt(x.no, 10) === newNo;
+  });
+  if (collision) {
+    if (!confirm('Transmittal #' + newNo + ' is already used on this project. Save anyway?')) return;
+  }
+  t.no = newNo;
+  t.date = newDate || null;
+  saveDB();
+  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+    try {
+      var r = await supabaseClient.from('kmi_transmittals').upsert(toSBTransmittal(t));
+      if (r && r.error) console.warn('transmittal update warning:', r.error.message);
+    } catch (e) { console.warn('transmittal update threw:', e); }
+  }
+  closeModal();
+  renderProjectTransmittalsSection();
+}
+
+async function deleteTransmittal(transmittalId) {
+  if (!requireFull('edit-submittals', 'delete transmittals')) return;
+  var t = (db.transmittals || []).find(function(x){ return String(x.id) === String(transmittalId); });
+  if (!t) return;
+  if (!confirm('Delete transmittal #' + (t.no || '?') + '?\n\nThe PDF you already downloaded is unaffected. This only removes the tracking record. The next compile will reuse this number if it was the highest.')) return;
+  db.transmittals = (db.transmittals || []).filter(function(x){ return String(x.id) !== String(transmittalId); });
+  saveDB();
+  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+    try {
+      await supabaseClient.from('kmi_transmittals').delete().eq('id', transmittalId);
+    } catch (e) { console.warn('transmittal delete threw:', e); }
+  }
+  renderProjectTransmittalsSection();
 }
 
 function goToSubmittalsForProject(projectId) {
@@ -26235,6 +26453,7 @@ function initNewProject() {
   renderProjectParametersSection();
   renderProjectAttachments();
   renderProjectSubmittalsSection();
+  renderProjectTransmittalsSection();
 
   // Stash the source opp id on the form for saveProject() to read, then clear the module-level var
   g('nprj-save-btn').dataset.oppId = _newProjectFromOppId || '';
@@ -26410,6 +26629,7 @@ function editProject(id) {
   renderProjectParametersSection();
   renderProjectAttachments();
   renderProjectSubmittalsSection();
+  renderProjectTransmittalsSection();
 
   g('nprj-save-btn').dataset.oppId = '';
 }
@@ -33649,6 +33869,35 @@ function fromSBSubmittal(r) {
   };
 }
 
+// ── Transmittal mappers ─────────────────────────────────────────────
+// One row per compile event. submittal_ids stores the included
+// submittals as a JSONB array so the project Transmittals section can
+// re-resolve them at render time. Project-scoped via project_id; no
+// must be unique within a project for the autonumber to work (the UI
+// warns on collisions during edit).
+function toSBTransmittal(r) {
+  return {
+    id:                 r.id,
+    project_id:         r.projectId || null,
+    no:                 (r.no || 0),
+    date:               r.date || null,
+    submittal_ids:      Array.isArray(r.submittalIds) ? r.submittalIds : [],
+    created_at:         r.createdAt || null,
+    created_by_user_id: r.createdByUserId || null
+  };
+}
+function fromSBTransmittal(r) {
+  return {
+    id:              r.id,
+    projectId:       r.project_id || null,
+    no:              (r.no || 0),
+    date:            r.date || null,
+    submittalIds:    Array.isArray(r.submittal_ids) ? r.submittal_ids : [],
+    createdAt:       r.created_at || null,
+    createdByUserId: r.created_by_user_id || null
+  };
+}
+
 // ── Spec Section mappers (Round 5) ──────────────────────────────
 function toSBSpecSection(r) {
   return {
@@ -34373,6 +34622,11 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_submittals').upsert(db.submittals.map(toSBSubmittal));
       if (r && r.error) errs.push('submittals: ' + r.error.message);
     }
+    // Transmittals — non-fatal if table missing
+    if ((db.transmittals || []).length) {
+      var r = await supabaseClient.from('kmi_transmittals').upsert(db.transmittals.map(toSBTransmittal));
+      if (r && r.error) errs.push('transmittals: ' + r.error.message);
+    }
     // Spec sections (Round 5) — non-fatal if table missing
     if ((db.specSections || []).length) {
       var r = await supabaseClient.from('kmi_spec_sections').upsert(db.specSections.map(toSBSpecSection));
@@ -34496,7 +34750,8 @@ async function pullFromSupabase() {
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
-         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes] = await Promise.all([
+         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes,
+         transRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -34520,7 +34775,8 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_submittals').select('*'),
       supabaseClient.from('kmi_spec_sections').select('*').order('sort_order', {ascending:true}),
       supabaseClient.from('kmi_project_parameters').select('*').order('sort_order', {ascending:true}),
-      supabaseClient.from('kmi_purchase_orders').select('*')
+      supabaseClient.from('kmi_purchase_orders').select('*'),
+      supabaseClient.from('kmi_transmittals').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -34678,6 +34934,15 @@ async function pullFromSupabase() {
     } else if (projParamsRes && projParamsRes.error) {
       console.warn('kmi_project_parameters load error (table missing?):', projParamsRes.error.message);
       if (!Array.isArray(db.projectParameters)) db.projectParameters = [];
+    }
+    // Transmittals — same preserve-on-missing pattern. If kmi_transmittals
+    // doesn't exist yet (the transmittals migration hasn't been run on this
+    // Supabase project), keep whatever's local so the user isn't stuck.
+    if (transRes && !transRes.error) {
+      db.transmittals = (transRes.data || []).map(fromSBTransmittal);
+    } else if (transRes && transRes.error) {
+      console.warn('kmi_transmittals load error (table missing?):', transRes.error.message);
+      if (!Array.isArray(db.transmittals)) db.transmittals = [];
     }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
