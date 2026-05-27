@@ -27485,6 +27485,61 @@ function _procCollectProjectPoLines(projectId) {
 
 // Bucket PO line entries by procurement item. Returns
 //   { byItemId: { id -> [entry+matchKind] }, ghosts: [entry] }
+// ── Vendor auto-add from POs ──────────────────────────────────────────
+// When a PO line is linked to a procurement item (manual link, auto-match
+// by description, or ghost promotion), the PO's vendor gets added to the
+// item's planned vendor list (item.vendorIds[]). This way the planning
+// view stays in sync with the actual purchasing activity.
+//
+// Once added, a vendor sticks — unlinking the PO later does NOT remove
+// the vendor from vendorIds[]. The user can remove it manually via the
+// edit-item modal if they want. Rationale: a vendor that supplied this
+// item at some point is reasonable to keep as a planned vendor.
+function _procEnsureVendorOnItem(item, vendorId) {
+  if (!item || !vendorId) return false;
+  var vid = String(vendorId);
+  if (!Array.isArray(item.vendorIds)) item.vendorIds = [];
+  for (var i = 0; i < item.vendorIds.length; i++) {
+    if (String(item.vendorIds[i]) === vid) return false;
+  }
+  item.vendorIds.push(vid);
+  return true;
+}
+
+// Sync vendors from currently-resolved PO lines onto their procurement
+// items. Mirrors the logic in _procBuildMatchIndex (manual + auto-match
+// resolution) but does so for the purpose of mutating item.vendorIds[].
+// Called once per render before the match index runs. Returns true if
+// anything was added — caller should saveDB() to persist.
+function _procSyncAutoVendors(project, poLineEntries) {
+  if (!project || !Array.isArray(project.procurementItems)) return false;
+  var items = project.procurementItems;
+  var descIdx = {};
+  items.forEach(function(it){
+    var key = String(it.description || '').toLowerCase().trim();
+    if (key && !descIdx[key]) descIdx[key] = it;
+  });
+  var idMap = {};
+  items.forEach(function(it){ idMap[String(it.id)] = it; });
+
+  var dirty = false;
+  (poLineEntries || []).forEach(function(e){
+    var manualId = e.line.procurementItemId;
+    if (manualId === PROC_UNLINK_SENTINEL) return;
+    var targetItem = null;
+    if (manualId && idMap[String(manualId)]) {
+      targetItem = idMap[String(manualId)];
+    } else {
+      var descKey = String(e.line.description || '').toLowerCase().trim();
+      if (descKey && descIdx[descKey]) targetItem = descIdx[descKey];
+    }
+    if (!targetItem) return;
+    var vendorId = e.po && e.po.vendorId;
+    if (_procEnsureVendorOnItem(targetItem, vendorId)) dirty = true;
+  });
+  return dirty;
+}
+
 function _procBuildMatchIndex(project, poLineEntries) {
   var items = (project && project.procurementItems) || [];
   var descIdx = {};
@@ -27564,6 +27619,9 @@ function renderProjectProcurement() {
   p.procurementItems = p.procurementItems || [];
   var items   = p.procurementItems;
   var poLines = _procCollectProjectPoLines(p.id);
+  // Sync any not-yet-recorded vendors from currently-linked / auto-matched
+  // PO lines onto their procurement items. Persist if anything changed.
+  if (_procSyncAutoVendors(p, poLines)) saveDB();
   var idx     = _procBuildMatchIndex(p, poLines);
   var matListCount = (p.materialList || []).length;
 
@@ -27674,6 +27732,8 @@ function _procRenderItemRow(item, entries) {
   var leadTime = (item.leadTimeDays != null && item.leadTimeDays !== '') ? item.leadTimeDays : '';
   var hasPO = entries.length > 0;
   var hasMulti = entries.length > 1;
+  var hasMultiBpr = (Array.isArray(item.bprAssignments) ? item.bprAssignments : []).length > 1;
+  var canExpand = hasMulti || hasMultiBpr;
   var isOpen = !!_procDrawerOpen[itemId];
 
   // Qty cell — three-state precedence: linked POs → rollup; else
@@ -27700,11 +27760,17 @@ function _procRenderItemRow(item, entries) {
   var deliveryCell = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '<span style="color:#aaa">—</span>';
 
   var poBadge = '';
-  if (hasMulti) {
+  if (canExpand) {
+    // Single label whether the user is expanding for multi-PO, multi-BPR,
+    // or both. The drawer itself shows whichever sections apply.
+    var pieces = [];
+    if (hasMulti) pieces.push(entries.length + ' POs');
+    else if (hasPO) pieces.push('1 PO');
+    if (hasMultiBpr) pieces.push(bprAssignments.length + ' BPR');
     poBadge = ' <button type="button" onclick="procToggleDrawer(\'' + _procEsc(itemId) + '\')" ' +
       'style="padding:2px 8px;font-size:11px;background:#EEF0F8;color:#1F5A8A;border:none;border-radius:8px;cursor:pointer;font-family:inherit" ' +
-      'title="Show details for each linked PO">' +
-      (isOpen ? '▾' : '▸') + ' ' + entries.length + ' POs</button>';
+      'title="Show BPR composition and / or linked PO details">' +
+      (isOpen ? '▾' : '▸') + ' ' + pieces.join(' · ') + '</button>';
   } else if (hasPO) {
     var e = entries[0];
     var isManual = e.matchKind === 'manual';
@@ -27757,6 +27823,26 @@ function _procRenderItemRow(item, entries) {
     }
   }
 
+  // Vendor pills — planned vendors set via the edit modal. Stored as
+  // item.vendorIds[] (vendor IDs from db.vendors). Rendered as small
+  // pills below the description.
+  var vendorPills = '';
+  if (Array.isArray(item.vendorIds) && item.vendorIds.length) {
+    var vendorMap = {};
+    (db.vendors || []).forEach(function(v){ vendorMap[String(v.id)] = v; });
+    var names = item.vendorIds.map(function(vid){
+      var v = vendorMap[String(vid)];
+      return v ? (v.name || '(unnamed)') : null;
+    }).filter(Boolean);
+    if (names.length) {
+      vendorPills = '<div style="margin-top:3px;display:flex;flex-wrap:wrap;gap:4px">' +
+        names.map(function(n){
+          return '<span style="font-size:10px;color:#1F5A8A;background:#E3F0FB;padding:1px 6px;border-radius:8px" title="Planned vendor">' + _procEsc(n) + '</span>';
+        }).join('') +
+      '</div>';
+    }
+  }
+
   var html =
     '<tr style="border-top:1px solid #eee;' + rowBg + '">' +
       '<td style="padding:8px">' +
@@ -27765,6 +27851,7 @@ function _procRenderItemRow(item, entries) {
           poBadge +
           bprBadge +
         '</div>' +
+        vendorPills +
         '<div style="font-size:10px;color:#888;margin-top:2px">' +
           (item.unit ? 'Unit: ' + _procEsc(item.unit) : '') +
           (item.unit && item.costCode ? ' · ' : '') +
@@ -27793,7 +27880,7 @@ function _procRenderItemRow(item, entries) {
       '</td>' +
     '</tr>';
 
-  if (hasMulti && isOpen) {
+  if (canExpand && isOpen) {
     var totalCols = _procVarianceOn ? 9 : 6;
     html += '<tr><td colspan="' + totalCols + '" style="padding:0;background:#FAFAFA">' +
       _procRenderDrawer(item, entries) +
@@ -27804,40 +27891,103 @@ function _procRenderItemRow(item, entries) {
 }
 
 function _procRenderDrawer(item, entries) {
-  var rows = entries.map(function(e){
-    var qty = Number(e.line.qty) || 0;
-    var up  = Number(e.line.unitPrice) || 0;
-    var v   = (db.vendors || []).find(function(x){ return String(x.id) === String(e.po.vendorId); });
-    var vendorName = (v && v.name) || '—';
-    var poNum = e.po.number || '(no #)';
-    var statusBadge = '<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:#F0F0EE;color:#666;margin-left:4px">' + _procEsc(e.status) + '</span>';
-    var isManual = e.matchKind === 'manual';
-    var kindBadge = '<span style="font-size:10px;color:' + (isManual ? '#1F5A8A' : '#666') + ';background:' + (isManual ? '#E3F0FB' : '#F5F5F3') + ';padding:1px 6px;border-radius:8px;margin-left:4px" title="' + (isManual ? 'Manually linked' : 'Auto-matched by description') + '">' + (isManual ? 'M' : 'A') + '</span>';
-    var lineIdAttr = String(e.line.id || '');
-    var unlinkBtn = '<button type="button" class="btn btn-sm" onclick="procUnlinkPoLine(\'' + _procEsc(String(e.po.id)) + '\',\'' + _procEsc(lineIdAttr) + '\')" title="Unlink this PO line from the procurement item" style="padding:2px 7px;font-size:11px;color:#A32D2D">Unlink</button>';
-    return '<tr>' +
-      '<td style="padding:6px 10px"><a href="#" onclick="procOpenPo(\'' + _procEsc(String(e.po.id)) + '\');return false" style="color:#1F5A8A;text-decoration:none;font-weight:600">' + _procEsc(poNum) + '</a>' + statusBadge + kindBadge + '</td>' +
-      '<td style="padding:6px 10px">' + _procEsc(vendorName) + '</td>' +
-      '<td style="padding:6px 10px;text-align:right">' + qty + (e.line.unit ? ' ' + _procEsc(e.line.unit) : '') + '</td>' +
-      '<td style="padding:6px 10px;text-align:right;font-family:monospace">$' + _procFmtMoney(qty * up) + '</td>' +
-      '<td style="padding:6px 10px">' + (e.po.issuedAt ? _procFmtDate(String(e.po.issuedAt).slice(0,10)) : '<span style="color:#aaa">Not issued</span>') + '</td>' +
-      '<td style="padding:6px 10px">' + (e.po.estDeliveryDate ? _procFmtDate(e.po.estDeliveryDate) : '<span style="color:#aaa">—</span>') + '</td>' +
-      '<td style="padding:6px 10px;text-align:right">' + unlinkBtn + '</td>' +
-    '</tr>';
-  }).join('');
-  return '<div style="padding:8px 14px 14px 14px">' +
-    '<table style="width:100%;font-size:11px;background:#fff;border:1px solid #eee;border-radius:6px;overflow:hidden">' +
-      '<thead style="background:#f5f5f5"><tr>' +
-        '<th style="padding:6px 10px;text-align:left">PO #</th>' +
-        '<th style="padding:6px 10px;text-align:left">Vendor</th>' +
-        '<th style="padding:6px 10px;text-align:right">Qty</th>' +
-        '<th style="padding:6px 10px;text-align:right">Line $</th>' +
-        '<th style="padding:6px 10px;text-align:left">Order date</th>' +
-        '<th style="padding:6px 10px;text-align:left">Delivery date</th>' +
-        '<th style="padding:6px 10px;text-align:right;width:80px"></th>' +
-      '</tr></thead><tbody>' + rows + '</tbody>' +
-    '</table>' +
-  '</div>';
+  var p = _editProjectId ? getProj(_editProjectId) : null;
+  var bprAssignments = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
+  var hasMultiBpr = bprAssignments.length > 1;
+
+  // ── BPR composition section — shown only when the item is backed by
+  // multiple BPR lines (i.e. the item was created by group-import or by
+  // post-import merge). For single-BPR items the "B" badge in the row
+  // is enough; expanding doesn't add useful detail.
+  var bprSection = '';
+  if (hasMultiBpr && p && Array.isArray(p.bprMaterials)) {
+    var bprById = {};
+    p.bprMaterials.forEach(function(b){ bprById[String(b.id)] = b; });
+    var rows = '';
+    var totalQty = 0;
+    var totalDollars = 0;
+    bprAssignments.forEach(function(a){
+      if (a._orphaned) return;
+      var b = bprById[String(a.bprMaterialId)];
+      var qty = Number(a.qty) || 0;
+      totalQty += qty;
+      var bprQty = b ? (Number(b.quantity) || 0) : 0;
+      var extCost = b ? (Number(b.extendedMatCost) || 0) : 0;
+      var portion = bprQty > 0 ? (qty / bprQty) * extCost : 0;
+      totalDollars += portion;
+      rows += '<tr>' +
+        '<td style="padding:5px 10px;font-family:monospace;font-size:11px;color:#5D4391">' + _procEsc(b ? b.classCode : '?') + '</td>' +
+        '<td style="padding:5px 10px;font-family:monospace;font-size:11px">' + _procEsc(b ? b.materialCode : '(missing)') + '</td>' +
+        '<td style="padding:5px 10px;font-size:11px">' + _procEsc(b ? (b.description || '') : '<em>BPR line no longer exists</em>') + '</td>' +
+        '<td style="padding:5px 10px;text-align:right;font-size:11px">' + _procFmtBprQty(qty) + (b ? ' ' + _procEsc(b.unit || '') : '') + '</td>' +
+        '<td style="padding:5px 10px;text-align:right;font-family:monospace;font-size:11px">$' + _procFmtMoney(b ? b.unitCost : 0) + '</td>' +
+        '<td style="padding:5px 10px;text-align:right;font-family:monospace;font-size:11px">$' + _procFmtMoney(portion) + '</td>' +
+      '</tr>';
+    });
+    bprSection =
+      '<div style="padding:10px 14px 4px 14px;font-size:11px;font-weight:600;color:#5D4391">From BPR (' + bprAssignments.length + ' line' + (bprAssignments.length === 1 ? '' : 's') + ')</div>' +
+      '<div style="padding:0 14px 8px 14px">' +
+        '<table style="width:100%;font-size:11px;background:#fff;border:1px solid #EEE8F8;border-radius:6px;overflow:hidden">' +
+          '<thead style="background:#F5F0FA"><tr>' +
+            '<th style="padding:5px 10px;text-align:left;color:#5D4391">Class</th>' +
+            '<th style="padding:5px 10px;text-align:left;color:#5D4391">Code</th>' +
+            '<th style="padding:5px 10px;text-align:left;color:#5D4391">Description</th>' +
+            '<th style="padding:5px 10px;text-align:right;color:#5D4391">Portion</th>' +
+            '<th style="padding:5px 10px;text-align:right;color:#5D4391">Unit cost</th>' +
+            '<th style="padding:5px 10px;text-align:right;color:#5D4391">Ext. cost</th>' +
+          '</tr></thead><tbody>' + rows +
+            '<tr style="background:#FBF8FF"><td colspan="3" style="padding:5px 10px;font-size:11px;font-weight:600;text-align:right">Total</td>' +
+              '<td style="padding:5px 10px;text-align:right;font-size:11px;font-weight:600">' + _procFmtBprQty(totalQty) + '</td>' +
+              '<td></td>' +
+              '<td style="padding:5px 10px;text-align:right;font-family:monospace;font-size:11px;font-weight:600">$' + _procFmtMoney(totalDollars) + '</td>' +
+            '</tr>' +
+          '</tbody>' +
+        '</table>' +
+      '</div>';
+  }
+
+  // ── Linked POs section — same table as before but with a Description
+  // column instead of Line $.
+  var poSection = '';
+  if (entries.length > 0) {
+    var poRows = entries.map(function(e){
+      var qty = Number(e.line.qty) || 0;
+      var v   = (db.vendors || []).find(function(x){ return String(x.id) === String(e.po.vendorId); });
+      var vendorName = (v && v.name) || '—';
+      var poNum = e.po.number || '(no #)';
+      var statusBadge = '<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:#F0F0EE;color:#666;margin-left:4px">' + _procEsc(e.status) + '</span>';
+      var isManual = e.matchKind === 'manual';
+      var kindBadge = '<span style="font-size:10px;color:' + (isManual ? '#1F5A8A' : '#666') + ';background:' + (isManual ? '#E3F0FB' : '#F5F5F3') + ';padding:1px 6px;border-radius:8px;margin-left:4px" title="' + (isManual ? 'Manually linked' : 'Auto-matched by description') + '">' + (isManual ? 'M' : 'A') + '</span>';
+      var lineIdAttr = String(e.line.id || '');
+      var unlinkBtn = '<button type="button" class="btn btn-sm" onclick="procUnlinkPoLine(\'' + _procEsc(String(e.po.id)) + '\',\'' + _procEsc(lineIdAttr) + '\')" title="Unlink this PO line from the procurement item" style="padding:2px 7px;font-size:11px;color:#A32D2D">Unlink</button>';
+      return '<tr>' +
+        '<td style="padding:6px 10px"><a href="#" onclick="procOpenPo(\'' + _procEsc(String(e.po.id)) + '\');return false" style="color:#1F5A8A;text-decoration:none;font-weight:600">' + _procEsc(poNum) + '</a>' + statusBadge + kindBadge + '</td>' +
+        '<td style="padding:6px 10px">' + _procEsc(vendorName) + '</td>' +
+        '<td style="padding:6px 10px;font-size:11px;color:#333">' + _procEsc(e.line.description || '<span style="color:#aaa">—</span>') + '</td>' +
+        '<td style="padding:6px 10px;text-align:right">' + qty + (e.line.unit ? ' ' + _procEsc(e.line.unit) : '') + '</td>' +
+        '<td style="padding:6px 10px">' + (e.po.issuedAt ? _procFmtDate(String(e.po.issuedAt).slice(0,10)) : '<span style="color:#aaa">Not issued</span>') + '</td>' +
+        '<td style="padding:6px 10px">' + (e.po.estDeliveryDate ? _procFmtDate(e.po.estDeliveryDate) : '<span style="color:#aaa">—</span>') + '</td>' +
+        '<td style="padding:6px 10px;text-align:right">' + unlinkBtn + '</td>' +
+      '</tr>';
+    }).join('');
+    poSection =
+      '<div style="padding:10px 14px 4px 14px;font-size:11px;font-weight:600;color:#1F5A8A">Linked POs (' + entries.length + ')</div>' +
+      '<div style="padding:0 14px 14px 14px">' +
+        '<table style="width:100%;font-size:11px;background:#fff;border:1px solid #eee;border-radius:6px;overflow:hidden">' +
+          '<thead style="background:#f5f5f5"><tr>' +
+            '<th style="padding:6px 10px;text-align:left">PO #</th>' +
+            '<th style="padding:6px 10px;text-align:left">Vendor</th>' +
+            '<th style="padding:6px 10px;text-align:left">Description</th>' +
+            '<th style="padding:6px 10px;text-align:right">Qty</th>' +
+            '<th style="padding:6px 10px;text-align:left">Order date</th>' +
+            '<th style="padding:6px 10px;text-align:left">Delivery date</th>' +
+            '<th style="padding:6px 10px;text-align:right;width:80px"></th>' +
+          '</tr></thead><tbody>' + poRows + '</tbody>' +
+        '</table>' +
+      '</div>';
+  }
+
+  return '<div style="padding:4px 0 4px 0">' + bprSection + poSection + '</div>';
 }
 
 function _procRenderGhostRow(entry) {
@@ -28008,6 +28158,7 @@ function procAddGhostToList(poId, lineId) {
     var existing = p.procurementItems.find(function(r){ return String(r.description || '').toLowerCase().trim() === key; });
     if (existing) {
       line.procurementItemId = existing.id;
+      _procEnsureVendorOnItem(existing, po.vendorId);
       saveDB();
       renderProjectProcurement();
       if (typeof showToast === 'function') showToast('Linked PO line to existing "' + (existing.description || '') + '".', 'success');
@@ -28023,6 +28174,7 @@ function procAddGhostToList(poId, lineId) {
     unitCost: Number(line.unitPrice) || 0,
     leadTimeDays: null,
     manualQty: null,
+    vendorIds: po.vendorId ? [String(po.vendorId)] : [],
     sourceLabel: 'From PO ' + (po.number || ''),
     sourceMaterialListId: null,
     addedAt: new Date().toISOString()
@@ -28161,6 +28313,28 @@ function procOpenCustomItemModal(itemId) {
     return '<option value="' + u + '"' + sel + '>' + u + '</option>';
   }).join('');
 
+  // Vendor multi-select — checkbox list. The procurement item can be
+  // pre-assigned to one or more vendors (planning step before POs are
+  // cut). Stored as `vendorIds: [id, id]` on the item. If you actually
+  // want a per-vendor qty split, use the ✂ split action on the item
+  // instead so each split has its own vendor.
+  var existingVendorIds = (existing && Array.isArray(existing.vendorIds)) ? existing.vendorIds.map(String) : [];
+  var vendorList = (db.vendors || []).slice().sort(function(a, b){
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  var vendorListHtml = '';
+  if (vendorList.length) {
+    vendorListHtml = vendorList.map(function(v){
+      var checked = existingVendorIds.indexOf(String(v.id)) >= 0 ? ' checked' : '';
+      return '<label style="display:flex;align-items:center;gap:6px;padding:3px 6px;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0;font-size:12px;border-radius:3px" onmouseover="this.style.background=\'#f5f5f3\'" onmouseout="this.style.background=\'\'">' +
+        '<input type="checkbox" class="proc-edit-vendor-cb" value="' + _procEsc(String(v.id)) + '"' + checked + ' style="width:auto;margin:0">' +
+        '<span>' + _procEsc(v.name || '(unnamed vendor)') + '</span>' +
+      '</label>';
+    }).join('');
+  } else {
+    vendorListHtml = '<div style="padding:8px;font-size:11px;color:#aaa;text-align:center">No vendors yet — add vendors from the Vendors page first.</div>';
+  }
+
   showModal(
     '<button class="xbtn" onclick="closeModal()">&times;</button>' +
     '<div class="mt">' + (editing ? 'Edit procurement item' : 'Add custom procurement item') + '</div>' +
@@ -28171,6 +28345,10 @@ function procOpenCustomItemModal(itemId) {
       '<div class="fgr"><label>Cost code</label><select id="proc-edit-cc">' + ccOpts + '</select></div>' +
       '<div class="fgr"><label>Unit cost ($)</label><input type="number" min="0" step="0.01" id="proc-edit-unitcost" value="' + (existing && Number(existing.unitCost) ? existing.unitCost : '') + '"></div>' +
       '<div class="fgr"><label>Lead time (days)</label><input type="number" min="0" step="1" id="proc-edit-lead" value="' + (existing && existing.leadTimeDays != null && existing.leadTimeDays !== '' ? existing.leadTimeDays : '') + '" placeholder="—"></div>' +
+      '<div class="fgr full"><label>Vendor(s) (planning — check one or more)</label>' +
+        '<div style="max-height:140px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;padding:4px;background:#fff">' + vendorListHtml + '</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Check the vendor(s) you plan to buy this item from. For per-vendor qty splits, use the ✂ Split action on the row after saving.</div>' +
+      '</div>' +
     '</div>' +
     '<div class="mbtns">' +
       '<button class="btn" onclick="closeModal()">Cancel</button>' +
@@ -28194,6 +28372,13 @@ function procSaveCustomItem(itemId) {
   if (ltRaw === '' || ltRaw == null) leadTimeDays = null;
   else { leadTimeDays = parseInt(ltRaw, 10); if (!isFinite(leadTimeDays) || leadTimeDays < 0) leadTimeDays = 0; }
 
+  // Collect checked vendor IDs from the modal
+  var vendorIds = [];
+  var cbs = document.querySelectorAll('.proc-edit-vendor-cb');
+  for (var i = 0; i < cbs.length; i++) {
+    if (cbs[i].checked) vendorIds.push(String(cbs[i].value));
+  }
+
   p.procurementItems = p.procurementItems || [];
   if (itemId) {
     var existing = p.procurementItems.find(function(r){ return String(r.id) === String(itemId); });
@@ -28203,6 +28388,7 @@ function procSaveCustomItem(itemId) {
     existing.costCode     = cc;
     existing.unitCost     = unitCost;
     existing.leadTimeDays = leadTimeDays;
+    existing.vendorIds    = vendorIds;
   } else {
     // Dedupe by description case-insensitive trim
     var key = desc.toLowerCase();
@@ -28216,6 +28402,7 @@ function procSaveCustomItem(itemId) {
       unitCost: unitCost,
       leadTimeDays: leadTimeDays,
       manualQty: null,
+      vendorIds: vendorIds,
       sourceLabel: 'Custom',
       sourceMaterialListId: null,
       addedAt: new Date().toISOString()
@@ -28331,6 +28518,10 @@ function procSaveLinkPicker(itemId) {
 
     if (wantLinked && !currentlyLinkedHere) {
       e.line.procurementItemId = itemId;
+      // Auto-add this PO's vendor to the item's planned vendor list.
+      if (_procEnsureVendorOnItem(item, e.po && e.po.vendorId)) {
+        // Already counted via `changed`; helper handles dedupe.
+      }
       changed++;
     } else if (!wantLinked && currentlyLinkedHere) {
       if (currentManual && currentManual !== PROC_UNLINK_SENTINEL && String(currentManual) === String(itemId)) {
@@ -29891,6 +30082,14 @@ function procDoMerge(sourceId) {
     target.bprRodLengthLinFt = source.bprRodLengthLinFt;
   }
 
+  // Union vendor IDs (planning context — both sets of planned vendors
+  // become valid for the merged item).
+  var mergedVendors = {};
+  (target.vendorIds || []).forEach(function(vid){ mergedVendors[String(vid)] = true; });
+  (source.vendorIds || []).forEach(function(vid){ mergedVendors[String(vid)] = true; });
+  var mergedVendorList = Object.keys(mergedVendors);
+  if (mergedVendorList.length) target.vendorIds = mergedVendorList;
+
   // Reassign PO lines pointing to source → target (preserves linkage)
   (p.poList || []).forEach(function(po){
     (po.lines || []).forEach(function(L){
@@ -30097,6 +30296,7 @@ function procDoSplit() {
       unitCost: Number(item.unitCost) || 0,
       leadTimeDays: item.leadTimeDays || null,
       manualQty: null,
+      vendorIds: Array.isArray(item.vendorIds) ? item.vendorIds.slice() : [],
       sourceLabel: item.sourceLabel || ('From BPR — ' + (bm ? (bm.classCode + ' / ' + bm.materialCode) : '')),
       sourceMaterialListId: null,
       addedAt: new Date().toISOString(),
