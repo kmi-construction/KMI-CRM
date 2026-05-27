@@ -77,6 +77,9 @@ h1{font-size:21px;font-weight:600;color:#1a1a1a;margin-bottom:3px}
 .split-btn-menu.open{display:block}
 .split-btn-menu > div{padding:10px 14px;font-size:13px;color:#1a1a1a;cursor:pointer;font-weight:500;white-space:nowrap}
 .split-btn-menu > div:hover{background:#f5f5f5}
+/* Procurement-tab mobile cards: hidden on desktop; the mobile media
+   block (≤740px) flips this on and hides .proc-desktop-only siblings. */
+.proc-mob{display:none}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;padding:9px 12px;font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.7px;border-bottom:0.5px solid #eee;background:#fafafa}
 td{padding:10px 12px;border-bottom:0.5px solid #eee;color:#1a1a1a;vertical-align:middle}
@@ -580,6 +583,105 @@ textarea{resize:vertical;min-height:72px}
   .pg > div[style*="justify-content:flex-end"] .split-btn{width:100%;display:flex}
   .pg > div[style*="justify-content:flex-end"] .split-btn > .btn{width:auto}
   .pg > div[style*="justify-content:flex-end"] .split-btn > .btn-main{flex:1}
+
+  /* ── Procurement tab — mobile (view-only card view, ≤740px) ──
+     Hide editing-oriented desktop UI; show grouped, collapsible card
+     view via _procRenderMobileCards. Section bands group by cost code
+     (Brick, Block, Stone, etc.) the same way the PDF does. */
+  .proc-desktop-only{display:none !important}
+  .proc-mob{display:block}
+  .proc-mob-section{margin-bottom:14px}
+  .proc-mob-sec-hd{
+    width:100%;
+    display:flex;align-items:center;gap:8px;
+    padding:11px 14px;
+    background:#F8F0DC;
+    border:0.5px solid #E8D8B5;
+    border-radius:8px;
+    font-family:inherit;font-size:13px;font-weight:600;
+    color:#2A2F5C;
+    text-align:left;text-transform:uppercase;letter-spacing:.4px;
+    cursor:pointer;
+    -webkit-tap-highlight-color:transparent
+  }
+  .proc-mob-sec-hd:active{background:#F2E8CC}
+  .proc-mob-sec-caret{
+    display:inline-block;width:12px;
+    color:#2A2F5C;font-size:11px;
+    transition:transform .15s ease
+  }
+  .proc-mob-section.collapsed .proc-mob-sec-caret{transform:rotate(-90deg)}
+  .proc-mob-sec-name{flex:1}
+  .proc-mob-sec-count{
+    font-size:11px;font-weight:500;
+    color:#8A7A52;
+    text-transform:none;letter-spacing:0
+  }
+  .proc-mob-sec-body{margin-top:8px;display:flex;flex-direction:column;gap:8px}
+  .proc-mob-section.collapsed .proc-mob-sec-body{display:none}
+
+  .proc-mob-item{
+    background:#fff;
+    border:0.5px solid #e5e5e5;
+    border-radius:8px;
+    padding:12px 14px
+  }
+  .proc-mob-item-top{
+    display:flex;justify-content:space-between;align-items:flex-start;
+    gap:10px;margin-bottom:4px
+  }
+  .proc-mob-item-desc{
+    font-weight:600;font-size:13px;color:#1a1a1a;
+    line-height:1.35;flex:1
+  }
+  .proc-mob-badge{
+    flex-shrink:0;
+    font-size:10px;font-weight:700;letter-spacing:.3px;
+    padding:2px 8px;border-radius:10px
+  }
+  .proc-mob-badge-po{background:#E3F0FB;color:#1F5A8A}
+  .proc-mob-badge-bpr{background:#EEE8F8;color:#5D4391}
+
+  .proc-mob-item-vendor{
+    font-size:12px;color:#555;margin-bottom:8px;line-height:1.35
+  }
+  .proc-mob-item-grid{
+    display:grid;grid-template-columns:1fr 1fr;
+    gap:4px 14px;font-size:12px
+  }
+  .proc-mob-item-grid > div{
+    display:flex;justify-content:space-between;gap:6px;
+    padding:4px 0
+  }
+  .proc-mob-item-grid .lbl{color:#888;font-size:11px}
+  .proc-mob-item-grid .val{color:#1a1a1a;font-weight:500;text-align:right}
+
+  .proc-mob-expander{
+    margin-top:10px;padding:8px 0;width:100%;
+    background:transparent;border:none;
+    border-top:0.5px solid #eee;
+    color:#1F5A8A;font-family:inherit;
+    font-size:12px;font-weight:600;
+    text-align:left;cursor:pointer;
+    -webkit-tap-highlight-color:transparent
+  }
+  .proc-mob-po-detail{
+    margin-top:6px;padding:6px 10px;
+    background:#FAFAFA;border-radius:6px
+  }
+  .proc-mob-po-line{
+    display:flex;justify-content:space-between;align-items:flex-start;
+    gap:10px;padding:6px 0;
+    font-size:12px;color:#444;
+    border-bottom:0.5px solid #eee
+  }
+  .proc-mob-po-line:last-child{border-bottom:none}
+  .proc-mob-po-line .desc{flex:1;line-height:1.35}
+  .proc-mob-po-line .qty{color:#1a1a1a;font-weight:500;white-space:nowrap}
+
+  .proc-mob-empty{
+    padding:24px 16px;color:#888;font-size:13px;text-align:center
+  }
 
   /* Bid opportunities calendar etc. — keep small, scroll horizontally */
   .cal-wrap{overflow-x:auto}
@@ -27591,6 +27693,11 @@ async function deleteSpecSection(id) {
 var PROC_UNLINK_SENTINEL = '__procunlinked__';
 var _procDrawerOpen = {};      // itemId -> bool, tracks expanded drawer rows
 var _procVarianceOn = false;   // variance columns toggle
+// Mobile-only: collapse state for cost-code section bands on the
+// view-only procurement card view (≤740px). Keyed by cost-code string
+// (or '__uncategorized__'). In-memory only — state resets on page
+// reload, which is acceptable for a view-only field tool.
+var _procMobSectionCollapsed = {};
 
 function _procEsc(s) {
   return String(s == null ? '' : s)
@@ -27780,13 +27887,13 @@ function renderProjectProcurement() {
       '<div class="ch">' +
         '<span class="ct">Procurement report</span>' +
         '<span style="display:flex;gap:12px;align-items:center">' +
-          '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#555;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0">' +
+          '<label class="proc-desktop-only" style="display:flex;align-items:center;gap:6px;font-size:12px;color:#555;cursor:pointer;font-weight:400;text-transform:none;letter-spacing:0">' +
             '<input type="checkbox" id="proc-var-toggle"' + (_procVarianceOn ? ' checked' : '') + ' onchange="procToggleVariance()" style="width:auto;margin:0">' +
             'Show variance columns' +
           '</label>' +
-          '<button type="button" class="btn btn-sm" onclick="procOpenFromMatListPicker()"' + (matListCount ? '' : ' disabled title="No material list rows on this project yet"') + '>+ From material list</button>' +
-          '<button type="button" class="btn btn-sm" onclick="procOpenBprFlow()" title="' + (p.bprMaterials && p.bprMaterials.length ? 'Import items from the Bid Price Report' : 'Upload the Bid Price Report PDF to extract material quantities') + '">+ From BPR' + (p.bprMaterials && p.bprMaterials.length ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
-          '<button type="button" class="btn btn-sm btn-p" onclick="procOpenCustomItemModal(null)">+ Custom item</button>' +
+          '<button type="button" class="btn btn-sm proc-desktop-only" onclick="procOpenFromMatListPicker()"' + (matListCount ? '' : ' disabled title="No material list rows on this project yet"') + '>+ From material list</button>' +
+          '<button type="button" class="btn btn-sm proc-desktop-only" onclick="procOpenBprFlow()" title="' + (p.bprMaterials && p.bprMaterials.length ? 'Import items from the Bid Price Report' : 'Upload the Bid Price Report PDF to extract material quantities') + '">+ From BPR' + (p.bprMaterials && p.bprMaterials.length ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
+          '<button type="button" class="btn btn-sm btn-p proc-desktop-only" onclick="procOpenCustomItemModal(null)">+ Custom item</button>' +
           '<button type="button" class="btn btn-sm" onclick="procGeneratePdf()" title="Generate a printable PDF of the procurement list">📄 Print PDF</button>' +
         '</span>' +
       '</div>' +
@@ -27800,10 +27907,11 @@ function renderProjectProcurement() {
 
   // Empty state — only when both items AND ghosts are empty.
   if (!items.length && !idx.ghosts.length) {
-    el.innerHTML = headerHtml + renderBprWorklist(p) +
+    el.innerHTML = headerHtml +
+      '<div class="proc-desktop-only">' + renderBprWorklist(p) + '</div>' +
       '<div class="card"><div style="padding:30px;color:#aaa;font-size:13px;text-align:center;line-height:1.6">' +
         'No procurement items yet.<br>' +
-        'Click <strong>+ From material list</strong> to pull items from the project material list, or <strong>+ Custom item</strong> to add one manually.' +
+        '<span class="proc-desktop-only">Click <strong>+ From material list</strong> to pull items from the project material list, or <strong>+ Custom item</strong> to add one manually.</span>' +
       '</div></div>';
     return;
   }
@@ -27851,7 +27959,7 @@ function renderProjectProcurement() {
   }
 
   var tableHtml =
-    '<div class="card" style="padding:0;overflow:hidden">' +
+    '<div class="card proc-desktop-only" style="padding:0;overflow:hidden">' +
       '<div style="overflow-x:auto">' +
         '<table style="width:100%;font-size:12px">' +
           tableHead +
@@ -27861,7 +27969,7 @@ function renderProjectProcurement() {
     '</div>';
 
   var hintHtml =
-    '<div style="font-size:11px;color:#888;margin-top:-8px;margin-bottom:16px;line-height:1.6;padding:0 4px">' +
+    '<div class="proc-desktop-only" style="font-size:11px;color:#888;margin-top:-8px;margin-bottom:16px;line-height:1.6;padding:0 4px">' +
       '<strong>Qty</strong> is editable when no PO is linked; once linked, it\'s a rollup of PO line qtys (read-only). ' +
       '<strong>Order date</strong> = earliest PO issue date. ' +
       '<strong>Delivery date</strong> = earliest PO\'s estimated delivery date. ' +
@@ -27870,7 +27978,197 @@ function renderProjectProcurement() {
       'Multi-PO rows expand for per-PO unlink.' +
     '</div>';
 
-  el.innerHTML = headerHtml + renderBprWorklist(p) + tableHtml + hintHtml;
+  // Mobile cards — view-only card view for ≤740px. Hidden on desktop
+  // via CSS. Skips ghosts, the BPR worklist, and the BPR-component
+  // breakdown; keeps Print PDF accessible via the header card.
+  var mobileHtml = _procRenderMobileCards(items, idx, p);
+
+  el.innerHTML = headerHtml +
+    '<div class="proc-desktop-only">' + renderBprWorklist(p) + '</div>' +
+    tableHtml + hintHtml + mobileHtml;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// MOBILE PROCUREMENT VIEW — view-only card layout for ≤740px screens
+// ────────────────────────────────────────────────────────────────────
+// Re-rendered alongside the desktop table on every renderProjectProcurement
+// pass; CSS picks one or the other based on viewport width. Mirrors the
+// PDF's "group by cost code, show parent + nested PO detail" structure
+// so a foreman / PM scanning the procurement list on their phone gets
+// the same mental model they see on the printed report.
+//
+// Per Mike's mobile-pass decisions:
+//   • view-only (no add / edit / merge / split controls)
+//   • Print PDF stays accessible (lives in the header card)
+//   • BPR component breakdown NOT shown on mobile (PO detail only)
+//   • Ghost / unmatched PO lines NOT shown on mobile
+//   • Section header bands are collapsible (in-memory state)
+//
+// PO-detail expander state is shared with the desktop drawer via
+// _procDrawerOpen, so the open/closed state carries across rotations.
+// ════════════════════════════════════════════════════════════════════
+function _procRenderMobileCards(items, idx, project) {
+  if (!items || !items.length) {
+    return '<div class="proc-mob"><div class="proc-mob-empty">No procurement items yet.</div></div>';
+  }
+
+  // Cost-code lookup (same source as the PDF generator)
+  var ccByCode = {};
+  (db.costCodes || []).forEach(function(c){
+    if (c && c.code) ccByCode[String(c.code)] = c;
+  });
+
+  // Group items by cost code
+  var byCC = {};
+  var ccCodes = [];
+  items.forEach(function(item){
+    var code = String(item.costCode || '');
+    if (!byCC[code]) { byCC[code] = []; ccCodes.push(code); }
+    byCC[code].push(item);
+  });
+  // Numeric-aware sort, uncategorized last
+  ccCodes.sort(function(a, b){
+    if (!a && b) return 1;
+    if (a && !b) return -1;
+    return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+  });
+
+  // Vendor map for name lookups
+  var vendorMap = {};
+  (db.vendors || []).forEach(function(v){ vendorMap[String(v.id)] = v; });
+
+  var html = '<div class="proc-mob">';
+
+  ccCodes.forEach(function(code){
+    var sectionItems = byCC[code];
+    var cc = ccByCode[code];
+    var headerText = code
+      ? (cc && cc.description ? cc.description : 'Code ' + code)
+      : 'Uncategorized';
+    var sectionKey = code || '__uncategorized__';
+    var collapsed = !!_procMobSectionCollapsed[sectionKey];
+
+    html += '<div class="proc-mob-section' + (collapsed ? ' collapsed' : '') + '">' +
+      '<button type="button" class="proc-mob-sec-hd" ' +
+        'onclick="procMobToggleSection(\'' + _procEsc(sectionKey) + '\')" ' +
+        'aria-expanded="' + (!collapsed) + '">' +
+        '<span class="proc-mob-sec-caret">▾</span>' +
+        '<span class="proc-mob-sec-name">' + _procEsc(headerText) + '</span>' +
+        '<span class="proc-mob-sec-count">' + sectionItems.length + ' item' + (sectionItems.length === 1 ? '' : 's') + '</span>' +
+      '</button>' +
+      '<div class="proc-mob-sec-body">';
+
+    sectionItems.forEach(function(item){
+      // Linked PO entries with charges filtered out — same logic as PDF
+      var allEntries = idx.byItemId[String(item.id)] || [];
+      var entries = allEntries.filter(function(e){ return !_procIsChargePoLine(e.line); });
+      var hasPO = entries.length > 0;
+      var multiplePO = entries.length > 1;
+      var rollup = _procRollup(entries);
+      var bprAssignments = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
+      var bprQtySum = 0;
+      bprAssignments.forEach(function(a){ bprQtySum += Number(a.qty) || 0; });
+      var hasBpr = bprAssignments.length > 0;
+
+      // Parent description / qty / unit — same priority ladder as PDF:
+      //   single PO  → PO description / qty / unit
+      //   multi  PO  → item description, summed qty, shared unit
+      //   no PO     → item description, BPR-sum or manual qty, item unit
+      var parentDesc, parentQty, parentUnit;
+      if (hasPO && !multiplePO) {
+        var solo = entries[0].line;
+        parentDesc = solo.description || item.description || '(no description)';
+        parentQty  = Number(solo.qty) || 0;
+        parentUnit = solo.unit || '';
+      } else if (hasPO && multiplePO) {
+        parentDesc = item.description || '(no description)';
+        parentQty  = rollup.totalQty;
+        var unitsSeen = {};
+        entries.forEach(function(e){
+          var u = String(e.line.unit || '').trim();
+          if (u) unitsSeen[u] = true;
+        });
+        var unitKeys = Object.keys(unitsSeen);
+        parentUnit = (unitKeys.length === 1) ? unitKeys[0] : (item.unit || '');
+      } else {
+        parentDesc = item.description || '(no description)';
+        if (hasBpr) parentQty = bprQtySum;
+        else if (item.manualQty != null && item.manualQty !== '') parentQty = Number(item.manualQty);
+        else parentQty = null;
+        parentUnit = item.unit || '';
+      }
+
+      var qtyText = (parentQty != null && isFinite(parentQty))
+        ? _procFmtQtyComma(parentQty) + (parentUnit ? ' ' + parentUnit : '')
+        : '—';
+      var leadText  = (item.leadTimeDays != null && item.leadTimeDays !== '')
+        ? (item.leadTimeDays + ' d') : '—';
+      var orderText = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '—';
+      var delivText = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '—';
+
+      var vendorNames = (Array.isArray(item.vendorIds) ? item.vendorIds : []).map(function(vid){
+        var v = vendorMap[String(vid)];
+        return v ? (v.name || '(unnamed)') : null;
+      }).filter(Boolean);
+      var vendorText = vendorNames.length ? vendorNames.join(', ') : '—';
+
+      var badge = '';
+      if (hasPO)       badge = '<span class="proc-mob-badge proc-mob-badge-po">PO</span>';
+      else if (hasBpr) badge = '<span class="proc-mob-badge proc-mob-badge-bpr">BPR</span>';
+
+      html += '<div class="proc-mob-item">' +
+        '<div class="proc-mob-item-top">' +
+          '<div class="proc-mob-item-desc">' + _procEsc(parentDesc) + '</div>' +
+          badge +
+        '</div>' +
+        '<div class="proc-mob-item-vendor">' + _procEsc(vendorText) + '</div>' +
+        '<div class="proc-mob-item-grid">' +
+          '<div><span class="lbl">Qty</span><span class="val">' + _procEsc(qtyText) + '</span></div>' +
+          '<div><span class="lbl">Lead</span><span class="val">' + _procEsc(leadText) + '</span></div>' +
+          '<div><span class="lbl">Ordered</span><span class="val">' + _procEsc(orderText) + '</span></div>' +
+          '<div><span class="lbl">Delivery</span><span class="val">' + _procEsc(delivText) + '</span></div>' +
+        '</div>';
+
+      // Multi-PO expander — shared state with the desktop drawer so the
+      // open/closed state carries across orientation changes.
+      if (multiplePO) {
+        var itemIdStr = String(item.id);
+        var isOpen = !!_procDrawerOpen[itemIdStr];
+        html += '<button type="button" class="proc-mob-expander" ' +
+                'onclick="procToggleDrawer(\'' + _procEsc(itemIdStr) + '\')">' +
+                (isOpen ? '▾ Hide' : '▸ Show') + ' PO detail (' + entries.length + ' lines)' +
+                '</button>';
+        if (isOpen) {
+          html += '<div class="proc-mob-po-detail">';
+          entries.forEach(function(e){
+            var lineDesc = e.line.description || '(no description)';
+            var lineQty  = Number(e.line.qty) || 0;
+            var lineUnit = e.line.unit || '';
+            var lineQtyText = _procFmtQtyComma(lineQty) + (lineUnit ? ' ' + lineUnit : '');
+            html += '<div class="proc-mob-po-line">' +
+                      '<div class="desc">' + _procEsc(lineDesc) + '</div>' +
+                      '<div class="qty">' + _procEsc(lineQtyText) + '</div>' +
+                    '</div>';
+          });
+          html += '</div>';
+        }
+      }
+
+      html += '</div>'; // end .proc-mob-item
+    });
+
+    html += '</div></div>'; // end .proc-mob-sec-body, .proc-mob-section
+  });
+
+  html += '</div>'; // end .proc-mob
+  return html;
+}
+
+// Toggle collapsed state for a mobile cost-code section and re-render.
+// In-memory only — section state resets on page reload.
+function procMobToggleSection(sectionKey) {
+  _procMobSectionCollapsed[sectionKey] = !_procMobSectionCollapsed[sectionKey];
+  renderProjectProcurement();
 }
 
 function _procRenderItemRow(item, entries) {
