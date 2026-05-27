@@ -1517,10 +1517,6 @@ textarea{resize:vertical;min-height:72px}
     <!-- Submittals on this project (Round 2B) — populated by
          renderProjectSubmittalsSection() once the project has been saved. -->
     <div id="nprj-submittals-section"></div>
-    <!-- Transmittals on this project — populated by
-         renderProjectTransmittalsSection(). Sibling to the submittals
-         block; shows compile-event history with edit/delete. -->
-    <div id="nprj-transmittals-section" style="margin-top:12px"></div>
   </div>
 
   <!-- ─── TAB 4: PO'S & SUBS ─────────────────────────────────────── -->
@@ -1832,6 +1828,17 @@ textarea{resize:vertical;min-height:72px}
         </label>
       </div>
     </div>
+  </div>
+
+  <!-- ── BPR Classification → Cost Code Map (Round 4.1) ───────────────── -->
+  <div class="card">
+    <div class="ch"><span class="ct">BPR Classification → Cost Code Map</span><span style="font-size:11px;color:#888;font-weight:400">Pre-fills the cost code when importing procurement items from a Bid Price Report</span></div>
+    <div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">
+      Each entry maps a BPR classification (and optionally a specific material code within it) to a Foundation cost code.
+      When the picker resolves a row, project overrides beat global, and material-specific entries beat class-only entries.
+      Entries are usually populated automatically via the "Remember these cost codes?" prompt after a BPR import — use the manual editor below only when you want to set defaults up-front.
+    </div>
+    <div id="t-bpr-ccmap"></div>
   </div>
 
   <!-- ── Budget template lines (Chunk 1: read-only view; editing in later chunk) ─ -->
@@ -2661,13 +2668,6 @@ var DB_DEFAULTS = {
   // Library-linked items reference a product (productId); custom items
   // (shop drawings, samples, RFI placeholders) set isCustom=true.
   submittals: [],
-  // Transmittals (each act of compiling/sending a submittal package as
-  // a PDF transmittal). One row per compile event. Persists the
-  // assigned transmittal number, date, and which submittals were
-  // included so the autonumber + history features work correctly.
-  // Project-scoped via projectId. Each transmittal is uniquely numbered
-  // within its project (max(no) + 1).
-  transmittals: [],
   // Spec sections (Round 5) — master list managed via Templates.
   // Replaces the hardcoded CSI_SECTIONS constant; that constant remains
   // as a fallback for environments where the round5 migration hasn't
@@ -5389,7 +5389,7 @@ function renderMobileSubmittalDetail() {
       '<div class="mob-sub-kv"><div class="k">Due date</div><div class="v ' + dueCls + '">' + _mobEsc(dueDisplay) + '</div></div>' +
       '<div class="mob-sub-kv"><div class="k">Response date</div><div class="v">' + _mobEsc(respDisplay) + '</div></div>' +
       '<div class="mob-sub-kv"><div class="k">Sent date</div><div class="v">' + _mobEsc(sentDisplay) + '</div></div>' +
-      '<div class="mob-sub-kv"><div class="k">Transmittal #</div><div class="v">' + (function(){ var _t = _latestTransmittalForSubmittal(s.id); return _mobEsc(_t ? String(_t.no) : '—'); })() + '</div></div>' +
+      '<div class="mob-sub-kv"><div class="k">Transmittal #</div><div class="v">' + _mobEsc(s.transmittalNo || '—') + '</div></div>' +
       (s.notes ? '<div class="mob-sub-kv full"><div class="k">Notes</div><div class="v" style="white-space:pre-wrap;font-weight:400">' + _mobEsc(s.notes) + '</div></div>' : '') +
     '</div>' +
     contactBlock +
@@ -8313,27 +8313,6 @@ function getSubmittal(id) {
   return (db.submittals || []).find(function(s){ return String(s.id) === String(id); });
 }
 
-// Returns the most-recent transmittal (compile event) that included the
-// given submittal id, or null if the submittal hasn't been transmitted
-// yet. Sort order: date desc, then createdAt desc, then no desc. Used
-// by the mobile submittal detail view and the project Transmittals
-// section.
-function _latestTransmittalForSubmittal(submittalId) {
-  if (!Array.isArray(db.transmittals)) return null;
-  var matches = db.transmittals.filter(function(t){
-    return Array.isArray(t.submittalIds) && t.submittalIds.some(function(id){ return String(id) === String(submittalId); });
-  });
-  if (!matches.length) return null;
-  matches.sort(function(a, b){
-    var da = String(a.date || ''), dbb = String(b.date || '');
-    if (dbb !== da) return dbb < da ? -1 : 1;
-    var ca = String(a.createdAt || ''), cb = String(b.createdAt || '');
-    if (cb !== ca) return cb < ca ? -1 : 1;
-    return (b.no || 0) - (a.no || 0);
-  });
-  return matches[0];
-}
-
 function getProjectName(id) {
   var p = (db.projects || []).find(function(x){ return String(x.id) === String(id); });
   if (!p) return '—';
@@ -10584,10 +10563,10 @@ async function _appendCompileDocToJsPdf(doc, docRec, bucket, submittal) {
   }
 
   try {
-    if (isPdf)   return await _appendPdfBytesToJsPdf(doc, ab, true);
+    if (isPdf)   return await _appendPdfBytesToJsPdf(doc, ab);
     if (isImage) return await _appendImageBytesToJsPdf(doc, ab, ct || 'image/jpeg');
     // Unknown extension — try PDF first, then image
-    try { return await _appendPdfBytesToJsPdf(doc, ab, true); }
+    try { return await _appendPdfBytesToJsPdf(doc, ab); }
     catch (e) {
       try { return await _appendImageBytesToJsPdf(doc, ab, 'image/jpeg'); }
       catch (e2) {
@@ -11135,23 +11114,14 @@ function showSubmittalPackageCompile(submittalId) {
   var proj = (db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {};
   var cust = proj.customerId ? (db.customers || []).find(function(c){ return String(c.id) === String(proj.customerId); }) : null;
 
-  // Build the project contact dropdown — restricted to customer-side
-  // PMs that are actually assigned to THIS project via contactAssignments.
-  // If no customer contacts are assigned yet, fall back to every PM at
-  // the customer company so you're never stuck without options.
-  // Pre-populate _compileContactsByPmId so onCompileContactChange can
-  // pull addresses without re-looking up.
+  // Build the project contact dropdown — every PM whose customerId
+  // matches the project's customer, regardless of whether it's listed
+  // in contactAssignments. Pre-populate _compileContactsByPmId so
+  // onCompileContactChange can pull addresses without re-looking up.
   _compileContactsByPmId = {};
-  var assignedPmIds = {};
-  (Array.isArray(proj.contactAssignments) ? proj.contactAssignments : []).forEach(function(a){
-    if (a && a.pmId) assignedPmIds[String(a.pmId)] = true;
-  });
-  var allCustomerPms = (db.pms || []).filter(function(pm){
+  var customerPms = (db.pms || []).filter(function(pm){
     return cust && String(pm.customerId) === String(cust.id);
-  });
-  var customerPms = allCustomerPms.filter(function(pm){ return assignedPmIds[String(pm.id)]; });
-  if (!customerPms.length) customerPms = allCustomerPms;  // safety fallback
-  customerPms.sort(function(a, b){
+  }).sort(function(a, b){
     return String(a.lastName || '').localeCompare(String(b.lastName || ''));
   });
   customerPms.forEach(function(pm){ _compileContactsByPmId[String(pm.id)] = pm; });
@@ -11168,13 +11138,7 @@ function showSubmittalPackageCompile(submittalId) {
   }
   if (!defaultPmId && customerPms.length) defaultPmId = String(customerPms[0].id);
 
-  // Helper: build the To block text from a PM record + customer.
-  // Customer mailing address mirrors the From block format:
-  //   Name (Company)
-  //   Street
-  //   City, State Zip
-  // Customers store the city/state/zip line as a single concatenated
-  // string in `cityState` (or, on older records, `city`).
+  // Helper: build the To block text from a PM record + customer
   function _buildToBlock(pm, c) {
     var lines = [];
     if (pm) {
@@ -11184,8 +11148,8 @@ function showSubmittalPackageCompile(submittalId) {
     } else if (c) {
       lines.push(c.name || '');
     }
-    if (c && c.address)                lines.push(c.address);
-    if (c && (c.cityState || c.city))  lines.push(c.cityState || c.city);
+    if (c && c.address)   lines.push(c.address);
+    if (c && c.cityState) lines.push(c.cityState);
     return lines.filter(Boolean).join('\n');
   }
   var defaultPm = defaultPmId ? _compileContactsByPmId[defaultPmId] : null;
@@ -11241,18 +11205,6 @@ function showSubmittalPackageCompile(submittalId) {
   // Today's date (yyyy-mm-dd) for the date inputs
   var todayIso = (new Date()).toISOString().slice(0, 10);
 
-  // Auto-number transmittals per-project: max(no) across every
-  // transmittal on this project + 1. Each compile bumps to a new number
-  // (matches Procore behavior — each act of transmitting is its own
-  // event). Field stays editable so the user can override if needed.
-  // Self-healing: deleting a transmittal frees its number for reuse.
-  var nextTransmittalNo = 1;
-  (db.transmittals || []).forEach(function(t){
-    if (String(t.projectId) !== String(anchor.projectId)) return;
-    var n = parseInt(t.no, 10);
-    if (!isNaN(n) && n >= nextTransmittalNo) nextTransmittalNo = n + 1;
-  });
-
   // Build the items list with checkboxes (per-submittal include/exclude).
   // The cover sheet's items table will be per-document; this list lets
   // the PC choose which submittals' docs are pulled into the package.
@@ -11302,8 +11254,8 @@ function showSubmittalPackageCompile(submittalId) {
     '<div class="fg">' +
       // Title / transmittal #
       '<div class="fgr"><label>Transmittal #</label>' +
-        '<input id="cmp-trans-no" type="number" min="1" step="1" value="' + nextTransmittalNo + '" style="width:80px">' +
-        '<div style="font-size:10px;color:#888;margin-top:3px">Auto-filled as next # for this project; edit if needed.</div>' +
+        '<input id="cmp-trans-no" type="number" min="1" step="1" value="1" style="width:80px">' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">Counter you keep manually for this project (Procore auto-generates this; here you set it).</div>' +
       '</div>' +
       '<div class="fgr"><label>Title — Submittal #/name (auto)</label><input id="cmp-title-sub" value="' + subEsc(defaultTitleSubmittal) + '"></div>' +
 
@@ -11314,7 +11266,7 @@ function showSubmittalPackageCompile(submittalId) {
       // Recipient picker + To block
       '<div class="fgr full"><label>Project contact (recipient)</label>' +
         '<select id="cmp-contact-pm" onchange="onCompileContactChange()">' + contactOpts + '</select>' +
-        '<div style="font-size:10px;color:#888;margin-top:3px">Contacts assigned to this project. If none are assigned, the full customer PM list is shown. Selecting one auto-fills the To block with their company\'s mailing address; you can edit further below.</div>' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">Pulled from this project\'s customer\'s PM list. Selecting one auto-fills the To block; you can edit further below.</div>' +
       '</div>' +
       '<div class="fgr"><label>To</label><textarea id="cmp-to" rows="3">' + subEsc(defaultTo) + '</textarea></div>' +
       '<div class="fgr"><label>From</label><textarea id="cmp-from" rows="3">' + subEsc(defaultFrom) + '</textarea></div>' +
@@ -11369,8 +11321,8 @@ function onCompileContactChange() {
   var nm = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim();
   var cn = cust && cust.name ? cust.name : '';
   lines.push(nm + (cn ? ' (' + cn + ')' : ''));
-  if (cust && cust.address)                lines.push(cust.address);
-  if (cust && (cust.cityState || cust.city)) lines.push(cust.cityState || cust.city);
+  if (cust && cust.address)   lines.push(cust.address);
+  if (cust && cust.cityState) lines.push(cust.cityState);
   to.value = lines.filter(Boolean).join('\n');
 }
 
@@ -11816,41 +11768,6 @@ async function compileSubmittalPackage() {
     else                       fname = 'KMI_Submittal_' + (new Date()).toISOString().slice(0, 10) + '.pdf';
     doc.save(fname);
 
-    // Persist this transmittal event so it shows up in history, drives
-    // the autonumber on the next compile, and lets the user edit/delete
-    // it later. Captures every INCLUDED submittal (not skipped ones).
-    try {
-      var _includedIds = allInPkg
-        .filter(function(s){ return includedSet[String(s.id)]; })
-        .map(function(s){ return s.id; });
-      var _transNoInt = parseInt(transNo, 10);
-      if (!Array.isArray(db.transmittals)) db.transmittals = [];
-      var _transRec = {
-        id:              Date.now(),
-        projectId:       anchor ? anchor.projectId : null,
-        no:              isNaN(_transNoInt) ? 0 : _transNoInt,
-        date:            sentDateIso || dateCreatedIso || (new Date().toISOString().slice(0,10)),
-        submittalIds:    _includedIds,
-        createdAt:       new Date().toISOString(),
-        createdByUserId: (_currentUser && _currentUser.id) ? _currentUser.id : null
-      };
-      db.transmittals.push(_transRec);
-      saveDB();
-      if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-        try {
-          var _r = await supabaseClient.from('kmi_transmittals').upsert(toSBTransmittal(_transRec));
-          if (_r && _r.error) console.warn('transmittal push warning:', _r.error.message);
-        } catch (e) { console.warn('transmittal push threw:', e); }
-      }
-      // Refresh the project-detail Transmittals section in case the user
-      // is viewing it (no-op otherwise).
-      if (typeof renderProjectTransmittalsSection === 'function') {
-        renderProjectTransmittalsSection();
-      }
-    } catch (e) {
-      console.warn('Persist transmittal failed:', e);
-    }
-
     if (status) {
       var msg = '<span style="color:#3B6D11">Generated ' + docItems.length + ' transmittal item(s), ' + totalAppendedPages + ' attached page(s)</span>';
       if (skipped.length) msg += ' <span style="color:#9A7A2E">— ' + skipped.length + ' not appended (see last page)</span>';
@@ -11995,159 +11912,6 @@ function renderProjectSubmittalsSection() {
     return;
   }
   el.innerHTML = renderProjectSubmittalsBlock(_editProjectId);
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// TRANSMITTALS — Project Detail block
-// ═══════════════════════════════════════════════════════════════════════
-// Each row in db.transmittals captures one compile event: project, no,
-// date, included submittal IDs. This block lists them under the project,
-// most recent first, with override (edit) and delete buttons.
-
-function renderProjectTransmittalsBlock(projectId) {
-  if (!projectId) return '';
-  var rows = (db.transmittals || []).filter(function(t){
-    return String(t.projectId) === String(projectId);
-  });
-  // Most recent first: by no desc (within a project, no roughly tracks time)
-  rows.sort(function(a, b){ return (b.no || 0) - (a.no || 0); });
-
-  var canEdit = canAccess('edit-submittals') === 'full';
-  var header =
-    '<div class="ch" style="display:flex;align-items:center;justify-content:space-between">' +
-      '<div class="mt" style="margin:0">Transmittals</div>' +
-      '<div style="font-size:11px;color:#888">Compile events for this project</div>' +
-    '</div>';
-
-  if (!rows.length) {
-    return '<div class="card">' + header +
-      '<div style="padding:14px;color:#888;font-size:13px">No transmittals yet. Generate one from a submittal package via Compile transmittal.</div>' +
-    '</div>';
-  }
-
-  function _fmtDate(iso) {
-    if (!iso) return '—';
-    var d = new Date(iso + (iso.length === 10 ? 'T00:00:00' : ''));
-    if (isNaN(d.getTime())) return iso;
-    return d.toLocaleDateString('en-US', {year:'numeric', month:'short', day:'numeric'});
-  }
-
-  function _summarize(t) {
-    var subs = (Array.isArray(t.submittalIds) ? t.submittalIds : [])
-      .map(function(id){ return getSubmittal(id); })
-      .filter(Boolean);
-    if (!subs.length) return '<span style="color:#888">(none)</span>';
-    // Show distinct packageName(s) + count, plus the first kmiSubmittalNo
-    var pkgs = {};
-    subs.forEach(function(s){ if (s.packageName) pkgs[s.packageName] = true; });
-    var pkgNames = Object.keys(pkgs);
-    var first = subs[0];
-    var firstNo = subEsc(first.kmiSubmittalNo || ('#' + first.id));
-    var pkgLabel = pkgNames.length === 1 ? subEsc(pkgNames[0])
-                  : pkgNames.length > 1  ? (pkgNames.length + ' packages')
-                  : '';
-    return firstNo + (subs.length > 1 ? ' + ' + (subs.length - 1) + ' more' : '') +
-           (pkgLabel ? ' <span style="color:#888;font-size:11px">— ' + pkgLabel + '</span>' : '');
-  }
-
-  var body = rows.map(function(t){
-    var actions = canEdit
-      ? '<button class="btn" style="font-size:11px;padding:3px 8px" onclick="editTransmittal(\'' + subEsc(t.id) + '\')">Edit</button> ' +
-        '<button class="btn" style="font-size:11px;padding:3px 8px;color:#A32D2D" onclick="deleteTransmittal(\'' + subEsc(t.id) + '\')">Delete</button>'
-      : '';
-    return '<tr>' +
-      '<td style="padding:6px 8px;font-weight:600">#' + subEsc(String(t.no || '?')) + '</td>' +
-      '<td style="padding:6px 8px">' + subEsc(_fmtDate(t.date)) + '</td>' +
-      '<td style="padding:6px 8px;font-size:12px">' + _summarize(t) + '</td>' +
-      '<td style="padding:6px 8px;text-align:right">' + actions + '</td>' +
-    '</tr>';
-  }).join('');
-
-  return '<div class="card">' + header +
-    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">' +
-      '<thead><tr style="border-bottom:1px solid #ddd;color:#666;font-size:11px;text-transform:uppercase">' +
-        '<th style="padding:6px 8px;text-align:left;width:80px">Trans. #</th>' +
-        '<th style="padding:6px 8px;text-align:left;width:120px">Date</th>' +
-        '<th style="padding:6px 8px;text-align:left">Submittals</th>' +
-        '<th style="padding:6px 8px;text-align:right;width:130px"></th>' +
-      '</tr></thead><tbody>' + body + '</tbody></table></div>' +
-  '</div>';
-}
-
-// Wrapper used by Project Detail; fills the nprj-transmittals-section div.
-function renderProjectTransmittalsSection() {
-  var el = g('nprj-transmittals-section');
-  if (!el) return;
-  if (!_editProjectId) { el.innerHTML = ''; return; }
-  if (canAccess('view-submittals') === 'none') { el.innerHTML = ''; return; }
-  el.innerHTML = renderProjectTransmittalsBlock(_editProjectId);
-}
-
-// Edit modal — override transmittal number and/or date for an existing
-// transmittal record. Useful when a number was assigned wrong and only
-// caught after the fact.
-function editTransmittal(transmittalId) {
-  if (!requireFull('edit-submittals', 'edit transmittals')) return;
-  var t = (db.transmittals || []).find(function(x){ return String(x.id) === String(transmittalId); });
-  if (!t) { alert('Transmittal not found.'); return; }
-  var html =
-    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
-    '<div class="mt">Edit transmittal #' + subEsc(String(t.no || '')) + '</div>' +
-    '<div class="msb">Override the assigned number or date. Affects history and the next autonumber.</div>' +
-    '<div class="fg">' +
-      '<div class="fgr"><label>Transmittal #</label>' +
-        '<input id="et-no" type="number" min="1" step="1" value="' + subEsc(String(t.no || '')) + '" style="width:120px"></div>' +
-      '<div class="fgr"><label>Date</label>' +
-        '<input id="et-date" type="date" value="' + subEsc(t.date || '') + '"></div>' +
-    '</div>' +
-    '<div class="mfooter">' +
-      '<button class="btn" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-p" onclick="saveTransmittalEdit(\'' + subEsc(t.id) + '\')">Save</button>' +
-    '</div>';
-  openModal(html);
-}
-
-async function saveTransmittalEdit(transmittalId) {
-  var t = (db.transmittals || []).find(function(x){ return String(x.id) === String(transmittalId); });
-  if (!t) { closeModal(); return; }
-  var newNo   = parseInt(g('et-no').value, 10);
-  var newDate = (g('et-date').value || '').trim();
-  if (isNaN(newNo) || newNo < 1) { alert('Transmittal # must be a positive number.'); return; }
-  // Warn if newNo collides with another transmittal on the same project
-  var collision = (db.transmittals || []).find(function(x){
-    return String(x.id) !== String(t.id) &&
-           String(x.projectId) === String(t.projectId) &&
-           parseInt(x.no, 10) === newNo;
-  });
-  if (collision) {
-    if (!confirm('Transmittal #' + newNo + ' is already used on this project. Save anyway?')) return;
-  }
-  t.no = newNo;
-  t.date = newDate || null;
-  saveDB();
-  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-    try {
-      var r = await supabaseClient.from('kmi_transmittals').upsert(toSBTransmittal(t));
-      if (r && r.error) console.warn('transmittal update warning:', r.error.message);
-    } catch (e) { console.warn('transmittal update threw:', e); }
-  }
-  closeModal();
-  renderProjectTransmittalsSection();
-}
-
-async function deleteTransmittal(transmittalId) {
-  if (!requireFull('edit-submittals', 'delete transmittals')) return;
-  var t = (db.transmittals || []).find(function(x){ return String(x.id) === String(transmittalId); });
-  if (!t) return;
-  if (!confirm('Delete transmittal #' + (t.no || '?') + '?\n\nThe PDF you already downloaded is unaffected. This only removes the tracking record. The next compile will reuse this number if it was the highest.')) return;
-  db.transmittals = (db.transmittals || []).filter(function(x){ return String(x.id) !== String(transmittalId); });
-  saveDB();
-  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-    try {
-      await supabaseClient.from('kmi_transmittals').delete().eq('id', transmittalId);
-    } catch (e) { console.warn('transmittal delete threw:', e); }
-  }
-  renderProjectTransmittalsSection();
 }
 
 function goToSubmittalsForProject(projectId) {
@@ -13119,43 +12883,21 @@ function _fitToLetterPage(srcW, srcH) {
 
 // Append every page of a PDF (given as ArrayBuffer) onto a jsPDF doc as
 // rasterised JPEG pages. Each source page becomes one new page in the doc.
-//
-// `preserveNative` (optional, default false):
-//   • false → legacy behavior: every appended page is forced to letter
-//     portrait and the rendered raster is fit-to-letter (keeps aspect).
-//     This is what CORs and T&M ticket compiles rely on.
-//   • true  → each appended page keeps the source PDF's own width,
-//     height, and orientation. Required for submittal package compile
-//     because shop drawings are routinely landscape D-size (or larger)
-//     and must NOT be crammed onto a letter-portrait page.
-//   Mixed page sizes in the output PDF are handled natively by Adobe,
-//   Bluebeam, Procore, etc. — same approach Procore's own compiler uses.
-async function _appendPdfBytesToJsPdf(doc, arrayBuffer, preserveNative) {
+async function _appendPdfBytesToJsPdf(doc, arrayBuffer) {
   if (!window.pdfjsLib) throw new Error('pdf.js not loaded.');
   var pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  var SCALE = 2.0;
   for (var i = 1; i <= pdf.numPages; i++) {
     var page = await pdf.getPage(i);
-    var viewport = page.getViewport({ scale: SCALE });
+    var viewport = page.getViewport({ scale: 2.0 });
     var canvas = document.createElement('canvas');
     canvas.width  = viewport.width;
     canvas.height = viewport.height;
     var ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport: viewport }).promise;
     var imgData = canvas.toDataURL('image/jpeg', 0.85);
-
-    if (preserveNative) {
-      // Native page dimensions in PDF points (viewport is at SCALE×)
-      var pageWpt = viewport.width  / SCALE;
-      var pageHpt = viewport.height / SCALE;
-      var orient = pageWpt > pageHpt ? 'l' : 'p';
-      doc.addPage([pageWpt, pageHpt], orient);
-      doc.addImage(imgData, 'JPEG', 0, 0, pageWpt, pageHpt);
-    } else {
-      var fit = _fitToLetterPage(viewport.width, viewport.height);
-      doc.addPage();
-      doc.addImage(imgData, 'JPEG', fit.x, fit.y, fit.w, fit.h);
-    }
+    var fit = _fitToLetterPage(viewport.width, viewport.height);
+    doc.addPage();
+    doc.addImage(imgData, 'JPEG', fit.x, fit.y, fit.w, fit.h);
   }
   return pdf.numPages;
 }
@@ -26453,7 +26195,6 @@ function initNewProject() {
   renderProjectParametersSection();
   renderProjectAttachments();
   renderProjectSubmittalsSection();
-  renderProjectTransmittalsSection();
 
   // Stash the source opp id on the form for saveProject() to read, then clear the module-level var
   g('nprj-save-btn').dataset.oppId = _newProjectFromOppId || '';
@@ -26629,7 +26370,6 @@ function editProject(id) {
   renderProjectParametersSection();
   renderProjectAttachments();
   renderProjectSubmittalsSection();
-  renderProjectTransmittalsSection();
 
   g('nprj-save-btn').dataset.oppId = '';
 }
@@ -27465,6 +27205,7 @@ function renderTemplates() {
   renderLaborRates();
   renderMaterialTemplates();
   renderFoundationMasterStatus();
+  renderBprCostCodeMap();
   renderBudgetTemplateTable();
   renderBudgetSettingsForms();
   renderAutoRoutes();
@@ -29527,10 +29268,15 @@ function procOpenBprPicker(preserveState) {
     _bprPickerSelections = {};
     _bprPickerGroups = [];
     _bprPickerGroupOf = {};
+    _bprPickerCostCodes = {};
+    _bprPickerInitialCostCodes = {};
     bpr.forEach(function(b){
       var assigned = assignedById[String(b.id)] || 0;
       var fullyAssigned = assigned >= (Number(b.quantity) || 0) - 0.001;
       _bprPickerSelections[b.id] = !b.defaultSkip && !fullyAssigned;
+      var resolved = _resolveBprCostCode(p, b);
+      _bprPickerCostCodes[b.id] = resolved;
+      _bprPickerInitialCostCodes[b.id] = resolved;
     });
   }
 
@@ -29605,6 +29351,16 @@ function _bprPickerHtml(p, groups, classOrder, assignedById) {
       (isOther ? ' <span style="font-weight:400;font-size:10px;color:#5D4391">(lump-sum, no breakdown)</span>' : '') +
       '</div>';
 
+    // Cost code dropdown options — built once per class section since
+    // every row shares the same list. The `selected` attribute is set
+    // per row below.
+    var ccBudgetable = (db.costCodes || []).filter(function(c){
+      return c.isBudgetable && c.active !== false;
+    }).sort(function(a, b){ return String(a.code).localeCompare(String(b.code), undefined, {numeric:true}); });
+    var ccOptsBase = '<option value="">—</option>' + ccBudgetable.map(function(c){
+      return '<option value="' + _procEsc(c.code) + '">' + _procEsc(c.code) + ' — ' + _procEsc(c.description || '') + '</option>';
+    }).join('');
+
     html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa">' +
       '<tr>' +
         '<th style="padding:6px 8px;width:36px"></th>' +
@@ -29612,8 +29368,9 @@ function _bprPickerHtml(p, groups, classOrder, assignedById) {
         '<th style="padding:6px 8px;text-align:left;width:80px">Code</th>' +
         '<th style="padding:6px 8px;text-align:right;width:90px">Quantity</th>' +
         '<th style="padding:6px 8px;text-align:left;width:60px">Unit</th>' +
-        '<th style="padding:6px 8px;text-align:right;width:90px">Unit cost</th>' +
-        '<th style="padding:6px 8px;text-align:right;width:100px">Ext. cost</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:80px">Unit cost</th>' +
+        '<th style="padding:6px 8px;text-align:right;width:90px">Ext. cost</th>' +
+        '<th style="padding:6px 8px;text-align:left;width:170px">Cost code</th>' +
       '</tr></thead><tbody>';
 
     list.forEach(function(b){
@@ -29645,6 +29402,24 @@ function _bprPickerHtml(p, groups, classOrder, assignedById) {
         groupBadge = ' <span style="font-size:10px;color:#2E6B36;background:#D7EBC4;padding:1px 6px;border-radius:8px" title="In group: ' + _procEsc(groupLabel) + '">⊕ ' + _procEsc(groupLabel) + '</span>';
       }
 
+      // Cost-code dropdown — pre-fills from the resolver. Changes go
+      // straight into _bprPickerCostCodes; the row is otherwise
+      // re-rendered fresh from state on next picker refresh.
+      var currentCC = String(_bprPickerCostCodes[b.id] || '');
+      var ccOpts;
+      if (currentCC) {
+        // Mark the matching option as selected. Escape the value for the
+        // RegExp so codes containing regex metacharacters (e.g. dots,
+        // dashes) don't blow up the match.
+        ccOpts = ccOptsBase.replace(
+          new RegExp('value="' + currentCC.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '"'),
+          function(m){ return m + ' selected'; }
+        );
+      } else {
+        // No code chosen — mark the "—" option as selected
+        ccOpts = ccOptsBase.replace('value=""', 'value="" selected');
+      }
+
       html += '<tr style="' + rowStyle + '">' +
         '<td style="padding:5px 8px;text-align:center"><input type="checkbox" data-bpr-pick="' + _procEsc(b.id) + '"' + checked + disabled + ' onchange="procBprToggle(this)"></td>' +
         '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.description || '(no description)') + statusBadge + rodHint + groupBadge + '</td>' +
@@ -29653,6 +29428,11 @@ function _bprPickerHtml(p, groups, classOrder, assignedById) {
         '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.unit || '') + '</td>' +
         '<td style="padding:5px 8px;font-size:11px;text-align:right;font-family:monospace">$' + _procFmtMoney(b.unitCost) + '</td>' +
         '<td style="padding:5px 8px;font-size:11px;text-align:right;font-family:monospace">$' + _procFmtMoney(b.extendedMatCost) + '</td>' +
+        '<td style="padding:5px 8px">' +
+          '<select onchange="procBprSetCostCode(\'' + _procEsc(b.id) + '\', this.value)" style="width:100%;padding:3px 6px;font-size:11px;border:1px solid #ddd;border-radius:4px">' +
+            ccOpts +
+          '</select>' +
+        '</td>' +
       '</tr>';
     });
 
@@ -29776,11 +29556,23 @@ function procBprSavePicker() {
     if (!assignments.length) return;  // every member fully assigned
 
     var weightedUnitCost = totalQty > 0 ? (totalDollars / totalQty) : 0;
+    // Pick a cost code for the combined group item. Strategy: take the
+    // first checked member's selected code. If members differ, the
+    // first wins (less astonishing than blanking) and the user can
+    // change it after via the edit modal.
+    var grpCC = '';
+    for (var gi = 0; gi < grp.memberIds.length; gi++) {
+      var mid = grp.memberIds[gi];
+      if (_bprPickerSelections[mid] && _bprPickerCostCodes[mid]) {
+        grpCC = _bprPickerCostCodes[mid];
+        break;
+      }
+    }
     var newItem = {
       id: _procNewItemId(),
       description: grp.label,
       unit: firstUnit,
-      costCode: '',
+      costCode: grpCC,
       unitCost: weightedUnitCost,
       leadTimeDays: null,
       manualQty: null,
@@ -29807,7 +29599,7 @@ function procBprSavePicker() {
       id: _procNewItemId(),
       description: b.description || b.materialCode || '(BPR material)',
       unit: b.unit || '',
-      costCode: '',
+      costCode: String(_bprPickerCostCodes[b.id] || ''),
       unitCost: Number(b.unitCost) || 0,
       leadTimeDays: null,
       manualQty: null,
@@ -29826,6 +29618,10 @@ function procBprSavePicker() {
     added++;
   });
 
+  // Compute the learn-mappings diff BEFORE clearing picker state, so we
+  // know which new mappings to propose persisting.
+  var newMappings = _bprComputeLearnMappings(p);
+
   // Clear transient picker state so the next open starts fresh
   _bprPickerGroups = [];
   _bprPickerGroupOf = {};
@@ -29839,6 +29635,164 @@ function procBprSavePicker() {
     if (skippedFullyAssigned) msg += ' Skipped ' + skippedFullyAssigned + ' fully-assigned.';
     showToast(added ? msg : 'No items selected.', added ? 'success' : 'info');
   }
+
+  // If the user set cost codes that aren't already in the map (either
+  // brand-new mappings or explicit overrides of the resolved default),
+  // surface a learn-as-you-go prompt so future imports pre-fill them
+  // automatically. Empty list → no prompt (silent path).
+  if (added && newMappings && newMappings.length) {
+    _bprPromptLearnMappings(p, newMappings);
+  }
+}
+
+// Change handler for the picker's cost-code dropdowns — updates the
+// in-memory selection without re-rendering (avoids losing focus).
+function procBprSetCostCode(bprId, value) {
+  if (!bprId) return;
+  _bprPickerCostCodes[String(bprId)] = String(value || '');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// LEARN-AS-YOU-GO — BPR class → cost code mappings
+// ─────────────────────────────────────────────────────────────────────
+// After the picker save, _bprComputeLearnMappings inspects every checked
+// row and returns the set of cost-code choices that are NOT already
+// covered by the current global+project map. Choices are compacted —
+// if every checked row in a given classCode landed on the same cost
+// code, one class-level entry is emitted; if codes vary within a class,
+// material-specific entries are emitted instead.
+
+function _bprComputeLearnMappings(project) {
+  var bprById = {};
+  (project.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+
+  // Group the user's chosen codes by classCode. For each class we
+  // track the distinct codes the user picked across its checked
+  // members, with the material codes those codes came from.
+  var byClass = {};  // classCode → { codes: { ccode: [materialCode...] } }
+
+  Object.keys(_bprPickerSelections).forEach(function(bprId){
+    if (!_bprPickerSelections[bprId]) return;
+    var b = bprById[bprId];
+    if (!b || !b.classCode) return;
+    var chosen = String(_bprPickerCostCodes[bprId] || '');
+    if (!chosen) return;  // unset codes don't propose mappings
+
+    // Skip if this exact mapping already exists in the resolved chain
+    // (i.e. user merely confirmed the default — nothing to learn).
+    if (_resolveBprCostCode(project, b) === chosen) return;
+
+    var cls = b.classCode;
+    var mat = String(b.materialCode || '');
+    byClass[cls] = byClass[cls] || { codes: {} };
+    byClass[cls].codes[chosen] = byClass[cls].codes[chosen] || [];
+    if (byClass[cls].codes[chosen].indexOf(mat) < 0) {
+      byClass[cls].codes[chosen].push(mat);
+    }
+  });
+
+  // Compact into final mappings. For each class:
+  //   - all rows agree on one code → emit class-only entry
+  //   - rows disagree → emit material-specific entries
+  var out = [];
+  Object.keys(byClass).forEach(function(cls){
+    var codes = Object.keys(byClass[cls].codes);
+    if (codes.length === 1) {
+      out.push({ classCode: cls, materialCode: null, costCode: codes[0] });
+    } else {
+      codes.forEach(function(ccode){
+        byClass[cls].codes[ccode].forEach(function(mat){
+          out.push({ classCode: cls, materialCode: mat || null, costCode: ccode });
+        });
+      });
+    }
+  });
+  return out;
+}
+
+function _bprPromptLearnMappings(project, mappings) {
+  if (!mappings || !mappings.length) return;
+
+  // Look up cost-code descriptions for the preview
+  var ccByCode = {};
+  (db.costCodes || []).forEach(function(c){ if (c.code) ccByCode[String(c.code)] = c; });
+
+  var rowsHtml = mappings.map(function(m){
+    var cc = ccByCode[m.costCode];
+    var ccLabel = m.costCode + (cc && cc.description ? ' — ' + cc.description : '');
+    return '<div style="display:flex;align-items:center;padding:5px 0;border-top:1px solid #f0f0ec;font-size:12px">' +
+      '<span style="font-family:monospace;color:#5D4391;min-width:60px">' + _procEsc(m.classCode) + '</span>' +
+      (m.materialCode
+        ? '<span style="font-family:monospace;color:#888;font-size:11px;margin-right:8px">/ ' + _procEsc(m.materialCode) + '</span>'
+        : '<span style="color:#888;font-size:11px;margin-right:8px">(all materials)</span>') +
+      '<span style="margin:0 8px;color:#888">→</span>' +
+      '<span>' + _procEsc(ccLabel) + '</span>' +
+    '</div>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Remember these cost codes?</div>' +
+    '<div class="msb">' +
+      'You set ' + mappings.length + ' cost code' + (mappings.length === 1 ? '' : 's') + ' that ' +
+      (mappings.length === 1 ? 'isn\'t' : 'aren\'t') + ' already in the BPR mapping. Saving will pre-fill ' +
+      (mappings.length === 1 ? 'this' : 'them') + ' the next time you import a BPR. Choose where to save:' +
+    '</div>' +
+    '<div class="sb3" style="margin-bottom:14px">' + rowsHtml + '</div>' +
+    '<div class="mbtns" style="flex-wrap:wrap;gap:8px">' +
+      '<button class="btn" onclick="closeModal()">Don\'t save</button>' +
+      '<button class="btn" onclick="_bprLearnMappingsApply(\'' + _procEsc(project.id) + '\', \'project\')" title="Save only on this project — global map untouched">Save to this project</button>' +
+      '<button class="btn btn-p" onclick="_bprLearnMappingsApply(\'' + _procEsc(project.id) + '\', \'global\')" title="Save globally — applies to all future BPR imports">Save globally</button>' +
+    '</div>'
+  );
+
+  // Stash the proposed mappings on a closure-accessible spot so the
+  // button handlers can find them without re-computing.
+  window._bprPendingLearnMappings = mappings;
+}
+
+function _bprLearnMappingsApply(projectId, scope) {
+  var mappings = window._bprPendingLearnMappings || [];
+  if (!mappings.length) { closeModal(); return; }
+
+  if (scope === 'global') {
+    db.bprCostCodeMap = Array.isArray(db.bprCostCodeMap) ? db.bprCostCodeMap : [];
+    _bprMergeMappingsInto(db.bprCostCodeMap, mappings);
+    // Persist to Supabase if connected
+    if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+      supabaseClient.from('kmi_settings')
+        .upsert({ key: 'bprCostCodeMap', value: db.bprCostCodeMap })
+        .then(function(r){ if (r && r.error) console.warn('bprCostCodeMap sync error:', r.error.message); });
+    }
+  } else {
+    var p = getProj(projectId); if (!p) { closeModal(); return; }
+    p.bprCostCodeMapOverrides = Array.isArray(p.bprCostCodeMapOverrides) ? p.bprCostCodeMapOverrides : [];
+    _bprMergeMappingsInto(p.bprCostCodeMapOverrides, mappings);
+  }
+
+  saveDB();
+  window._bprPendingLearnMappings = null;
+  closeModal();
+  if (typeof showToast === 'function') {
+    showToast('Saved ' + mappings.length + ' mapping' + (mappings.length === 1 ? '' : 's') + (scope === 'global' ? ' globally.' : ' to this project.'), 'success');
+  }
+  if (typeof renderTemplates === 'function' && document.querySelector('#pg-templates.active')) {
+    renderTemplates();
+  }
+}
+
+// Merge new mappings into an existing array. If a matching entry
+// (same classCode + materialCode pair) already exists, replace its
+// costCode; otherwise append.
+function _bprMergeMappingsInto(arr, mappings) {
+  mappings.forEach(function(m){
+    var idx = arr.findIndex(function(x){
+      return x.classCode === m.classCode &&
+             (x.materialCode || null) === (m.materialCode || null);
+    });
+    if (idx >= 0) arr[idx].costCode = m.costCode;
+    else arr.push({ classCode: m.classCode, materialCode: m.materialCode || null, costCode: m.costCode });
+  });
 }
 
 // Cleanup: when a procurement item is removed, its bprAssignments[] go
@@ -29886,6 +29840,43 @@ var _bprWorklistClassClosed  = {};      // classCode → true if collapsed
 // _bprPickerGroupOf: bprMaterialId → groupId (for fast lookup)
 var _bprPickerGroups   = [];
 var _bprPickerGroupOf  = {};
+
+// Round 4.1 — picker cost-code state. Initialized from the resolver
+// when the picker opens (preserveState=false). Tracks the user's
+// chosen cost code per BPR row independent of group membership.
+// _bprPickerInitialCostCodes captures the resolved default at open
+// time so the post-save "learn" step can detect which choices are
+// genuinely new (vs. confirming an existing mapping).
+var _bprPickerCostCodes         = {};
+var _bprPickerInitialCostCodes  = {};
+
+function _resolveBprCostCode(project, bprMaterial) {
+  if (!bprMaterial) return '';
+  var cls = String(bprMaterial.classCode || '');
+  var mat = String(bprMaterial.materialCode || '');
+  if (!cls) return '';
+
+  var pOverrides = Array.isArray(project && project.bprCostCodeMapOverrides)
+    ? project.bprCostCodeMapOverrides : [];
+  var gMap = Array.isArray(db.bprCostCodeMap) ? db.bprCostCodeMap : [];
+
+  function hit(list, requireMat) {
+    return list.find(function(m){
+      if (!m || m.classCode !== cls) return false;
+      if (requireMat) return String(m.materialCode || '') === mat;
+      return !m.materialCode;
+    });
+  }
+
+  // 1. project + materialCode  → 2. project class-only
+  // 3. global  + materialCode  → 4. global  class-only
+  var e;
+  if (mat) { e = hit(pOverrides, true); if (e) return e.costCode || ''; }
+  e = hit(pOverrides, false); if (e) return e.costCode || '';
+  if (mat) { e = hit(gMap,       true); if (e) return e.costCode || ''; }
+  e = hit(gMap, false);       if (e) return e.costCode || '';
+  return '';
+}
 
 function _bprNewGroupId() {
   return 'pg' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
@@ -31598,6 +31589,149 @@ function renderFoundationMasterStatus() {
   cfEl.innerHTML = cf
     ? '<span style="color:#3B6D11">&#10003; ' + cf + ' loaded</span>'
     : '<span style="color:#A32D2D">No data — upload required</span>';
+}
+
+// ── BPR Classification → Cost Code Map (Round 4.1) ───────────────────
+function renderBprCostCodeMap() {
+  var el = g('t-bpr-ccmap');
+  if (!el) return;
+  var rows = Array.isArray(db.bprCostCodeMap) ? db.bprCostCodeMap : [];
+  var ccBudgetable = (db.costCodes || []).filter(function(c){
+    return c.isBudgetable && c.active !== false;
+  }).sort(function(a, b){ return String(a.code).localeCompare(String(b.code), undefined, {numeric:true}); });
+
+  if (!ccBudgetable.length) {
+    el.innerHTML = '<div style="padding:14px;color:#A32D2D;font-size:12px;background:#FFF1F1;border:1px solid #EFCBCB;border-radius:6px">' +
+      'No budgetable cost codes loaded yet. Upload your Foundation cost-code CSV in the section above before configuring this map.' +
+    '</div>';
+    return;
+  }
+
+  var ccByCode = {};
+  ccBudgetable.forEach(function(c){ ccByCode[String(c.code)] = c; });
+
+  var rowsHtml = rows.length
+    ? rows.map(function(m, i){
+        var cc = ccByCode[String(m.costCode)];
+        var ccLabel = m.costCode ? (m.costCode + (cc && cc.description ? ' — ' + cc.description : ' <em style="color:#A32D2D">(no longer budgetable)</em>')) : '<span style="color:#aaa">—</span>';
+        return '<tr>' +
+          '<td style="font-family:monospace;padding:6px 10px;color:#5D4391">' + _procEsc(m.classCode || '') + '</td>' +
+          '<td style="font-family:monospace;padding:6px 10px;font-size:11px;color:#666">' +
+            (m.materialCode ? _procEsc(m.materialCode) : '<span style="color:#aaa">(all materials in this class)</span>') +
+          '</td>' +
+          '<td style="padding:6px 10px;font-size:11px">' + ccLabel + '</td>' +
+          '<td style="padding:6px 10px;text-align:right">' +
+            '<button class="btn btn-sm" onclick="bprCcMapEdit(' + i + ')" style="padding:2px 8px;font-size:11px;margin-right:4px">Edit</button>' +
+            '<button class="btn btn-sm" onclick="bprCcMapRemove(' + i + ')" style="padding:2px 8px;font-size:11px;color:#A32D2D">Remove</button>' +
+          '</td>' +
+        '</tr>';
+      }).join('')
+    : '<tr><td colspan="4" style="padding:14px;text-align:center;color:#aaa;font-size:12px">No mappings yet. Click <strong>+ Add mapping</strong> below or run a BPR import — the picker will offer to remember your cost-code choices.</td></tr>';
+
+  el.innerHTML =
+    '<table style="font-size:12px"><thead><tr>' +
+      '<th style="width:80px">BPR class</th>' +
+      '<th style="width:200px">Material code (optional)</th>' +
+      '<th>Cost code</th>' +
+      '<th style="width:140px"></th>' +
+    '</tr></thead><tbody>' + rowsHtml + '</tbody></table>' +
+    '<div style="margin-top:10px"><button class="btn btn-sm" onclick="bprCcMapEdit(-1)">+ Add mapping</button></div>';
+}
+
+function bprCcMapEdit(idx) {
+  if (!requireFull('templates', 'edit BPR cost code map')) return;
+  var rows = Array.isArray(db.bprCostCodeMap) ? db.bprCostCodeMap : [];
+  var editing = idx >= 0 && idx < rows.length;
+  var existing = editing ? rows[idx] : { classCode: '', materialCode: '', costCode: '' };
+
+  var ccBudgetable = (db.costCodes || []).filter(function(c){
+    return c.isBudgetable && c.active !== false;
+  }).sort(function(a, b){ return String(a.code).localeCompare(String(b.code), undefined, {numeric:true}); });
+
+  var ccOpts = '<option value="">—</option>' + ccBudgetable.map(function(c){
+    var sel = (existing.costCode === c.code) ? ' selected' : '';
+    return '<option value="' + _procEsc(c.code) + '"' + sel + '>' + _procEsc(c.code) + ' — ' + _procEsc(c.description || '') + '</option>';
+  }).join('');
+
+  // Build a datalist of known BPR classes from any current map entries
+  // + a small hard-coded fallback covering common Tradesmen classes.
+  var seen = {};
+  rows.forEach(function(m){ if (m.classCode) seen[m.classCode] = true; });
+  ['ANC','BRI','CMU','CUL','FLA','GRO','HML','INR','LIS','MES','MOR','OTH','PA','PAR','PCP','PRE','REB','SCA','SEA','STE','WIR'].forEach(function(c){ seen[c] = true; });
+  var classListOpts = Object.keys(seen).sort().map(function(c){
+    return '<option value="' + _procEsc(c) + '">';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&times;</button>' +
+    '<div class="mt">' + (editing ? 'Edit mapping' : 'Add mapping') + '</div>' +
+    '<div class="fg" style="margin:12px 0">' +
+      '<div class="fgr"><label>BPR class *</label>' +
+        '<input id="bpr-ccmap-class" list="bpr-ccmap-class-list" value="' + _procEsc(existing.classCode || '') + '" placeholder="e.g. BRI">' +
+        '<datalist id="bpr-ccmap-class-list">' + classListOpts + '</datalist>' +
+      '</div>' +
+      '<div class="fgr"><label>Material code (optional)</label>' +
+        '<input id="bpr-ccmap-matcode" value="' + _procEsc(existing.materialCode || '') + '" placeholder="leave blank for all materials in class">' +
+      '</div>' +
+      '<div class="fgr full"><label>Cost code *</label>' +
+        '<select id="bpr-ccmap-cc">' + ccOpts + '</select>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="bprCcMapSave(' + idx + ')">' + (editing ? 'Save' : 'Add') + '</button>' +
+    '</div>'
+  );
+}
+
+function bprCcMapSave(idx) {
+  var cls = (g('bpr-ccmap-class').value || '').trim().toUpperCase();
+  var mat = (g('bpr-ccmap-matcode').value || '').trim();
+  var cc  = (g('bpr-ccmap-cc').value || '').trim();
+  if (!cls) { alert('BPR class is required.'); return; }
+  if (!cc)  { alert('Cost code is required.'); return; }
+
+  db.bprCostCodeMap = Array.isArray(db.bprCostCodeMap) ? db.bprCostCodeMap : [];
+
+  // Block duplicates (same class+matcode pair, but a different array slot)
+  var dupIdx = db.bprCostCodeMap.findIndex(function(m){
+    return m.classCode === cls && (m.materialCode || '') === mat;
+  });
+  if (dupIdx >= 0 && dupIdx !== idx) {
+    if (!confirm('A mapping for ' + cls + (mat ? ' / ' + mat : ' (class-level)') + ' already exists. Overwrite it?')) return;
+    db.bprCostCodeMap.splice(dupIdx, 1);
+    if (idx > dupIdx) idx--;
+  }
+
+  var entry = { classCode: cls, materialCode: mat || null, costCode: cc };
+  if (idx >= 0 && idx < db.bprCostCodeMap.length) db.bprCostCodeMap[idx] = entry;
+  else                                            db.bprCostCodeMap.push(entry);
+
+  saveDB();
+  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+    supabaseClient.from('kmi_settings')
+      .upsert({ key: 'bprCostCodeMap', value: db.bprCostCodeMap })
+      .then(function(r){ if (r && r.error) console.warn('bprCostCodeMap sync error:', r.error.message); });
+  }
+  closeModal();
+  renderBprCostCodeMap();
+}
+
+function bprCcMapRemove(idx) {
+  if (!requireFull('templates', 'edit BPR cost code map')) return;
+  var rows = Array.isArray(db.bprCostCodeMap) ? db.bprCostCodeMap : [];
+  if (idx < 0 || idx >= rows.length) return;
+  var m = rows[idx];
+  if (!confirm('Remove mapping ' + m.classCode + (m.materialCode ? ' / ' + m.materialCode : '') + ' → ' + m.costCode + '?')) return;
+  rows.splice(idx, 1);
+  db.bprCostCodeMap = rows;
+  saveDB();
+  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+    supabaseClient.from('kmi_settings')
+      .upsert({ key: 'bprCostCodeMap', value: db.bprCostCodeMap })
+      .then(function(r){ if (r && r.error) console.warn('bprCostCodeMap sync error:', r.error.message); });
+  }
+  renderBprCostCodeMap();
 }
 
 // ── Budget template table (Chunk 1: read-only display) ─────────────────
@@ -33869,35 +34003,6 @@ function fromSBSubmittal(r) {
   };
 }
 
-// ── Transmittal mappers ─────────────────────────────────────────────
-// One row per compile event. submittal_ids stores the included
-// submittals as a JSONB array so the project Transmittals section can
-// re-resolve them at render time. Project-scoped via project_id; no
-// must be unique within a project for the autonumber to work (the UI
-// warns on collisions during edit).
-function toSBTransmittal(r) {
-  return {
-    id:                 r.id,
-    project_id:         r.projectId || null,
-    no:                 (r.no || 0),
-    date:               r.date || null,
-    submittal_ids:      Array.isArray(r.submittalIds) ? r.submittalIds : [],
-    created_at:         r.createdAt || null,
-    created_by_user_id: r.createdByUserId || null
-  };
-}
-function fromSBTransmittal(r) {
-  return {
-    id:              r.id,
-    projectId:       r.project_id || null,
-    no:              (r.no || 0),
-    date:            r.date || null,
-    submittalIds:    Array.isArray(r.submittal_ids) ? r.submittal_ids : [],
-    createdAt:       r.created_at || null,
-    createdByUserId: r.created_by_user_id || null
-  };
-}
-
 // ── Spec Section mappers (Round 5) ──────────────────────────────
 function toSBSpecSection(r) {
   return {
@@ -34094,6 +34199,9 @@ function toSBProject(r) {
     // procurement assignments. Independent of projectBudgets (cost-code
     // accounting aggregate). See BPR PARSER + PICKER module.
     bpr_materials:                 r.bprMaterials                 || [],
+    // Round 4.1 — per-project override layer for the BPR class → Foundation
+    // cost-code map. Empty array uses global map only. See _resolveBprCostCode.
+    bpr_cost_code_map_overrides:   r.bprCostCodeMapOverrides       || [],
     // Round 2.5 — project file attachments (quotes, drawings, anything)
     attachments:                   r.attachments                  || [],
     // Round 4.1 — COR markup percentages
@@ -34151,6 +34259,7 @@ function fromSBProject(r) {
     procurementItems:            Array.isArray(r.procurement_items) ? r.procurement_items : [],
     // Procurement Round 3 — BPR materials parsed from PDF
     bprMaterials:                Array.isArray(r.bpr_materials)     ? r.bpr_materials     : [],
+    bprCostCodeMapOverrides:     Array.isArray(r.bpr_cost_code_map_overrides) ? r.bpr_cost_code_map_overrides : [],
     // Round 2.5 — project file attachments
     attachments:                 Array.isArray(r.attachments) ? r.attachments : [],
     // Round 4.1 — COR markup percentages (legacy projects fall back to defaults)
@@ -34622,11 +34731,6 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_submittals').upsert(db.submittals.map(toSBSubmittal));
       if (r && r.error) errs.push('submittals: ' + r.error.message);
     }
-    // Transmittals — non-fatal if table missing
-    if ((db.transmittals || []).length) {
-      var r = await supabaseClient.from('kmi_transmittals').upsert(db.transmittals.map(toSBTransmittal));
-      if (r && r.error) errs.push('transmittals: ' + r.error.message);
-    }
     // Spec sections (Round 5) — non-fatal if table missing
     if ((db.specSections || []).length) {
       var r = await supabaseClient.from('kmi_spec_sections').upsert(db.specSections.map(toSBSpecSection));
@@ -34722,7 +34826,8 @@ async function pushToSupabase() {
       {key:'clarGroups',   value:db.clarGroups},
       {key:'budgetEquipmentSplit', value:db.budgetEquipmentSplit},
       {key:'budgetQtyConversions', value:db.budgetQtyConversions},
-      {key:'budgetAutoRoutes',     value:db.budgetAutoRoutes}
+      {key:'budgetAutoRoutes',     value:db.budgetAutoRoutes},
+      {key:'bprCostCodeMap',       value:db.bprCostCodeMap || []}
     ];
     var r = await supabaseClient.from('kmi_settings').upsert(settingsRows);
     if (r.error) errs.push('settings: ' + r.error.message);
@@ -34750,8 +34855,7 @@ async function pullFromSupabase() {
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
-         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes,
-         transRes] = await Promise.all([
+         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -34775,8 +34879,7 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_submittals').select('*'),
       supabaseClient.from('kmi_spec_sections').select('*').order('sort_order', {ascending:true}),
       supabaseClient.from('kmi_project_parameters').select('*').order('sort_order', {ascending:true}),
-      supabaseClient.from('kmi_purchase_orders').select('*'),
-      supabaseClient.from('kmi_transmittals').select('*')
+      supabaseClient.from('kmi_purchase_orders').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -34935,15 +35038,6 @@ async function pullFromSupabase() {
       console.warn('kmi_project_parameters load error (table missing?):', projParamsRes.error.message);
       if (!Array.isArray(db.projectParameters)) db.projectParameters = [];
     }
-    // Transmittals — same preserve-on-missing pattern. If kmi_transmittals
-    // doesn't exist yet (the transmittals migration hasn't been run on this
-    // Supabase project), keep whatever's local so the user isn't stuck.
-    if (transRes && !transRes.error) {
-      db.transmittals = (transRes.data || []).map(fromSBTransmittal);
-    } else if (transRes && transRes.error) {
-      console.warn('kmi_transmittals load error (table missing?):', transRes.error.message);
-      if (!Array.isArray(db.transmittals)) db.transmittals = [];
-    }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
 
@@ -34953,6 +35047,7 @@ async function pullFromSupabase() {
                                 'laborRates','laborRateSets','materialTemplates',
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
                                 'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
+                                'bprCostCodeMap',
                                 'anthropic_api_key'];
     (settings.data || []).forEach(function(row) {
       if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
