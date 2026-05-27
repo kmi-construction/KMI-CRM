@@ -30969,6 +30969,49 @@ function procBprPickerRenameGroup(groupId) {
 // reviewing budget vs. actual. Add a toggle later if Mike wants an
 // internal-review variant.
 
+// Format a quantity with thousands separators (commas), preserving the
+// fractional-handling rules of _procFmtBprQty (round-to-int when very
+// close, otherwise up to 2 decimals stripped of trailing zeros). Used
+// on the procurement PDF only; the in-app UI continues to use the
+// no-comma _procFmtBprQty so nothing in the app surface changes.
+//   21925   → '21,925'
+//   54      → '54'
+//   1234.5  → '1,234.5'
+function _procFmtQtyComma(n) {
+  var v = Number(n);
+  if (!isFinite(v)) return '0';
+  var s;
+  if (Math.abs(v - Math.round(v)) < 0.005) {
+    s = String(Math.round(v));
+  } else {
+    s = v.toFixed(2).replace(/\.?0+$/, '');
+  }
+  var parts = s.split('.');
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return parts.join('.');
+}
+
+// Identify "non-material" PO lines (mold change, freight, delivery
+// charges, fuel surcharges, etc.) so they can be skipped from the
+// procurement PDF's nested-line detail. The procurement report is a
+// physical-material view, not the line-by-line PO accounting — these
+// charges belong on the PO PDF, not here. Detection is by description
+// keyword. Conservative enough to catch the common cases (mold change,
+// freight, anything with "charge" or "fee" as a standalone word) without
+// flagging real masonry material descriptions. If a legitimate material
+// line ever gets mis-flagged, the user can rename it on the PO.
+function _procIsChargePoLine(line) {
+  if (!line) return false;
+  var d = String(line.description || '').toLowerCase();
+  if (!d) return false;
+  if (d.indexOf('mold change') >= 0) return true;
+  if (d.indexOf('freight')     >= 0) return true;
+  if (d.indexOf('surcharge')   >= 0) return true;
+  if (/\bcharge\b/.test(d))          return true;  // "Delivery Charge", "Mold Change Charge"
+  if (/\bfee\b/.test(d))             return true;
+  return false;
+}
+
 function procGeneratePdf() {
   if (!_editProjectId) { alert('Open a project first.'); return; }
   var p = getProj(_editProjectId);
@@ -31031,7 +31074,9 @@ function procGeneratePdf() {
     sf('bold', 10, [42, 47, 92]);
     doc.text(text, LM + 8, currentY + 11);
     sf('normal', 9, [0, 0, 0]);
-    return currentY + 22;
+    // Header rect occupies 16pt; return +30 to leave 14pt of breathing room
+    // between the bottom of the header band and the first item row below.
+    return currentY + 30;
   }
 
   function ensureRoom(yNeeded, currentY) {
@@ -31170,17 +31215,69 @@ function procGeneratePdf() {
     _currentSection = headerText;
 
     sectionItems.forEach(function(item){
-      var entries = idx.byItemId[String(item.id)] || [];
+      // Linked PO entries (manual + auto-match by description) — drop any
+      // line that looks like a charge (mold change, freight, etc.) so the
+      // procurement PDF stays focused on physical material. Charge lines
+      // that happen to get linked never appear here.
+      var allEntries = idx.byItemId[String(item.id)] || [];
+      var entries    = allEntries.filter(function(e){ return !_procIsChargePoLine(e.line); });
+      var hasPO      = entries.length > 0;
+      var multiplePO = entries.length > 1;
+
+      // Rollup of the material-only PO entries (totals, dates)
       var rollup = _procRollup(entries);
+
+      // BPR context — only used when no PO is linked yet. Per Mike's
+      // decision the BPR component breakdown NEVER renders on the PDF;
+      // it remains visible in the app via the triangle expander.
       var bprAssignments = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
       var bprQtySum = 0;
       bprAssignments.forEach(function(a){ bprQtySum += Number(a.qty) || 0; });
-      var isMerged = bprAssignments.length > 1;
 
-      // Description — single line, no subtitle
-      var descLines = wrap(item.description || '(no description)', COL_DESC_W - 4);
+      // ── Parent-row data (description / qty / unit) ─────────────────
+      // Priority ladder:
+      //   • Single linked PO line  → PO description, PO qty, PO unit.
+      //     The PO is the source of truth; this also handles the "Stone"
+      //     case where the BPR said 54 SqFt and the real PO is 54 TON of
+      //     Fon Du Lac Harvest — PO wins on all three fields.
+      //   • Multiple linked PO lines → procurement-item description as
+      //     the parent label, summed qty across PO lines, and the shared
+      //     unit if every PO line agrees (falling back to the item unit
+      //     if they disagree). Nested PO-detail rows render below.
+      //   • No linked POs → procurement-item description, BPR/manual
+      //     qty, procurement-item unit.
+      var parentDesc, parentQty, parentUnit;
+      if (hasPO && !multiplePO) {
+        var soloLine = entries[0].line;
+        parentDesc = soloLine.description || item.description || '(no description)';
+        parentQty  = Number(soloLine.qty) || 0;
+        parentUnit = soloLine.unit || '';
+      } else if (hasPO && multiplePO) {
+        parentDesc = item.description || '(no description)';
+        parentQty  = rollup.totalQty;
+        var unitsSeen = {};
+        entries.forEach(function(e){
+          var u = String(e.line.unit || '').trim();
+          if (u) unitsSeen[u] = true;
+        });
+        var unitKeys = Object.keys(unitsSeen);
+        parentUnit = (unitKeys.length === 1) ? unitKeys[0] : (item.unit || '');
+      } else {
+        parentDesc = item.description || '(no description)';
+        if (bprAssignments.length > 0) {
+          parentQty = bprQtySum;
+        } else if (item.manualQty != null && item.manualQty !== '') {
+          parentQty = Number(item.manualQty);
+        } else {
+          parentQty = null;
+        }
+        parentUnit = item.unit || '';
+      }
 
-      // Vendor lines
+      var descLines = wrap(parentDesc, COL_DESC_W - 4);
+
+      // Vendor cell — item.vendorIds[] was already populated from linked
+      // POs by _procSyncAutoVendors() at the top of this function.
       var vendorNames = (Array.isArray(item.vendorIds) ? item.vendorIds : []).map(function(vid){
         var v = vendorMap[String(vid)];
         return v ? (v.name || '(unnamed)') : null;
@@ -31189,13 +31286,9 @@ function procGeneratePdf() {
         ? vendorNames.reduce(function(acc, n){ return acc.concat(wrap(n, COL_VEND_W - 4)); }, [])
         : ['—'];
 
-      // Qty: linked-PO rollup → BPR sum → manualQty
-      var qty;
-      if (entries.length > 0)             qty = rollup.totalQty;
-      else if (bprAssignments.length > 0) qty = bprQtySum;
-      else                                qty = (item.manualQty != null && item.manualQty !== '') ? Number(item.manualQty) : null;
-      var qtyText = (qty != null && isFinite(qty)) ? _procFmtBprQty(qty) + (item.unit ? ' ' + item.unit : '') : '—';
-
+      var qtyText = (parentQty != null && isFinite(parentQty))
+        ? _procFmtQtyComma(parentQty) + (parentUnit ? ' ' + parentUnit : '')
+        : '—';
       var leadText  = (item.leadTimeDays != null && item.leadTimeDays !== '') ? String(item.leadTimeDays) : '—';
       var orderText = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '—';
       var delivText = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '—';
@@ -31203,12 +31296,12 @@ function procGeneratePdf() {
       var bodyLineCount = Math.max(descLines.length, vendorLines.length, 1);
       var rowH = bodyLineCount * 11 + 4;
 
-      // Reserve room for the main row plus at least one component sub-row
-      // when merged (so we don't orphan the header on the page).
-      var roomNeeded = rowH + (isMerged ? 11 : 0);
+      // Reserve room for the parent row plus at least one nested PO row
+      // when multi-linked, so we never orphan the parent on a page.
+      var roomNeeded = rowH + (multiplePO ? 11 : 0);
       y = ensureRoom(roomNeeded, y);
 
-      // Draw the main row
+      // Draw the parent row
       sf('normal', 9, [0, 0, 0]);
       doc.text(descLines, COL_DESC_X, y);
       doc.text(vendorLines, COL_VEND_X, y);
@@ -31216,40 +31309,36 @@ function procGeneratePdf() {
       doc.text(leadText,    COL_LEAD_RIGHT, y, { align: 'right' });
       doc.text(orderText,   COL_ORDER_X,    y);
       doc.text(delivText,   COL_DELIV_X,    y);
-
       y += rowH;
 
-      // For merged items: indented component sub-rows show each BPR
-      // line that was combined into this procurement item. Foremen need
-      // to see the breakdown so they know what the order actually
-      // covers — without this, "Burnished CMU 1,565 EA" hides the fact
-      // that it's a roll-up of 12BBB + 12BURN + 8 BURN + 8BURN.BBM.
-      if (isMerged) {
+      // Nested PO-line rows for multi-linked items only. Each shows the
+      // PO's own description, qty, and unit so the PM sees exactly what
+      // was ordered against the merged procurement item (e.g. Burnished
+      // CMU's 5 variants from PO 002, Splitface CMU's 11 variants from
+      // PO 001). Single-PO items already carry the PO data on the parent
+      // row, so no nested detail is needed.
+      if (multiplePO) {
         sf('normal', 8, [110, 110, 110]);
-        bprAssignments.forEach(function(a){
-          if (a._orphaned) return;
-          var bm = bprById[String(a.bprMaterialId)];
-          if (!bm) return;
-
-          var compDesc = bm.description || bm.materialCode || '(missing)';
-          var compQty  = Number(a.qty) || 0;
-          var compUnit = bm.unit || '';
-          var compQtyText = _procFmtBprQty(compQty) + (compUnit ? ' ' + compUnit : '');
-
-          var compLines = wrap('• ' + compDesc, COL_DESC_W - 16);
-          var compH = compLines.length * 10;
-
-          y = ensureRoom(compH + 2, y);
-          doc.text(compLines, COL_DESC_X + 12, y);
-          doc.text(compQtyText, COL_QTY_RIGHT, y, { align: 'right' });
-          y += compH;
+        entries.forEach(function(e){
+          var lineDesc = e.line.description || '(no description)';
+          var lineQty  = Number(e.line.qty) || 0;
+          var lineUnit = e.line.unit || '';
+          var subDescLines = wrap('• ' + lineDesc, COL_DESC_W - 16);
+          var subH = subDescLines.length * 10;
+          y = ensureRoom(subH + 2, y);
+          doc.text(subDescLines, COL_DESC_X + 12, y);
+          doc.text(_procFmtQtyComma(lineQty) + (lineUnit ? ' ' + lineUnit : ''),
+                   COL_QTY_RIGHT, y, { align: 'right' });
+          y += subH;
         });
         sf('normal', 9, [0, 0, 0]);
       }
 
-      // Light divider between items
-      ln(LM, y + 1, RM, y + 1, 0.2, [220, 220, 220]);
-      y += 5;
+      // Light divider — drawn ONLY at the very end of each item (after
+      // nested rows, if any). Never inside an item, so the gray line
+      // never cuts through a parent's own PO detail.
+      ln(LM, y + 2, RM, y + 2, 0.2, [220, 220, 220]);
+      y += 7;
     });
 
     // Small gap between sections
