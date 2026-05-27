@@ -10552,10 +10552,10 @@ async function _appendCompileDocToJsPdf(doc, docRec, bucket, submittal) {
   }
 
   try {
-    if (isPdf)   return await _appendPdfBytesToJsPdf(doc, ab);
+    if (isPdf)   return await _appendPdfBytesToJsPdf(doc, ab, true);
     if (isImage) return await _appendImageBytesToJsPdf(doc, ab, ct || 'image/jpeg');
     // Unknown extension — try PDF first, then image
-    try { return await _appendPdfBytesToJsPdf(doc, ab); }
+    try { return await _appendPdfBytesToJsPdf(doc, ab, true); }
     catch (e) {
       try { return await _appendImageBytesToJsPdf(doc, ab, 'image/jpeg'); }
       catch (e2) {
@@ -11103,14 +11103,23 @@ function showSubmittalPackageCompile(submittalId) {
   var proj = (db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {};
   var cust = proj.customerId ? (db.customers || []).find(function(c){ return String(c.id) === String(proj.customerId); }) : null;
 
-  // Build the project contact dropdown — every PM whose customerId
-  // matches the project's customer, regardless of whether it's listed
-  // in contactAssignments. Pre-populate _compileContactsByPmId so
-  // onCompileContactChange can pull addresses without re-looking up.
+  // Build the project contact dropdown — restricted to customer-side
+  // PMs that are actually assigned to THIS project via contactAssignments.
+  // If no customer contacts are assigned yet, fall back to every PM at
+  // the customer company so you're never stuck without options.
+  // Pre-populate _compileContactsByPmId so onCompileContactChange can
+  // pull addresses without re-looking up.
   _compileContactsByPmId = {};
-  var customerPms = (db.pms || []).filter(function(pm){
+  var assignedPmIds = {};
+  (Array.isArray(proj.contactAssignments) ? proj.contactAssignments : []).forEach(function(a){
+    if (a && a.pmId) assignedPmIds[String(a.pmId)] = true;
+  });
+  var allCustomerPms = (db.pms || []).filter(function(pm){
     return cust && String(pm.customerId) === String(cust.id);
-  }).sort(function(a, b){
+  });
+  var customerPms = allCustomerPms.filter(function(pm){ return assignedPmIds[String(pm.id)]; });
+  if (!customerPms.length) customerPms = allCustomerPms;  // safety fallback
+  customerPms.sort(function(a, b){
     return String(a.lastName || '').localeCompare(String(b.lastName || ''));
   });
   customerPms.forEach(function(pm){ _compileContactsByPmId[String(pm.id)] = pm; });
@@ -11127,7 +11136,13 @@ function showSubmittalPackageCompile(submittalId) {
   }
   if (!defaultPmId && customerPms.length) defaultPmId = String(customerPms[0].id);
 
-  // Helper: build the To block text from a PM record + customer
+  // Helper: build the To block text from a PM record + customer.
+  // Customer mailing address mirrors the From block format:
+  //   Name (Company)
+  //   Street
+  //   City, State Zip
+  // Customers store the city/state/zip line as a single concatenated
+  // string in `cityState` (or, on older records, `city`).
   function _buildToBlock(pm, c) {
     var lines = [];
     if (pm) {
@@ -11137,8 +11152,8 @@ function showSubmittalPackageCompile(submittalId) {
     } else if (c) {
       lines.push(c.name || '');
     }
-    if (c && c.address)   lines.push(c.address);
-    if (c && c.cityState) lines.push(c.cityState);
+    if (c && c.address)                lines.push(c.address);
+    if (c && (c.cityState || c.city))  lines.push(c.cityState || c.city);
     return lines.filter(Boolean).join('\n');
   }
   var defaultPm = defaultPmId ? _compileContactsByPmId[defaultPmId] : null;
@@ -11194,6 +11209,20 @@ function showSubmittalPackageCompile(submittalId) {
   // Today's date (yyyy-mm-dd) for the date inputs
   var todayIso = (new Date()).toISOString().slice(0, 10);
 
+  // Auto-number transmittals per-project: max(transmittalNo) across every
+  // submittal on this project + 1. Each compile bumps to a new number
+  // (matches Procore behavior — each act of transmitting is its own
+  // event). Field stays editable so the user can override if needed.
+  // Computing at dialog-open instead of save-time means cancelling the
+  // dialog doesn't burn a number, and it self-heals if a submittal with
+  // a transmittal# gets deleted.
+  var nextTransmittalNo = 1;
+  (db.submittals || []).forEach(function(s){
+    if (String(s.projectId) !== String(anchor.projectId)) return;
+    var n = parseInt(s.transmittalNo, 10);
+    if (!isNaN(n) && n >= nextTransmittalNo) nextTransmittalNo = n + 1;
+  });
+
   // Build the items list with checkboxes (per-submittal include/exclude).
   // The cover sheet's items table will be per-document; this list lets
   // the PC choose which submittals' docs are pulled into the package.
@@ -11243,8 +11272,8 @@ function showSubmittalPackageCompile(submittalId) {
     '<div class="fg">' +
       // Title / transmittal #
       '<div class="fgr"><label>Transmittal #</label>' +
-        '<input id="cmp-trans-no" type="number" min="1" step="1" value="1" style="width:80px">' +
-        '<div style="font-size:10px;color:#888;margin-top:3px">Counter you keep manually for this project (Procore auto-generates this; here you set it).</div>' +
+        '<input id="cmp-trans-no" type="number" min="1" step="1" value="' + nextTransmittalNo + '" style="width:80px">' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">Auto-filled as next # for this project; edit if needed.</div>' +
       '</div>' +
       '<div class="fgr"><label>Title — Submittal #/name (auto)</label><input id="cmp-title-sub" value="' + subEsc(defaultTitleSubmittal) + '"></div>' +
 
@@ -11255,7 +11284,7 @@ function showSubmittalPackageCompile(submittalId) {
       // Recipient picker + To block
       '<div class="fgr full"><label>Project contact (recipient)</label>' +
         '<select id="cmp-contact-pm" onchange="onCompileContactChange()">' + contactOpts + '</select>' +
-        '<div style="font-size:10px;color:#888;margin-top:3px">Pulled from this project\'s customer\'s PM list. Selecting one auto-fills the To block; you can edit further below.</div>' +
+        '<div style="font-size:10px;color:#888;margin-top:3px">Contacts assigned to this project. If none are assigned, the full customer PM list is shown. Selecting one auto-fills the To block with their company\'s mailing address; you can edit further below.</div>' +
       '</div>' +
       '<div class="fgr"><label>To</label><textarea id="cmp-to" rows="3">' + subEsc(defaultTo) + '</textarea></div>' +
       '<div class="fgr"><label>From</label><textarea id="cmp-from" rows="3">' + subEsc(defaultFrom) + '</textarea></div>' +
@@ -11310,8 +11339,8 @@ function onCompileContactChange() {
   var nm = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim();
   var cn = cust && cust.name ? cust.name : '';
   lines.push(nm + (cn ? ' (' + cn + ')' : ''));
-  if (cust && cust.address)   lines.push(cust.address);
-  if (cust && cust.cityState) lines.push(cust.cityState);
+  if (cust && cust.address)                lines.push(cust.address);
+  if (cust && (cust.cityState || cust.city)) lines.push(cust.cityState || cust.city);
   to.value = lines.filter(Boolean).join('\n');
 }
 
@@ -12872,21 +12901,43 @@ function _fitToLetterPage(srcW, srcH) {
 
 // Append every page of a PDF (given as ArrayBuffer) onto a jsPDF doc as
 // rasterised JPEG pages. Each source page becomes one new page in the doc.
-async function _appendPdfBytesToJsPdf(doc, arrayBuffer) {
+//
+// `preserveNative` (optional, default false):
+//   • false → legacy behavior: every appended page is forced to letter
+//     portrait and the rendered raster is fit-to-letter (keeps aspect).
+//     This is what CORs and T&M ticket compiles rely on.
+//   • true  → each appended page keeps the source PDF's own width,
+//     height, and orientation. Required for submittal package compile
+//     because shop drawings are routinely landscape D-size (or larger)
+//     and must NOT be crammed onto a letter-portrait page.
+//   Mixed page sizes in the output PDF are handled natively by Adobe,
+//   Bluebeam, Procore, etc. — same approach Procore's own compiler uses.
+async function _appendPdfBytesToJsPdf(doc, arrayBuffer, preserveNative) {
   if (!window.pdfjsLib) throw new Error('pdf.js not loaded.');
   var pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  var SCALE = 2.0;
   for (var i = 1; i <= pdf.numPages; i++) {
     var page = await pdf.getPage(i);
-    var viewport = page.getViewport({ scale: 2.0 });
+    var viewport = page.getViewport({ scale: SCALE });
     var canvas = document.createElement('canvas');
     canvas.width  = viewport.width;
     canvas.height = viewport.height;
     var ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport: viewport }).promise;
     var imgData = canvas.toDataURL('image/jpeg', 0.85);
-    var fit = _fitToLetterPage(viewport.width, viewport.height);
-    doc.addPage();
-    doc.addImage(imgData, 'JPEG', fit.x, fit.y, fit.w, fit.h);
+
+    if (preserveNative) {
+      // Native page dimensions in PDF points (viewport is at SCALE×)
+      var pageWpt = viewport.width  / SCALE;
+      var pageHpt = viewport.height / SCALE;
+      var orient = pageWpt > pageHpt ? 'l' : 'p';
+      doc.addPage([pageWpt, pageHpt], orient);
+      doc.addImage(imgData, 'JPEG', 0, 0, pageWpt, pageHpt);
+    } else {
+      var fit = _fitToLetterPage(viewport.width, viewport.height);
+      doc.addPage();
+      doc.addImage(imgData, 'JPEG', fit.x, fit.y, fit.w, fit.h);
+    }
   }
   return pdf.numPages;
 }
