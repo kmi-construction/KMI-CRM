@@ -27642,6 +27642,7 @@ function renderProjectProcurement() {
           '<button type="button" class="btn btn-sm" onclick="procOpenFromMatListPicker()"' + (matListCount ? '' : ' disabled title="No material list rows on this project yet"') + '>+ From material list</button>' +
           '<button type="button" class="btn btn-sm" onclick="procOpenBprFlow()" title="' + (p.bprMaterials && p.bprMaterials.length ? 'Import items from the Bid Price Report' : 'Upload the Bid Price Report PDF to extract material quantities') + '">+ From BPR' + (p.bprMaterials && p.bprMaterials.length ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
           '<button type="button" class="btn btn-sm btn-p" onclick="procOpenCustomItemModal(null)">+ Custom item</button>' +
+          '<button type="button" class="btn btn-sm" onclick="procGeneratePdf()" title="Generate a printable PDF of the procurement list">📄 Print PDF</button>' +
         '</span>' +
       '</div>' +
       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 20px;font-size:12px;line-height:1.6">' +
@@ -27662,10 +27663,11 @@ function renderProjectProcurement() {
     return;
   }
 
-  var totalCols = _procVarianceOn ? 9 : 6;
+  var totalCols = _procVarianceOn ? 10 : 7;
   var tableHead =
     '<thead style="background:#fafafa"><tr>' +
       '<th style="padding:8px;text-align:left">Description</th>' +
+      '<th style="padding:8px;text-align:left;width:160px">Vendor</th>' +
       '<th style="padding:8px;text-align:right;width:90px">Qty</th>' +
       '<th style="padding:8px;text-align:right;width:80px" title="Lead time in days">Lead (d)</th>' +
       '<th style="padding:8px;text-align:left;width:110px">Order date</th>' +
@@ -27823,10 +27825,9 @@ function _procRenderItemRow(item, entries) {
     }
   }
 
-  // Vendor pills — planned vendors set via the edit modal. Stored as
-  // item.vendorIds[] (vendor IDs from db.vendors). Rendered as small
-  // pills below the description.
-  var vendorPills = '';
+  // Vendor column — names from item.vendorIds[], stacked vertically when
+  // there are multiple. Auto-add from POs lands them here too.
+  var vendorCell;
   if (Array.isArray(item.vendorIds) && item.vendorIds.length) {
     var vendorMap = {};
     (db.vendors || []).forEach(function(v){ vendorMap[String(v.id)] = v; });
@@ -27835,12 +27836,14 @@ function _procRenderItemRow(item, entries) {
       return v ? (v.name || '(unnamed)') : null;
     }).filter(Boolean);
     if (names.length) {
-      vendorPills = '<div style="margin-top:3px;display:flex;flex-wrap:wrap;gap:4px">' +
-        names.map(function(n){
-          return '<span style="font-size:10px;color:#1F5A8A;background:#E3F0FB;padding:1px 6px;border-radius:8px" title="Planned vendor">' + _procEsc(n) + '</span>';
-        }).join('') +
-      '</div>';
+      vendorCell = names.map(function(n){
+        return '<div style="font-size:11px">' + _procEsc(n) + '</div>';
+      }).join('');
+    } else {
+      vendorCell = '<span style="color:#aaa">—</span>';
     }
+  } else {
+    vendorCell = '<span style="color:#aaa">—</span>';
   }
 
   var html =
@@ -27851,7 +27854,6 @@ function _procRenderItemRow(item, entries) {
           poBadge +
           bprBadge +
         '</div>' +
-        vendorPills +
         '<div style="font-size:10px;color:#888;margin-top:2px">' +
           (item.unit ? 'Unit: ' + _procEsc(item.unit) : '') +
           (item.unit && item.costCode ? ' · ' : '') +
@@ -27860,6 +27862,7 @@ function _procRenderItemRow(item, entries) {
           (item.sourceLabel ? _procEsc(item.sourceLabel) : '') +
         '</div>' +
       '</td>' +
+      '<td style="padding:8px;vertical-align:top">' + vendorCell + '</td>' +
       '<td style="padding:8px;text-align:right">' + qtyCell + rodHint + '</td>' +
       '<td style="padding:8px;text-align:right">' +
         '<input type="number" min="0" step="1" value="' + _procEsc(leadTime) + '" placeholder="—" ' +
@@ -27881,7 +27884,7 @@ function _procRenderItemRow(item, entries) {
     '</tr>';
 
   if (canExpand && isOpen) {
-    var totalCols = _procVarianceOn ? 9 : 6;
+    var totalCols = _procVarianceOn ? 10 : 7;
     html += '<tr><td colspan="' + totalCols + '" style="padding:0;background:#FAFAFA">' +
       _procRenderDrawer(item, entries) +
     '</td></tr>';
@@ -28015,8 +28018,9 @@ function _procRenderGhostRow(entry) {
         '<em>' + _procEsc(entry.line.description || '(no description)') + '</em>' +
         '<span style="font-size:10px;color:#9A7A2E;background:#FFF1CC;padding:1px 6px;border-radius:8px" title="Not in the procurement list">unmatched</span>' +
       '</div>' +
-      '<div style="font-size:10px;color:#888;margin-top:2px">From PO ' + _procEsc(poNum) + (vendorName ? ' · ' + _procEsc(vendorName) : '') + '</div>' +
+      '<div style="font-size:10px;color:#888;margin-top:2px">From PO ' + _procEsc(poNum) + '</div>' +
     '</td>' +
+    '<td style="padding:8px;font-size:11px;vertical-align:top">' + (vendorName ? _procEsc(vendorName) : '<span style="color:#aaa">—</span>') + '</td>' +
     '<td style="padding:8px;text-align:right">' + qty + (entry.line.unit ? ' ' + _procEsc(entry.line.unit) : '') + '</td>' +
     '<td style="padding:8px;text-align:right"><span style="color:#aaa">—</span></td>' +
     '<td style="padding:8px">' + orderDate + '</td>' +
@@ -30405,6 +30409,237 @@ function procBprPickerRenameGroup(groupId) {
 // ─────────────────────────────────────────────────────────────────────
 // END BPR ROUND 3.3 MODULE
 // ─────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────
+// PROCUREMENT PDF — printable report for foremen / vendors
+// ─────────────────────────────────────────────────────────────────────
+// Generates a one-button PDF of the procurement list for the active
+// project. Layout mirrors the existing KMI PDFs (T&M, COR, PO): letter,
+// portrait, header / footer images, helvetica body.
+//
+// Columns rendered: Description · Vendor(s) · Qty (with unit) · Lead time
+// · Order date · Delivery date. The "from BPR" badge becomes a small B
+// marker after the description; the Source label (e.g. "From BPR — BRI /
+// MOD FACE1") appears as a secondary subtitle row beneath in a lighter
+// shade, so foremen can see provenance without it cluttering primary
+// columns.
+//
+// Variance / cost columns are intentionally excluded from the default
+// PDF. The audience here is field crews and outside vendors — not the PM
+// reviewing budget vs. actual. Add a toggle later if Mike wants an
+// internal-review variant.
+
+function procGeneratePdf() {
+  if (!_editProjectId) { alert('Open a project first.'); return; }
+  var p = getProj(_editProjectId);
+  if (!p) { alert('Project not found.'); return; }
+  if (typeof window.jspdf === 'undefined' || !window.jspdf || !window.jspdf.jsPDF) {
+    alert('PDF library not loaded. Refresh the page and try again.');
+    return;
+  }
+
+  var items = (p.procurementItems || []);
+  if (!items.length) {
+    alert('No procurement items to print yet.');
+    return;
+  }
+
+  // Re-sync vendors before rendering so the PDF reflects the latest auto-add
+  var poLines = _procCollectProjectPoLines(p.id);
+  if (_procSyncAutoVendors(p, poLines)) saveDB();
+  var idx = _procBuildMatchIndex(p, poLines);
+
+  // Build vendor lookup
+  var vendorMap = {};
+  (db.vendors || []).forEach(function(v){ vendorMap[String(v.id)] = v; });
+
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  var LM = 36, RM = 576, PAGE_W = 612, PAGE_H = 792;
+  var FOOTER_TOP = 720;
+
+  function letterhead() {
+    if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
+      try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 109); } catch (e) {}
+    }
+    if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
+      try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 72, PAGE_W, 72); } catch (e) {}
+    }
+  }
+  function sf(st, sz, col) {
+    doc.setFont('helvetica', st);
+    doc.setFontSize(sz);
+    doc.setTextColor(col ? col[0] : 0, col ? col[1] : 0, col ? col[2] : 0);
+  }
+  function ln(x1, y1, x2, y2, w, rgb) {
+    doc.setDrawColor(rgb ? rgb[0] : 0, rgb ? rgb[1] : 0, rgb ? rgb[2] : 0);
+    doc.setLineWidth(w || 0.5);
+    doc.line(x1, y1, x2, y2);
+  }
+  function wrap(text, maxW) {
+    return doc.splitTextToSize(String(text || ''), maxW);
+  }
+  function ensureRoom(yNeeded, currentY) {
+    if (currentY + yNeeded > FOOTER_TOP - 20) {
+      doc.addPage();
+      letterhead();
+      drawTableHeader(130);
+      return 130 + 22;
+    }
+    return currentY;
+  }
+
+  // Column geometry — usable width 540, allocate:
+  //   description 196, vendor 110, qty 70 (right), lead 36 (right),
+  //   order 60, delivery 60. Total = 532, with small inter-col gutters
+  //   handled by simple x-offsets.
+  var COL_DESC_X     = LM;
+  var COL_DESC_W     = 196;
+  var COL_VEND_X     = LM + 200;
+  var COL_VEND_W     = 110;
+  var COL_QTY_X      = LM + 320;
+  var COL_QTY_W      = 70;
+  var COL_QTY_RIGHT  = COL_QTY_X + COL_QTY_W;
+  var COL_LEAD_X     = LM + 396;
+  var COL_LEAD_W     = 36;
+  var COL_LEAD_RIGHT = COL_LEAD_X + COL_LEAD_W;
+  var COL_ORDER_X    = LM + 440;
+  var COL_DELIV_X    = LM + 500;
+
+  function drawTableHeader(y) {
+    sf('bold', 9, [80, 80, 80]);
+    doc.text('Description',   COL_DESC_X,     y);
+    doc.text('Vendor(s)',     COL_VEND_X,     y);
+    doc.text('Qty',           COL_QTY_RIGHT,  y, { align: 'right' });
+    doc.text('Lead',          COL_LEAD_RIGHT, y, { align: 'right' });
+    doc.text('Order',         COL_ORDER_X,    y);
+    doc.text('Delivery',      COL_DELIV_X,    y);
+    ln(LM, y + 4, RM, y + 4, 0.4, [180, 180, 180]);
+  }
+
+  letterhead();
+
+  // ── Title ────────────────────────────────────────────────────────────
+  var y = 130;
+  sf('bold', 14, [42, 47, 92]);
+  doc.text('PROCUREMENT REPORT', PAGE_W / 2, y, { align: 'center' });
+  ln(LM, y + 4, RM, y + 4, 0.8, [200, 168, 75]);
+  y += 22;
+
+  // ── Project info block (two columns) ────────────────────────────────
+  sf('normal', 9, [0, 0, 0]);
+  var leftLabelX = LM, leftValX = LM + 110;
+  var rightLabelX = LM + 280, rightValX = LM + 360;
+
+  function pair(label, value, lx, vx, yy) {
+    sf('bold', 9);
+    doc.text(label, lx, yy);
+    sf('normal', 9);
+    doc.text(String(value || '—'), vx, yy);
+  }
+
+  var nowStr = new Date().toLocaleDateString();
+  pair('KMI Project #:', p.number || '', leftLabelX, leftValX, y);
+  pair('Generated:',     nowStr,         rightLabelX, rightValX, y);
+  y += 14;
+  pair('Project Name:',  p.name || '',   leftLabelX, leftValX, y);
+  pair('Item Count:',    String(items.length), rightLabelX, rightValX, y);
+  y += 14;
+  // Customer name lookup — projects store either customerName or customerId
+  var customerName = p.customerName || '';
+  if (!customerName && p.customerId) {
+    var cu = (db.customers || []).find(function(c){ return String(c.id) === String(p.customerId); });
+    if (cu) customerName = cu.name || '';
+  }
+  pair('Customer:',      customerName,   leftLabelX, leftValX, y);
+  var addr = (p.address || '');
+  var cs = (p.city || '') + (p.state ? ', ' + p.state : '') + (p.zip ? ' ' + p.zip : '');
+  var addrLine = (addr + (cs.trim() && cs.trim() !== ',' ? '  ·  ' + cs.trim() : '')).trim();
+  pair('Address:',       addrLine,       rightLabelX, rightValX, y);
+  y += 18;
+
+  // ── Table header ────────────────────────────────────────────────────
+  drawTableHeader(y);
+  y += 22;
+
+  // ── Item rows ───────────────────────────────────────────────────────
+  sf('normal', 9, [0, 0, 0]);
+  items.forEach(function(item){
+    var entries = idx.byItemId[String(item.id)] || [];
+    var rollup = _procRollup(entries);
+
+    var descLines = wrap(item.description || '(no description)', COL_DESC_W - 4);
+    // Append source/unit hint as a dim secondary line
+    var hintPieces = [];
+    if (item.unit)     hintPieces.push('Unit: ' + item.unit);
+    if (item.costCode) hintPieces.push('CC ' + item.costCode);
+    if (item.sourceLabel) hintPieces.push(item.sourceLabel);
+    var hintLine = hintPieces.join(' · ');
+    var hintLines = hintLine ? wrap(hintLine, COL_DESC_W - 4) : [];
+
+    // Vendor lines
+    var vendorNames = (Array.isArray(item.vendorIds) ? item.vendorIds : []).map(function(vid){
+      var v = vendorMap[String(vid)];
+      return v ? (v.name || '(unnamed)') : null;
+    }).filter(Boolean);
+    var vendorLines = vendorNames.length
+      ? vendorNames.reduce(function(acc, n){ return acc.concat(wrap(n, COL_VEND_W - 4)); }, [])
+      : ['—'];
+
+    // Qty: prefer linked-PO rollup, then BPR sum, then manualQty
+    var bprAssignments = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
+    var bprQtySum = 0;
+    bprAssignments.forEach(function(a){ bprQtySum += Number(a.qty) || 0; });
+    var qty;
+    if (entries.length > 0) qty = rollup.totalQty;
+    else if (bprAssignments.length > 0) qty = bprQtySum;
+    else qty = (item.manualQty != null && item.manualQty !== '') ? Number(item.manualQty) : null;
+    var qtyText = (qty != null && isFinite(qty)) ? _procFmtBprQty(qty) + (item.unit ? ' ' + item.unit : '') : '—';
+
+    var leadText  = (item.leadTimeDays != null && item.leadTimeDays !== '') ? String(item.leadTimeDays) : '—';
+    var orderText = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '—';
+    var delivText = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '—';
+
+    // Row height: max line count across multi-line cells × 11pt + hint spacing
+    var bodyLineCount = Math.max(descLines.length, vendorLines.length, 1);
+    var hintLineCount = hintLines.length;
+    var rowH = bodyLineCount * 11 + hintLineCount * 9 + 4;
+
+    y = ensureRoom(rowH, y);
+
+    // Draw cells
+    doc.text(descLines, COL_DESC_X, y);
+    if (hintLines.length) {
+      sf('normal', 7, [120, 120, 120]);
+      doc.text(hintLines, COL_DESC_X, y + descLines.length * 11);
+      sf('normal', 9, [0, 0, 0]);
+    }
+    doc.text(vendorLines, COL_VEND_X, y);
+    doc.text(qtyText,     COL_QTY_RIGHT,  y, { align: 'right' });
+    doc.text(leadText,    COL_LEAD_RIGHT, y, { align: 'right' });
+    doc.text(orderText,   COL_ORDER_X,    y);
+    doc.text(delivText,   COL_DELIV_X,    y);
+
+    y += rowH;
+    // Light divider between rows
+    ln(LM, y - 2, RM, y - 2, 0.2, [220, 220, 220]);
+  });
+
+  // ── Footer summary ──────────────────────────────────────────────────
+  y += 8;
+  y = ensureRoom(24, y);
+  sf('italic', 8, [120, 120, 120]);
+  var bprCount = items.filter(function(it){ return (it.bprAssignments || []).length > 0; }).length;
+  var summary = items.length + ' item' + (items.length === 1 ? '' : 's') +
+    (bprCount ? ' · ' + bprCount + ' from Bid Price Report' : '') +
+    ' · generated ' + nowStr;
+  doc.text(summary, LM, y);
+
+  // Save
+  var safeName = (p.number || 'project').replace(/[^A-Za-z0-9_-]/g, '_');
+  var safeDate = new Date().toISOString().slice(0, 10);
+  doc.save('Procurement_' + safeName + '_' + safeDate + '.pdf');
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // END BPR MODULE
