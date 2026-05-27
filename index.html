@@ -78,8 +78,12 @@ h1{font-size:21px;font-weight:600;color:#1a1a1a;margin-bottom:3px}
 .split-btn-menu > div{padding:10px 14px;font-size:13px;color:#1a1a1a;cursor:pointer;font-weight:500;white-space:nowrap}
 .split-btn-menu > div:hover{background:#f5f5f5}
 /* Procurement-tab mobile cards: hidden on desktop; the mobile media
-   block (≤740px) flips this on and hides .proc-desktop-only siblings. */
+   block (≤768px) flips this on and hides .proc-desktop-only siblings.
+   On the dedicated m-procurement mobile page, always show the cards —
+   that page is itself .mob-only so desktop never reaches it, and this
+   guarantees the cards render on tablets in the 741–768px range too. */
 .proc-mob{display:none}
+#pg-m-procurement .proc-mob{display:block}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;padding:9px 12px;font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.7px;border-bottom:0.5px solid #eee;background:#fafafa}
 td{padding:10px 12px;border-bottom:0.5px solid #eee;color:#1a1a1a;vertical-align:middle}
@@ -584,7 +588,7 @@ textarea{resize:vertical;min-height:72px}
   .pg > div[style*="justify-content:flex-end"] .split-btn > .btn{width:auto}
   .pg > div[style*="justify-content:flex-end"] .split-btn > .btn-main{flex:1}
 
-  /* ── Procurement tab — mobile (view-only card view, ≤740px) ──
+  /* ── Procurement tab — mobile (view-only card view, ≤768px) ──
      Hide editing-oriented desktop UI; show grouped, collapsible card
      view via _procRenderMobileCards. Section bands group by cost code
      (Brick, Block, Stone, etc.) the same way the PDF does. */
@@ -1238,6 +1242,17 @@ textarea{resize:vertical;min-height:72px}
     <button class="btn btn-sm" onclick="nav('m-submittals')">← Back</button>
   </div>
   <div id="m-sd-body"></div>
+</div>
+
+<!-- Mobile: procurement (read-only card view). Reuses _procRenderMobileCards
+     from the desktop procurement tab so the data model and visuals stay in
+     lock-step. Navigated to from the mobile project-detail page. -->
+<div class="pg mob-only" id="pg-m-procurement">
+  <div class="ph" style="margin-bottom:10px">
+    <div><h1 id="m-proc-heading" style="font-size:17px">Procurement</h1></div>
+    <button class="btn btn-sm" onclick="nav('m-project-detail')">← Back</button>
+  </div>
+  <div id="m-proc-body"></div>
 </div>
 
 <!-- Mobile: "open on desktop" stub for pages without a mobile version -->
@@ -4292,6 +4307,7 @@ function nav(page) {
     'm-project-detail':   renderMobileProjectDetail,
     'm-submittals':       renderMobileSubmittals,
     'm-submittal-detail': renderMobileSubmittalDetail,
+    'm-procurement':      renderMobileProcurement,
     'm-desktop-only':     function(){}
   };
   if (fns[page]) fns[page]();
@@ -4315,7 +4331,7 @@ var _mobileAllowedPages = {
   // Existing pages with mobile-friendly UX (via responsive CSS):
   'tm-tickets': 1, 'new-tm-ticket': 1,
   // Mobile-only pages (also tagged with .mob-only):
-  'm-projects': 1, 'm-project-detail': 1, 'm-submittals': 1, 'm-submittal-detail': 1, 'm-desktop-only': 1,
+  'm-projects': 1, 'm-project-detail': 1, 'm-submittals': 1, 'm-submittal-detail': 1, 'm-procurement': 1, 'm-desktop-only': 1,
   // Auxiliary pages a user may legitimately reach on mobile:
   'supabase-setup': 1
 };
@@ -4323,7 +4339,7 @@ var _mobileTabForPage = {
   'tm-tickets': 'tm-tickets', 'new-tm-ticket': 'tm-tickets',
   'm-submittals': 'm-submittals',
   'm-submittal-detail': 'm-submittals',
-  'm-projects': 'm-projects', 'm-project-detail': 'm-projects'
+  'm-projects': 'm-projects', 'm-project-detail': 'm-projects', 'm-procurement': 'm-projects'
 };
 var _mobileSelectedProjectId = null;        // remembers project for detail page
 var _mobileSubmittalProjectFilter = null;   // when set, filters m-submittals list
@@ -4399,6 +4415,7 @@ function mobSetHeaderTitle(page) {
     'm-project-detail': 'Project',
     'm-submittals':     'Submittals',
     'm-submittal-detail': 'Submittal',
+    'm-procurement':    'Procurement',
     'm-desktop-only':   'Desktop only',
     'supabase-setup':   'Supabase'
   };
@@ -4623,6 +4640,9 @@ function renderMobileProjectDetail() {
 
   // Count submittals for the View-submittals shortcut
   var subCt = (db.submittals || []).filter(function(s){ return String(s.projectId) === String(p.id); }).length;
+  // Procurement item count — gives the user a glanceable sense of how
+  // much is on the procurement list before they tap in.
+  var procCt = Array.isArray(p.procurementItems) ? p.procurementItems.length : 0;
 
   var html =
     '<div class="mob-proj-hero">' +
@@ -4634,6 +4654,7 @@ function renderMobileProjectDetail() {
       '</div>' +
       '<div class="mob-proj-hero-actions">' +
         '<button class="btn" onclick="mobOpenSubmittalsForProject(' + p.id + ')">▤ Submittals (' + subCt + ')</button>' +
+        '<button class="btn" onclick="mobOpenProcurementForProject(' + p.id + ')">📋 Procurement (' + procCt + ')</button>' +
       '</div>' +
     '</div>' +
     '<div class="mob-section-hdr">KMI Team <span class="mob-section-hdr-count">' + kmi.length + '</span></div>' +
@@ -4653,6 +4674,80 @@ function mobOpenSubmittalsForProject(projectId) {
 function mobClearSubmittalProjectFilter() {
   _mobileSubmittalProjectFilter = null;
   renderMobileSubmittals();
+}
+
+// Set the project context for the mobile procurement page, then navigate.
+// _mobileSelectedProjectId is the same state the project detail page uses,
+// so back-button → m-project-detail comes back to the right project.
+function mobOpenProcurementForProject(projectId) {
+  _mobileSelectedProjectId = projectId;
+  nav('m-procurement');
+}
+
+// Mobile procurement page: project hero + Print PDF button + the same
+// _procRenderMobileCards card view that powers the procurement tab on the
+// desktop project edit page at ≤768px width. Read-only — no editing
+// controls (no add/edit/delete, no auto-vendor toggles), matches Mike's
+// "mobile is for field reference" design.
+function renderMobileProcurement() {
+  if (!_mobileSelectedProjectId) { nav('m-projects'); return; }
+  var p = getProj(_mobileSelectedProjectId);
+  if (!p) { nav('m-projects'); return; }
+
+  // Heading on the page header bar
+  var hdr = document.getElementById('m-proc-heading');
+  if (hdr) hdr.textContent = 'Procurement — ' + (p.number || '');
+
+  // Prep data (mirrors renderProjectProcurement's setup so the cards see the
+  // same items/PO lines/match index the desktop view does)
+  p.procurementItems = p.procurementItems || [];
+  var items = p.procurementItems;
+  var poLines = (typeof _procCollectProjectPoLines === 'function') ? _procCollectProjectPoLines(p.id) : [];
+  if (typeof _procSyncAutoVendors === 'function' && _procSyncAutoVendors(p, poLines)) {
+    if (typeof saveDB === 'function') saveDB();
+  }
+  var idx = (typeof _procBuildMatchIndex === 'function') ? _procBuildMatchIndex(p, poLines) : { byCode: {}, byItem: {} };
+
+  // Hero block: project number, name, customer, address — same shape as
+  // m-project-detail so the visual language stays consistent.
+  var c = getCust(p.customerId) || {};
+  var addrParts = [];
+  if (p.address) addrParts.push(p.address);
+  var cityLine = [p.city, p.state].filter(Boolean).join(', ');
+  if (cityLine) addrParts.push(cityLine + (p.zip ? ' ' + p.zip : ''));
+  else if (p.zip) addrParts.push(p.zip);
+  var addrHtml = addrParts.length ? addrParts.map(_mobEsc).join('<br>') : '<span style="opacity:.6">No address</span>';
+
+  // Print PDF: procGeneratePdf reads _editProjectId, not _mobileSelectedProjectId,
+  // so the onclick sets it before invoking. Safe because procGeneratePdf doesn't
+  // mutate _editProjectId and there's no desktop edit context on mobile to disturb.
+  var pdfBtn = (items.length && typeof procGeneratePdf === 'function')
+    ? '<button class="btn" onclick="_editProjectId=' + p.id + ';procGeneratePdf()">📄 Print PDF</button>'
+    : '';
+
+  var heroHtml =
+    '<div class="mob-proj-hero">' +
+      '<div class="mob-proj-hero-num">' + _mobEsc(p.number || '—') + '</div>' +
+      '<div class="mob-proj-hero-name">' + _mobEsc(p.name || '') + '</div>' +
+      '<div class="mob-proj-hero-meta">' +
+        '<strong style="color:#fff;font-weight:600">' + _mobEsc(c.name || 'No customer') + '</strong><br>' +
+        addrHtml +
+      '</div>' +
+      (pdfBtn ? '<div class="mob-proj-hero-actions">' + pdfBtn + '</div>' : '') +
+    '</div>';
+
+  // Cards block
+  var cardsHtml;
+  if (!items.length) {
+    cardsHtml = '<div class="mob-list-empty">No procurement items on this project yet.</div>';
+  } else if (typeof _procRenderMobileCards === 'function') {
+    cardsHtml = _procRenderMobileCards(items, idx, p);
+  } else {
+    cardsHtml = '<div class="mob-list-empty">Procurement view unavailable.</div>';
+  }
+
+  var body = document.getElementById('m-proc-body');
+  if (body) body.innerHTML = heroHtml + cardsHtml;
 }
 
 // Render the mobile submittals list. Filters by project if
@@ -5664,6 +5759,7 @@ async function _ptrOnTouchEnd() {
     else if (pageId === 'm-projects'    && typeof renderMobileProjects === 'function')   renderMobileProjects();
     else if (pageId === 'm-submittals'  && typeof renderMobileSubmittals === 'function') renderMobileSubmittals();
     else if (pageId === 'm-project-detail' && typeof renderMobileProjectDetail === 'function') renderMobileProjectDetail();
+    else if (pageId === 'm-procurement' && typeof renderMobileProcurement === 'function') renderMobileProcurement();
     // Always refresh the badge after a pull
     updateOverdueBadge();
   } catch (e) {
@@ -27694,7 +27790,7 @@ var PROC_UNLINK_SENTINEL = '__procunlinked__';
 var _procDrawerOpen = {};      // itemId -> bool, tracks expanded drawer rows
 var _procVarianceOn = false;   // variance columns toggle
 // Mobile-only: collapse state for cost-code section bands on the
-// view-only procurement card view (≤740px). Keyed by cost-code string
+// view-only procurement card view (≤768px). Keyed by cost-code string
 // (or '__uncategorized__'). In-memory only — state resets on page
 // reload, which is acceptable for a view-only field tool.
 var _procMobSectionCollapsed = {};
@@ -27978,7 +28074,7 @@ function renderProjectProcurement() {
       'Multi-PO rows expand for per-PO unlink.' +
     '</div>';
 
-  // Mobile cards — view-only card view for ≤740px. Hidden on desktop
+  // Mobile cards — view-only card view for ≤768px. Hidden on desktop
   // via CSS. Skips ghosts, the BPR worklist, and the BPR-component
   // breakdown; keeps Print PDF accessible via the header card.
   var mobileHtml = _procRenderMobileCards(items, idx, p);
@@ -27989,7 +28085,7 @@ function renderProjectProcurement() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// MOBILE PROCUREMENT VIEW — view-only card layout for ≤740px screens
+// MOBILE PROCUREMENT VIEW — view-only card layout for ≤768px screens
 // ────────────────────────────────────────────────────────────────────
 // Re-rendered alongside the desktop table on every renderProjectProcurement
 // pass; CSS picks one or the other based on viewport width. Mirrors the
