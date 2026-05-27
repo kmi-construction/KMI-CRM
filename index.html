@@ -67,6 +67,16 @@ h1{font-size:21px;font-weight:600;color:#1a1a1a;margin-bottom:3px}
 .btn-pdf{background:#EEF0F8;color:var(--kmi);border-color:var(--stl);font-weight:600}
 .btn-pdf:hover{background:#DDE1F0}
 .btn-sm{padding:4px 10px;font-size:12px}
+/* Split-button: primary action + dropdown caret (e.g. Save changes / Save & close).
+   Lives inside flex containers; the menu is absolutely positioned to its right edge. */
+.split-btn{display:inline-flex;position:relative}
+.split-btn > .btn-main{border-top-right-radius:0;border-bottom-right-radius:0}
+.split-btn > .btn-caret{border-top-left-radius:0;border-bottom-left-radius:0;border-left:0.5px solid rgba(255,255,255,.35);padding-left:12px;padding-right:12px}
+.btn:not(.btn-p):not(.btn-bid):not(.btn-nobid):not(.btn-pdf).btn-caret{border-left-color:#ddd}
+.split-btn-menu{position:absolute;top:calc(100% + 5px);right:0;background:#fff;border:0.5px solid #ddd;border-radius:7px;box-shadow:0 6px 18px rgba(0,0,0,.12);min-width:170px;display:none;z-index:50;overflow:hidden}
+.split-btn-menu.open{display:block}
+.split-btn-menu > div{padding:10px 14px;font-size:13px;color:#1a1a1a;cursor:pointer;font-weight:500;white-space:nowrap}
+.split-btn-menu > div:hover{background:#f5f5f5}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;padding:9px 12px;font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.7px;border-bottom:0.5px solid #eee;background:#fafafa}
 td{padding:10px 12px;border-bottom:0.5px solid #eee;color:#1a1a1a;vertical-align:middle}
@@ -566,6 +576,10 @@ textarea{resize:vertical;min-height:72px}
     gap:8px !important
   }
   .pg > div[style*="justify-content:flex-end"] .btn{width:100%}
+  /* Split-button on mobile: keep main + caret inline within a full-width row */
+  .pg > div[style*="justify-content:flex-end"] .split-btn{width:100%;display:flex}
+  .pg > div[style*="justify-content:flex-end"] .split-btn > .btn{width:auto}
+  .pg > div[style*="justify-content:flex-end"] .split-btn > .btn-main{flex:1}
 
   /* Bid opportunities calendar etc. — keep small, scroll horizontally */
   .cal-wrap{overflow-x:auto}
@@ -1539,9 +1553,15 @@ textarea{resize:vertical;min-height:72px}
     <div id="nprj-procurement-section"></div>
   </div>
 
-  <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
+  <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;align-items:center">
     <button class="btn" onclick="nav('projects')">Cancel</button>
-    <button class="btn btn-p" onclick="saveProject()" style="padding:10px 32px;font-size:14px;font-weight:700" id="nprj-save-btn">Create project</button>
+    <div class="split-btn" id="nprj-save-split">
+      <button class="btn btn-p btn-main" onclick="saveProject(false)" style="padding:10px 32px;font-size:14px;font-weight:700" id="nprj-save-btn">Create project</button>
+      <button class="btn btn-p btn-caret" onclick="toggleSaveMenu(event)" style="padding-top:10px;padding-bottom:10px;font-size:12px;font-weight:700" title="More save options" aria-label="More save options">▾</button>
+      <div class="split-btn-menu" id="nprj-save-menu" role="menu">
+        <div onclick="saveProject(true)" id="nprj-save-close-mi" role="menuitem">Save &amp; close</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -26113,6 +26133,8 @@ function initNewProject() {
   _editProjectId = null;
   g('nprj-heading').textContent    = 'New project';
   g('nprj-save-btn').textContent   = 'Create project';
+  var _newProjMi = g('nprj-save-close-mi'); if (_newProjMi) _newProjMi.textContent = 'Create & close';
+  var _newProjMenu = g('nprj-save-menu');   if (_newProjMenu) _newProjMenu.classList.remove('open');
   g('nprj-id-display').textContent = '';
 
   // Reset to first tab on entry so the user always lands on Project Details
@@ -26201,7 +26223,11 @@ function initNewProject() {
   _newProjectFromOppId = null;
 }
 
-function saveProject() {
+function saveProject(closeAfterSave) {
+  // Close any open save dropdown menu immediately so it doesn't linger
+  // through an alert/return path on validation failures.
+  var _saveMenu = g('nprj-save-menu'); if (_saveMenu) _saveMenu.classList.remove('open');
+
   var number = (g('nprj-num').value  || '').trim();
   var name   = (g('nprj-name').value || '').trim();
   var custId = parseInt(g('nprj-cust').value);
@@ -26272,7 +26298,21 @@ function saveProject() {
     var p = getProj(_editProjectId); if (!p) return;
     Object.keys(payload).forEach(function(k){ p[k] = payload[k]; });
     db.activity.unshift({text: 'Project ' + p.number + ' updated', type: 'won', time: 'Just now'});
-    saveDB(); _editProjectId = null; nav('projects');
+    saveDB();
+    if (closeAfterSave) {
+      _editProjectId = null;
+      nav('projects');
+      return;
+    }
+    // Stay on the page — update heading in case number/name changed,
+    // refresh the currently-active tab so lazy-rendered sections show
+    // freshly-saved data, then flash visual feedback on the button.
+    var _titleParts = [];
+    if (p.number) _titleParts.push(p.number);
+    if (p.name)   _titleParts.push(p.name);
+    g('nprj-heading').textContent = _titleParts.length ? _titleParts.join(' - ') : 'Edit project';
+    _nprjRefreshAfterSave(p);
+    _nprjFlashSaved();
     return;
   }
 
@@ -26292,7 +26332,98 @@ function saveProject() {
     db.activity.unshift({text: 'Project ' + number + ' created', type: 'won', time: 'Just now'});
   }
   g('nprj-save-btn').dataset.oppId = '';
-  saveDB(); nav('projects');
+  saveDB();
+
+  if (closeAfterSave) {
+    nav('projects');
+    return;
+  }
+  // Stay on the page — transition from "create" mode into "edit" mode for the
+  // newly-created project so the user can keep working (procurement, submittals,
+  // POs, the labor-rate template etc. all require a saved project). Mirrors the
+  // setup editProject() does, minus reading inputs (the form already reflects
+  // what the user typed).
+  _editProjectId = newId;
+  var created = getProj(newId);
+  if (created) {
+    var titleParts = [];
+    if (created.number) titleParts.push(created.number);
+    if (created.name)   titleParts.push(created.name);
+    g('nprj-heading').textContent  = titleParts.length ? titleParts.join(' - ') : 'Edit project';
+    g('nprj-save-btn').textContent = 'Save changes';
+    var _miEl = g('nprj-save-close-mi'); if (_miEl) _miEl.textContent = 'Save & close';
+    // Show the source-opportunity link block if this project came from an opp
+    if (created.opportunityId) {
+      g('nprj-source-wrap').style.display = '';
+      g('nprj-source-note').innerHTML = 'Linked to opportunity <strong style="color:var(--kmi)">' + created.opportunityId + '</strong>';
+    }
+    _nprjRefreshAfterSave(created);
+  }
+  _nprjFlashSaved();
+}
+
+// Toggle the save dropdown menu on the project page. Stops the click from
+// bubbling so the document-level click handler doesn't immediately close it.
+function toggleSaveMenu(ev) {
+  if (ev) { ev.stopPropagation(); ev.preventDefault && ev.preventDefault(); }
+  var m = g('nprj-save-menu'); if (!m) return;
+  var willOpen = !m.classList.contains('open');
+  // Close any other open split-button menus first so we never have two open
+  document.querySelectorAll('.split-btn-menu.open').forEach(function(el){ el.classList.remove('open'); });
+  if (willOpen) m.classList.add('open');
+}
+
+// Global click handler: close any open split-button menu when the user clicks
+// outside its parent .split-btn container. Registered once at script-load.
+document.addEventListener('click', function(ev){
+  var open = document.querySelectorAll('.split-btn-menu.open');
+  if (!open.length) return;
+  open.forEach(function(menu){
+    var parent = menu.parentElement;
+    if (parent && !parent.contains(ev.target)) menu.classList.remove('open');
+  });
+});
+
+// After a save where we're staying on the page, re-render the live section
+// for the currently-active project tab. The Details tab's inputs already
+// reflect what the user just typed, but PO list / procurement / submittals
+// render lazily and need a refresh to pick up cloud-side changes that may
+// have come in (and to clear any stale "save the project first" placeholders
+// shown before the first save in create mode).
+function _nprjRefreshAfterSave(p) {
+  try {
+    if (_npActiveTab === 'pos' && typeof renderProjectPoList === 'function') {
+      renderProjectPoList();
+    } else if (_npActiveTab === 'procurement' && typeof renderProjectProcurement === 'function') {
+      renderProjectProcurement();
+    } else if (_npActiveTab === 'submittals' && typeof renderProjectSubmittalsSection === 'function') {
+      renderProjectSubmittalsSection();
+    }
+    // Cheap details-tab refresh — picks up assignment rows, parameter answers,
+    // labor template, material list, attachments in the new edit-mode context.
+    if (typeof renderProjectAttachments === 'function')       renderProjectAttachments();
+    if (typeof renderProjectMaterialList === 'function')      renderProjectMaterialList();
+    if (typeof renderProjectParametersSection === 'function') renderProjectParametersSection();
+    if (typeof renderProjectLaborRateSection === 'function')  renderProjectLaborRateSection();
+    if (typeof renderProjectSubmittalsSection === 'function' && _npActiveTab !== 'submittals') {
+      renderProjectSubmittalsSection();
+    }
+  } catch(e) {
+    console.warn('post-save refresh error', e);
+  }
+}
+
+// Brief visual confirmation that the save succeeded but the user is still
+// on the project page. Flashes "✓ Saved" on the main save button for ~1.6s
+// then restores its original label.
+function _nprjFlashSaved() {
+  var btn = g('nprj-save-btn'); if (!btn) return;
+  var orig = btn.textContent;
+  btn.textContent = '✓ Saved';
+  setTimeout(function(){
+    // Only restore if nothing else has changed the label in the meantime
+    if (btn.textContent === '✓ Saved') btn.textContent = orig;
+  }, 1600);
 }
 
 function editProject(id) {
@@ -26311,6 +26442,8 @@ function editProject(id) {
   if (p.name)   titleParts.push(p.name);
   g('nprj-heading').textContent    = titleParts.length ? titleParts.join(' - ') : 'Edit project';
   g('nprj-save-btn').textContent   = 'Save changes';
+  var _editProjMi = g('nprj-save-close-mi'); if (_editProjMi) _editProjMi.textContent = 'Save & close';
+  var _editProjMenu = g('nprj-save-menu');   if (_editProjMenu) _editProjMenu.classList.remove('open');
   g('nprj-id-display').textContent = '';
 
   // Reset to first tab on entry so the user always lands on Project Details
