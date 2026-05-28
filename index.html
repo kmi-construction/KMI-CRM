@@ -29671,6 +29671,115 @@ async function _bprParsePdf(file) {
   return _bprParseLines(lines);
 }
 
+// Find the latest budget version for a project that has a stored source
+// PDF. Returns { path, version } or null. The Budget module is the system
+// of record for the BPR (versioning / Replace / Append), so Procurement
+// consumes whatever the latest budget version points at.
+function _bprLatestBudgetPdf(projectId) {
+  var bs = (db.projectBudgets || []).filter(function(b){
+    return String(b.projectId) === String(projectId) && b.sourcePdfPath;
+  });
+  if (!bs.length) return null;
+  bs.sort(function(a, b){ return (b.version || 0) - (a.version || 0); });
+  return { path: bs[0].sourcePdfPath, version: bs[0].version || 1 };
+}
+
+// Shared post-parse handler: carry existing procurement assignments forward
+// onto freshly parsed BPR materials (remap by classCode|materialCode),
+// persist, summarize in statusEl, then open the picker. Used by both the
+// manual upload path (procBprUploadChosen) and the "use BPR on file" path
+// (procUseBudgetBpr) so the carry-forward logic lives in exactly one place.
+function _bprApplyParsed(parsed, statusEl) {
+  var p = getProj(_editProjectId);
+  if (!p) { if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">Project not found.</span>'; return; }
+
+  var oldById = {};
+  (p.bprMaterials || []).forEach(function(b){ oldById[String(b.id)] = b; });
+  var newByKey = {};
+  parsed.forEach(function(b){
+    newByKey[(b.classCode || '') + '|' + (b.materialCode || '')] = b;
+  });
+
+  // Remap assignments
+  var remapped = 0, orphaned = 0;
+  (p.procurementItems || []).forEach(function(item){
+    if (!Array.isArray(item.bprAssignments)) return;
+    item.bprAssignments.forEach(function(a){
+      var oldMat = oldById[String(a.bprMaterialId)];
+      if (!oldMat) { a._orphaned = true; orphaned++; return; }
+      var key = (oldMat.classCode || '') + '|' + (oldMat.materialCode || '');
+      var newMat = newByKey[key];
+      if (newMat) {
+        a.bprMaterialId = newMat.id;
+        delete a._orphaned;
+        remapped++;
+      } else {
+        a._orphaned = true;
+        orphaned++;
+      }
+    });
+  });
+
+  p.bprMaterials = parsed;
+  saveDB();
+
+  if (statusEl) {
+    var summary = 'Parsed ' + parsed.length + ' material' + (parsed.length === 1 ? '' : 's') + '.';
+    if (remapped) summary += ' Re-pointed ' + remapped + ' existing assignment' + (remapped === 1 ? '' : 's') + '.';
+    if (orphaned) summary += ' ' + orphaned + ' orphaned (no match in new BPR).';
+    statusEl.innerHTML = '<span style="color:#1E6B36">' + _procEsc(summary) + '</span>';
+  }
+
+  // Brief delay so user sees the success message, then open the picker
+  setTimeout(function(){ closeModal(); procOpenBprPicker(); }, 700);
+}
+
+// "Use BPR on file" — pull the latest budget version's source PDF straight
+// from the kmi-budget-pdfs bucket and run the procurement parse on it, so
+// you don't have to re-upload a file the Budget module already stored.
+async function procUseBudgetBpr() {
+  if (!_editProjectId) { alert('Save the project first.'); return; }
+  if (typeof hasFull === 'function' && !hasFull('edit_project_budget')) {
+    alert('You do not have permission to import Bid Price Reports.');
+    return;
+  }
+  if (!supabaseClient) { alert('Not connected to Supabase. Connect first, then try again.'); return; }
+
+  var info = _bprLatestBudgetPdf(_editProjectId);
+  if (!info) { alert('No budget PDF on file for this project. Upload one in the Budget module, or use manual upload below.'); return; }
+
+  var statusEl = g('bpr-upload-status');
+  var useBtn = g('bpr-use-budget-btn');
+  if (useBtn) useBtn.disabled = true;
+  if (statusEl) statusEl.innerHTML = '<span style="color:#1F5A8A">Fetching BPR from budget v' + info.version + '\u2026</span>';
+
+  try {
+    var signed = await supabaseClient.storage.from('kmi-budget-pdfs').createSignedUrl(info.path, 300);
+    if (signed && signed.error) throw new Error(signed.error.message);
+    var url = signed && signed.data && signed.data.signedUrl;
+    if (!url) throw new Error('Could not generate a download link for the budget PDF.');
+
+    var resp = await fetch(url);
+    if (!resp.ok) throw new Error('Download failed (HTTP ' + resp.status + ').');
+    var blob = await resp.blob();   // _bprFileToArrayBuffer reads Blobs and Files alike
+
+    if (statusEl) statusEl.innerHTML = '<span style="color:#1F5A8A">Parsing BPR from budget v' + info.version + '\u2026</span>';
+    var parsed = await _bprParsePdf(blob);
+
+    if (!parsed || !parsed.length) {
+      if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">No Material Totals rows found in the budget PDF. Is it a Tradesmen Quantity/Bid Price Report?</span>';
+      if (useBtn) useBtn.disabled = false;
+      return;
+    }
+
+    _bprApplyParsed(parsed, statusEl);
+  } catch (e) {
+    console.error('procUseBudgetBpr error', e);
+    if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">' + _procEsc('Couldn\'t use the budget BPR: ' + (e && e.message ? e.message : String(e))) + '</span>';
+    if (useBtn) useBtn.disabled = false;
+  }
+}
+
 // ── UI: entry point button on the procurement toolbar ────────────────
 function procOpenBprFlow() {
   if (!_editProjectId) { alert('Save the project first.'); return; }
@@ -29688,14 +29797,26 @@ function procOpenBprFlow() {
 }
 
 function procOpenBprUploadModal(reUpload) {
+  // If the Budget module already stored a BPR for this project, offer it as
+  // the default — no re-upload needed. Manual upload stays as the fallback.
+  var budgetPdf = _editProjectId ? _bprLatestBudgetPdf(_editProjectId) : null;
+  var useBudgetBlock = budgetPdf ?
+    '<div class="sb3" style="background:#EEF5EE;border:0.5px solid #C2D6C2;margin-bottom:14px">' +
+      '<div style="font-size:13px;color:#1E6B36;margin-bottom:10px">A BPR is already on file from <strong>Budget v' + budgetPdf.version + '</strong> — use it directly, no re-upload required.</div>' +
+      '<button class="btn btn-p" id="bpr-use-budget-btn" onclick="procUseBudgetBpr()">\u2713 Use BPR on file (Budget v' + budgetPdf.version + ')</button>' +
+    '</div>' +
+    '<div style="text-align:center;font-size:11px;color:#aaa;margin:0 0 12px">\u2014 or upload manually \u2014</div>'
+    : '';
+
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
-    '<div class="mt">' + (reUpload ? 'Re-upload Bid Price Report' : 'Upload Bid Price Report') + '</div>' +
-    '<div class="msb">Pick the BPR PDF for this project. We\'ll parse Material Totals and the Other Cost Breakdown section to populate the procurement list. Scaffold, cleaning, air deduction, and patching are extracted but default to unchecked — opt in if you want them.</div>' +
+    '<div class="mt">' + (reUpload ? 'Re-upload Bid Price Report' : 'Import Bid Price Report') + '</div>' +
+    '<div class="msb">We\'ll parse Material Totals and the Other Cost Breakdown section to populate the procurement list. Scaffold, cleaning, air deduction, and patching are extracted but default to unchecked — opt in if you want them.</div>' +
     (reUpload ?
-      '<div class="sb3" style="background:#FFF8E1;color:#9A7A2E;font-size:12px;margin-bottom:12px"><strong>Heads up:</strong> Re-uploading replaces the stored BPR materials. Existing procurement-item assignments will be carried forward where the new BPR has a matching classification + material code; assignments to materials that disappear become orphaned (visible but no longer reconciling).</div>' :
+      '<div class="sb3" style="background:#FFF8E1;color:#9A7A2E;font-size:12px;margin-bottom:12px"><strong>Heads up:</strong> Re-importing replaces the stored BPR materials. Existing procurement-item assignments will be carried forward where the new BPR has a matching classification + material code; assignments to materials that disappear become orphaned (visible but no longer reconciling).</div>' :
       ''
     ) +
+    useBudgetBlock +
     '<div class="fgr full"><label>BPR PDF</label>' +
       '<input type="file" id="bpr-upload-input" accept=".pdf" onchange="procBprUploadChosen(event)">' +
     '</div>' +
@@ -29736,49 +29857,7 @@ async function procBprUploadChosen(evt) {
     return;
   }
 
-  // Carry-forward: if procurement items currently reference bprMaterials,
-  // try to remap to new entries by (classCode, materialCode).
-  var p = getProj(_editProjectId);
-  if (!p) { if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">Project not found.</span>'; return; }
-  var oldById = {};
-  (p.bprMaterials || []).forEach(function(b){ oldById[String(b.id)] = b; });
-  var newByKey = {};
-  parsed.forEach(function(b){
-    newByKey[(b.classCode || '') + '|' + (b.materialCode || '')] = b;
-  });
-
-  // Remap assignments
-  var remapped = 0, orphaned = 0;
-  (p.procurementItems || []).forEach(function(item){
-    if (!Array.isArray(item.bprAssignments)) return;
-    item.bprAssignments.forEach(function(a){
-      var oldMat = oldById[String(a.bprMaterialId)];
-      if (!oldMat) { a._orphaned = true; orphaned++; return; }
-      var key = (oldMat.classCode || '') + '|' + (oldMat.materialCode || '');
-      var newMat = newByKey[key];
-      if (newMat) {
-        a.bprMaterialId = newMat.id;
-        delete a._orphaned;
-        remapped++;
-      } else {
-        a._orphaned = true;
-        orphaned++;
-      }
-    });
-  });
-
-  p.bprMaterials = parsed;
-  saveDB();
-
-  if (statusEl) {
-    var summary = 'Parsed ' + parsed.length + ' material' + (parsed.length === 1 ? '' : 's') + '.';
-    if (remapped) summary += ' Re-pointed ' + remapped + ' existing assignment' + (remapped === 1 ? '' : 's') + '.';
-    if (orphaned) summary += ' ' + orphaned + ' orphaned (no match in new BPR).';
-    statusEl.innerHTML = '<span style="color:#1E6B36">' + _procEsc(summary) + '</span>';
-  }
-
-  // Brief delay so user sees the success message, then open the picker
-  setTimeout(function(){ closeModal(); procOpenBprPicker(); }, 700);
+  _bprApplyParsed(parsed, statusEl);
 }
 
 // ── UI: import picker ───────────────────────────────────────────────
