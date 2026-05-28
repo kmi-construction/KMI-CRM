@@ -28423,7 +28423,9 @@ function _procRenderItemRow(item, entries) {
   var hasPO = entries.length > 0;
   var hasMulti = entries.length > 1;
   var hasMultiBpr = (Array.isArray(item.bprAssignments) ? item.bprAssignments : []).length > 1;
-  var canExpand = hasMulti || hasMultiBpr;
+  // Expandable whenever there's a linked PO (even a single one) or multiple
+  // BPR source lines. The drawer shows BPR composition + linked-PO detail.
+  var canExpand = hasPO || hasMultiBpr;
   var isOpen = !!_procDrawerOpen[itemId];
 
   // Qty cell — three-state precedence: linked POs → rollup; else
@@ -28475,17 +28477,28 @@ function _procRenderItemRow(item, entries) {
 
   var poBadge = '';
   if (canExpand) {
-    // Single label whether the user is expanding for multi-PO, multi-BPR,
-    // or both. The drawer itself shows whichever sections apply.
+    // Single label whether the user is expanding for single/multi-PO,
+    // multi-BPR, or any combination. The drawer shows whichever sections apply.
     var pieces = [];
     if (hasMulti) pieces.push(entries.length + ' POs');
     else if (hasPO) pieces.push('1 PO');
-    if (hasMultiBpr) pieces.push(bprAssignments.length + ' BPR');
+    if (bprAssignments.length >= 1) pieces.push(bprAssignments.length + ' BPR');
     poBadge = ' <button type="button" onclick="procToggleDrawer(\'' + _procEsc(itemId) + '\')" ' +
       'style="padding:2px 8px;font-size:11px;background:#EEF0F8;color:#1F5A8A;border:none;border-radius:8px;cursor:pointer;font-family:inherit" ' +
       'title="Show BPR composition and / or linked PO details">' +
-      (isOpen ? '▾' : '▸') + ' ' + pieces.join(' · ') + '</button>';
+      (isOpen ? '▾' : '▸') + ' ' + (pieces.length ? pieces.join(' · ') : 'Details') + '</button>';
+    // For a single linked PO, keep the manual/auto glance badge alongside
+    // the expander (multi-PO rows surface M/A per line inside the drawer).
+    if (hasPO && !hasMulti) {
+      var e1 = entries[0];
+      var isM1 = e1.matchKind === 'manual';
+      poBadge += ' <span style="font-size:10px;color:' + (isM1 ? '#1F5A8A' : '#666') +
+        ';background:' + (isM1 ? '#E3F0FB' : '#F5F5F3') + ';padding:1px 6px;border-radius:8px" ' +
+        'title="' + (isM1 ? 'Manually linked' : 'Auto-matched by description') + '">' +
+        (isM1 ? 'M' : 'A') + '</span>';
+    }
   } else if (hasPO) {
+    // Defensive fallback — unreachable while canExpand includes hasPO.
     var e = entries[0];
     var isManual = e.matchKind === 'manual';
     poBadge = ' <span style="font-size:10px;color:' + (isManual ? '#1F5A8A' : '#666') +
@@ -28603,14 +28616,12 @@ function _procRenderItemRow(item, entries) {
 function _procRenderDrawer(item, entries) {
   var p = _editProjectId ? getProj(_editProjectId) : null;
   var bprAssignments = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
-  var hasMultiBpr = bprAssignments.length > 1;
 
-  // ── BPR composition section — shown only when the item is backed by
-  // multiple BPR lines (i.e. the item was created by group-import or by
-  // post-import merge). For single-BPR items the "B" badge in the row
-  // is enough; expanding doesn't add useful detail.
+  // ── BPR composition section — shown whenever the item is backed by one or
+  // more BPR lines, so single-PO / single-BPR items expand to the same detail
+  // as grouped items (class, code, description, portion, unit & ext costs).
   var bprSection = '';
-  if (hasMultiBpr && p && Array.isArray(p.bprMaterials)) {
+  if (bprAssignments.length >= 1 && p && Array.isArray(p.bprMaterials)) {
     var bprById = {};
     p.bprMaterials.forEach(function(b){ bprById[String(b.id)] = b; });
     var rows = '';
