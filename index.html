@@ -2840,7 +2840,7 @@ var DB_DEFAULTS = {
   budgetTemplate:      [],   // { id, sortOrder, description, costCode, costClass, sourceType, sourceKey, defaultAmount }
   projectBudgets:      [],   // { id, projectId, version, createdAt, createdBy, sourcePdfPath, taxRate, lines, totals, notes }
   budgetEquipmentSplit: { class_5: 46, class_6: 20, class_10: 30, class_11: 4 },
-  budgetQtyConversions: { mortar_cuft_per_bag: 28, wire_lf_per_bundle: 500, grout_cuft_per_bag: 22 },
+  budgetQtyConversions: { mortar_cuft_per_bag: 27, wire_lf_per_bundle: 500, grout_cuft_per_bag: 23 },
   // Auto-routing rules: when an extracted PDF item doesn't match a
   // configured template line, these rules try to route it to a known
   // cost code/class. Editable on the Templates page. Defaults match
@@ -2972,7 +2972,23 @@ function clearAllData() {
   nav('dashboard');
 }
 
+// One-time correction: the original grout/mortar bag capacities (mortar 28 /
+// grout 22 CF per bag) were superseded by the Procurement-page values
+// (mortar 27 / grout 23). Bump any saved setting still on the old defaults so
+// the Budget and Procurement modules agree on a single source of truth.
+// Only exact old-default matches are touched, so any deliberately-customized
+// value is preserved. Returns true if anything changed.
+function _normalizeBudgetQtyConversions() {
+  var c = db && db.budgetQtyConversions;
+  if (!c || typeof c !== 'object') return false;
+  var changed = false;
+  if (Number(c.mortar_cuft_per_bag) === 28) { c.mortar_cuft_per_bag = 27; changed = true; }
+  if (Number(c.grout_cuft_per_bag)  === 22) { c.grout_cuft_per_bag  = 23; changed = true; }
+  return changed;
+}
+
 var db = loadDB();
+_normalizeBudgetQtyConversions();  // correct stale cached settings before first render
 
 // ═══ AUTH & PERMISSIONS ═══════════════════════════════════════════
 var SESSION_KEY = 'kmi_crm_session_v1';
@@ -4704,6 +4720,9 @@ function renderMobileProcurement() {
   var items = p.procurementItems;
   var poLines = (typeof _procCollectProjectPoLines === 'function') ? _procCollectProjectPoLines(p.id) : [];
   if (typeof _procSyncAutoVendors === 'function' && _procSyncAutoVendors(p, poLines)) {
+    if (typeof saveDB === 'function') saveDB();
+  }
+  if (typeof _procEnsureConversionSnapshots === 'function' && _procEnsureConversionSnapshots(p)) {
     if (typeof saveDB === 'function') saveDB();
   }
   var idx = (typeof _procBuildMatchIndex === 'function') ? _procBuildMatchIndex(p, poLines) : { byCode: {}, byItem: {} };
@@ -27969,7 +27988,9 @@ function renderProjectProcurement() {
   var poLines = _procCollectProjectPoLines(p.id);
   // Sync any not-yet-recorded vendors from currently-linked / auto-matched
   // PO lines onto their procurement items. Persist if anything changed.
-  if (_procSyncAutoVendors(p, poLines)) saveDB();
+  var _procDirty = _procSyncAutoVendors(p, poLines);
+  if (_procEnsureConversionSnapshots(p)) _procDirty = true;
+  if (_procDirty) saveDB();
   var idx     = _procBuildMatchIndex(p, poLines);
   var matListCount = (p.materialList || []).length;
 
@@ -28197,6 +28218,10 @@ function _procRenderMobileCards(items, idx, project) {
       var qtyText = (parentQty != null && isFinite(parentQty))
         ? _procFmtQtyComma(parentQty) + (parentUnit ? ' ' + parentUnit : '')
         : '—';
+      // Rebar/grout/mortar headline conversion (rods / bags) with the
+      // measured qty shown beneath — mirrors the desktop table + PDF.
+      var qtyConv = (parentQty != null && isFinite(parentQty))
+        ? _procUnitConversion(item, parentQty, parentUnit) : null;
       var leadText  = (item.leadTimeDays != null && item.leadTimeDays !== '')
         ? (item.leadTimeDays + ' d') : '—';
       var orderText = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '—';
@@ -28219,7 +28244,11 @@ function _procRenderMobileCards(items, idx, project) {
         '</div>' +
         '<div class="proc-mob-item-vendor">' + _procEsc(vendorText) + '</div>' +
         '<div class="proc-mob-item-grid">' +
-          '<div><span class="lbl">Qty</span><span class="val">' + _procEsc(qtyText) + '</span></div>' +
+          '<div><span class="lbl">Qty</span><span class="val">' +
+            (qtyConv ? _procEsc(qtyConv.countLabel) : _procEsc(qtyText)) +
+          '</span>' +
+            (qtyConv ? '<span class="val" style="display:block;font-size:10px;color:#888;font-weight:400;margin-top:1px">' + _procEsc(qtyConv.sourceLabel) + '</span>' : '') +
+          '</div>' +
           '<div><span class="lbl">Lead</span><span class="val">' + _procEsc(leadText) + '</span></div>' +
           '<div><span class="lbl">Ordered</span><span class="val">' + _procEsc(orderText) + '</span></div>' +
           '<div><span class="lbl">Delivery</span><span class="val">' + _procEsc(delivText) + '</span></div>' +
@@ -28276,6 +28305,117 @@ function procMobToggleSection(sectionKey) {
   }
 }
 
+// ════════════════════════════════════════════════════════════════════
+// PROCUREMENT UNIT CONVERSIONS — headline-unit derivation
+// ────────────────────────────────────────────────────────────────────
+// The procurement list leads with the orderable unit (rods for rebar,
+// bulk bags for grout/mortar) and shows the underlying measured quantity
+// (LF / cubic feet) as a gray secondary line beneath it, on both the app
+// (desktop table + mobile cards) and the printed PDF.
+//
+//   • Rebar  — LF ÷ rodLength → rods. rodLength is per-item, snapshotted
+//     from the BPR description ("240"" → 20 LF, "6'8"" → 6.667 LF) onto
+//     item.bprRodLengthLinFt at import.
+//   • Grout  — cubic feet ÷ (CF/bag) → bags.
+//   • Mortar — cubic feet ÷ (CF/bag) → bags.
+//
+// Grout/mortar are detected via item.bprClassCode ('GRO' / 'MOR'),
+// snapshotted at BPR import (and backfilled from linked BPR materials by
+// _procEnsureConversionSnapshots for items created before this feature).
+//
+// SINGLE SOURCE OF TRUTH: the CF/bag figures come from the shared,
+// editable db.budgetQtyConversions setting (Budget settings panel) so the
+// Procurement and Budget modules can never disagree. The constants below
+// are only the fallback when that setting is missing/zero.
+//
+// PO OVERRIDE & UNIT SAFETY: the conversion is applied to the effective
+// quantity, which is the linked-PO rollup when a PO exists (PO qty
+// overrides the BPR estimate, exactly as elsewhere). It only fires when
+// that quantity is expressed in the MEASURED unit (LF for rebar, CF for
+// grout/mortar). A PO denominated directly in rods / bags / EA is already
+// in the orderable unit, so it passes through as-is — never re-divided.
+var _PROC_GROUT_CUFT_PER_BAG  = 23;   // fallback only — see budgetQtyConversions
+var _PROC_MORTAR_CUFT_PER_BAG = 27;   // fallback only — see budgetQtyConversions
+
+// Unit family tests — used to decide whether a quantity is in the measured
+// unit (and therefore convertible) or already in an orderable unit.
+function _procUnitIsLinearFt(u) {
+  var n = String(u == null ? '' : u).toLowerCase().replace(/[\s.]/g, '');
+  return n === '' || n === 'lf' || n === 'lft' || n.indexOf('lin') === 0;
+}
+function _procUnitIsCubicFt(u) {
+  var n = String(u == null ? '' : u).toLowerCase().replace(/[\s.]/g, '');
+  return n === '' || n === 'cf' || n === 'cft' ||
+         n.indexOf('cu') === 0 || n.indexOf('cbc') === 0 || n.indexOf('cubic') === 0;
+}
+
+// Given a procurement item, its effective quantity, and that quantity's
+// unit, return the headline conversion or null when none applies.
+//   → { countLabel: '12 rods', sourceLabel: '240 LF' }
+function _procUnitConversion(item, qty, unit) {
+  if (!item) return null;
+  var q = Number(qty);
+  if (!isFinite(q) || q <= 0) return null;
+  var uTxt = unit ? ' ' + unit : '';
+
+  // Rebar — LF → rods using the snapshotted per-item rod length. Skipped
+  // when the qty is already in an orderable unit (e.g. a PO cut in rods).
+  if (item.bprRodLengthLinFt && item.bprRodLengthLinFt > 0 && _procUnitIsLinearFt(unit)) {
+    var rods = Math.ceil(q / item.bprRodLengthLinFt);
+    return {
+      countLabel:  rods + ' rod' + (rods === 1 ? '' : 's'),
+      sourceLabel: _procFmtQtyComma(q) + uTxt
+    };
+  }
+
+  // Grout / mortar — cubic feet → bulk bags. Per-bag capacity comes from the
+  // shared budgetQtyConversions setting (fallback to the constants above).
+  // Skipped when the qty is already in bags / EA (e.g. a PO cut by the bag).
+  var cc = String(item.bprClassCode || '');
+  if ((cc === 'GRO' || cc === 'MOR') && _procUnitIsCubicFt(unit)) {
+    var bcv = (typeof db !== 'undefined' && db && db.budgetQtyConversions) ? db.budgetQtyConversions : {};
+    var perBag = (cc === 'GRO')
+      ? (Number(bcv.grout_cuft_per_bag)  > 0 ? Number(bcv.grout_cuft_per_bag)  : _PROC_GROUT_CUFT_PER_BAG)
+      : (Number(bcv.mortar_cuft_per_bag) > 0 ? Number(bcv.mortar_cuft_per_bag) : _PROC_MORTAR_CUFT_PER_BAG);
+    if (perBag > 0) {
+      var bags = Math.ceil(q / perBag);
+      return {
+        countLabel:  bags + ' bag' + (bags === 1 ? '' : 's'),
+        sourceLabel: _procFmtQtyComma(q) + uTxt
+      };
+    }
+  }
+
+  return null;
+}
+
+// Backfill conversion snapshots (bprRodLengthLinFt for rebar, bprClassCode
+// for grout/mortar) onto procurement items created before these snapshots
+// existed, by resolving each item's first linked BPR material. Returns true
+// if anything changed so the caller can persist. Safe to call every render.
+function _procEnsureConversionSnapshots(p) {
+  if (!p || !Array.isArray(p.procurementItems)) return false;
+  var bprById = {};
+  (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+  var changed = false;
+  p.procurementItems.forEach(function(item){
+    var asgs = Array.isArray(item.bprAssignments) ? item.bprAssignments : [];
+    if (!asgs.length) return;
+    if (item.bprRodLengthLinFt || item.bprClassCode) return; // already snapshotted
+    for (var i = 0; i < asgs.length; i++) {
+      var b = bprById[String(asgs[i].bprMaterialId)];
+      if (!b) continue;
+      if (b.classCode === 'REB' && b.rodLengthLinFt) {
+        item.bprRodLengthLinFt = b.rodLengthLinFt; changed = true;
+      } else if (b.classCode === 'MOR' || b.classCode === 'GRO') {
+        item.bprClassCode = b.classCode; changed = true;
+      }
+      break; // first resolvable member wins (mirrors import behavior)
+    }
+  });
+  return changed;
+}
+
 function _procRenderItemRow(item, entries) {
   var itemId = String(item.id);
   var rollup = _procRollup(entries);
@@ -28294,8 +28434,32 @@ function _procRenderItemRow(item, entries) {
   bprAssignments.forEach(function(a){ bprQtySum += Number(a.qty) || 0; });
   var hasBprAssignments = bprAssignments.length > 0;
 
-  var qtyCell;
+  // Effective measured qty for read-only (PO/BPR) rows — the basis for any
+  // unit conversion (rebar LF→rods, grout/mortar CF→bags).
+  var effQty = hasPO ? rollup.totalQty : (hasBprAssignments ? bprQtySum : null);
+  // Effective unit mirrors the qty source: the linked PO's unit when a PO
+  // exists (single → that line's unit; multi → shared unit if they agree),
+  // else the item's own unit. Lets the conversion respect a PO cut directly
+  // in rods/bags instead of re-dividing it.
+  var effUnit = item.unit || '';
   if (hasPO) {
+    if (entries.length === 1) {
+      effUnit = entries[0].line.unit || item.unit || '';
+    } else {
+      var _unitsSeen = {};
+      entries.forEach(function(e){ var u = String(e.line.unit || '').trim(); if (u) _unitsSeen[u] = true; });
+      var _uk = Object.keys(_unitsSeen);
+      effUnit = (_uk.length === 1) ? _uk[0] : (item.unit || '');
+    }
+  }
+  var conv = (effQty != null) ? _procUnitConversion(item, effQty, effUnit) : null;
+
+  var qtyCell, qtySub = '';
+  if (conv) {
+    // Lead with the orderable unit (rods / bags); measured qty goes gray below.
+    qtyCell = '<span style="font-weight:600">' + conv.countLabel + '</span>';
+    qtySub  = '<div style="font-size:10px;color:#888;margin-top:2px;text-align:right">' + _procEsc(conv.sourceLabel) + '</div>';
+  } else if (hasPO) {
     qtyCell = '<span style="font-weight:600">' + rollup.totalQty + '</span>';
   } else if (hasBprAssignments) {
     qtyCell = '<span style="font-weight:600" title="Quantity from BPR assignment(s) — edit via the ⚙ button or by re-assigning portions">' + _procFmtBprQty(bprQtySum) + '</span>';
@@ -28361,17 +28525,8 @@ function _procRenderItemRow(item, entries) {
     ? ' <span style="font-size:10px;color:#5D4391;background:#EEE8F8;padding:1px 6px;border-radius:8px" title="Quantity sourced from Bid Price Report assignment' + (bprAssignments.length === 1 ? '' : 's') + '">B' + (bprAssignments.length > 1 ? '×' + bprAssignments.length : '') + '</span>'
     : '';
 
-  // Rebar rod-count derivation — when the item carries a rod length
-  // (snapshotted from the BPR description "240"" or "6'8""), show the
-  // derived piece count as a secondary line under the qty.
-  var rodHint = '';
-  if (item.bprRodLengthLinFt && (hasBprAssignments || hasPO)) {
-    var lfForRodCalc = hasPO ? rollup.totalQty : bprQtySum;
-    if (lfForRodCalc > 0 && item.bprRodLengthLinFt > 0) {
-      var pieces = Math.ceil(lfForRodCalc / item.bprRodLengthLinFt);
-      rodHint = '<div style="font-size:10px;color:#888;margin-top:2px;text-align:right">≈ ' + pieces + ' rod' + (pieces === 1 ? '' : 's') + '</div>';
-    }
-  }
+  // (Rebar/grout/mortar unit conversion is handled above via _procUnitConversion,
+  // surfaced as qtySub beneath the headline qty.)
 
   // Vendor column — names from item.vendorIds[], stacked vertically when
   // there are multiple. Auto-add from POs lands them here too.
@@ -28411,7 +28566,7 @@ function _procRenderItemRow(item, entries) {
         '</div>' +
       '</td>' +
       '<td style="padding:8px;vertical-align:top">' + vendorCell + '</td>' +
-      '<td style="padding:8px;text-align:right">' + qtyCell + rodHint + '</td>' +
+      '<td style="padding:8px;text-align:right">' + qtyCell + qtySub + '</td>' +
       '<td style="padding:8px;text-align:right">' +
         '<input type="number" min="0" step="1" value="' + _procEsc(leadTime) + '" placeholder="—" ' +
           'style="width:60px;padding:4px 6px;font-size:12px;text-align:right;border:1px solid #ddd;border-radius:4px" ' +
@@ -30207,6 +30362,7 @@ function procBprSavePicker() {
       bprAssignments: assignments
     };
     if (firstRodLength) newItem.bprRodLengthLinFt = firstRodLength;
+    if (firstClassCode === 'MOR' || firstClassCode === 'GRO') newItem.bprClassCode = firstClassCode;
     p.procurementItems.push(newItem);
     added++;
     groupedAdded++;
@@ -30237,6 +30393,10 @@ function procBprSavePicker() {
     // Snapshot rebar rod length so the procurement row can show piece count
     if (b.classCode === 'REB' && b.rodLengthLinFt) {
       newItem.bprRodLengthLinFt = b.rodLengthLinFt;
+    }
+    // Snapshot grout/mortar class so the procurement row can show bag count
+    if (b.classCode === 'MOR' || b.classCode === 'GRO') {
+      newItem.bprClassCode = b.classCode;
     }
 
     p.procurementItems.push(newItem);
@@ -30848,6 +31008,9 @@ function procDoBprAssignment(bprMaterialId, maxRemaining) {
     if (b.classCode === 'REB' && b.rodLengthLinFt) {
       newItem.bprRodLengthLinFt = b.rodLengthLinFt;
     }
+    if (b.classCode === 'MOR' || b.classCode === 'GRO') {
+      newItem.bprClassCode = b.classCode;
+    }
     p.procurementItems.push(newItem);
   } else {
     var sel = g('bpr-asgn-existing-sel');
@@ -30975,6 +31138,10 @@ function procDoMerge(sourceId) {
   // Carry over rod length when applicable
   if (!target.bprRodLengthLinFt && source.bprRodLengthLinFt) {
     target.bprRodLengthLinFt = source.bprRodLengthLinFt;
+  }
+  // Carry over grout/mortar class when applicable
+  if (!target.bprClassCode && source.bprClassCode) {
+    target.bprClassCode = source.bprClassCode;
   }
 
   // Union vendor IDs (planning context — both sets of planned vendors
@@ -31135,6 +31302,7 @@ function procDoUnmerge(itemId) {
       bprAssignments: [ { bprMaterialId: String(a.bprMaterialId), qty: Number(a.qty) || 0 } ]
     };
     if (bm.classCode === 'REB' && bm.rodLengthLinFt) copy.bprRodLengthLinFt = bm.rodLengthLinFt;
+    if (bm.classCode === 'MOR' || bm.classCode === 'GRO') copy.bprClassCode = bm.classCode;
     return copy;
   }).filter(Boolean);
 
@@ -31339,6 +31507,7 @@ function procDoSplit() {
       bprAssignments: [ { bprMaterialId: String(bprId), qty: Number(r.qty) } ]
     };
     if (item.bprRodLengthLinFt) copy.bprRodLengthLinFt = item.bprRodLengthLinFt;
+    if (item.bprClassCode) copy.bprClassCode = item.bprClassCode;
     return copy;
   });
 
@@ -31521,7 +31690,9 @@ function procGeneratePdf() {
 
   // Re-sync vendors before rendering so the PDF reflects the latest auto-add
   var poLines = _procCollectProjectPoLines(p.id);
-  if (_procSyncAutoVendors(p, poLines)) saveDB();
+  var _procPdfDirty = _procSyncAutoVendors(p, poLines);
+  if (_procEnsureConversionSnapshots(p)) _procPdfDirty = true;
+  if (_procPdfDirty) saveDB();
   var idx = _procBuildMatchIndex(p, poLines);
 
   // Build vendor lookup
@@ -31781,11 +31952,15 @@ function procGeneratePdf() {
       var qtyText = (parentQty != null && isFinite(parentQty))
         ? _procFmtQtyComma(parentQty) + (parentUnit ? ' ' + parentUnit : '')
         : '—';
+      // Rebar/grout/mortar headline conversion (rods / bags); measured qty
+      // prints gray beneath. Mirrors the app's desktop table + mobile cards.
+      var qtyConv = (parentQty != null && isFinite(parentQty))
+        ? _procUnitConversion(item, parentQty, parentUnit) : null;
       var leadText  = (item.leadTimeDays != null && item.leadTimeDays !== '') ? String(item.leadTimeDays) : '—';
       var orderText = rollup.earliestOrderDate    ? _procFmtDate(rollup.earliestOrderDate)    : '—';
       var delivText = rollup.earliestDeliveryDate ? _procFmtDate(rollup.earliestDeliveryDate) : '—';
 
-      var bodyLineCount = Math.max(descLines.length, vendorLines.length, 1);
+      var bodyLineCount = Math.max(descLines.length, vendorLines.length, qtyConv ? 2 : 1);
       var rowH = bodyLineCount * 11 + 4;
 
       // Reserve room for the parent row plus at least one nested PO row
@@ -31797,7 +31972,14 @@ function procGeneratePdf() {
       sf('normal', 9, [0, 0, 0]);
       doc.text(descLines, COL_DESC_X, y);
       doc.text(vendorLines, COL_VEND_X, y);
-      doc.text(qtyText,     COL_QTY_RIGHT,  y, { align: 'right' });
+      if (qtyConv) {
+        doc.text(qtyConv.countLabel, COL_QTY_RIGHT, y, { align: 'right' });
+        sf('normal', 8, [136, 136, 136]);
+        doc.text(qtyConv.sourceLabel, COL_QTY_RIGHT, y + 10, { align: 'right' });
+        sf('normal', 9, [0, 0, 0]);
+      } else {
+        doc.text(qtyText, COL_QTY_RIGHT, y, { align: 'right' });
+      }
       doc.text(leadText,    COL_LEAD_RIGHT, y, { align: 'right' });
       doc.text(orderText,   COL_ORDER_X,    y);
       doc.text(delivText,   COL_DELIV_X,    y);
@@ -35771,6 +35953,15 @@ async function pullFromSupabase() {
       db.laborRateSets = [{id:'lrs1', label:'Current Rates', rates:db.laborRates}];
     }
     delete db.laborRates;
+
+    // Correct any stale grout/mortar bag capacities (old defaults 28/22 →
+    // 27/23) loaded from the cloud, and re-persist so the saved setting and
+    // the Procurement module agree.
+    if (_normalizeBudgetQtyConversions() && supabaseClient) {
+      supabaseClient.from('kmi_settings')
+        .upsert({key:'budgetQtyConversions', value:db.budgetQtyConversions})
+        .then(function(r){ if (r && r.error) console.warn('budgetQtyConversions normalize sync error:', r.error.message); });
+    }
 
     // Save to localStorage as cache
     try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch(e) {}
