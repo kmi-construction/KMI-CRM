@@ -1485,7 +1485,7 @@ textarea{resize:vertical;min-height:72px}
     <input class="si" placeholder="Search by number, name, address..." oninput="filterProj()" id="prj-s">
     <select class="fs" onchange="filterProj()" id="prj-fc"><option value="">All customers</option></select>
     <select class="fs" onchange="filterProj()" id="prj-ft"><option value="">All types</option></select>
-    <button class="btn btn-p" style="margin-left:auto" onclick="nav('new-project')">+ New project</button>
+    <button class="btn btn-p" style="margin-left:auto" id="prj-new-btn" onclick="nav('new-project')">+ New project</button>
   </div>
   <div class="card" style="padding:0;overflow:hidden">
     <table><thead><tr>
@@ -1504,11 +1504,11 @@ textarea{resize:vertical;min-height:72px}
        into nprj-tab-details / nprj-tab-directory / nprj-tab-submittals /
        nprj-tab-pos / nprj-tab-procurement. -->
   <div class="tabs" style="margin-top:16px">
-    <div class="tab active" onclick="npSwTab('details', this)">Project Details</div>
-    <div class="tab" onclick="npSwTab('directory', this)">Project Directory</div>
-    <div class="tab" onclick="npSwTab('submittals', this)">Submittals</div>
-    <div class="tab" onclick="npSwTab('pos', this)">PO's &amp; Subs</div>
-    <div class="tab" onclick="npSwTab('procurement', this)">Procurement</div>
+    <div class="tab active" id="nprj-tabhdr-details" onclick="npSwTab('details', this)">Project Details</div>
+    <div class="tab" id="nprj-tabhdr-directory" onclick="npSwTab('directory', this)">Project Directory</div>
+    <div class="tab" id="nprj-tabhdr-submittals" onclick="npSwTab('submittals', this)">Submittals</div>
+    <div class="tab" id="nprj-tabhdr-pos" onclick="npSwTab('pos', this)">PO's &amp; Subs</div>
+    <div class="tab" id="nprj-tabhdr-procurement" onclick="npSwTab('procurement', this)">Procurement</div>
   </div>
 
   <!-- ─── TAB 1: PROJECT DETAILS ─────────────────────────────────── -->
@@ -3032,11 +3032,26 @@ var PERMISSIONS = {
   // Void, Revise. Same trust shape as edit (Admin/PM/PC). Field roles never
   // transition POs; Accounting reads only.
   'issue-purchase-orders':  ['full','full','full','none','none','none'],
+  // Procurement tab: reconciles the project material list / BPR imports against
+  // PO line items (what's ordered, lead times, dates). Field roles get READ —
+  // they already consume the read-only mobile procurement page. Accounting
+  // reads it for AP matching. Office staff (Admin/PM/PC) get full edit.
+  'view-procurement':   ['full','full','full','read','read','read'],
+  'edit-procurement':   ['full','full','full','none','none','none'],
   'analytics':          ['full','read','read','read','none','none'],
   'users':              ['full','none','none','none','none','none'],
   'templates':          ['full','read','none','none','none','none'],
   'email-log':          ['full','none','none','none','none','none'],
   'email-settings':     ['full','none','none','none','none','none'],
+  // Projects module: the project record itself + its workspace. view-project
+  // gates the Projects list, the project detail, and the Details/Directory tabs.
+  // create/edit gate the New/Edit Project page and Save; delete is Admin-only.
+  // Field roles manage field work (T&M, procurement) on mobile, not the
+  // office-side project record, so they're none on view/create/edit.
+  'view-project':    ['full','full','full','read','none','none'],
+  'create-project':  ['full','full','full','none','none','none'],
+  'edit-project':    ['full','full','full','none','none','none'],
+  'delete-project':  ['full','none','none','none','none','none'],
   // Project Kickoff (post-spec): Admin / PM / PC can send. Mirrors the
   // create-opportunity / edit-customers trust shape — same people who can
   // set up the project record can send the kickoff email + Job File CSV.
@@ -3149,6 +3164,8 @@ var PAGE_ACTION_MAP = {
   'pms':            'add-pm',
   'vendors':           'add-vendors',
   'vendor-contacts':   'add-vendor-contacts',
+  'projects':       'view-project',
+  'new-project':    'edit-project',
   'analytics':      'analytics',
   'users':          'users',
   'templates':      'templates',
@@ -3260,7 +3277,7 @@ function enterApp() {
     nav('tm-tickets');
     return;
   }
-  nav('dashboard');
+  nav(firstAccessiblePage());
 }
 function logout() {
   _currentUser = null;
@@ -4289,7 +4306,29 @@ function setActivePage(page) {
   if (pg) pg.classList.add('active');
 }
 
+// Round 9: first page (in priority order) the current user can actually reach.
+// Used as the desktop landing page and as the redirect target when a user
+// lands on a page they don't have access to. Field roles fall through to T&M.
+function firstAccessiblePage() {
+  var order = ['dashboard','tm-tickets','opportunities','projects','submittals',
+               'product-library','vendors','customers','budget','analytics'];
+  for (var i = 0; i < order.length; i++) {
+    var a = PAGE_ACTION_MAP[order[i]];
+    if (!a || canAccess(a) !== 'none') return order[i];
+  }
+  return 'dashboard';
+}
+
 function nav(page) {
+  // Permission gate (Round 9): never render a desktop page the current user
+  // can't access — even the hardcoded landing page. Redirect to their first
+  // accessible page instead. Pages with no mapped action (mobile shells,
+  // new-* sub-pages) pass through unchanged.
+  var _gate = PAGE_ACTION_MAP[page];
+  if (_gate && _currentUser && canAccess(_gate) === 'none') {
+    var _dest = firstAccessiblePage();
+    if (_dest && _dest !== page) { nav(_dest); return; }
+  }
   setActivePage(page);
   closeModal();
   var fns = {
@@ -24264,8 +24303,37 @@ function getProj(id) { return db.projects.find(function(p){ return p.id === id; 
 // product library — toggles header active state and shows/hides the
 // matching tab body. Pass `el` from the inline onclick to keep the
 // click target highlighted; pass `null` when restoring state programmatically.
+// Round 9: project workspace tab → permission gate. A tab the role can't
+// access ('none') is hidden, and switching to it falls back to the first
+// accessible tab. Tabs whose action is 'read' or 'full' both render (the
+// edit controls inside them are gated separately by their own perms).
+var NPRJ_TAB_PERMS = {
+  details:     'view-project',
+  directory:   'view-project',
+  submittals:  'view-submittals',
+  pos:         'view-purchase-orders',
+  procurement: 'view-procurement'
+};
+function npTabAllowed(tab) {
+  var a = NPRJ_TAB_PERMS[tab];
+  return !a || canAccess(a) !== 'none';
+}
+function applyProjectTabPermissions() {
+  Object.keys(NPRJ_TAB_PERMS).forEach(function(tab) {
+    var el = g('nprj-tabhdr-' + tab);
+    if (el) el.style.display = npTabAllowed(tab) ? '' : 'none';
+  });
+}
 function npSwTab(tab, el) {
   if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'procurement') tab = 'details';
+  // Hide tab headers the current role can't access, then redirect off any
+  // disallowed tab (e.g. the hardcoded 'details' default) to the first allowed one.
+  applyProjectTabPermissions();
+  if (!npTabAllowed(tab)) {
+    var _order = ['details','directory','submittals','pos','procurement'];
+    var _alt = _order.find(function(t){ return npTabAllowed(t); });
+    if (_alt && _alt !== tab) { return npSwTab(_alt, null); }
+  }
   _npActiveTab = tab;
   var heads = document.querySelectorAll('#pg-new-project .tabs .tab');
   heads.forEach(function(h){ h.classList.remove('active'); });
@@ -26212,6 +26280,8 @@ function formatProjAddress(p) {
 }
 
 function renderProjects() {
+  // Round 9: hide the create entry point for roles without create-project.
+  var _nb = g('prj-new-btn'); if (_nb) _nb.style.display = hasFull('create-project') ? '' : 'none';
   // Customer filter
   g('prj-fc').innerHTML = '<option value="">All customers</option>' +
     db.customers.slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); })
@@ -26441,6 +26511,10 @@ function initNewProject() {
 }
 
 function saveProject(closeAfterSave) {
+  // Permission gate (Round 9): creating a new project needs create-project;
+  // saving an existing one needs edit-project.
+  var _projPerm = _editProjectId ? 'edit-project' : 'create-project';
+  if (!requireFull(_projPerm, _editProjectId ? 'edit projects' : 'create projects')) return;
   // Close any open save dropdown menu immediately so it doesn't linger
   // through an alert/return path on validation failures.
   var _saveMenu = g('nprj-save-menu'); if (_saveMenu) _saveMenu.classList.remove('open');
@@ -26644,6 +26718,7 @@ function _nprjFlashSaved() {
 }
 
 function editProject(id) {
+  if (!requireFull('edit-project', 'edit projects')) return;
   var p = getProj(id); if (!p) { alert('Project not found.'); return; }
   _editProjectId = id;
   _newProjectFromOppId = null;
@@ -26725,6 +26800,7 @@ function editProject(id) {
 }
 
 function deleteProject(id) {
+  if (!requireFull('delete-project', 'delete projects')) return;
   var p = getProj(id); if (!p) return;
   if (!confirm('Delete project ' + (p.number || '') + (p.name ? ' (' + p.name + ')' : '') + '?\n\nThis cannot be undone.')) return;
   if (p.opportunityId) {
@@ -28008,9 +28084,11 @@ function renderProjectProcurement() {
             '<input type="checkbox" id="proc-var-toggle"' + (_procVarianceOn ? ' checked' : '') + ' onchange="procToggleVariance()" style="width:auto;margin:0">' +
             'Show variance columns' +
           '</label>' +
-          '<button type="button" class="btn btn-sm proc-desktop-only" onclick="procOpenFromMatListPicker()"' + (matListCount ? '' : ' disabled title="No material list rows on this project yet"') + '>+ From material list</button>' +
-          '<button type="button" class="btn btn-sm proc-desktop-only" onclick="procOpenBprFlow()" title="' + (p.bprMaterials && p.bprMaterials.length ? 'Import items from the Bid Price Report' : 'Upload the Bid Price Report PDF to extract material quantities') + '">+ From BPR' + (p.bprMaterials && p.bprMaterials.length ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
-          '<button type="button" class="btn btn-sm btn-p proc-desktop-only" onclick="procOpenCustomItemModal(null)">+ Custom item</button>' +
+          (hasFull('edit-procurement') ?
+            '<button type="button" class="btn btn-sm proc-desktop-only" onclick="procOpenFromMatListPicker()"' + (matListCount ? '' : ' disabled title="No material list rows on this project yet"') + '>+ From material list</button>' +
+            '<button type="button" class="btn btn-sm proc-desktop-only" onclick="procOpenBprFlow()" title="' + (p.bprMaterials && p.bprMaterials.length ? 'Import items from the Bid Price Report' : 'Upload the Bid Price Report PDF to extract material quantities') + '">+ From BPR' + (p.bprMaterials && p.bprMaterials.length ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
+            '<button type="button" class="btn btn-sm btn-p proc-desktop-only" onclick="procOpenCustomItemModal(null)">+ Custom item</button>'
+          : '') +
           '<button type="button" class="btn btn-sm" onclick="procGeneratePdf()" title="Generate a printable PDF of the procurement list">📄 Print PDF</button>' +
         '</span>' +
       '</div>' +
@@ -28771,6 +28849,7 @@ function procToggleDrawer(itemId) {
 }
 
 function procUpdateLead(inp) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
   var itemId = inp.getAttribute('data-proc-lead');
@@ -28788,6 +28867,7 @@ function procUpdateLead(inp) {
 }
 
 function procUpdateManualQty(inp) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
   var itemId = inp.getAttribute('data-proc-qty');
@@ -28813,6 +28893,7 @@ function procOpenPo(poId) {
 // auto-match by description will naturally re-attach if a same-description
 // item is added later).
 function procRemoveItem(itemId) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
   var items = p.procurementItems || [];
@@ -28854,6 +28935,7 @@ function procRemoveItem(itemId) {
 // If the link was an auto description match, set the sentinel so it
 // doesn't re-match.
 function procUnlinkPoLine(poId, lineId) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) return;
   if (typeof hasFull === 'function' && !hasFull('edit-purchase-orders')) {
     alert('You do not have permission to change PO line links.');
@@ -28877,6 +28959,7 @@ function procUnlinkPoLine(poId, lineId) {
 // If an item with the same description already exists, manually link
 // instead of creating a duplicate.
 function procAddGhostToList(poId, lineId) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) { alert('Save the project first.'); return; }
   var p = getProj(_editProjectId); if (!p) return;
   var po = (db.purchaseOrders || []).find(function(x){ return String(x.id) === String(poId); });
@@ -28923,6 +29006,7 @@ function procAddGhostToList(poId, lineId) {
 // already represented in procurementItems (case-insensitive trim) are
 // disabled with a hint. Checked rows get snapshotted into procurement.
 function procOpenFromMatListPicker() {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) { alert('Save the project first.'); return; }
   var p = getProj(_editProjectId); if (!p) return;
   var matList = (p.materialList || []).slice();
@@ -29025,6 +29109,7 @@ function procSaveFromMatListPicker() {
 // existing items (itemId set). Edits cover the fields that aren't
 // rolled-up from POs: description, unit, cost code, unit cost.
 function procOpenCustomItemModal(itemId) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) { alert('Save the project first.'); return; }
   var p = getProj(_editProjectId); if (!p) return;
   var editing = !!itemId;
@@ -29147,6 +29232,7 @@ function procSaveCustomItem(itemId) {
 
 // ── ⚙ Link POs picker — bulk link/unlink ─────────────────────────────
 function procOpenLinkPicker(itemId) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) return;
   if (typeof hasFull === 'function' && !hasFull('edit-purchase-orders')) {
     alert('You do not have permission to change PO line links.');
@@ -29948,6 +30034,7 @@ async function procUseBudgetBpr() {
 
 // ── UI: entry point button on the procurement toolbar ────────────────
 function procOpenBprFlow() {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) { alert('Save the project first.'); return; }
   if (typeof hasFull === 'function' && !hasFull('edit_project_budget')) {
     alert('You do not have permission to upload Bid Price Reports.');
@@ -31046,6 +31133,7 @@ function procDoBprAssignment(bprMaterialId, maxRemaining) {
 // ─────────────────────────────────────────────────────────────────────
 
 function procOpenMergeDialog(itemId) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
   var source = (p.procurementItems || []).find(function(x){ return String(x.id) === String(itemId); });
@@ -31198,6 +31286,7 @@ function procDoMerge(sourceId) {
 // mean the item is a merge product and the user wants to undo the
 // merge, restoring one item per original BPR line.
 function procOpenSplitOrUnmerge(itemId) {
+  if (!requireFull('edit-procurement','edit procurement')) return;
   if (!_editProjectId) return;
   var p = getProj(_editProjectId); if (!p) return;
   var item = (p.procurementItems || []).find(function(x){ return String(x.id) === String(itemId); });
