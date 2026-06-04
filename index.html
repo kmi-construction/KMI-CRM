@@ -1508,6 +1508,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="tab" id="nprj-tabhdr-directory" onclick="npSwTab('directory', this)">Project Directory</div>
     <div class="tab" id="nprj-tabhdr-submittals" onclick="npSwTab('submittals', this)">Submittals</div>
     <div class="tab" id="nprj-tabhdr-pos" onclick="npSwTab('pos', this)">PO's &amp; Subs</div>
+    <div class="tab" id="nprj-tabhdr-cors" onclick="npSwTab('cors', this)">Change Orders</div>
     <div class="tab" id="nprj-tabhdr-procurement" onclick="npSwTab('procurement', this)">Procurement</div>
   </div>
 
@@ -1662,7 +1663,32 @@ textarea{resize:vertical;min-height:72px}
     </div>
   </div>
 
-  <!-- ─── TAB 5: PROCUREMENT ─────────────────────────────────────── -->
+  <!-- ─── TAB 5: CHANGE ORDERS ───────────────────────────────────── -->
+  <!-- Lists every COR on this project with a status filter and click-to-sort
+       columns. Renders lazily via renderProjectCorList() when the tab opens.
+       "+ New COR" launches the standard type-picker with this project locked. -->
+  <div id="nprj-tab-cors" style="display:none">
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Change Orders</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <select id="nprj-cor-status-filter" class="fs" onchange="renderProjectCorList()" title="Filter by status">
+            <option value="">All statuses</option>
+            <option value="Draft">Draft</option>
+            <option value="Pending">Pending</option>
+            <option value="Approved">Approved</option>
+            <option value="Rejected">Rejected</option>
+            <option value="Voided">Voided</option>
+          </select>
+          <button class="btn btn-sm btn-p" onclick="corNewForProject()" id="nprj-cor-new-btn">+ New COR</button>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#888;margin-bottom:10px">Change Order Requests on this project. Click any column header to sort; use the dropdown to filter by status.</div>
+      <div id="nprj-cor-list-section"></div>
+    </div>
+  </div>
+
+  <!-- ─── TAB 6: PROCUREMENT ─────────────────────────────────────── -->
   <!-- Reconciles project material list rows with PO line items so PMs can see
        at a glance what's been ordered, what hasn't, lead times, and dates.
        Renders lazily via renderProjectProcurement() when the tab opens. -->
@@ -2230,7 +2256,7 @@ textarea{resize:vertical;min-height:72px}
     <button class="btn btn-p" onclick="showNewCorModal()" id="cor-new-btn">+ New COR</button>
   </div>
   <div class="card" style="padding:0;overflow:hidden">
-    <table><thead><tr>
+    <table><thead><tr id="cor-head-row">
       <th>COR #</th><th>Date</th><th>Project</th><th>Type</th><th>Description</th><th>Total</th><th>Status</th><th>Created by</th><th>Actions</th>
     </tr></thead><tbody id="cor-tbody"></tbody></table>
   </div>
@@ -15157,6 +15183,175 @@ function corCanDelete(c) {
   return hasFull('delete-cor');
 }
 
+// ── Column sorting (shared by the main CORs list and the per-project
+//    Change Orders tab) ────────────────────────────────────────────────
+// Sortable column definitions. The main list uses all of them; the
+// per-project tab drops "Project" (every row is the same project).
+var COR_COLS = [
+  { key: 'cornum',  label: 'COR #' },
+  { key: 'date',    label: 'Date' },
+  { key: 'project', label: 'Project' },
+  { key: 'type',    label: 'Type' },
+  { key: 'desc',    label: 'Description' },
+  { key: 'total',   label: 'Total' },
+  { key: 'status',  label: 'Status' },
+  { key: 'creator', label: 'Created by' }
+];
+var PRJ_COR_COLS = COR_COLS.filter(function(c){ return c.key !== 'project'; });
+
+// Sort state. Default is newest-first by date (matches the prior hardcoded
+// behaviour). _corSort drives the main list; _prjCorSort the project tab.
+var _corSort    = { key: 'date', dir: 'desc' };
+var _prjCorSort = { key: 'date', dir: 'desc' };
+
+// Sensible default direction when a NEW column is clicked: numeric/date
+// columns start largest/newest first; text columns start A→Z.
+function _corDefaultDir(key) {
+  return (key === 'date' || key === 'total' || key === 'cornum') ? 'desc' : 'asc';
+}
+
+// Resolve the display name of whoever created a COR (user record first,
+// falling back to the stored createdByName, then an em dash).
+function _corCreatorName(c) {
+  var creator = (db.users || []).find(function(u){ return String(u.id) === String(c.createdByUserId); }) || {};
+  return ((creator.firstName || '') + ' ' + (creator.lastName || '')).trim() || (c.createdByName || '—');
+}
+
+// Extract a comparable value for a given column. Returns { t, v } where
+// t is 'n' (numeric) or 's' (string) so the comparator can pick the right
+// comparison. Strings are lowercased for case-insensitive ordering.
+function _corSortValue(c, key) {
+  var p;
+  switch (key) {
+    case 'cornum': {
+      var seq = corExtractKmiSeq(c.corNumber);
+      var n = parseInt(seq, 10);
+      return isNaN(n) ? { t: 's', v: String(seq || '').toLowerCase() } : { t: 'n', v: n };
+    }
+    case 'date':    return { t: 's', v: String(c.corDate || '') };           // YYYY-MM-DD sorts lexically
+    case 'project': p = getProj(c.projectId) || {}; return { t: 's', v: ((p.number || '') + ' ' + (p.name || '')).toLowerCase() };
+    case 'type':    return { t: 's', v: String(c.corType || c.type || '').toLowerCase() };
+    case 'desc':    return { t: 's', v: String(c.description || '').toLowerCase() };
+    case 'total':   return { t: 'n', v: Number(c.totalAmount) || 0 };
+    case 'status':  return { t: 's', v: String(c.status || 'Draft').toLowerCase() };
+    case 'creator': return { t: 's', v: _corCreatorName(c).toLowerCase() };
+    default:        return { t: 's', v: '' };
+  }
+}
+
+// Comparator. Equal primary keys fall back to a stable, direction-
+// independent tiebreak (newest date, then highest id) so ties never jitter.
+function _corCompare(a, b, key, dir) {
+  var va = _corSortValue(a, key), vb = _corSortValue(b, key);
+  var cmp;
+  if (va.t === 'n' && vb.t === 'n') cmp = va.v - vb.v;
+  else cmp = String(va.v).localeCompare(String(vb.v));
+  if (cmp !== 0) return dir === 'asc' ? cmp : -cmp;
+  return String(b.corDate || '').localeCompare(String(a.corDate || '')) || (Number(b.id) - Number(a.id));
+}
+
+// Build the clickable header cells (plus a non-sortable Actions column).
+// `onclickFnName` is the sort handler to call; `thExtra` is appended to
+// each th's inline style (the project tab needs its own padding).
+function _corHeadHtml(cols, sort, onclickFnName, thExtra) {
+  thExtra = thExtra || '';
+  var ths = cols.map(function(col){
+    var active = String(sort.key) === String(col.key);
+    var arrow = active ? (sort.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+    return '<th style="cursor:pointer;user-select:none;white-space:nowrap;' + thExtra + '" ' +
+      'onclick="' + onclickFnName + '(\'' + col.key + '\')" title="Sort by ' + corEsc(col.label) + '">' +
+      corEsc(col.label) +
+      '<span style="color:var(--kmi);font-size:11px;font-weight:700">' + arrow + '</span></th>';
+  }).join('');
+  return ths + '<th style="' + thExtra + '">Actions</th>';
+}
+
+// Click handler for the MAIN CORs list. Toggles direction on the active
+// column, otherwise switches column with its default direction. Persisted
+// to localStorage so the choice survives nav-away/refresh.
+function corSetSort(key) {
+  if (_corSort.key === key) _corSort.dir = (_corSort.dir === 'asc' ? 'desc' : 'asc');
+  else { _corSort.key = key; _corSort.dir = _corDefaultDir(key); }
+  try { localStorage.setItem('kmi_cor_sort', JSON.stringify(_corSort)); } catch (e) { /* non-fatal */ }
+  filterCors();
+}
+
+// Click handler for the per-project Change Orders tab (session-only state).
+function prjCorSetSort(key) {
+  if (_prjCorSort.key === key) _prjCorSort.dir = (_prjCorSort.dir === 'asc' ? 'desc' : 'asc');
+  else { _prjCorSort.key = key; _prjCorSort.dir = _corDefaultDir(key); }
+  renderProjectCorList();
+}
+
+// ── Per-project Change Orders tab ──────────────────────────────────────
+// Lists every COR on the open project, with a status filter and click-to-
+// sort columns. Mirrors renderProjectPoList's lazy-render pattern.
+function renderProjectCorList() {
+  var el = g('nprj-cor-list-section'); if (!el) return;
+  var newBtn = g('nprj-cor-new-btn');
+  var pid = _editProjectId;
+
+  // Gate the New button by permission regardless of save state.
+  if (newBtn) newBtn.style.display = hasFull('create-cor') ? '' : 'none';
+
+  if (!pid) {
+    el.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px">Save the project first to start adding change orders.</div>';
+    if (newBtn) newBtn.disabled = true;
+    return;
+  }
+  if (newBtn) newBtn.disabled = false;
+
+  var statusFilter = (g('nprj-cor-status-filter') && g('nprj-cor-status-filter').value) || '';
+  var rows = (db.cors || []).filter(function(c){
+    if (String(c.projectId) !== String(pid)) return false;
+    if (statusFilter && (c.status || 'Draft') !== statusFilter) return false;
+    return true;
+  });
+  rows.sort(function(a, b){ return _corCompare(a, b, _prjCorSort.key, _prjCorSort.dir); });
+
+  var head = _corHeadHtml(PRJ_COR_COLS, _prjCorSort, 'prjCorSetSort', 'padding:8px 10px;text-align:left');
+
+  if (!rows.length) {
+    el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
+      '</tr></thead><tbody><tr><td colspan="8" style="text-align:center;color:#aaa;padding:24px;font-size:13px">' +
+      (statusFilter ? ('No ' + corEsc(statusFilter) + ' change orders on this project.') : 'No change orders on this project yet.') +
+      '</td></tr></tbody></table>';
+    return;
+  }
+
+  var body = rows.map(function(c){
+    var creatorName = _corCreatorName(c);
+    var actions = '';
+    if (hasRead('view-cors')) {
+      actions += '<button class="btn btn-sm" onclick="viewCor(' + c.id + ')">' +
+        (corCanEdit(c) ? '\u270E Edit' : '\uD83D\uDC41 View') + '</button>';
+    }
+    if (corCanDelete(c)) {
+      actions += '&nbsp;<button class="btn btn-sm" style="color:#A32D2D" onclick="deleteCor(' + c.id + ')">Delete</button>';
+    }
+    return '<tr style="border-bottom:1px solid #eee">' +
+      '<td style="padding:8px 10px"><strong style="color:var(--kmi)">' + corEsc(corExtractKmiSeq(c.corNumber) || '') + '</strong></td>' +
+      '<td style="padding:8px 10px">' + corEsc(c.corDate || '') + '</td>' +
+      '<td style="padding:8px 10px">' + corTypeBadge(c) + '</td>' +
+      '<td style="padding:8px 10px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + corEsc(c.description || '') + '">' + corEsc(c.description || '') + '</td>' +
+      '<td style="padding:8px 10px">' + corFmtMoney(c.totalAmount || 0) + '</td>' +
+      '<td style="padding:8px 10px">' + corStatusBadge(c) + '</td>' +
+      '<td style="padding:8px 10px">' + corEsc(creatorName) + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap">' + actions + '</td>' +
+      '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
+    '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+// Launch the New COR type-picker with this project pre-selected and locked.
+function corNewForProject() {
+  if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); return; }
+  if (!_editProjectId) { alert('Save the project first before adding change orders.'); return; }
+  showNewCorModal(_editProjectId);
+}
+
 // ── Render: list page ─────────────────────────────────────────────────
 function renderCors() {
   if (!hasRead('view-cors')) {
@@ -15197,6 +15392,17 @@ function renderCors() {
     }
   } catch (e) { /* malformed JSON — ignore, filters stay empty */ }
 
+  // Restore persisted column sort (set by corSetSort). Falls back to the
+  // default newest-first if missing or malformed / unknown column.
+  try {
+    var savedSort = JSON.parse(localStorage.getItem('kmi_cor_sort') || 'null');
+    if (savedSort && typeof savedSort === 'object' &&
+        COR_COLS.some(function(col){ return col.key === savedSort.key; }) &&
+        (savedSort.dir === 'asc' || savedSort.dir === 'desc')) {
+      _corSort = { key: savedSort.key, dir: savedSort.dir };
+    }
+  } catch (e) { /* malformed JSON — keep default sort */ }
+
   filterCors();
 }
 
@@ -15226,10 +15432,13 @@ function filterCors() {
     var hay = [c.corNumber, c.description, p.number, p.name, c.status, c.corType].join(' ').toLowerCase();
     return hay.indexOf(s) !== -1;
   }).sort(function(a,b){
-    // Newest first
-    return String(b.corDate || '').localeCompare(String(a.corDate || ''))
-        || (Number(b.id) - Number(a.id));
+    return _corCompare(a, b, _corSort.key, _corSort.dir);
   });
+
+  // Sortable header row — rebuilt each pass so the active-column arrow
+  // reflects the current sort. Falls back silently if the row isn't present.
+  var headRow = g('cor-head-row');
+  if (headRow) headRow.innerHTML = _corHeadHtml(COR_COLS, _corSort, 'corSetSort', '');
 
   // Metrics
   var total      = list.length;
@@ -15259,8 +15468,7 @@ function filterCors() {
   }
   g('cor-tbody').innerHTML = list.map(function(c){
     var p = getProj(c.projectId) || {};
-    var creator = (db.users.find(function(u){ return String(u.id) === String(c.createdByUserId); }) || {});
-    var creatorName = ((creator.firstName || '') + ' ' + (creator.lastName || '')).trim() || (c.createdByName || '—');
+    var creatorName = _corCreatorName(c);
 
     var actions = '';
     if (hasRead('view-cors')) {
@@ -15286,13 +15494,18 @@ function filterCors() {
 }
 
 // ── Type-picker modal (Step 1 of new COR creation) ────────────────────
-function showNewCorModal() {
+// preselectProjectId (optional): when provided (e.g. launched from a
+// project's Change Orders tab), that project is selected and locked so the
+// COR is created against it.
+function showNewCorModal(preselectProjectId) {
   if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); return; }
+  var lock = preselectProjectId !== null && preselectProjectId !== undefined && preselectProjectId !== '';
   var projOpts = '<option value="">— Select project —</option>' +
     db.projects.slice().sort(function(a,b){
       return String(a.number || '').localeCompare(String(b.number || ''));
     }).map(function(p){
-      return '<option value="' + p.id + '">' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+      var sel = (lock && String(p.id) === String(preselectProjectId)) ? ' selected' : '';
+      return '<option value="' + p.id + '"' + sel + '>' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
     }).join('');
 
   showModal(
@@ -15300,7 +15513,9 @@ function showNewCorModal() {
     '<div class="mt">New Change Order Request</div>' +
     '<div class="msb">Pick a project and type. The COR type can\'t be changed after creation, since it changes which data sources fill the form.</div>' +
     '<div class="fg" style="margin-bottom:14px">' +
-      '<div class="fgr full"><label>Project *</label><select id="ncm-project">' + projOpts + '</select></div>' +
+      '<div class="fgr full"><label>Project *</label><select id="ncm-project"' + (lock ? ' disabled style="background:#f5f5f5;color:#666"' : '') + '>' + projOpts + '</select>' +
+        (lock ? '<div style="font-size:11px;color:#888;margin-top:4px">Locked to this project &mdash; you opened New COR from its Change Orders tab.</div>' : '') +
+      '</div>' +
     '</div>' +
     '<div style="margin-bottom:14px">' +
       '<label style="display:block;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.7px;margin-bottom:8px">Type *</label>' +
@@ -24317,6 +24532,7 @@ var NPRJ_TAB_PERMS = {
   directory:   'view-project',
   submittals:  'view-submittals',
   pos:         'view-purchase-orders',
+  cors:        'view-cors',
   procurement: 'view-procurement'
 };
 function npTabAllowed(tab) {
@@ -24335,12 +24551,12 @@ function applyProjectTabPermissions() {
   var split = g('nprj-save-split'); if (split) split.style.display = canSave ? '' : 'none';
 }
 function npSwTab(tab, el) {
-  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'procurement') tab = 'details';
+  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'cors' && tab !== 'procurement') tab = 'details';
   // Hide tab headers the current role can't access, then redirect off any
   // disallowed tab (e.g. the hardcoded 'details' default) to the first allowed one.
   applyProjectTabPermissions();
   if (!npTabAllowed(tab)) {
-    var _order = ['details','directory','submittals','pos','procurement'];
+    var _order = ['details','directory','submittals','pos','cors','procurement'];
     var _alt = _order.find(function(t){ return npTabAllowed(t); });
     if (_alt && _alt !== tab) { return npSwTab(_alt, null); }
   }
@@ -24350,23 +24566,29 @@ function npSwTab(tab, el) {
   if (el) {
     el.classList.add('active');
   } else {
-    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : (tab === 'procurement' ? 4 : 0)));
+    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : (tab === 'cors' ? 4 : (tab === 'procurement' ? 5 : 0))));
     if (heads[idx]) heads[idx].classList.add('active');
   }
   var dTab = g('nprj-tab-details');
   var rTab = g('nprj-tab-directory');
   var sTab = g('nprj-tab-submittals');
   var pTab = g('nprj-tab-pos');
+  var cTab = g('nprj-tab-cors');
   var mTab = g('nprj-tab-procurement');
   if (dTab) dTab.style.display = (tab === 'details')     ? '' : 'none';
   if (rTab) rTab.style.display = (tab === 'directory')   ? '' : 'none';
   if (sTab) sTab.style.display = (tab === 'submittals')  ? '' : 'none';
   if (pTab) pTab.style.display = (tab === 'pos')         ? '' : 'none';
+  if (cTab) cTab.style.display = (tab === 'cors')        ? '' : 'none';
   if (mTab) mTab.style.display = (tab === 'procurement') ? '' : 'none';
   // Render PO list lazily when the PO tab is opened, so we always reflect
   // the latest db state (including POs added in another session).
   if (tab === 'pos' && typeof renderProjectPoList === 'function') {
     try { renderProjectPoList(); } catch(e) { console.warn('renderProjectPoList error', e); }
+  }
+  // Same lazy-render pattern for the Change Orders tab.
+  if (tab === 'cors' && typeof renderProjectCorList === 'function') {
+    try { renderProjectCorList(); } catch(e) { console.warn('renderProjectCorList error', e); }
   }
   // Same pattern for procurement — render lazily so PO data is fresh.
   if (tab === 'procurement' && typeof renderProjectProcurement === 'function') {
@@ -26715,6 +26937,8 @@ function _nprjRefreshAfterSave(p) {
   try {
     if (_npActiveTab === 'pos' && typeof renderProjectPoList === 'function') {
       renderProjectPoList();
+    } else if (_npActiveTab === 'cors' && typeof renderProjectCorList === 'function') {
+      renderProjectCorList();
     } else if (_npActiveTab === 'procurement' && typeof renderProjectProcurement === 'function') {
       renderProjectProcurement();
     } else if (_npActiveTab === 'submittals' && typeof renderProjectSubmittalsSection === 'function') {
