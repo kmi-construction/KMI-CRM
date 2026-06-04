@@ -1680,6 +1680,7 @@ textarea{resize:vertical;min-height:72px}
             <option value="Rejected">Rejected</option>
             <option value="Voided">Voided</option>
           </select>
+          <button class="btn btn-sm" onclick="showCorLogModal()" id="nprj-cor-log-btn" title="Download a Change Order Log PDF with a contract summary">&#8595; Download log</button>
           <button class="btn btn-sm btn-p" onclick="corNewForProject()" id="nprj-cor-new-btn">+ New COR</button>
         </div>
       </div>
@@ -15289,17 +15290,22 @@ function prjCorSetSort(key) {
 function renderProjectCorList() {
   var el = g('nprj-cor-list-section'); if (!el) return;
   var newBtn = g('nprj-cor-new-btn');
+  var logBtn = g('nprj-cor-log-btn');
   var pid = _editProjectId;
 
   // Gate the New button by permission regardless of save state.
   if (newBtn) newBtn.style.display = hasFull('create-cor') ? '' : 'none';
+  // Log button needs only read access to CORs.
+  if (logBtn) logBtn.style.display = hasRead('view-cors') ? '' : 'none';
 
   if (!pid) {
     el.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px">Save the project first to start adding change orders.</div>';
     if (newBtn) newBtn.disabled = true;
+    if (logBtn) logBtn.disabled = true;
     return;
   }
   if (newBtn) newBtn.disabled = false;
+  if (logBtn) logBtn.disabled = false;
 
   var statusFilter = (g('nprj-cor-status-filter') && g('nprj-cor-status-filter').value) || '';
   var rows = (db.cors || []).filter(function(c){
@@ -15350,6 +15356,253 @@ function corNewForProject() {
   if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); return; }
   if (!_editProjectId) { alert('Save the project first before adding change orders.'); return; }
   showNewCorModal(_editProjectId);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CHANGE ORDER LOG PDF  (per-project)
+// ═══════════════════════════════════════════════════════════════════════
+// A printable log of a project's CORs, filtered by status, with a contract
+// summary at the bottom. The summary counts ONLY the statuses included on
+// the log: Approved CORs feed "Approved Change Orders" / "Current Contract
+// Amount"; Pending CORs feed "Pending Change Orders" / "Pending Contract
+// Amount". Rejected and Voided CORs never contribute to the math (they only
+// appear in the table when their status box is ticked). Draft, if shown,
+// lands in the table but has no summary bucket.
+//
+// Launched from the Change Orders tab → status-picker modal → generate.
+
+// Status-picker modal. Defaults: Approved + Pending checked.
+function showCorLogModal() {
+  if (!hasRead('view-cors')) { alert('You do not have permission to view CORs.'); return; }
+  if (!_editProjectId) { alert('Save the project first before downloading a change order log.'); return; }
+  var p = getProj(_editProjectId);
+  if (!p) { alert('Project not found.'); return; }
+
+  // Default selection per Mike: Approved + Pending.
+  var defaults = { Approved: true, Pending: true };
+  var boxes = COR_STATUSES.map(function(s){
+    var checked = defaults[s] ? ' checked' : '';
+    return '<label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:6px 0;cursor:pointer">' +
+      '<input type="checkbox" class="cor-log-status" value="' + corEsc(s) + '"' + checked + '> ' + corEsc(s) +
+      '</label>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Download Change Order Log</div>' +
+    '<div class="msb">Pick which statuses to include. The contract summary at the bottom of the log counts only the statuses you include here &mdash; approved CORs roll into the current contract amount, pending CORs into the pending contract amount. (Rejected and Voided CORs never affect the totals.)</div>' +
+    '<div class="fg"><div class="fgr full"><label>Statuses to include</label>' +
+      '<div style="border:0.5px solid #ddd;border-radius:8px;padding:6px 12px">' + boxes + '</div>' +
+    '</div></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="generateCorLogPDF()">&#8595; Download PDF</button>' +
+    '</div>'
+  );
+}
+
+// Read the ticked statuses, then build + save the PDF.
+function generateCorLogPDF() {
+  if (!_editProjectId) { closeModal(); return; }
+  var p = getProj(_editProjectId);
+  if (!p) { closeModal(); alert('Project not found.'); return; }
+
+  var statuses = Array.prototype.slice.call(document.querySelectorAll('.cor-log-status'))
+    .filter(function(cb){ return cb.checked; })
+    .map(function(cb){ return cb.value; });
+
+  if (!statuses.length) { alert('Pick at least one status to include.'); return; }
+
+  closeModal();
+  buildCorLogPDF(p, statuses);
+}
+
+// Build the Change Order Log PDF. `statuses` is the array of status strings
+// to display; the contract summary is computed from the displayed rows only.
+function buildCorLogPDF(p, statuses) {
+  if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return; }
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ unit:'pt', format:'letter' });
+
+  var LM = 54, RM = 558, PAGE_W = 612;
+  var FOOTER_TOP = 740;
+  var GREEN = [59, 109, 17];
+
+  function sf(st, sz, col) {
+    doc.setFont('helvetica', st);
+    doc.setFontSize(sz);
+    doc.setTextColor(col ? col[0] : 0, col ? col[1] : 0, col ? col[2] : 0);
+  }
+  function ln(x1, y1, x2, y2, w, rgb) {
+    doc.setDrawColor(rgb ? rgb[0] : 0, rgb ? rgb[1] : 0, rgb ? rgb[2] : 0);
+    doc.setLineWidth(w || 0.5);
+    doc.line(x1, y1, x2, y2);
+  }
+
+  function letterhead() {
+    if (typeof KMI_LOGO_IMG === 'string' && KMI_LOGO_IMG) {
+      try { doc.addImage(KMI_LOGO_IMG, 'JPEG', LM, 26, 100, 45); } catch(e) {}
+    } else {
+      sf('bold', 30, [0,0,0]); doc.text('KMI', LM + 4, 52);
+      sf('bold', 7, [60,60,60]); doc.text('CONSTRUCTION', LM, 66);
+    }
+    sf('bold', 22, [0,0,0]);
+    doc.text('CHANGE ORDER LOG', LM + 120, 56);
+    ln(LM, 74, RM, 74, 1.2, GREEN);
+  }
+
+  // Column geometry (sums to the LM..RM usable width of 504pt).
+  var C_NUM = 54;     // COR #
+  var C_DATE = 100;   // Date
+  var C_DESC = 162;   // Description (wraps)
+  var C_DESC_W = 226;
+  var C_AMT_R = 470;  // Amount right edge (right-aligned)
+  var C_STAT = 478;   // Status
+
+  function statusColor(s) {
+    if (s === 'Approved') return [59,109,17];
+    if (s === 'Pending')  return [133,79,11];
+    if (s === 'Rejected') return [163,45,45];
+    if (s === 'Voided')   return [95,95,95];
+    return [120,120,120]; // Draft / other
+  }
+
+  function tableHeader(y) {
+    sf('bold', 9, [90,90,90]);
+    doc.text('COR #', C_NUM, y);
+    doc.text('Date', C_DATE, y);
+    doc.text('Description', C_DESC, y);
+    doc.text('Amount', C_AMT_R, y, { align:'right' });
+    doc.text('Status', C_STAT, y);
+    ln(LM, y + 4, RM, y + 4, 0.8, [180,180,180]);
+    return y + 18;
+  }
+
+  letterhead();
+
+  // ── Meta block ───────────────────────────────────────────────────────
+  var cust = getCust(p.customerId);
+  var y = 96;
+  sf('normal', 10, [80,80,80]); doc.text('Project #:', LM, y);
+  sf('normal', 10, [0,0,0]);    doc.text(String(p.number || ''), LM + 60, y);
+  sf('normal', 10, [80,80,80]); doc.text('Customer:', 320, y);
+  sf('normal', 10, [0,0,0]);    doc.text(String((cust && cust.name) || ''), 380, y);
+  y += 15;
+  sf('normal', 10, [80,80,80]); doc.text('Project:', LM, y);
+  sf('normal', 10, [0,0,0]);    doc.text(String(p.name || ''), LM + 60, y);
+  y += 15;
+  sf('normal', 10, [80,80,80]); doc.text('Generated:', LM, y);
+  sf('normal', 10, [0,0,0]);    doc.text(new Date().toLocaleDateString('en-US'), LM + 60, y);
+  y += 15;
+  sf('normal', 9, [80,80,80]);  doc.text('Statuses included:', LM, y);
+  sf('normal', 9, [0,0,0]);     doc.text(statuses.join(', '), LM + 96, y);
+  y += 18;
+
+  // ── Gather + sort rows ───────────────────────────────────────────────
+  var statusSet = {};
+  statuses.forEach(function(s){ statusSet[s] = true; });
+  var rows = (db.cors || []).filter(function(c){
+    return String(c.projectId) === String(p.id) && statusSet[(c.status || 'Draft')];
+  });
+  // Sort by COR sequence ascending (numeric where possible).
+  rows.sort(function(a, b){
+    var sa = corExtractKmiSeq(a.corNumber) || '', sb = corExtractKmiSeq(b.corNumber) || '';
+    var na = parseInt(sa, 10), nb = parseInt(sb, 10);
+    if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+    return String(sa).localeCompare(String(sb));
+  });
+
+  // ── Table ────────────────────────────────────────────────────────────
+  y = tableHeader(y);
+
+  if (!rows.length) {
+    sf('italic', 10, [150,150,150]);
+    doc.text('No change orders match the selected statuses.', LM, y + 6);
+    y += 24;
+  } else {
+    rows.forEach(function(c){
+      var st = c.status || 'Draft';
+      var desc = String(c.description || '');
+      if (c.customerCoNumber) desc += '  (Cust CO# ' + c.customerCoNumber + ')';
+      sf('normal', 9, [40,40,40]);
+      var descLines = doc.splitTextToSize(desc || '\u2014', C_DESC_W);
+      if (descLines.length > 3) { descLines = descLines.slice(0, 3); descLines[2] = descLines[2] + '\u2026'; }
+      var rowH = Math.max(14, descLines.length * 11 + 3);
+
+      // Page break if the row won't fit.
+      if (y + rowH > FOOTER_TOP) {
+        doc.addPage();
+        letterhead();
+        y = tableHeader(96);
+      }
+
+      sf('bold', 9, GREEN); doc.text(String(corExtractKmiSeq(c.corNumber) || ''), C_NUM, y);
+      sf('normal', 9, [40,40,40]);
+      doc.text(String(c.corDate || ''), C_DATE, y);
+      doc.text(descLines, C_DESC, y);
+      doc.text(corFmtMoney(c.totalAmount || 0), C_AMT_R, y, { align:'right' });
+      sf('bold', 8, statusColor(st)); doc.text(st, C_STAT, y);
+
+      y += rowH;
+      ln(LM, y - 6, RM, y - 6, 0.3, [225,225,225]);
+    });
+  }
+
+  // ── Contract summary (counts ONLY displayed rows) ───────────────────
+  var approvedSum = 0, pendingSum = 0;
+  rows.forEach(function(c){
+    var amt = Number(c.totalAmount) || 0;
+    if ((c.status || 'Draft') === 'Approved') approvedSum += amt;
+    else if ((c.status || 'Draft') === 'Pending') pendingSum += amt;
+  });
+  var original = Number(p.contractAmount) || 0;
+  var current = original + approvedSum;
+  var pendingContract = current + pendingSum;
+
+  var BOX_W = 286, BOX_X = RM - BOX_W;
+  var rowH = 18, headH = 20;
+  var boxH = headH + rowH * 5 + 4;
+
+  // Keep the whole summary block together; push to a new page if needed.
+  if (y + 24 + boxH > FOOTER_TOP) {
+    doc.addPage();
+    letterhead();
+    y = 96;
+  }
+  y += 18;
+
+  // Header bar
+  doc.setFillColor(234, 243, 222);
+  doc.rect(BOX_X, y, BOX_W, headH, 'F');
+  doc.setDrawColor(180,180,180); doc.setLineWidth(0.5);
+  doc.rect(BOX_X, y, BOX_W, boxH, 'S');
+  sf('bold', 10, [39,80,10]);
+  doc.text('Contract Summary', BOX_X + 10, y + 14);
+
+  function sumRow(label, value, emphasize, valColor) {
+    sf(emphasize ? 'bold' : 'normal', emphasize ? 10 : 9.5, emphasize ? [0,0,0] : [70,70,70]);
+    doc.text(label, BOX_X + 10, ry + 12);
+    sf(emphasize ? 'bold' : 'normal', emphasize ? 10 : 9.5, valColor || (emphasize ? [0,0,0] : [40,40,40]));
+    doc.text(corFmtMoney(value), BOX_X + BOX_W - 10, ry + 12, { align:'right' });
+    ry += rowH;
+  }
+
+  var ry = y + headH;
+  sumRow('Original Contract Amount', original, false);
+  sumRow('Approved Change Orders', approvedSum, false);
+  ln(BOX_X, ry, BOX_X + BOX_W, ry, 0.5, [180,180,180]);
+  sumRow('Current Contract Amount', current, true, GREEN);
+  sumRow('Pending Change Orders', pendingSum, false);
+  ln(BOX_X, ry, BOX_X + BOX_W, ry, 0.5, [180,180,180]);
+  sumRow('Pending Contract Amount', pendingContract, true, [133,79,11]);
+
+  // ── Footer line ──────────────────────────────────────────────────────
+  sf('normal', 8, [150,150,150]);
+  doc.text('KMI Construction  \u00B7  2880 S. 171st Street, New Berlin, WI 53151  \u00B7  262-548-0632  \u00B7  KMI-Construction.com',
+    PAGE_W / 2, 770, { align:'center' });
+
+  var fname = (p.number || 'project') + '_ChangeOrderLog.pdf';
+  doc.save(fname);
 }
 
 // ── Render: list page ─────────────────────────────────────────────────
