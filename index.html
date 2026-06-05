@@ -15424,9 +15424,12 @@ function buildCorLogPDF(p, statuses) {
   var jsPDF = window.jspdf.jsPDF;
   var doc = new jsPDF({ unit:'pt', format:'letter' });
 
-  var LM = 54, RM = 558, PAGE_W = 612;
-  var FOOTER_TOP = 740;
-  var GREEN = [59, 109, 17];
+  var LM = 54, RM = 558, PAGE_W = 612, PAGE_H = 792;
+  var FOOTER_TOP = 700;            // content must stay above this (footer image sits at 720)
+  var GOLD = [200, 168, 75];       // matches the Procurement Report accent line
+  var BLUE = [42, 47, 92];         // KMI logo blue
+  var TAN  = [248, 240, 220];      // Procurement Report section-header fill
+  var DIVIDER = [210, 210, 210];   // light gray row divider
 
   function sf(st, sz, col) {
     doc.setFont('helvetica', st);
@@ -15439,16 +15442,15 @@ function buildCorLogPDF(p, statuses) {
     doc.line(x1, y1, x2, y2);
   }
 
+  // Blueprint letterhead — matches the Procurement Report (full-width header
+  // and footer images, with the logo + contact info baked in).
   function letterhead() {
-    if (typeof KMI_LOGO_IMG === 'string' && KMI_LOGO_IMG) {
-      try { doc.addImage(KMI_LOGO_IMG, 'JPEG', LM, 26, 100, 45); } catch(e) {}
-    } else {
-      sf('bold', 30, [0,0,0]); doc.text('KMI', LM + 4, 52);
-      sf('bold', 7, [60,60,60]); doc.text('CONSTRUCTION', LM, 66);
+    if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) {
+      try { doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 109); } catch(e) {}
     }
-    sf('bold', 22, [0,0,0]);
-    doc.text('CHANGE ORDER LOG', LM + 120, 56);
-    ln(LM, 74, RM, 74, 1.2, GREEN);
+    if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) {
+      try { doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H - 72, PAGE_W, 72); } catch(e) {}
+    }
   }
 
   // Column geometry (sums to the LM..RM usable width of 504pt).
@@ -15459,13 +15461,18 @@ function buildCorLogPDF(p, statuses) {
   var C_AMT_R = 470;  // Amount right edge (right-aligned)
   var C_STAT = 478;   // Status
 
+  // Status text colors per spec: black for Pending/Approved, red for
+  // Rejected, light gray for Voided, dark gray for Draft.
   function statusColor(s) {
-    if (s === 'Approved') return [59,109,17];
-    if (s === 'Pending')  return [133,79,11];
-    if (s === 'Rejected') return [163,45,45];
-    if (s === 'Voided')   return [95,95,95];
-    return [120,120,120]; // Draft / other
+    if (s === 'Pending')  return [0, 0, 0];
+    if (s === 'Approved') return [0, 0, 0];
+    if (s === 'Rejected') return [192, 28, 28];   // red
+    if (s === 'Voided')   return [170, 170, 170];  // light gray
+    return [110, 110, 110];                         // Draft / other — dark gray
   }
+
+  var LINE_H = 11;   // height per wrapped text line
+  var ROW_PAD = 9;   // total vertical padding inside a row band
 
   function tableHeader(y) {
     sf('bold', 9, [90,90,90]);
@@ -15474,15 +15481,21 @@ function buildCorLogPDF(p, statuses) {
     doc.text('Description', C_DESC, y);
     doc.text('Amount', C_AMT_R, y, { align:'right' });
     doc.text('Status', C_STAT, y);
-    ln(LM, y + 4, RM, y + 4, 0.8, [180,180,180]);
-    return y + 18;
+    ln(LM, y + 4, RM, y + 4, 0.6, [180,180,180]);
+    return y + 14;   // returns the top edge of the first row band
   }
 
   letterhead();
 
+  // ── Title (centered, mirrors the Procurement Report) ─────────────────
+  var y = 130;
+  sf('bold', 14, BLUE);
+  doc.text('CHANGE ORDER LOG', PAGE_W / 2, y, { align:'center' });
+  ln(LM, y + 5, RM, y + 5, 0.8, GOLD);
+  y += 24;
+
   // ── Meta block ───────────────────────────────────────────────────────
   var cust = getCust(p.customerId);
-  var y = 96;
   sf('normal', 10, [80,80,80]); doc.text('Project #:', LM, y);
   sf('normal', 10, [0,0,0]);    doc.text(String(p.number || ''), LM + 60, y);
   sf('normal', 10, [80,80,80]); doc.text('Customer:', 320, y);
@@ -15496,7 +15509,7 @@ function buildCorLogPDF(p, statuses) {
   y += 15;
   sf('normal', 9, [80,80,80]);  doc.text('Statuses included:', LM, y);
   sf('normal', 9, [0,0,0]);     doc.text(statuses.join(', '), LM + 96, y);
-  y += 18;
+  y += 20;
 
   // ── Gather + sort rows ───────────────────────────────────────────────
   var statusSet = {};
@@ -15514,11 +15527,13 @@ function buildCorLogPDF(p, statuses) {
 
   // ── Table ────────────────────────────────────────────────────────────
   y = tableHeader(y);
+  // Top divider for the first row band.
+  ln(LM, y, RM, y, 0.4, DIVIDER);
 
   if (!rows.length) {
     sf('italic', 10, [150,150,150]);
-    doc.text('No change orders match the selected statuses.', LM, y + 6);
-    y += 24;
+    doc.text('No change orders match the selected statuses.', LM, y + 16);
+    y += 28;
   } else {
     rows.forEach(function(c){
       var st = c.status || 'Draft';
@@ -15527,24 +15542,36 @@ function buildCorLogPDF(p, statuses) {
       sf('normal', 9, [40,40,40]);
       var descLines = doc.splitTextToSize(desc || '\u2014', C_DESC_W);
       if (descLines.length > 3) { descLines = descLines.slice(0, 3); descLines[2] = descLines[2] + '\u2026'; }
-      var rowH = Math.max(14, descLines.length * 11 + 3);
 
-      // Page break if the row won't fit.
+      var nLines = descLines.length;
+      var rowH = nLines * LINE_H + ROW_PAD;
+
+      // Page break if the row won't fit; redraw letterhead + header and
+      // re-establish the top divider on the new page.
       if (y + rowH > FOOTER_TOP) {
         doc.addPage();
         letterhead();
-        y = tableHeader(96);
+        y = tableHeader(130);
+        ln(LM, y, RM, y, 0.4, DIVIDER);
       }
 
-      sf('bold', 9, GREEN); doc.text(String(corExtractKmiSeq(c.corNumber) || ''), C_NUM, y);
-      sf('normal', 9, [40,40,40]);
-      doc.text(String(c.corDate || ''), C_DATE, y);
-      doc.text(descLines, C_DESC, y);
-      doc.text(corFmtMoney(c.totalAmount || 0), C_AMT_R, y, { align:'right' });
-      sf('bold', 8, statusColor(st)); doc.text(st, C_STAT, y);
+      var bandTop = y;
+      // Center the description block vertically within the band; single-line
+      // cells sit on the band's vertical midline so every cell reads as
+      // centered between the divider above and the divider below.
+      var descTop = bandTop + (rowH - nLines * LINE_H) / 2 + 8;
+      var midBaseline = bandTop + rowH / 2 + 3;
 
-      y += rowH;
-      ln(LM, y - 6, RM, y - 6, 0.3, [225,225,225]);
+      sf('bold', 9, BLUE); doc.text(String(corExtractKmiSeq(c.corNumber) || ''), C_NUM, midBaseline);
+      sf('normal', 9, [40,40,40]);
+      doc.text(String(c.corDate || ''), C_DATE, midBaseline);
+      doc.text(descLines, C_DESC, descTop);
+      doc.text(corFmtMoney(c.totalAmount || 0), C_AMT_R, midBaseline, { align:'right' });
+      sf('bold', 8, statusColor(st)); doc.text(st, C_STAT, midBaseline);
+
+      y = bandTop + rowH;
+      // Divider at the bottom of the band — evenly aligned at the row edge.
+      ln(LM, y, RM, y, 0.4, DIVIDER);
     });
   }
 
@@ -15560,23 +15587,23 @@ function buildCorLogPDF(p, statuses) {
   var pendingContract = current + pendingSum;
 
   var BOX_W = 286, BOX_X = RM - BOX_W;
-  var rowH = 18, headH = 20;
-  var boxH = headH + rowH * 5 + 4;
+  var sumRowH = 18, headH = 20;
+  var boxH = headH + sumRowH * 5 + 4;
 
   // Keep the whole summary block together; push to a new page if needed.
   if (y + 24 + boxH > FOOTER_TOP) {
     doc.addPage();
     letterhead();
-    y = 96;
+    y = 130;
   }
   y += 18;
 
-  // Header bar
-  doc.setFillColor(234, 243, 222);
+  // Header bar — tan fill + blue text (matches Procurement section headers)
+  doc.setFillColor(TAN[0], TAN[1], TAN[2]);
   doc.rect(BOX_X, y, BOX_W, headH, 'F');
   doc.setDrawColor(180,180,180); doc.setLineWidth(0.5);
   doc.rect(BOX_X, y, BOX_W, boxH, 'S');
-  sf('bold', 10, [39,80,10]);
+  sf('bold', 10, BLUE);
   doc.text('Contract Summary', BOX_X + 10, y + 14);
 
   function sumRow(label, value, emphasize, valColor) {
@@ -15584,22 +15611,17 @@ function buildCorLogPDF(p, statuses) {
     doc.text(label, BOX_X + 10, ry + 12);
     sf(emphasize ? 'bold' : 'normal', emphasize ? 10 : 9.5, valColor || (emphasize ? [0,0,0] : [40,40,40]));
     doc.text(corFmtMoney(value), BOX_X + BOX_W - 10, ry + 12, { align:'right' });
-    ry += rowH;
+    ry += sumRowH;
   }
 
   var ry = y + headH;
   sumRow('Original Contract Amount', original, false);
   sumRow('Approved Change Orders', approvedSum, false);
   ln(BOX_X, ry, BOX_X + BOX_W, ry, 0.5, [180,180,180]);
-  sumRow('Current Contract Amount', current, true, GREEN);
+  sumRow('Current Contract Amount', current, true, BLUE);
   sumRow('Pending Change Orders', pendingSum, false);
   ln(BOX_X, ry, BOX_X + BOX_W, ry, 0.5, [180,180,180]);
-  sumRow('Pending Contract Amount', pendingContract, true, [133,79,11]);
-
-  // ── Footer line ──────────────────────────────────────────────────────
-  sf('normal', 8, [150,150,150]);
-  doc.text('KMI Construction  \u00B7  2880 S. 171st Street, New Berlin, WI 53151  \u00B7  262-548-0632  \u00B7  KMI-Construction.com',
-    PAGE_W / 2, 770, { align:'center' });
+  sumRow('Pending Contract Amount', pendingContract, true, [150, 120, 40]); // bronze/gold accent
 
   var fname = (p.number || 'project') + '_ChangeOrderLog.pdf';
   doc.save(fname);
