@@ -1508,8 +1508,9 @@ textarea{resize:vertical;min-height:72px}
     <div class="tab" id="nprj-tabhdr-directory" onclick="npSwTab('directory', this)">Project Directory</div>
     <div class="tab" id="nprj-tabhdr-submittals" onclick="npSwTab('submittals', this)">Submittals</div>
     <div class="tab" id="nprj-tabhdr-pos" onclick="npSwTab('pos', this)">PO's &amp; Subs</div>
-    <div class="tab" id="nprj-tabhdr-cors" onclick="npSwTab('cors', this)">Change Orders</div>
     <div class="tab" id="nprj-tabhdr-procurement" onclick="npSwTab('procurement', this)">Procurement</div>
+    <div class="tab" id="nprj-tabhdr-tm" onclick="npSwTab('tm', this)">T&amp;M Tickets</div>
+    <div class="tab" id="nprj-tabhdr-cors" onclick="npSwTab('cors', this)">Change Orders</div>
   </div>
 
   <!-- ─── TAB 1: PROJECT DETAILS ─────────────────────────────────── -->
@@ -1695,6 +1696,35 @@ textarea{resize:vertical;min-height:72px}
        Renders lazily via renderProjectProcurement() when the tab opens. -->
   <div id="nprj-tab-procurement" style="display:none">
     <div id="nprj-procurement-section"></div>
+  </div>
+
+  <!-- ─── TAB 7: T&M TICKETS ──────────────────────────────────────── -->
+  <!-- Project-scoped Time & Material tickets. Mirrors the Change Orders tab:
+       a status filter, New ticket + Smart upload buttons, and a click-to-sort
+       list. Renders lazily via renderProjectTmList() when the tab opens.
+       Create/Smart-upload set a return context so the form comes back here. -->
+  <div id="nprj-tab-tm" style="display:none">
+    <div class="card">
+      <div class="ch">
+        <span class="ct">T&amp;M Tickets</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <select id="nprj-tm-status-filter" class="fs" onchange="renderProjectTmList()" title="Filter by status">
+            <option value="">All statuses</option>
+            <option value="Draft">Draft</option>
+            <option value="Sent for Signature">Sent for Signature</option>
+            <option value="Signed">Signed</option>
+            <option value="Signed (Uploaded)">Signed (Uploaded)</option>
+            <option value="Rejected by Super">Rejected by Super</option>
+            <option value="Voided">Voided</option>
+            <option value="Rolled into COR">Rolled into COR</option>
+          </select>
+          <button class="btn btn-sm" onclick="tmSmartUploadForProject()" id="nprj-tm-smart-up-btn" title="Upload a scanned/photographed paper ticket — AI fills in the form, ticket goes straight to Signed (Uploaded)">&#10024; Smart upload</button>
+          <button class="btn btn-sm btn-p" onclick="tmNewForProject()" id="nprj-tm-new-btn">+ New ticket</button>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#888;margin-bottom:10px">Time &amp; Material field tickets on this project. Click any column header to sort; use the dropdown to filter by status.</div>
+      <div id="nprj-tm-list-section"></div>
+    </div>
   </div>
 
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;align-items:center">
@@ -2131,7 +2161,7 @@ textarea{resize:vertical;min-height:72px}
 <div class="pg" id="pg-new-tm-ticket">
   <div class="ph" style="margin-bottom:0">
     <div><h1 id="ntm-heading">New T&amp;M ticket</h1><div class="sub" id="ntm-id-display" style="font-weight:600;color:var(--kmi)"></div><div class="stripe"></div></div>
-    <button class="btn" onclick="_smartUpCancel(); nav('tm-tickets');">← Cancel</button>
+    <button class="btn" onclick="_smartUpCancel(); _tmExitForm();">← Cancel</button>
   </div>
 
   <!-- Smart Upload mode banner — only shown when in the smart-upload review flow.
@@ -2223,7 +2253,7 @@ textarea{resize:vertical;min-height:72px}
   </div>
 
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
-    <button class="btn" onclick="_smartUpCancel(); nav('tm-tickets');">Cancel</button>
+    <button class="btn" onclick="_smartUpCancel(); _tmExitForm();">Cancel</button>
     <button class="btn" onclick="downloadTmTicketPDF()" id="ntm-pdf-btn" style="display:none">⬇ Download PDF</button>
     <!-- Round 3 action buttons (visibility controlled by viewTmTicket based on status + permissions) -->
     <button class="btn" onclick="showSendForSignatureModal()" id="ntm-send-sig-btn" style="display:none;background:var(--kmi);color:#fff;border-color:var(--kmi)">Send for signature</button>
@@ -2814,6 +2844,16 @@ var currentOppId = null;
 var _oppView = 'list';
 var _oppSort = { col: 'bidDate', dir: 'desc' };  // default: newest bid date first
 var _tmSort  = { col: 'ticketNumber', dir: 'asc' }; // default: ticket # smallest to largest
+// Persisted T&M list filters. Survives re-renders (new ticket, smart upload,
+// page navigation) so a PM focused on one project isn't reset to "All" each
+// time. filterTmTickets() writes here; renderTmTickets() restores from here
+// after it rebuilds the project/status dropdowns.
+var _tmFilter = { s: '', fp: '', fs: '' };
+// When a T&M ticket is created / smart-uploaded / opened from a project's
+// T&M tab, this holds that project id so the form returns there on save or
+// cancel (instead of the global T&M list). Set by the project-tab launch
+// helpers; consumed and cleared by _tmExitForm().
+var _tmReturnToProject = null;
 var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; })();
 
 var DB_DEFAULTS = {
@@ -4514,7 +4554,8 @@ function mobSetHeaderTitle(page) {
 function mobTabClick(target) {
   // T&M and Submittals are direct nav. Projects defaults to the list.
   if (target === 'tm-tickets') {
-    // From submittals/projects flow, going back to T&M clears any filters
+    // Going back to T&M preserves the last-used filters (handled by
+    // renderTmTickets restoring from _tmFilter).
     nav('tm-tickets');
   } else if (target === 'm-submittals') {
     _mobileSubmittalProjectFilter = null;
@@ -12340,6 +12381,22 @@ function renderTmTickets() {
   var suBtn = g('tm-smart-up-btn');
   if (suBtn) suBtn.style.display = (hasFull('create-tm-ticket') && hasFull('smart-upload-tm')) ? '' : 'none';
 
+  // Restore the last-used filters. Rebuilding the dropdowns above resets their
+  // selection to the first option ("All"), so we re-apply the saved values
+  // before filtering. The project value is only restored if that project is
+  // still present in the (freshly rebuilt) option list.
+  if (g('tm-s'))  g('tm-s').value  = _tmFilter.s || '';
+  if (g('tm-fs')) g('tm-fs').value = _tmFilter.fs || '';
+  if (g('tm-fp')) {
+    var _fpEl = g('tm-fp');
+    var _wantFp = _tmFilter.fp || '';
+    var _fpOk = false;
+    for (var _i = 0; _i < _fpEl.options.length; _i++) {
+      if (_fpEl.options[_i].value === _wantFp) { _fpOk = true; break; }
+    }
+    _fpEl.value = _fpOk ? _wantFp : '';
+  }
+
   filterTmTickets();
 }
 
@@ -12348,6 +12405,11 @@ function filterTmTickets() {
   var fp = g('tm-fp').value;
   var fs = g('tm-fs').value;
   var role = _currentUser ? normalizeRole(_currentUser.role) : '';
+
+  // Remember these so they persist across re-renders (new ticket, smart
+  // upload, navigating away and back). Store the raw search text, not the
+  // lower-cased copy, so the input shows what the user typed.
+  _tmFilter = { s: (g('tm-s').value || ''), fp: fp, fs: fs };
 
   var list = (db.tmTickets || []).filter(function(t){
     if (fp && String(t.projectId) !== String(fp)) return false;
@@ -12515,7 +12577,10 @@ function updateTmSortIndicators() {
 }
 
 // ── Form: open New ──────────────────────────────────────────────────────
-function initNewTmTicket() {
+function initNewTmTicket(prefillProjectId) {
+  // Entering the form fresh — clear any project-return context. The project
+  // tab's tmNewForProject() re-sets it after calling us.
+  _tmReturnToProject = null;
   if (!requireFull('create-tm-ticket', 'create T&M tickets')) {
     nav('tm-tickets');
     return;
@@ -12558,6 +12623,14 @@ function initNewTmTicket() {
   ntmAddEquipRow();
   ntmAddMatRow();
   ntmRefreshLaborTotals();
+
+  // Optional pre-select (used when launched from a project's T&M tab). Setting
+  // the value then running ntmProjectChanged() fills the project #/name and
+  // refreshes the material/labor rows for that project's snapshot.
+  if (prefillProjectId && getProj(prefillProjectId)) {
+    g('ntm-project').value = String(prefillProjectId);
+    ntmProjectChanged();
+  }
 }
 
 function ntmProjectChanged() {
@@ -12602,6 +12675,9 @@ function ntmProjectChanged() {
 
 // ── Form: open Edit / View ──────────────────────────────────────────────
 function viewTmTicket(id) {
+  // Opening a ticket clears any project-return context by default; the
+  // project tab's tmViewForProject() re-sets it after calling us.
+  _tmReturnToProject = null;
   var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(id); });
   if (!t) { alert('T&M ticket not found.'); return; }
   if (!hasRead('view-tm-tickets')) {
@@ -13015,7 +13091,7 @@ async function saveTmTicket() {
     db.activity.unshift({text: 'T&M ticket ' + (t.ticketNumber || '') + ' updated', type: 'won', time: 'Just now'});
     saveDB();
     _editTmTicketId = null;
-    nav('tm-tickets');
+    _tmExitForm();
     return;
   }
 
@@ -13119,7 +13195,7 @@ async function saveTmTicket() {
     }
   }
 
-  nav('tm-tickets');
+  _tmExitForm();
 }
 
 function deleteTmTicket(id) {
@@ -14228,7 +14304,7 @@ function _smartUpClear() {
 }
 
 // Show the modal that kicks off the smart-upload flow.
-function showSmartUploadModal() {
+function showSmartUploadModal(prefillProjectId) {
   if (!hasFull('smart-upload-tm') || !hasFull('create-tm-ticket')) {
     alert('You do not have permission to use Smart Upload.'); return;
   }
@@ -14251,7 +14327,8 @@ function showSmartUploadModal() {
   });
   var projOpts = '<option value="">Select project...</option>' +
     projects.map(function(p){
-      return '<option value="' + p.id + '">' + tmEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+      var sel = (prefillProjectId && String(p.id) === String(prefillProjectId)) ? ' selected' : '';
+      return '<option value="' + p.id + '"' + sel + '>' + tmEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
     }).join('');
 
   showModal(
@@ -14783,7 +14860,14 @@ async function confirmSmartUploadTicket() {
   if (g('ntm-save-btn')) g('ntm-save-btn').style.display = '';
   var pSel = g('ntm-project'); if (pSel) pSel.disabled = false;
 
-  viewTmTicket(ticket.id);
+  // If this smart upload was launched from a project's T&M tab, return there
+  // (the new ticket shows in that list); otherwise open the ticket so the
+  // user can review what was extracted.
+  if (_tmReturnToProject) {
+    _tmExitForm();
+  } else {
+    viewTmTicket(ticket.id);
+  }
 }
 
 // Email the project's assigned PM with a plain-text summary of the new
@@ -15356,6 +15440,145 @@ function corNewForProject() {
   if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); return; }
   if (!_editProjectId) { alert('Save the project first before adding change orders.'); return; }
   showNewCorModal(_editProjectId);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PROJECT-SCOPED T&M TICKETS (project workspace → "T&M Tickets" tab)
+// ───────────────────────────────────────────────────────────────────────
+// Mirrors the project COR tab: a status-filtered list of this project's
+// tickets, plus New ticket and Smart upload buttons. The list re-uses the
+// global T&M helpers (tmLaborTotals, tmStatusBadge, viewTmTicket, etc.).
+// Creating / smart-uploading / opening a ticket from here sets
+// _tmReturnToProject so the form returns to this tab instead of the global
+// T&M list. The global list is unaffected.
+// ═══════════════════════════════════════════════════════════════════════
+function renderProjectTmList() {
+  var el = g('nprj-tm-list-section'); if (!el) return;
+  var newBtn = g('nprj-tm-new-btn');
+  var suBtn  = g('nprj-tm-smart-up-btn');
+  var pid = _editProjectId;
+
+  // Gate buttons by permission regardless of save state.
+  if (newBtn) newBtn.style.display = hasFull('create-tm-ticket') ? '' : 'none';
+  if (suBtn)  suBtn.style.display  = (hasFull('create-tm-ticket') && hasFull('smart-upload-tm')) ? '' : 'none';
+
+  if (!pid) {
+    el.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px">Save the project first to start adding T&amp;M tickets.</div>';
+    if (newBtn) newBtn.disabled = true;
+    if (suBtn)  suBtn.disabled  = true;
+    return;
+  }
+  if (newBtn) newBtn.disabled = false;
+  if (suBtn)  suBtn.disabled  = false;
+
+  var statusFilter = (g('nprj-tm-status-filter') && g('nprj-tm-status-filter').value) || '';
+  var rows = (db.tmTickets || []).filter(function(t){
+    if (String(t.projectId) !== String(pid)) return false;
+    if (statusFilter) {
+      if (statusFilter === 'Rolled into COR') {
+        if (!t.corId) return false;
+      } else {
+        if ((t.status || 'Draft') !== statusFilter) return false;
+        if (t.corId) return false;
+      }
+    }
+    return true;
+  });
+  // Reuse the global T&M sort so this list matches the main list's behaviour.
+  rows = sortTmArray(rows);
+
+  var head =
+    '<th style="padding:8px 10px;text-align:left">Ticket #</th>' +
+    '<th style="padding:8px 10px;text-align:left">Date</th>' +
+    '<th style="padding:8px 10px;text-align:left">Description</th>' +
+    '<th style="padding:8px 10px;text-align:left">Hours (ST/OT/DT)</th>' +
+    '<th style="padding:8px 10px;text-align:left">Status</th>' +
+    '<th style="padding:8px 10px;text-align:left">Created by</th>' +
+    '<th style="padding:8px 10px;text-align:left">Actions</th>';
+
+  if (!rows.length) {
+    el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
+      '</tr></thead><tbody><tr><td colspan="7" style="text-align:center;color:#aaa;padding:24px;font-size:13px">' +
+      (statusFilter ? ('No ' + tmEsc(statusFilter) + ' tickets on this project.') : 'No T&amp;M tickets on this project yet.') +
+      '</td></tr></tbody></table>';
+    return;
+  }
+
+  var body = rows.map(function(t){
+    var creator = (db.users.find(function(u){ return String(u.id) === String(t.createdByUserId); }) || {});
+    var creatorName = ((creator.firstName || '') + ' ' + (creator.lastName || '')).trim() || (t.createdByName || '—');
+    var tot = tmLaborTotals(t);
+    var hoursCell = '<span title="ST / OT / DT">' + tmFmtHrs(tot.st) + ' / ' + tmFmtHrs(tot.ot) + ' / ' + tmFmtHrs(tot.dt) + '</span>';
+
+    var actions = '';
+    if (hasRead('view-tm-tickets')) {
+      actions += '<button class="btn btn-sm" onclick="tmViewForProject(' + t.id + ')">' +
+        (tmCanEditTicket(t) ? '\u270E Edit' : '\uD83D\uDC41 View') + '</button>';
+    }
+    actions += '&nbsp;<button class="btn btn-sm" onclick="downloadTmTicketPDFById(' + t.id + ')" title="Download PDF">\u2B07 PDF</button>';
+    if (tmCanDeleteTicket(t)) {
+      actions += '&nbsp;<button class="btn btn-sm" style="color:#A32D2D" onclick="deleteTmTicketFromProject(' + t.id + ')">Delete</button>';
+    }
+
+    return '<tr style="border-bottom:1px solid #eee">' +
+      '<td style="padding:8px 10px;font-weight:600;color:var(--kmi);font-family:monospace;cursor:pointer" onclick="tmViewForProject(' + t.id + ')">' + tmEsc(t.ticketNumber || '—') + '</td>' +
+      '<td style="padding:8px 10px">' + tmEsc(t.ticketDate || '—') + '</td>' +
+      '<td style="padding:8px 10px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + tmEsc(t.workDescription || '') + '">' + tmEsc(t.workDescription || '—') + '</td>' +
+      '<td style="padding:8px 10px;font-family:monospace">' + hoursCell + '</td>' +
+      '<td style="padding:8px 10px">' + tmStatusBadge(t) + '</td>' +
+      '<td style="padding:8px 10px;color:#555">' + tmEsc(creatorName) + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap">' + actions + '</td>' +
+      '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
+    '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+// New ticket from the project tab — pre-fills the project and remembers to
+// return here on save/cancel.
+function tmNewForProject() {
+  if (!hasFull('create-tm-ticket')) { alert('You do not have permission to create T&M tickets.'); return; }
+  if (!_editProjectId) { alert('Save the project first before adding T&M tickets.'); return; }
+  var pid = _editProjectId;
+  initNewTmTicket(pid);          // clears _tmReturnToProject, pre-selects project
+  _tmReturnToProject = pid;      // set after, so the form returns here
+}
+
+// Smart upload from the project tab — opens the modal with the project locked
+// in and remembers to return here when done.
+function tmSmartUploadForProject() {
+  if (!_editProjectId) { alert('Save the project first before adding T&M tickets.'); return; }
+  _tmReturnToProject = _editProjectId;
+  showSmartUploadModal(_editProjectId);
+}
+
+// View/Edit a ticket from the project tab — remembers to return here on close.
+function tmViewForProject(id) {
+  var pid = _editProjectId;
+  viewTmTicket(id);              // clears _tmReturnToProject internally
+  _tmReturnToProject = pid;      // re-set so cancel/save returns to this tab
+}
+
+// Delete from the project tab, then refresh this list (not the global one).
+function deleteTmTicketFromProject(id) {
+  deleteTmTicket(id);            // handles perms + confirm + saveDB
+  if (typeof renderProjectTmList === 'function') renderProjectTmList();
+}
+
+// Centralised exit from the T&M ticket form. If the form was reached from a
+// project's T&M tab, reopen that project on the tab; otherwise fall back to
+// the global T&M list.
+function _tmExitForm() {
+  if (_tmReturnToProject) {
+    var pid = _tmReturnToProject;
+    _tmReturnToProject = null;
+    if (typeof editProject === 'function' && getProj(pid)) {
+      editProject(pid, 'tm');
+      return;
+    }
+  }
+  nav('tm-tickets');
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -24808,7 +25031,8 @@ var NPRJ_TAB_PERMS = {
   submittals:  'view-submittals',
   pos:         'view-purchase-orders',
   cors:        'view-cors',
-  procurement: 'view-procurement'
+  procurement: 'view-procurement',
+  tm:          'view-tm-tickets'
 };
 function npTabAllowed(tab) {
   var a = NPRJ_TAB_PERMS[tab];
@@ -24826,12 +25050,12 @@ function applyProjectTabPermissions() {
   var split = g('nprj-save-split'); if (split) split.style.display = canSave ? '' : 'none';
 }
 function npSwTab(tab, el) {
-  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'cors' && tab !== 'procurement') tab = 'details';
+  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'cors' && tab !== 'procurement' && tab !== 'tm') tab = 'details';
   // Hide tab headers the current role can't access, then redirect off any
   // disallowed tab (e.g. the hardcoded 'details' default) to the first allowed one.
   applyProjectTabPermissions();
   if (!npTabAllowed(tab)) {
-    var _order = ['details','directory','submittals','pos','cors','procurement'];
+    var _order = ['details','directory','submittals','pos','procurement','tm','cors'];
     var _alt = _order.find(function(t){ return npTabAllowed(t); });
     if (_alt && _alt !== tab) { return npSwTab(_alt, null); }
   }
@@ -24841,7 +25065,9 @@ function npSwTab(tab, el) {
   if (el) {
     el.classList.add('active');
   } else {
-    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : (tab === 'cors' ? 4 : (tab === 'procurement' ? 5 : 0))));
+    // Header order: details(0) directory(1) submittals(2) pos(3)
+    // procurement(4) tm(5) cors(6)
+    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : (tab === 'procurement' ? 4 : (tab === 'tm' ? 5 : (tab === 'cors' ? 6 : 0)))));
     if (heads[idx]) heads[idx].classList.add('active');
   }
   var dTab = g('nprj-tab-details');
@@ -24850,12 +25076,14 @@ function npSwTab(tab, el) {
   var pTab = g('nprj-tab-pos');
   var cTab = g('nprj-tab-cors');
   var mTab = g('nprj-tab-procurement');
+  var tTab = g('nprj-tab-tm');
   if (dTab) dTab.style.display = (tab === 'details')     ? '' : 'none';
   if (rTab) rTab.style.display = (tab === 'directory')   ? '' : 'none';
   if (sTab) sTab.style.display = (tab === 'submittals')  ? '' : 'none';
   if (pTab) pTab.style.display = (tab === 'pos')         ? '' : 'none';
   if (cTab) cTab.style.display = (tab === 'cors')        ? '' : 'none';
   if (mTab) mTab.style.display = (tab === 'procurement') ? '' : 'none';
+  if (tTab) tTab.style.display = (tab === 'tm')          ? '' : 'none';
   // Render PO list lazily when the PO tab is opened, so we always reflect
   // the latest db state (including POs added in another session).
   if (tab === 'pos' && typeof renderProjectPoList === 'function') {
@@ -24868,6 +25096,10 @@ function npSwTab(tab, el) {
   // Same pattern for procurement — render lazily so PO data is fresh.
   if (tab === 'procurement' && typeof renderProjectProcurement === 'function') {
     try { renderProjectProcurement(); } catch(e) { console.warn('renderProjectProcurement error', e); }
+  }
+  // Same pattern for the T&M Tickets tab.
+  if (tab === 'tm' && typeof renderProjectTmList === 'function') {
+    try { renderProjectTmList(); } catch(e) { console.warn('renderProjectTmList error', e); }
   }
 }
 
@@ -27218,6 +27450,8 @@ function _nprjRefreshAfterSave(p) {
       renderProjectProcurement();
     } else if (_npActiveTab === 'submittals' && typeof renderProjectSubmittalsSection === 'function') {
       renderProjectSubmittalsSection();
+    } else if (_npActiveTab === 'tm' && typeof renderProjectTmList === 'function') {
+      renderProjectTmList();
     }
     // Cheap details-tab refresh — picks up assignment rows, parameter answers,
     // labor template, material list, attachments in the new edit-mode context.
@@ -27246,7 +27480,7 @@ function _nprjFlashSaved() {
   }, 1600);
 }
 
-function editProject(id) {
+function editProject(id, initialTab) {
   // Permission gate (Round 9.1): opening the project workspace only requires
   // VIEW access — read users land on the same page with Save hidden so they
   // can browse the Details/Directory/Procurement tabs (the only path into
@@ -27271,8 +27505,9 @@ function editProject(id) {
   var _editProjMenu = g('nprj-save-menu');   if (_editProjMenu) _editProjMenu.classList.remove('open');
   g('nprj-id-display').textContent = '';
 
-  // Reset to first tab on entry so the user always lands on Project Details
-  npSwTab('details', null);
+  // Reset to first tab on entry so the user always lands on Project Details,
+  // unless a specific tab was requested (e.g. returning from the T&M form).
+  npSwTab(initialTab || 'details', null);
 
   g('nprj-num').value  = p.number || '';
   g('nprj-name').value = p.name   || '';
