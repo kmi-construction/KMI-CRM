@@ -2872,6 +2872,12 @@ var DB_DEFAULTS = {
   // Library-linked items reference a product (productId); custom items
   // (shop drawings, samples, RFI placeholders) set isCustom=true.
   submittals: [],
+  // Transmittals (autonumber history) — one row per generated submittal
+  // transmittal cover. Per-project sequence in `no`; `submittalIds` lists
+  // the submittals on that transmittal. Drives the next-number suggestion
+  // and the (derived) mobile "Transmittal #" display. Schema: id,
+  // project_id, no, date, submittal_ids, created_at, created_by_user_id.
+  transmittals: [],
   // Spec sections (Round 5) — master list managed via Templates.
   // Replaces the hardcoded CSI_SECTIONS constant; that constant remains
   // as a fallback for environments where the round5 migration hasn't
@@ -5737,7 +5743,7 @@ function renderMobileSubmittalDetail() {
       '<div class="mob-sub-kv"><div class="k">Due date</div><div class="v ' + dueCls + '">' + _mobEsc(dueDisplay) + '</div></div>' +
       '<div class="mob-sub-kv"><div class="k">Response date</div><div class="v">' + _mobEsc(respDisplay) + '</div></div>' +
       '<div class="mob-sub-kv"><div class="k">Sent date</div><div class="v">' + _mobEsc(sentDisplay) + '</div></div>' +
-      '<div class="mob-sub-kv"><div class="k">Transmittal #</div><div class="v">' + _mobEsc(s.transmittalNo || '—') + '</div></div>' +
+      '<div class="mob-sub-kv"><div class="k">Transmittal #</div><div class="v">' + _mobEsc(s.transmittalNo || _transmittalNoForSubmittal(s.id) || '—') + '</div></div>' +
       (s.notes ? '<div class="mob-sub-kv full"><div class="k">Notes</div><div class="v" style="white-space:pre-wrap;font-weight:400">' + _mobEsc(s.notes) + '</div></div>' : '') +
     '</div>' +
     contactBlock +
@@ -11433,6 +11439,39 @@ function _userRoleTitle(role) {
 // onCompileContactChange (in-dialog) and the cover renderer.
 var _compileContactsByPmId = {};
 
+// ── Transmittal autonumber helpers ───────────────────────────────────
+// Per-project sequence. The suggested next number is max(no)+1 across
+// every recorded transmittal for that project; history lives in
+// db.transmittals / kmi_transmittals, so existing rows feed the sequence.
+function _nextTransmittalNo(projectId) {
+  if (projectId == null) return 1;
+  var max = 0;
+  (db.transmittals || []).forEach(function(t){
+    if (String(t.projectId) === String(projectId)) {
+      var n = parseInt(t.no, 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return max + 1;
+}
+
+// Highest transmittal number whose submittalIds include this submittal.
+// Drives the mobile "Transmittal #" display — derived, never stored on
+// the submittal row. Returns '' when the submittal is on no transmittal.
+function _transmittalNoForSubmittal(submittalId) {
+  var best = '';
+  var bestN = -1;
+  (db.transmittals || []).forEach(function(t){
+    var ids = Array.isArray(t.submittalIds) ? t.submittalIds : [];
+    var hit = ids.some(function(x){ return String(x) === String(submittalId); });
+    if (hit) {
+      var n = parseInt(t.no, 10);
+      if (!isNaN(n) && n > bestN) { bestN = n; best = t.no; }
+    }
+  });
+  return best;
+}
+
 function showSubmittalPackageCompile(submittalId) {
   if (!requireFull('edit-submittals', 'compile submittal packages')) return;
   if (typeof window.jspdf === 'undefined' || !window.jspdf || !window.jspdf.jsPDF) {
@@ -11603,7 +11642,7 @@ function showSubmittalPackageCompile(submittalId) {
     '<div class="fg">' +
       // Title / transmittal #
       '<div class="fgr"><label>Transmittal #</label>' +
-        '<input id="cmp-trans-no" type="number" min="1" step="1" value="1" style="width:80px">' +
+        '<input id="cmp-trans-no" type="number" min="1" step="1" value="' + _nextTransmittalNo(anchor.projectId) + '" style="width:80px">' +
         '<div style="font-size:10px;color:#888;margin-top:3px">Counter you keep manually for this project (Procore auto-generates this; here you set it).</div>' +
       '</div>' +
       '<div class="fgr"><label>Title — Submittal #/name (auto)</label><input id="cmp-title-sub" value="' + subEsc(defaultTitleSubmittal) + '"></div>' +
@@ -11992,6 +12031,21 @@ async function compileSubmittalPackage() {
   var proj = anchor ? ((db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {}) : {};
   var projectLine = (proj.number ? proj.number + ' ' : '') + (proj.name || '');
 
+  // Warn-but-allow if this transmittal number was already used on this
+  // project (editable field + soft duplicate guard — no hard block).
+  var _typedTransNo = parseInt(transNo, 10);
+  if (!isNaN(_typedTransNo) && anchor && anchor.projectId != null) {
+    var _dupeTrans = (db.transmittals || []).some(function(t){
+      return String(t.projectId) === String(anchor.projectId) &&
+             parseInt(t.no, 10) === _typedTransNo;
+    });
+    if (_dupeTrans && !confirm('Transmittal #' + _typedTransNo + ' has already been used for this project. Generate it again anyway?')) {
+      if (btn) btn.disabled = false;
+      if (status) status.innerHTML = '';
+      return;
+    }
+  }
+
   if (btn) btn.disabled = true;
   if (status) status.innerHTML = '<span style="color:#666">Building cover…</span>';
 
@@ -12116,6 +12170,36 @@ async function compileSubmittalPackage() {
     else if (_pkgNm)           fname = _pkgNm + '.pdf';
     else                       fname = 'KMI_Submittal_' + (new Date()).toISOString().slice(0, 10) + '.pdf';
     doc.save(fname);
+
+    // ── Persist this transmittal (autonumber history) ───────────────
+    // Recorded only after a successful generate, so cancelled dialogs
+    // never burn a number. The next compile for this project suggests
+    // max(no)+1. Matches kmi_transmittals: id, project_id, no, date,
+    // submittal_ids, created_at, created_by_user_id.
+    try {
+      var _saveTransNo = parseInt(transNo, 10);
+      if (!isNaN(_saveTransNo) && anchor && anchor.projectId != null) {
+        var _transRow = {
+          id:              Date.now(),
+          projectId:       anchor.projectId,
+          no:              _saveTransNo,
+          date:            (sentDateIso || dateCreatedIso || (new Date()).toISOString().slice(0, 10)) || null,
+          submittalIds:    includedIds.slice(),
+          createdAt:       (new Date()).toISOString(),
+          createdByUserId: (_currentUser && _currentUser.id) ? _currentUser.id : null
+        };
+        db.transmittals = db.transmittals || [];
+        db.transmittals.push(_transRow);
+        saveDB();
+        if (supabaseClient) {
+          supabaseClient.from('kmi_transmittals').upsert(toSBTransmittal(_transRow)).then(function(rr){
+            if (rr && rr.error) console.warn('kmi_transmittals upsert error:', rr.error.message);
+          }).catch(function(rr){ console.warn('kmi_transmittals upsert exception:', rr); });
+        }
+      }
+    } catch (_transErr) {
+      console.warn('Transmittal persist failed:', _transErr);
+    }
 
     if (status) {
       var msg = '<span style="color:#3B6D11">Generated ' + docItems.length + ' transmittal item(s), ' + totalAppendedPages + ' attached page(s)</span>';
@@ -35771,6 +35855,32 @@ function fromSBSubmittal(r) {
   };
 }
 
+// ── Transmittal mappers (autonumber history) ────────────────────
+// Lean schema, matched to the live table: id, project_id, no (int),
+// date, submittal_ids (jsonb), created_at, created_by_user_id.
+function toSBTransmittal(r) {
+  return {
+    id:                 r.id,
+    project_id:         r.projectId || null,
+    no:                 (r.no != null && !isNaN(Number(r.no))) ? Number(r.no) : 0,
+    date:               r.date || null,
+    submittal_ids:      Array.isArray(r.submittalIds) ? r.submittalIds : [],
+    created_at:         r.createdAt || null,
+    created_by_user_id: r.createdByUserId || null
+  };
+}
+function fromSBTransmittal(r) {
+  return {
+    id:              r.id,
+    projectId:       r.project_id || null,
+    no:              (r.no != null) ? r.no : 0,
+    date:            r.date || null,
+    submittalIds:    Array.isArray(r.submittal_ids) ? r.submittal_ids : [],
+    createdAt:       r.created_at || null,
+    createdByUserId: r.created_by_user_id || null
+  };
+}
+
 // ── Spec Section mappers (Round 5) ──────────────────────────────
 function toSBSpecSection(r) {
   return {
@@ -36499,6 +36609,11 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_submittals').upsert(db.submittals.map(toSBSubmittal));
       if (r && r.error) errs.push('submittals: ' + r.error.message);
     }
+    // Transmittals (autonumber history) — non-fatal if table missing
+    if ((db.transmittals || []).length) {
+      var r = await supabaseClient.from('kmi_transmittals').upsert(db.transmittals.map(toSBTransmittal));
+      if (r && r.error) errs.push('transmittals: ' + r.error.message);
+    }
     // Spec sections (Round 5) — non-fatal if table missing
     if ((db.specSections || []).length) {
       var r = await supabaseClient.from('kmi_spec_sections').upsert(db.specSections.map(toSBSpecSection));
@@ -36623,7 +36738,7 @@ async function pullFromSupabase() {
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
-         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes] = await Promise.all([
+         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -36647,7 +36762,8 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_submittals').select('*'),
       supabaseClient.from('kmi_spec_sections').select('*').order('sort_order', {ascending:true}),
       supabaseClient.from('kmi_project_parameters').select('*').order('sort_order', {ascending:true}),
-      supabaseClient.from('kmi_purchase_orders').select('*')
+      supabaseClient.from('kmi_purchase_orders').select('*'),
+      supabaseClient.from('kmi_transmittals').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -36805,6 +36921,13 @@ async function pullFromSupabase() {
     } else if (projParamsRes && projParamsRes.error) {
       console.warn('kmi_project_parameters load error (table missing?):', projParamsRes.error.message);
       if (!Array.isArray(db.projectParameters)) db.projectParameters = [];
+    }
+    // Transmittals (autonumber history) — same preserve-on-missing pattern
+    if (transRes && !transRes.error) {
+      db.transmittals = (transRes.data || []).map(fromSBTransmittal);
+    } else if (transRes && transRes.error) {
+      console.warn('kmi_transmittals load error (table missing?):', transRes.error.message);
+      if (!Array.isArray(db.transmittals)) db.transmittals = [];
     }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
