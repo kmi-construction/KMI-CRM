@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Request for Quote — KMI Construction</title>
+<style>
+  :root{ --navy:#1f4e79; --ink:#1a1a1a; --muted:#6b7280; --line:#e5e7eb; --bg:#f4f5f7; --ok:#3B6D11; --okbg:#EAF3DE; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; color:var(--ink); background:var(--bg); }
+  .wrap{ max-width:620px; margin:0 auto; padding:18px 14px 60px; }
+  .card{ background:#fff; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .hd{ padding:16px 18px; border-bottom:1px solid var(--line); }
+  .eyebrow{ font-size:11px; letter-spacing:.05em; color:var(--muted); text-transform:uppercase; }
+  h1{ font-size:18px; margin:4px 0 0; }
+  .sub{ font-size:13px; color:var(--muted); margin-top:3px; }
+  .meta{ display:flex; gap:16px; flex-wrap:wrap; margin-top:10px; font-size:12px; }
+  .meta a{ color:var(--navy); text-decoration:none; }
+  .body{ padding:6px 18px 14px; }
+  .lhdr{ display:grid; grid-template-columns:1fr 96px 92px; gap:10px; padding:10px 0 4px; font-size:11px; color:var(--muted); }
+  .lhdr .r{ text-align:right; }
+  .row{ display:grid; grid-template-columns:1fr 96px 92px; gap:10px; align-items:center; padding:11px 0; border-bottom:1px solid #f0f0f0; }
+  .row.lump{ grid-template-columns:1fr 96px; }
+  .desc{ font-size:14px; }
+  .qty{ font-size:11px; color:var(--muted); margin-top:2px; }
+  input[type=text],input[type=number],input[type=date],textarea{ width:100%; font:inherit; font-size:14px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  input:disabled{ background:#f7f7f7; color:#bbb; }
+  .ext{ text-align:right; font-size:14px; font-variant-numeric:tabular-nums; color:var(--muted); }
+  .nobid{ font-size:11px; color:var(--muted); display:flex; align-items:center; gap:5px; margin-top:5px; cursor:pointer; }
+  .totbar{ display:flex; justify-content:space-between; align-items:center; padding:12px 18px; background:var(--bg); }
+  .tot{ font-size:18px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .ft{ padding:14px 18px; border-top:1px solid var(--line); }
+  .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  label.fld{ font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
+  .btn{ width:100%; margin-top:14px; padding:12px; font-size:15px; font-weight:600; color:#fff; background:var(--navy); border:none; border-radius:8px; cursor:pointer; }
+  .btn:disabled{ opacity:.5; cursor:default; }
+  .hint{ font-size:11px; color:var(--muted); text-align:center; margin-top:8px; }
+  .state{ padding:40px 24px; text-align:center; color:var(--muted); }
+  .state h2{ color:var(--ink); font-size:17px; margin:0 0 6px; }
+  .banner{ background:var(--okbg); color:var(--ok); border:1px solid #cfe3b8; border-radius:8px; padding:10px 12px; font-size:13px; margin:0 0 12px; }
+  .closed{ background:#FAEEDA; color:#854F0B; border-color:#f0d9ad; }
+  .foot{ text-align:center; font-size:11px; color:#9ca3af; margin-top:18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="root"><div class="state">Loading your request for quote&hellip;</div></div>
+  <div class="foot">KMI Construction LLC &middot; secure quote portal</div>
+</div>
+
+<script>
+// This page NEVER talks to the database directly and contains no service key.
+// It only calls the rfq-portal Edge Function, which validates the token and
+// returns/accepts data scoped to this one vendor + RFQ. The publishable key
+// below is the project's public anon key (already public in the main app) and
+// is used solely to satisfy the function gateway.
+var FN_URL = 'https://kxwoaczmrocczmyihpbr.supabase.co/functions/v1/rfq-portal';
+var ANON_KEY = 'sb_publishable_rd34BgN18pVir98jvP2Svg_Qm8ozarY';
+
+var TOKEN = new URLSearchParams(location.search).get('t') || '';
+var STATE = { lines: [], closed: false };
+var usd = new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:2 });
+var usd0 = new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 });
+
+function el(id){ return document.getElementById(id); }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function api(action, extra){
+  var resp = await fetch(FN_URL, {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'apikey':ANON_KEY, 'Authorization':'Bearer '+ANON_KEY },
+    body: JSON.stringify(Object.assign({ action:action, token:TOKEN }, extra||{}))
+  });
+  var data = {};
+  try { data = await resp.json(); } catch(_){}
+  return data;
+}
+
+function stateMsg(title, msg, closed){
+  el('root').innerHTML = '<div class="card"><div class="state"><h2>' + esc(title) + '</h2><div>' + esc(msg) + '</div></div></div>';
+}
+
+function priceFor(lineId, prior){
+  if (!prior || !Array.isArray(prior.linePrices)) return null;
+  return prior.linePrices.find(function(p){ return String(p.lineId) === String(lineId); }) || null;
+}
+
+function render(d){
+  var rfq = d.rfq || {};
+  STATE.lines = rfq.lines || [];
+  STATE.closed = !!d.closed;
+  var prior = d.priorResponse;
+
+  var docsLink = rfq.docsUrl ? '<a href="' + esc(rfq.docsUrl) + '" target="_blank" rel="noopener">View plans &amp; specs</a>' : '';
+  var head =
+    '<div class="hd">' +
+      '<div class="eyebrow">Request for quote &middot; KMI Construction</div>' +
+      '<h1>' + esc(rfq.title || 'Request for quote') + '</h1>' +
+      '<div class="sub">' + (rfq.vendorName ? 'For: ' + esc(rfq.vendorName) + ' &middot; ' : '') + (rfq.dueDate ? 'Quote due ' + esc(rfq.dueDate) : '') + '</div>' +
+      (docsLink ? '<div class="meta">' + docsLink + '</div>' : '') +
+    '</div>';
+
+  if (STATE.closed){
+    el('root').innerHTML = '<div class="card">' + head +
+      '<div class="body"><div class="banner closed">This RFQ is closed and is no longer accepting quotes' +
+      (prior && prior.status === 'submitted' ? '. Your submitted quote is on file with KMI.' : '.') +
+      '</div></div></div>';
+    return;
+  }
+
+  var rowsHtml = STATE.lines.map(function(ln, i){
+    var pp = priceFor(ln.lineId, prior);
+    var noBid = pp ? !!pp.noBid : false;
+    var val = (pp && pp.unitPrice != null && pp.unitPrice !== '') ? pp.unitPrice : '';
+    if (ln.type === 'lump'){
+      return '<div class="row lump" data-i="' + i + '">' +
+        '<div><div class="desc">' + esc(ln.description) + '</div><div class="qty">Lump sum</div>' +
+          '<label class="nobid"><input type="checkbox" class="nb" ' + (noBid?'checked':'') + ' onchange="onNoBid(' + i + ')"> No bid</label></div>' +
+        '<input type="number" inputmode="decimal" class="price" placeholder="0.00" value="' + esc(val) + '" ' + (noBid?'disabled':'') + ' oninput="recompute()">' +
+      '</div>';
+    }
+    return '<div class="row" data-i="' + i + '">' +
+      '<div><div class="desc">' + esc(ln.description) + '</div><div class="qty">Qty ' + esc(ln.estQty) + ' ' + esc(ln.unit) + '</div>' +
+        '<label class="nobid"><input type="checkbox" class="nb" ' + (noBid?'checked':'') + ' onchange="onNoBid(' + i + ')"> No bid</label></div>' +
+      '<input type="number" inputmode="decimal" class="price" placeholder="0.00" value="' + esc(val) + '" ' + (noBid?'disabled':'') + ' oninput="recompute()">' +
+      '<div class="ext" data-ext="' + i + '">&mdash;</div>' +
+    '</div>';
+  }).join('');
+
+  var lt = prior && prior.leadTimeDays != null ? prior.leadTimeDays : '';
+  var vt = prior ? (prior.validThrough || '') : '';
+  var vn = prior ? (prior.vendorNotes || '') : '';
+
+  el('root').innerHTML = '<div class="card">' + head +
+    '<div class="body">' +
+      (prior && prior.status === 'submitted' ? '<div class="banner">Your quote was received. You can revise and resubmit any time before the due date.</div>' : '') +
+      '<div class="lhdr"><span>Item</span><span class="r">Your unit $</span><span class="r">Extended</span></div>' +
+      rowsHtml +
+    '</div>' +
+    '<div class="totbar"><span style="font-size:13px;color:var(--muted)">Quote total</span><span class="tot" id="tot">$0</span></div>' +
+    '<div class="ft">' +
+      '<div class="grid2">' +
+        '<div><label class="fld">Lead time (days)</label><input type="number" id="lt" inputmode="numeric" value="' + esc(lt) + '"></div>' +
+        '<div><label class="fld">Quote valid through</label><input type="date" id="vt" value="' + esc(vt) + '"></div>' +
+      '</div>' +
+      '<div style="margin-top:12px"><label class="fld">Notes (optional)</label><textarea id="vn" rows="2" placeholder="Assumptions, exclusions, lead-time caveats...">' + esc(vn) + '</textarea></div>' +
+      '<button class="btn" id="submitBtn" onclick="submitQuote()">' + (prior && prior.status === 'submitted' ? 'Update quote' : 'Submit quote') + '</button>' +
+      '<div class="hint">You can revise and resubmit until the due date.</div>' +
+    '</div>' +
+  '</div>';
+  recompute();
+}
+
+function onNoBid(i){
+  var row = document.querySelector('.row[data-i="' + i + '"]');
+  if (!row) return;
+  var nb = row.querySelector('.nb').checked;
+  var price = row.querySelector('.price');
+  price.disabled = nb;
+  if (nb) price.value = '';
+  recompute();
+}
+
+function recompute(){
+  var total = 0;
+  STATE.lines.forEach(function(ln, i){
+    var row = document.querySelector('.row[data-i="' + i + '"]');
+    if (!row) return;
+    var nb = row.querySelector('.nb').checked;
+    var price = parseFloat(row.querySelector('.price').value);
+    var extCell = row.querySelector('[data-ext]');
+    if (nb || isNaN(price)){
+      if (extCell) extCell.innerHTML = '&mdash;';
+      return;
+    }
+    if (ln.type === 'lump'){
+      total += price;
+    } else {
+      var qty = Number(ln.estQty) || 0;
+      var ext = price * qty;
+      total += ext;
+      if (extCell) extCell.textContent = usd0.format(ext);
+    }
+  });
+  var t = el('tot'); if (t) t.textContent = usd0.format(total);
+}
+
+async function submitQuote(){
+  var btn = el('submitBtn');
+  var linePrices = STATE.lines.map(function(ln, i){
+    var row = document.querySelector('.row[data-i="' + i + '"]');
+    var nb = row ? row.querySelector('.nb').checked : false;
+    var raw = row ? row.querySelector('.price').value : '';
+    var price = (raw === '' || isNaN(parseFloat(raw))) ? null : parseFloat(raw);
+    return { lineId: ln.lineId, unitPrice: nb ? null : price, noBid: nb };
+  });
+  // basic check: at least one priced or explicit no-bid on every line
+  var missing = STATE.lines.some(function(ln, i){
+    var lp = linePrices[i];
+    return !lp.noBid && (lp.unitPrice == null);
+  });
+  if (missing){
+    if (!confirm('Some lines have no price and are not marked "No bid". Submit anyway? Blank lines will be treated as no quote.')) return;
+  }
+  btn.disabled = true; btn.textContent = 'Submitting\u2026';
+  var resp = {
+    linePrices: linePrices,
+    leadTimeDays: el('lt').value,
+    validThrough: el('vt').value,
+    vendorNotes: el('vn').value
+  };
+  var res = await api('submit', { response: resp });
+  if (res && res.success){
+    el('root').innerHTML = '<div class="card"><div class="state"><h2>Quote received \u2713</h2>' +
+      '<div>Thank you. KMI Construction has your pricing. You can reopen this link to revise it any time before the due date.</div>' +
+      '<button class="btn" style="max-width:220px;margin:18px auto 0" onclick="boot()">Review or revise</button></div></div>';
+  } else {
+    btn.disabled = false; btn.textContent = 'Submit quote';
+    alert((res && res.error) || 'Something went wrong submitting your quote. Please try again.');
+  }
+}
+
+async function boot(){
+  if (!TOKEN){ stateMsg('Link not recognized', 'This quote link is missing its access code. Please use the exact link from your email.'); return; }
+  el('root').innerHTML = '<div class="state">Loading your request for quote&hellip;</div>';
+  var d = await api('get', {});
+  if (!d || !d.success){
+    stateMsg('Link not available', (d && d.error) || 'This quote link could not be opened. It may have expired or been removed.');
+    return;
+  }
+  render(d);
+}
+
+boot();
+</script>
+</body>
+</html>
