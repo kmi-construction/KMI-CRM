@@ -2603,7 +2603,7 @@ textarea{resize:vertical;min-height:72px}
 <div class="pg" id="pg-edit-submittal">
   <div class="ph"><div><h1 id="esb-title">Add submittal</h1><div class="sub" id="esb-sub">New submittal item</div><div class="stripe"></div></div></div>
   <div style="display:flex;gap:10px;margin-bottom:14px">
-    <button class="btn" onclick="nav('submittals')">&larr; Back to submittals</button>
+    <button class="btn" onclick="_subExitForm()">&larr; Back to submittals</button>
   </div>
 
   <!-- Revision context banner — populated by renderSubmittalRevisionBanner.
@@ -2651,7 +2651,7 @@ textarea{resize:vertical;min-height:72px}
       <div class="fgr full"><label>Internal notes</label><textarea id="esb-notes" rows="2" placeholder="Notes for the team"></textarea></div>
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
-      <button class="btn" onclick="nav('submittals')">Cancel</button>
+      <button class="btn" onclick="_subExitForm()">Cancel</button>
       <button class="btn" onclick="showSubmittalPackageCompile(_editSubmittalId)" id="esb-compile-btn" style="display:none">📄 Compile package</button>
       <button class="btn btn-p" onclick="saveSubmittal()" id="esb-save-btn">Save submittal</button>
       <button class="btn" onclick="deleteSubmittal()" id="esb-del-btn" style="color:#A32D2D;display:none">Delete</button>
@@ -8632,6 +8632,11 @@ function cfRemoveFieldFromQuestion(qi, fieldName) {
 // so the PM can override.
 
 var _editSubmittalId = null;
+// When a submittal is opened/created from a project's Submittals tab, this
+// holds that project id so the edit form's Back/Cancel returns to that tab
+// instead of the global submittals list. Null means the form was reached
+// from the global list (or mobile), so exit falls back to nav('submittals').
+var _subReturnToProject = null;
 var _subSrcMode      = 'library';  // 'library' | 'custom'
 // Round 6: products picked on the edit form. Mirrors the form's UI state
 // so save/preview can read it without scraping the DOM. Initialized from
@@ -8761,10 +8766,10 @@ function renderSubmittalsPage() {
   if (projSel) {
     var prevProj = projSel.value;
     var projs = (db.projects || []).slice().sort(function(a,b){
-      return String(a.name || '').localeCompare(String(b.name || ''));
+      return String(a.number || '').localeCompare(String(b.number || ''));
     });
     projSel.innerHTML = '<option value="">All projects</option>' +
-      projs.map(function(p){ return '<option value="' + subEsc(p.id) + '">' + subEsc(p.name || ('Project ' + p.id)) + '</option>'; }).join('');
+      projs.map(function(p){ return '<option value="' + subEsc(p.id) + '">' + subEsc((p.number || '') + ' — ' + (p.name || ('Project ' + p.id))) + '</option>'; }).join('');
     projSel.value = prevProj;
   }
   // Status filter
@@ -8945,6 +8950,7 @@ function renderSubmittals() {
 function initNewSubmittal() {
   if (!requireFull('edit-submittals', 'add submittals')) return;
   _editSubmittalId = null;
+  _subReturnToProject = null;   // global entry — exit to the global list
   _subSrcMode = 'library';
   _editingSubmittalProductIds = [];
   _editingSubmittalDocSelection = null;
@@ -8958,6 +8964,8 @@ function editSubmittal(id) {
     return;
   }
   _editSubmittalId = id;
+  _subReturnToProject = null;   // default: exit to the global list. Project-tab
+                                // callers (subEditForProject) re-set this after.
   var existing = getSubmittal(id);
   _subSrcMode = (existing && existing.isCustom) ? 'custom' : 'library';
   // Seed the picker state from the loaded submittal. renderSubmittalProductsList
@@ -9168,13 +9176,13 @@ function renderEditSubmittalPage() {
   var projSel = g('esb-proj');
   if (projSel) {
     var projs = (db.projects || []).slice().sort(function(a,b){
-      return String(a.name || '').localeCompare(String(b.name || ''));
+      return String(a.number || '').localeCompare(String(b.number || ''));
     });
     projSel.innerHTML = '<option value="">— Select —</option>' +
       projs.map(function(p){
         var sel = ((r && String(r.projectId) === String(p.id)) ||
                    (!r && preselectProj && String(preselectProj) === String(p.id))) ? ' selected' : '';
-        return '<option value="' + subEsc(p.id) + '"' + sel + '>' + subEsc(p.name || ('Project ' + p.id)) + '</option>';
+        return '<option value="' + subEsc(p.id) + '"' + sel + '>' + subEsc((p.number || '') + ' — ' + (p.name || ('Project ' + p.id))) + '</option>';
       }).join('');
   }
   if (preselectProj) _preselectSubmittalProjectId = null;
@@ -9886,7 +9894,7 @@ async function deleteSubmittal() {
   }
 
   _editSubmittalId = null;
-  nav('submittals');
+  _subExitForm();
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -12290,7 +12298,7 @@ function renderProjectSubmittalsBlock(projectId) {
       if (_isOverdue(s.dueDate) && s.status !== 'closed') {
         dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
       }
-      body += '<tr style="cursor:pointer" onclick="editSubmittal(' + s.id + ')">' +
+      body += '<tr style="cursor:pointer" onclick="subEditForProject(' + s.id + ', ' + projectId + ')">' +
         '<td style="padding:5px 8px">' + subStatusBadge(s.status || 'draft') + '</td>' +
         '<td style="padding:5px 8px">' + subResponseBadge(s.response || '') + '</td>' +
         '<td style="padding:5px 8px;font-family:monospace;font-size:11px">' + subEsc(s.kmiSubmittalNo || '—') + '</td>' +
@@ -12327,7 +12335,32 @@ function initNewSubmittalForProject(projectId) {
   // Stash the desired project on a module var so renderEditSubmittalPage
   // can pre-select it before the user has to click anything.
   _preselectSubmittalProjectId = projectId;
+  _subReturnToProject = projectId;   // return to this project's Submittals tab on exit
   nav('edit-submittal');
+}
+
+// Open an existing submittal from a project's Submittals tab. editSubmittal
+// clears _subReturnToProject internally, so we re-set it afterward so
+// Back/Cancel returns to this project's tab instead of the global list.
+function subEditForProject(id, projectId) {
+  editSubmittal(id);
+  _subReturnToProject = projectId || _editProjectId || null;
+}
+
+// Centralised exit from the submittal edit form (Back / Cancel). If the form
+// was reached from a project's Submittals tab, reopen that project on the
+// Submittals tab; otherwise fall back to the global submittals list (which
+// retains its own filters via renderSubmittalsPage).
+function _subExitForm() {
+  if (_subReturnToProject) {
+    var pid = _subReturnToProject;
+    _subReturnToProject = null;
+    if (typeof editProject === 'function' && getProj(pid)) {
+      editProject(pid, 'submittals');
+      return;
+    }
+  }
+  nav('submittals');
 }
 
 // Wrapper used by the Project Detail / Edit page; fills the
