@@ -1464,6 +1464,19 @@ textarea{resize:vertical;min-height:72px}
     </div>
     <div id="rfqb-vendors"></div>
   </div>
+  <div class="card" id="rfqb-matrix-card">
+    <div class="ch">
+      <span class="ct">Bid comparison</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="rfqRefreshResponses()" title="Pull the latest vendor responses from the cloud">Refresh</button>
+        <button class="btn btn-sm" onclick="rfqSendReminder()" title="Email vendors who haven't responded yet">Send reminder</button>
+        <button class="btn btn-sm" id="rfqb-close-btn" onclick="rfqToggleClose()" title="Stop or resume accepting quotes">Close RFQ</button>
+        <button class="btn btn-sm btn-p" onclick="rfqExportMatrixPDF()" title="Export the comparison as a PDF">Export PDF</button>
+      </div>
+    </div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Read-only comparison of submitted quotes. Lowest per line and lowest total are highlighted. Awarding happens at the project stage.</div>
+    <div id="rfqb-matrix"></div>
+  </div>
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
     <button class="btn" onclick="rfqBuilderBack()">Cancel</button>
     <button class="btn btn-p" onclick="rfqBuilderSave()" style="padding:10px 32px;font-size:14px;font-weight:700">Save RFQ</button>
@@ -23618,6 +23631,20 @@ async function rfqSend() {
   if (noEmail.length) confirmMsg += '\n\nNo email on file (skipped \u2014 use the Link button to share manually): ' + noEmail.join(', ');
   if (!confirm(confirmMsg)) return;
 
+  // Capture the assigned estimator as the notify-to for vendor responses
+  // (falls back to the sender). The portal function emails this address when
+  // a quote arrives.
+  var notifyEmail = '';
+  if (r.parentType === 'opportunity') {
+    var oNotify = getOpp(r.parentId);
+    if (oNotify && oNotify.estimatorId) {
+      var est = (db.users || []).find(function(uu){ return String(uu.id) === String(oNotify.estimatorId); });
+      if (est) notifyEmail = est.email || '';
+    }
+  }
+  if (!notifyEmail) notifyEmail = (_currentUser && _currentUser.email) || '';
+  r.notifyEmail = notifyEmail;
+
   // Generate tokens for any invite missing one
   r.invites.forEach(function(iv){ if (!iv.token) iv.token = rfqGenToken(); });
 
@@ -23765,6 +23792,9 @@ function renderRfqBuilder() {
   g('rfqb-notes').value = r.notes || '';
   renderRfqLines(r);
   renderRfqVendors(r);
+  renderRfqMatrix(r);
+  var cb = g('rfqb-close-btn');
+  if (cb) cb.textContent = (r.status === 'closed') ? 'Reopen RFQ' : 'Close RFQ';
 }
 
 // ── Scope lines ──
@@ -23967,6 +23997,267 @@ async function rfqDelete(id) {
     }
   } catch(e) { console.warn('RFQ remote delete failed:', e && e.message); }
   if (currentOppId) renderOppRfqs(getOpp(currentOppId));
+}
+
+// ── RFQ comparison matrix (session 3, read-only) ────────────────
+function rfqResponsesFor(rfqId) {
+  return (db.rfqResponses || []).filter(function(x){ return String(x.rfqId) === String(rfqId); });
+}
+function rfqLinePriceOf(resp, lineId) {
+  if (!resp || !Array.isArray(resp.linePrices)) return null;
+  return resp.linePrices.find(function(p){ return String(p.lineId) === String(lineId); }) || null;
+}
+function rfqLineExtended(line, lp) {
+  if (!lp || lp.noBid || lp.unitPrice == null || lp.unitPrice === '') return null;
+  var price = Number(lp.unitPrice);
+  if (isNaN(price)) return null;
+  if (line.type === 'lump') return price;
+  return price * (Number(line.estQty) || 0);
+}
+function rfqMoney(n)  { return '$' + Math.round(Number(n)).toLocaleString('en-US'); }
+function rfqMoney2(n) { return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
+
+function rfqMatrixCols(r) {
+  return rfqResponsesFor(r.id)
+    .filter(function(x){ return x.status === 'submitted'; })
+    .map(function(resp){ var v = getVendor(resp.vendorId); return { resp: resp, vendorId: resp.vendorId, name: v ? v.name : 'Vendor' }; })
+    .sort(function(a,b){ return a.name.localeCompare(b.name); });
+}
+function rfqMatrixCompute(r, cols) {
+  var lines = Array.isArray(r.scopeLines) ? r.scopeLines : [];
+  var subtotal = {}; cols.forEach(function(c){ subtotal[String(c.vendorId)] = 0; });
+  var lowestByLine = {};
+  lines.forEach(function(ln){
+    var best = null;
+    cols.forEach(function(c){
+      var ext = rfqLineExtended(ln, rfqLinePriceOf(c.resp, ln.lineId));
+      if (ext != null) { subtotal[String(c.vendorId)] += ext; if (best == null || ext < best) best = ext; }
+    });
+    lowestByLine[ln.lineId] = best;
+  });
+  var lowestTotal = null;
+  cols.forEach(function(c){ var s = subtotal[String(c.vendorId)]; if (lowestTotal == null || s < lowestTotal) lowestTotal = s; });
+  return { subtotal: subtotal, lowestByLine: lowestByLine, lowestTotal: lowestTotal };
+}
+
+function renderRfqMatrix(r) {
+  var box = g('rfqb-matrix');
+  if (!box) return;
+  if (!r) { box.innerHTML = ''; return; }
+  var lines = Array.isArray(r.scopeLines) ? r.scopeLines : [];
+  var cols = rfqMatrixCols(r);
+
+  var respondedIds = {}; cols.forEach(function(c){ respondedIds[String(c.vendorId)] = true; });
+  var waiting = (r.invites || []).filter(function(iv){ return iv.vendorId && !respondedIds[String(iv.vendorId)]; })
+    .map(function(iv){ var v = getVendor(iv.vendorId); return v ? v.name : 'Vendor'; });
+
+  if (!cols.length) {
+    box.innerHTML = '<div style="text-align:center;padding:20px;color:#888;font-size:13px">No vendor responses yet.' +
+      (waiting.length ? ' Waiting on: ' + waiting.map(rfqEsc).join(', ') + '.' : '') +
+      ' Use <strong>Refresh</strong> to pull the latest.</div>';
+    return;
+  }
+
+  var calc = rfqMatrixCompute(r, cols);
+  var grid = 'minmax(150px,1.4fr) 60px ' + cols.map(function(){ return 'minmax(92px,1fr)'; }).join(' ');
+  var GH = 'display:grid;grid-template-columns:' + grid + ';gap:6px;';
+  var html = '<div style="overflow-x:auto"><div style="min-width:' + (230 + cols.length * 100) + 'px">';
+
+  html += '<div style="' + GH + 'padding:6px 4px;border-bottom:1px solid #ddd;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">' +
+    '<span>Scope item</span><span style="text-align:right">Est qty</span>' +
+    cols.map(function(c){ return '<span style="text-align:right">' + rfqEsc(c.name) + '</span>'; }).join('') + '</div>';
+
+  lines.forEach(function(ln){
+    html += '<div style="' + GH + 'padding:8px 4px;border-bottom:1px solid #f2f2f2;align-items:start;font-size:12px">';
+    html += '<span>' + rfqEsc(ln.description) + '<span style="display:block;font-size:10px;color:#aaa">' + rfqEsc(ln.costCode || '') + (ln.type === 'lump' ? ' \u00b7 lump' : '') + '</span></span>';
+    html += '<span style="text-align:right">' + (ln.type === 'lump' ? '<span style="color:#aaa">LS</span>' : (rfqEsc(ln.estQty) + ' ' + rfqEsc(ln.unit))) + '</span>';
+    cols.forEach(function(c){
+      var lp = rfqLinePriceOf(c.resp, ln.lineId);
+      var ext = rfqLineExtended(ln, lp);
+      if (ext == null) {
+        html += '<span style="text-align:right;color:#bbb">' + (lp && lp.noBid ? 'No bid' : '\u2014') + '</span>';
+      } else {
+        var isLow = (calc.lowestByLine[ln.lineId] != null && ext === calc.lowestByLine[ln.lineId]);
+        var unit = (lp.unitPrice != null && ln.type !== 'lump') ? ('<span style="display:block;font-size:10px;color:#999">@ ' + rfqMoney2(lp.unitPrice) + '</span>') : '';
+        html += '<span style="text-align:right;' + (isLow ? 'color:#3B6D11;font-weight:700' : '') + '">' + rfqMoney(ext) + unit + '</span>';
+      }
+    });
+    html += '</div>';
+  });
+
+  html += '<div style="' + GH + 'padding:9px 4px;border-top:2px solid #ddd;font-size:12px;font-weight:700"><span>Subtotal (lines bid)</span><span></span>';
+  cols.forEach(function(c){ var s = calc.subtotal[String(c.vendorId)]; var isLow = (calc.lowestTotal != null && s === calc.lowestTotal); html += '<span style="text-align:right;' + (isLow ? 'color:#3B6D11' : '') + '">' + rfqMoney(s) + '</span>'; });
+  html += '</div>';
+
+  function metaRow(label, fn) {
+    var h = '<div style="' + GH + 'padding:5px 4px;font-size:11px;color:#666"><span>' + label + '</span><span></span>';
+    cols.forEach(function(c){ h += '<span style="text-align:right">' + rfqEsc(fn(c.resp)) + '</span>'; });
+    return h + '</div>';
+  }
+  html += metaRow('Lead time', function(resp){ return (resp.leadTimeDays != null && resp.leadTimeDays !== '') ? (resp.leadTimeDays + ' days') : '\u2014'; });
+  html += metaRow('Valid through', function(resp){ return resp.validThrough || '\u2014'; });
+  html += '</div></div>';
+
+  var notes = cols.filter(function(c){ return (c.resp.vendorNotes || '').trim(); });
+  if (notes.length) {
+    html += '<div style="margin-top:12px;border-top:1px solid #eee;padding-top:10px"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-bottom:6px">Vendor notes</div>';
+    notes.forEach(function(c){ html += '<div style="font-size:12px;margin-bottom:6px"><strong>' + rfqEsc(c.name) + ':</strong> ' + rfqEsc(c.resp.vendorNotes) + '</div>'; });
+    html += '</div>';
+  }
+  if (waiting.length) html += '<div style="margin-top:10px;font-size:11px;color:#999">Waiting on: ' + waiting.map(rfqEsc).join(', ') + '</div>';
+  box.innerHTML = html;
+}
+
+async function rfqRefreshResponses() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  if (typeof supabaseClient === 'undefined' || !supabaseClient) { alert('Not connected to Supabase.'); return; }
+  try {
+    var rfqRes = await supabaseClient.from('kmi_rfqs').select('*').eq('id', String(r.id)).limit(1);
+    if (rfqRes && !rfqRes.error && rfqRes.data && rfqRes.data[0]) {
+      var fresh = fromSBRfq(rfqRes.data[0]);
+      var idx = (db.rfqs || []).findIndex(function(x){ return String(x.id) === String(r.id); });
+      if (idx >= 0) db.rfqs[idx] = fresh;
+    }
+    var respRes = await supabaseClient.from('kmi_rfq_responses').select('*').eq('rfq_id', String(r.id));
+    if (respRes && !respRes.error) {
+      var freshResps = (respRes.data || []).map(fromSBRfqResponse);
+      db.rfqResponses = (db.rfqResponses || []).filter(function(x){ return String(x.rfqId) !== String(r.id); }).concat(freshResps);
+    }
+    saveDB();
+    renderRfqBuilder();
+  } catch (e) {
+    alert('Refresh failed: ' + (e && e.message ? e.message : e));
+  }
+}
+
+async function rfqToggleClose() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  var closing = (r.status !== 'closed');
+  if (closing && !confirm('Close this RFQ? Vendors will no longer be able to submit or revise quotes.')) return;
+  if (!closing && !confirm('Reopen this RFQ? Vendors will be able to submit quotes again (up to the due date).')) return;
+  r.status = closing ? 'closed' : 'sent';
+  saveDB();
+  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+    var up = await supabaseClient.from('kmi_rfqs').upsert(toSBRfq(r));
+    if (up && up.error) alert('Saved locally, but the cloud update failed: ' + up.error.message);
+  }
+  renderRfqBuilder();
+}
+
+async function rfqSendReminder() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  if (typeof supabaseClient === 'undefined' || !supabaseClient) { alert('Not connected to Supabase.'); return; }
+  var pending = (r.invites || []).filter(function(iv){ return iv.vendorId && iv.token && (iv.status === 'invited' || iv.status === 'viewed'); });
+  if (!pending.length) { alert('No outstanding vendors to remind \u2014 everyone has either responded or has not been sent yet.'); return; }
+  var resolved = pending.map(function(iv){ return { inv: iv, rcpt: rfqResolveRecipient(iv) }; }).filter(function(x){ return x.rcpt.email; });
+  if (!resolved.length) { alert('Outstanding vendors have no email on file. Use the Link button to share manually.'); return; }
+  if (!confirm('Send a reminder to ' + resolved.length + ' vendor(s) who have not responded?')) return;
+  var u = _currentUser || {};
+  var fromEmail = u.email || '', fromName = ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+  var projectName = ''; if (r.parentType === 'opportunity') { var o = getOpp(r.parentId); projectName = o ? o.project : ''; }
+  var sent = 0, failed = [];
+  for (var i = 0; i < resolved.length; i++) {
+    var inv = resolved[i].inv, rcpt = resolved[i].rcpt, link = rfqPortalLink(inv.token);
+    var subject = 'Reminder: quote requested' + (projectName ? (' \u2014 ' + projectName) : '') + (r.dueDate ? (' (due ' + r.dueDate + ')') : '');
+    var body = 'Hello ' + (rcpt.contactName || rcpt.vendorName) + ',\n\nA friendly reminder that KMI Construction is awaiting your quote' + (projectName ? (' for ' + projectName) : '') + '.' + (r.dueDate ? (' Quote is due ' + r.dueDate + '.') : '') + '\n\n' + link + '\n\nThank you,\n' + (fromName || 'KMI Construction');
+    var html = '<p>Hello ' + rfqEsc(rcpt.contactName || rcpt.vendorName) + ',</p><p>A friendly reminder that KMI Construction is awaiting your quote' + (projectName ? (' for <strong>' + rfqEsc(projectName) + '</strong>') : '') + '.' + (r.dueDate ? (' Quote is due <strong>' + rfqEsc(r.dueDate) + '</strong>.') : '') + '</p><p><a href="' + link + '" style="display:inline-block;background:#1f4e79;color:#ffffff;padding:11px 22px;border-radius:6px;text-decoration:none;font-weight:600">Submit your quote</a></p><p style="font-size:12px;color:#666">Or paste this link: ' + rfqEsc(link) + '</p><p>Thank you,<br>' + rfqEsc(fromName || 'KMI Construction') + '</p>';
+    var payload = { to: rcpt.email, subject: subject, text: body, html: html, flowType: 'rfq_invite', sentBy: (_currentUser ? _currentUser.id : null), sentByEmail: fromEmail, relatedEntityType: 'rfq', relatedEntityId: String(r.id) };
+    if (fromEmail) { payload.from = fromEmail; payload.fromName = fromName; }
+    var result = await sendEmail(payload);
+    if (result && result.success) sent++; else failed.push(rcpt.vendorName);
+  }
+  alert('Reminder sent to ' + sent + ' vendor(s).' + (failed.length ? ('\n\nFailed: ' + failed.join(', ')) : ''));
+}
+
+function rfqExportMatrixPDF() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return; }
+  var lines = Array.isArray(r.scopeLines) ? r.scopeLines : [];
+  var cols = rfqMatrixCols(r);
+  if (!cols.length) { alert('No vendor responses to export yet.'); return; }
+  var calc = rfqMatrixCompute(r, cols);
+
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ unit:'pt', format:'letter' });
+  var LM = 54, RM = 558, PAGE_W = 612, PAGE_H = 792, FOOTER_TOP = 700;
+  var GOLD = [200,168,75], BLUE = [42,47,92], GREEN = [59,109,17];
+  function sf(st, sz, col){ doc.setFont('helvetica', st); doc.setFontSize(sz); doc.setTextColor(col?col[0]:0, col?col[1]:0, col?col[2]:0); }
+  function ln(x1,y1,x2,y2,w,rgb){ doc.setDrawColor(rgb?rgb[0]:0, rgb?rgb[1]:0, rgb?rgb[2]:0); doc.setLineWidth(w||0.5); doc.line(x1,y1,x2,y2); }
+  function letterhead(){ try { if (typeof KMI_HEADER_IMG === 'string' && KMI_HEADER_IMG) doc.addImage(KMI_HEADER_IMG, 'PNG', 0, 0, PAGE_W, 109); } catch(e){} try { if (typeof KMI_FOOTER_IMG === 'string' && KMI_FOOTER_IMG) doc.addImage(KMI_FOOTER_IMG, 'PNG', 0, PAGE_H-72, PAGE_W, 72); } catch(e){} }
+
+  var X_SCOPE = LM, W_SCOPE = 176, X_QTY = LM + W_SCOPE, W_QTY = 52;
+  var vendorsX = X_QTY + W_QTY, vendorTotalW = RM - vendorsX, vColW = vendorTotalW / cols.length;
+  function vColRight(i){ return vendorsX + vColW * (i + 1) - 4; }
+
+  function tableHeader(y){
+    sf('bold', 8, [90,90,90]);
+    doc.text('Scope item', X_SCOPE, y);
+    doc.text('Qty', X_QTY + W_QTY - 4, y, { align:'right' });
+    cols.forEach(function(c, i){ var nm = c.name.length > 16 ? (c.name.slice(0,15) + '\u2026') : c.name; doc.text(nm, vColRight(i), y, { align:'right' }); });
+    ln(LM, y + 4, RM, y + 4, 0.6, [180,180,180]);
+    return y + 14;
+  }
+
+  letterhead();
+  var y = 130;
+  sf('bold', 14, BLUE); doc.text('RFQ BID COMPARISON', PAGE_W / 2, y, { align:'center' });
+  ln(LM, y + 5, RM, y + 5, 0.8, GOLD); y += 24;
+
+  var projectName = ''; if (r.parentType === 'opportunity') { var o = getOpp(r.parentId); projectName = o ? o.project : ''; }
+  sf('normal', 10, [80,80,80]); doc.text('RFQ:', LM, y);
+  sf('normal', 10, [0,0,0]); doc.text(String(r.rfqNumber || '') + (r.title ? ('   ' + r.title) : ''), LM + 40, y); y += 15;
+  if (projectName) { sf('normal', 10, [80,80,80]); doc.text('Project:', LM, y); sf('normal', 10, [0,0,0]); doc.text(projectName, LM + 50, y); y += 15; }
+  sf('normal', 10, [80,80,80]); doc.text('Due:', LM, y); sf('normal', 10, [0,0,0]); doc.text(String(r.dueDate || '\u2014'), LM + 40, y);
+  sf('normal', 10, [80,80,80]); doc.text('Generated:', 330, y); sf('normal', 10, [0,0,0]); doc.text(new Date().toLocaleDateString('en-US'), 395, y); y += 20;
+
+  y = tableHeader(y);
+  ln(LM, y, RM, y, 0.4, [225,225,225]);
+
+  lines.forEach(function(l){
+    sf('normal', 9, [0,0,0]);
+    var descLines = doc.splitTextToSize(String(l.description || ''), W_SCOPE - 4);
+    var rowH = Math.max(descLines.length * 11 + 8, 22);
+    if (y + rowH > FOOTER_TOP) { doc.addPage(); letterhead(); y = 130; y = tableHeader(y); ln(LM, y, RM, y, 0.4, [225,225,225]); }
+    var ty = y + 11;
+    sf('normal', 9, [0,0,0]); doc.text(descLines, X_SCOPE, ty);
+    sf('normal', 8, [150,150,150]); doc.text((l.costCode || '') + (l.type === 'lump' ? ' \u00b7 lump' : ''), X_SCOPE, ty + descLines.length * 11);
+    sf('normal', 9, [80,80,80]); doc.text(l.type === 'lump' ? 'LS' : (String(l.estQty || 0) + ' ' + (l.unit || '')), X_QTY + W_QTY - 4, ty, { align:'right' });
+    cols.forEach(function(c, i){
+      var lp = rfqLinePriceOf(c.resp, l.lineId), e = rfqLineExtended(l, lp);
+      if (e == null) { sf('normal', 9, [180,180,180]); doc.text(lp && lp.noBid ? 'No bid' : '\u2014', vColRight(i), ty, { align:'right' }); return; }
+      var isLow = (calc.lowestByLine[l.lineId] != null && e === calc.lowestByLine[l.lineId]);
+      sf(isLow ? 'bold' : 'normal', 9, isLow ? GREEN : [0,0,0]); doc.text(rfqMoney(e), vColRight(i), ty, { align:'right' });
+      if (l.type !== 'lump' && lp.unitPrice != null) { sf('normal', 7, [150,150,150]); doc.text('@' + rfqMoney2(lp.unitPrice), vColRight(i), ty + 9, { align:'right' }); }
+    });
+    y += rowH;
+    ln(LM, y, RM, y, 0.3, [238,238,238]);
+  });
+
+  if (y + 40 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 130; }
+  y += 6; ln(LM, y - 4, RM, y - 4, 1, [180,180,180]);
+  sf('bold', 9, [0,0,0]); doc.text('Subtotal (lines bid)', X_SCOPE, y + 8);
+  cols.forEach(function(c, i){ var s = calc.subtotal[String(c.vendorId)]; var isLow = (calc.lowestTotal != null && s === calc.lowestTotal); sf('bold', 9, isLow ? GREEN : [0,0,0]); doc.text(rfqMoney(s), vColRight(i), y + 8, { align:'right' }); });
+  y += 20;
+  sf('normal', 8, [110,110,110]); doc.text('Lead time', X_SCOPE, y + 6);
+  cols.forEach(function(c, i){ sf('normal', 8, [80,80,80]); var lt = (c.resp.leadTimeDays != null && c.resp.leadTimeDays !== '') ? (c.resp.leadTimeDays + 'd') : '\u2014'; doc.text(String(lt), vColRight(i), y + 6, { align:'right' }); });
+  y += 14;
+  sf('normal', 8, [110,110,110]); doc.text('Valid through', X_SCOPE, y + 6);
+  cols.forEach(function(c, i){ sf('normal', 8, [80,80,80]); doc.text(String(c.resp.validThrough || '\u2014'), vColRight(i), y + 6, { align:'right' }); });
+  y += 22;
+
+  var notes = cols.filter(function(c){ return (c.resp.vendorNotes || '').trim(); });
+  if (notes.length) {
+    if (y + 30 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 130; }
+    sf('bold', 9, BLUE); doc.text('Vendor notes', LM, y); y += 14;
+    notes.forEach(function(c){
+      var nl = doc.splitTextToSize(c.name + ': ' + c.resp.vendorNotes, RM - LM);
+      if (y + nl.length * 11 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 130; }
+      sf('normal', 9, [40,40,40]); doc.text(nl, LM, y); y += nl.length * 11 + 4;
+    });
+  }
+
+  var fname = 'RFQ_' + (r.rfqNumber || 'comparison') + (projectName ? ('_' + projectName.replace(/[^a-z0-9]+/gi, '_').slice(0, 30)) : '') + '.pdf';
+  doc.save(fname);
 }
 
 // ── BID DECISION ────────────────────────────────────────────────
@@ -37077,7 +37368,8 @@ function toSBRfq(r) {
     invites: Array.isArray(r.invites) ? r.invites : [],
     awards: Array.isArray(r.awards) ? r.awards : [],
     created: r.created || '',
-    created_by_user_id: r.createdByUserId || null
+    created_by_user_id: r.createdByUserId || null,
+    notify_email: r.notifyEmail || ''
   };
 }
 function fromSBRfq(r) {
@@ -37095,7 +37387,8 @@ function fromSBRfq(r) {
     invites: Array.isArray(r.invites) ? r.invites : [],
     awards: Array.isArray(r.awards) ? r.awards : [],
     created: r.created || '',
-    createdByUserId: r.created_by_user_id || null
+    createdByUserId: r.created_by_user_id || null,
+    notifyEmail: r.notify_email || ''
   };
 }
 function toSBRfqResponse(r) {
@@ -37846,7 +38139,7 @@ async function renderEmailLog() {
 
 function renderEmailLogFilters() {
   var s = _emailLogState;
-  var flowOpts = ['password_reset','assignment_alert','proposal','welcome','rfq_invite'];
+  var flowOpts = ['password_reset','assignment_alert','proposal','welcome','rfq_invite','rfq_response_received'];
   var statOpts = ['sent','failed','test_redirected','queued'];
   return '<div class="card" style="margin-bottom:14px">' +
     '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;align-items:end">' +
