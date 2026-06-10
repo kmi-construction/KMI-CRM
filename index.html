@@ -1395,6 +1395,75 @@ textarea{resize:vertical;min-height:72px}
     <input type="file" id="od-scope-file" accept="application/pdf,.pdf" style="display:none">
     <div id="od-scope-items"></div>
   </div>
+  <div class="card" id="od-rfq-card">
+    <div class="ch" style="margin-bottom:12px"><span class="ct">RFQs &amp; vendor pricing</span>
+      <button class="btn btn-sm btn-p" onclick="rfqCreateForOpp()" title="Create a new request for quote on this opportunity">+ New RFQ</button>
+    </div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Solicit line-by-line pricing from vendors. Each RFQ pulls its own scope lines and vendor list \u2014 multiple RFQs per opportunity are allowed.</div>
+    <div id="od-rfq-list"></div>
+  </div>
+</div>
+
+<!-- RFQ BUILDER -->
+<div class="pg" id="pg-rfq-builder">
+  <div class="ph" style="margin-bottom:0">
+    <div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
+        <button class="btn btn-sm" onclick="rfqBuilderBack()" style="font-size:12px">&larr; Back to opportunity</button>
+        <span id="rfqb-status"></span>
+      </div>
+      <h1>Request for quote</h1>
+      <div class="sub" id="rfqb-id-display" style="font-weight:600;color:var(--kmi)"></div>
+      <div class="stripe"></div>
+    </div>
+    <button class="btn btn-p" onclick="rfqBuilderSave()" style="padding:10px 28px;font-size:14px;font-weight:700">Save RFQ</button>
+  </div>
+  <div class="card">
+    <div class="ch"><span class="ct">RFQ details</span></div>
+    <div class="fg">
+      <div class="fgr full"><label>RFQ title</label><input id="rfqb-title" placeholder="e.g. New Berlin Library \u2014 masonry materials"></div>
+      <div class="fgr"><label>Quote due date</label><input type="date" id="rfqb-due"></div>
+      <div class="fgr"><label>Plans &amp; specs link</label><input id="rfqb-docs" placeholder="Paste planroom / SharePoint / Dropbox link..."></div>
+      <div class="fgr full"><label>Internal notes</label><textarea id="rfqb-notes" placeholder="Notes for your team (not shown to vendors)..."></textarea></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Scope lines</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-sm" onclick="rfqSeedFromInclusions()" title="Pull inclusion items from this opportunity's scope checklist">&darr; Seed from inclusions</button>
+        <button class="btn btn-sm btn-p" onclick="rfqAddLine()">+ Add line</button>
+      </div>
+    </div>
+    <div style="font-size:11px;color:#888;margin-bottom:10px">Cost code and class stay internal \u2014 vendors only see description, unit, and estimated quantity.</div>
+    <div style="display:grid;grid-template-columns:1fr 76px 64px 76px 92px 92px 26px;gap:6px;margin-bottom:6px">
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Description</span>
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Type</span>
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Unit</span>
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Est. qty</span>
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Cost code</span>
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Class</span>
+      <span></span>
+    </div>
+    <div id="rfqb-lines"></div>
+  </div>
+  <div class="card">
+    <div class="ch">
+      <span class="ct">Vendors</span>
+      <button class="btn btn-sm" onclick="rfqAddVendorRow()">+ Add vendor</button>
+    </div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Vendors carried over from the opportunity's assignments. Pick a vendor, then optionally a contact. Sending invites comes in the next step.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 26px;gap:6px;margin-bottom:6px">
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Vendor</span>
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Contact</span>
+      <span></span>
+    </div>
+    <div id="rfqb-vendors"></div>
+  </div>
+  <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px">
+    <button class="btn" onclick="rfqBuilderBack()">Cancel</button>
+    <button class="btn btn-p" onclick="rfqBuilderSave()" style="padding:10px 32px;font-size:14px;font-weight:700">Save RFQ</button>
+  </div>
 </div>
 
 <!-- NEW PROPOSAL -->
@@ -2906,6 +2975,12 @@ var DB_DEFAULTS = {
   // matches the historical Excel template (no KMI letterhead). Future
   // rounds will layer in delivery tracking, invoice matching, etc.
   purchaseOrders: [],
+  // RFQ / Vendor Pricing module — RFQs attach to an opportunity (or, later,
+  // a project) and solicit line-by-line pricing from vendors. rfqResponses
+  // holds each vendor's returned pricing (written via the rfq-portal Edge
+  // Function in production). Both non-fatal if their tables are missing.
+  rfqs:          [],
+  rfqResponses:  [],
   // Foundation master data (imported from CSV on Templates page)
   costCodes:           [],   // { id, code, description, isBudgetable, active }
   costClasses:         [],   // { id, classNo, description, active }
@@ -3005,6 +3080,8 @@ function loadDB() {
         tmTickets:      p.tmTickets      || [],
         cors:           p.cors           || [],
         purchaseOrders: p.purchaseOrders || [],
+        rfqs:           p.rfqs           || [],
+        rfqResponses:   p.rfqResponses   || [],
         costCodes:           p.costCodes           || [],
         costClasses:         p.costClasses         || [],
         customersFoundation: p.customersFoundation || [],
@@ -23425,6 +23502,308 @@ function renderOppDetail(id) {
   }
   renderAddenda(o);
   renderScopeChecklist(o);
+  renderOppRfqs(o);
+}
+
+// ── RFQ / VENDOR PRICING ────────────────────────────────────────
+// Session 1: list + builder on the opportunity. Sending invites, the
+// vendor portal, the comparison matrix, and award->PO conversion arrive
+// in later sessions. Data persists via db.rfqs / kmi_rfqs.
+var currentRfqId = null;
+
+function rfqEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function getRfq(id) {
+  return (db.rfqs || []).find(function(r){ return String(r.id) === String(id); });
+}
+function rfqsForParent(parentType, parentId) {
+  return (db.rfqs || []).filter(function(r){
+    return r.parentType === parentType && String(r.parentId) === String(parentId);
+  });
+}
+function rfqStatusBadge(status) {
+  var s = status || 'draft';
+  var m = {draft:'bd-draft', sent:'bd-sent', closed:'bd-pending', awarded:'bd-won'};
+  var l = {draft:'Draft', sent:'Sent', closed:'Closed', awarded:'Awarded'};
+  return '<span class="bdg ' + (m[s]||'bd-draft') + '">' + (l[s]||s) + '</span>';
+}
+function rfqGenNumber(parentType, parentId) {
+  var n = rfqsForParent(parentType, parentId).length + 1;
+  return 'R' + (n < 10 ? '0' + n : '' + n);
+}
+
+function renderOppRfqs(o) {
+  if (!o) return;
+  var list = g('od-rfq-list');
+  if (!list) return;
+  var rfqs = rfqsForParent('opportunity', o.id);
+  if (!rfqs.length) {
+    list.innerHTML = '<div style="text-align:center;padding:18px;color:#888;font-size:13px">No RFQs yet. Click <strong>+ New RFQ</strong> to solicit vendor pricing for this bid.</div>';
+    return;
+  }
+  list.innerHTML = rfqs.map(function(r){
+    var lineCount = Array.isArray(r.scopeLines) ? r.scopeLines.length : 0;
+    var venCount  = Array.isArray(r.invites) ? r.invites.length : 0;
+    var due = r.dueDate ? ('Due ' + r.dueDate) : 'No due date';
+    return '<div onclick="openRfqBuilder(\'' + r.id + '\')" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;border:1px solid #eee;border-radius:8px;margin-bottom:8px;cursor:pointer">' +
+      '<div style="min-width:0">' +
+        '<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + rfqEsc(r.title || 'Untitled RFQ') + '</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:2px">' + rfqEsc(r.rfqNumber || '') + ' \u00b7 ' + lineCount + ' line' + (lineCount===1?'':'s') + ' \u00b7 ' + venCount + ' vendor' + (venCount===1?'':'s') + ' \u00b7 ' + due + '</div>' +
+      '</div>' +
+      '<div style="display:flex;align-items:center;gap:10px;flex-shrink:0">' + rfqStatusBadge(r.status) +
+        '<button class="btn btn-sm" onclick="event.stopPropagation();rfqDelete(\'' + r.id + '\')" title="Delete RFQ">\u00d7</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function rfqCreateForOpp() {
+  var o = getOpp(currentOppId);
+  if (!o) { alert('Open an opportunity first.'); return; }
+  var seedInvites = (Array.isArray(o.vendorAssignments) ? o.vendorAssignments : []).map(function(a){
+    return { vendorId: a.vendorId, contactId: a.contactId || null, token: '', status: 'pending', sentAt: '', viewedAt: '', respondedAt: '' };
+  });
+  var rfq = {
+    id: Date.now(),
+    parentType: 'opportunity',
+    parentId: o.id,
+    rfqNumber: rfqGenNumber('opportunity', o.id),
+    title: (o.project ? o.project + ' \u2014 materials' : 'New RFQ'),
+    status: 'draft',
+    dueDate: '',
+    docsUrl: o.scopeSourceUrl || '',
+    notes: '',
+    scopeLines: [],
+    invites: seedInvites,
+    awards: [],
+    created: new Date().toISOString(),
+    createdByUserId: (typeof _currentUser !== 'undefined' && _currentUser ? _currentUser.id : null)
+  };
+  if (!Array.isArray(db.rfqs)) db.rfqs = [];
+  db.rfqs.push(rfq);
+  saveDB();
+  openRfqBuilder(rfq.id);
+}
+
+function openRfqBuilder(rfqId) {
+  var r = getRfq(rfqId);
+  if (!r) { alert('RFQ not found.'); return; }
+  currentRfqId = r.id;
+  setActivePage('opportunities');
+  document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+  g('pg-rfq-builder').classList.add('active');
+  renderRfqBuilder();
+  window.scrollTo(0, 0);
+}
+
+function rfqBuilderBack() {
+  if (currentOppId) { openOppDetail(currentOppId); }
+  else { nav('opportunities'); }
+}
+
+function renderRfqBuilder() {
+  var r = getRfq(currentRfqId);
+  if (!r) return;
+  var parentLabel = '';
+  if (r.parentType === 'opportunity') {
+    var o = getOpp(r.parentId);
+    parentLabel = o ? o.project : '';
+  }
+  g('rfqb-id-display').textContent = (r.rfqNumber || '') + (parentLabel ? ' \u00b7 ' + parentLabel : '');
+  g('rfqb-status').innerHTML = rfqStatusBadge(r.status);
+  g('rfqb-title').value = r.title || '';
+  g('rfqb-due').value   = r.dueDate || '';
+  g('rfqb-docs').value  = r.docsUrl || '';
+  g('rfqb-notes').value = r.notes || '';
+  renderRfqLines(r);
+  renderRfqVendors(r);
+}
+
+// ── Scope lines ──
+function rfqLineRowHtml(ln) {
+  var isUnit = (ln.type !== 'lump');
+  var dis = isUnit ? '' : ' disabled style="opacity:.45"';
+  return '<div class="rfqb-line" data-line-id="' + ln.lineId + '" style="display:grid;grid-template-columns:1fr 76px 64px 76px 92px 92px 26px;gap:6px;margin-bottom:6px;align-items:center">' +
+    '<input type="text" class="rl-desc" value="' + rfqEsc(ln.description) + '" placeholder="Scope item description">' +
+    '<select class="rl-type" onchange="rfqLineTypeChanged()"><option value="unit"' + (isUnit?' selected':'') + '>Unit</option><option value="lump"' + (!isUnit?' selected':'') + '>Lump</option></select>' +
+    '<input type="text" class="rl-unit" value="' + rfqEsc(ln.unit) + '" placeholder="EA"' + dis + '>' +
+    '<input type="number" class="rl-qty" value="' + (ln.estQty!=null && ln.estQty!=='' ? ln.estQty : '') + '" placeholder="0"' + dis + '>' +
+    '<input type="text" class="rl-cc" value="' + rfqEsc(ln.costCode) + '" placeholder="Code">' +
+    '<input type="text" class="rl-cl" value="' + rfqEsc(ln.costClass) + '" placeholder="Class">' +
+    '<button class="btn btn-sm" onclick="rfqDeleteLine(\'' + ln.lineId + '\')" title="Remove line">\u00d7</button>' +
+  '</div>';
+}
+function renderRfqLines(r) {
+  var box = g('rfqb-lines');
+  if (!box) return;
+  if (!Array.isArray(r.scopeLines) || !r.scopeLines.length) {
+    box.innerHTML = '<div style="text-align:center;padding:14px;color:#888;font-size:12px">No lines yet. Seed from the opportunity\'s inclusions, or add lines manually.</div>';
+    return;
+  }
+  box.innerHTML = r.scopeLines.map(rfqLineRowHtml).join('');
+}
+function rfqReadLinesFromDOM(r) {
+  var rows = document.querySelectorAll('#rfqb-lines .rfqb-line');
+  var out = [];
+  rows.forEach(function(row){
+    var lineId = row.getAttribute('data-line-id');
+    var existing = (r.scopeLines || []).find(function(l){ return String(l.lineId) === String(lineId); }) || {};
+    var type = row.querySelector('.rl-type').value === 'lump' ? 'lump' : 'unit';
+    var qtyRaw = row.querySelector('.rl-qty').value;
+    out.push({
+      lineId: lineId,
+      type: type,
+      description: row.querySelector('.rl-desc').value.trim(),
+      unit: type === 'unit' ? row.querySelector('.rl-unit').value.trim() : '',
+      estQty: type === 'unit' ? (qtyRaw === '' ? 0 : Number(qtyRaw)) : 0,
+      costCode: row.querySelector('.rl-cc').value.trim(),
+      costClass: row.querySelector('.rl-cl').value.trim(),
+      sourceScopeItemId: existing.sourceScopeItemId || null
+    });
+  });
+  r.scopeLines = out;
+}
+function rfqLineTypeChanged() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  rfqReadLinesFromDOM(r);
+  renderRfqLines(r);
+}
+function rfqAddLine() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  rfqReadLinesFromDOM(r);
+  if (!Array.isArray(r.scopeLines)) r.scopeLines = [];
+  r.scopeLines.push({ lineId:'L' + Date.now() + Math.floor(Math.random()*1000), type:'unit', description:'', unit:'', estQty:0, costCode:'', costClass:'', sourceScopeItemId:null });
+  renderRfqLines(r);
+}
+function rfqDeleteLine(lineId) {
+  var r = getRfq(currentRfqId); if (!r) return;
+  rfqReadLinesFromDOM(r);
+  r.scopeLines = (r.scopeLines || []).filter(function(l){ return String(l.lineId) !== String(lineId); });
+  renderRfqLines(r);
+}
+function rfqSeedFromInclusions() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  if (r.parentType !== 'opportunity') { alert('Seeding from inclusions is available on opportunity RFQs.'); return; }
+  var o = getOpp(r.parentId);
+  if (!o) { alert('Parent opportunity not found.'); return; }
+  var incs = (Array.isArray(o.scopeItems) ? o.scopeItems : []).filter(function(it){ return it.inc; });
+  if (!incs.length) { alert('No inclusion items found on this opportunity\'s scope checklist. Mark items as Incl first, or add lines manually.'); return; }
+  rfqReadLinesFromDOM(r);
+  if (!Array.isArray(r.scopeLines)) r.scopeLines = [];
+  var have = {};
+  r.scopeLines.forEach(function(l){ have[(l.description||'').toLowerCase()] = true; });
+  var added = 0;
+  incs.forEach(function(it, i){
+    var txt = (it.text || '').trim();
+    if (!txt || have[txt.toLowerCase()]) return;
+    r.scopeLines.push({ lineId:'L' + Date.now() + '_' + i, type:'unit', description:txt, unit:'', estQty:0, costCode:'', costClass:'', sourceScopeItemId:(it.id || null) });
+    added++;
+  });
+  renderRfqLines(r);
+  if (!added) alert('All inclusion items are already in the line list.');
+}
+
+// ── Vendors ──
+function rfqVendorRowHtml(inv, idx) {
+  var vendorOpts = '<option value="">Select vendor...</option>' + (db.vendors||[]).slice().sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); }).map(function(v){
+    return '<option value="' + v.id + '"' + (String(v.id)===String(inv.vendorId)?' selected':'') + '>' + rfqEsc(v.name) + '</option>';
+  }).join('');
+  var contacts = (db.vendorContacts||[]).filter(function(c){ return String(c.vendorId) === String(inv.vendorId); });
+  var contactOpts = '<option value="">No specific contact</option>' + contacts.map(function(c){
+    var nm = ((c.firstName||'') + ' ' + (c.lastName||'')).trim() || c.email || 'Contact';
+    return '<option value="' + c.id + '"' + (String(c.id)===String(inv.contactId)?' selected':'') + '>' + rfqEsc(nm) + '</option>';
+  }).join('');
+  return '<div class="rfqb-ven" data-idx="' + idx + '" style="display:grid;grid-template-columns:1fr 1fr 26px;gap:6px;margin-bottom:6px;align-items:center">' +
+    '<select class="rv-vendor" onchange="rfqVendorChanged()">' + vendorOpts + '</select>' +
+    '<select class="rv-contact">' + contactOpts + '</select>' +
+    '<button class="btn btn-sm" onclick="rfqDeleteVendorRow(' + idx + ')" title="Remove vendor">\u00d7</button>' +
+  '</div>';
+}
+function renderRfqVendors(r) {
+  var box = g('rfqb-vendors');
+  if (!box) return;
+  if (!Array.isArray(r.invites) || !r.invites.length) {
+    box.innerHTML = '<div style="text-align:center;padding:14px;color:#888;font-size:12px">No vendors yet. Click <strong>+ Add vendor</strong> to choose who receives this RFQ.</div>';
+    return;
+  }
+  box.innerHTML = r.invites.map(rfqVendorRowHtml).join('');
+}
+function rfqReadVendorsFromDOM(r) {
+  var rows = document.querySelectorAll('#rfqb-vendors .rfqb-ven');
+  var out = [];
+  rows.forEach(function(row){
+    var vidRaw = row.querySelector('.rv-vendor').value;
+    var cidRaw = row.querySelector('.rv-contact').value;
+    var vid = vidRaw ? (isNaN(Number(vidRaw)) ? vidRaw : Number(vidRaw)) : '';
+    var cid = cidRaw ? (isNaN(Number(cidRaw)) ? cidRaw : Number(cidRaw)) : null;
+    var existing = (r.invites||[]).find(function(iv){ return String(iv.vendorId) === String(vid); }) || {};
+    out.push({
+      vendorId: vid,
+      contactId: cid,
+      token: existing.token || '',
+      status: existing.status || 'pending',
+      sentAt: existing.sentAt || '',
+      viewedAt: existing.viewedAt || '',
+      respondedAt: existing.respondedAt || ''
+    });
+  });
+  r.invites = out;
+}
+function rfqVendorChanged() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  rfqReadVendorsFromDOM(r);
+  renderRfqVendors(r);
+}
+function rfqAddVendorRow() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  rfqReadVendorsFromDOM(r);
+  if (!Array.isArray(r.invites)) r.invites = [];
+  r.invites.push({ vendorId:'', contactId:null, token:'', status:'pending', sentAt:'', viewedAt:'', respondedAt:'' });
+  renderRfqVendors(r);
+}
+function rfqDeleteVendorRow(idx) {
+  var r = getRfq(currentRfqId); if (!r) return;
+  rfqReadVendorsFromDOM(r);
+  if (Array.isArray(r.invites) && idx >= 0 && idx < r.invites.length) r.invites.splice(idx, 1);
+  renderRfqVendors(r);
+}
+
+function rfqBuilderSave() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  rfqReadLinesFromDOM(r);
+  rfqReadVendorsFromDOM(r);
+  r.title   = (g('rfqb-title').value || '').trim() || 'Untitled RFQ';
+  r.dueDate = g('rfqb-due').value || '';
+  r.docsUrl = (g('rfqb-docs').value || '').trim();
+  r.notes   = (g('rfqb-notes').value || '').trim();
+  r.scopeLines = (r.scopeLines||[]).filter(function(l){ return (l.description||'').trim(); });
+  var seen = {};
+  r.invites = (r.invites||[]).filter(function(iv){
+    if (!iv.vendorId) return false;
+    var k = String(iv.vendorId);
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
+  saveDB();
+  alert('RFQ saved.');
+  rfqBuilderBack();
+}
+
+async function rfqDelete(id) {
+  var r = getRfq(id); if (!r) return;
+  if (!confirm('Delete this RFQ? This cannot be undone.')) return;
+  db.rfqs = (db.rfqs||[]).filter(function(x){ return String(x.id) !== String(id); });
+  db.rfqResponses = (db.rfqResponses||[]).filter(function(x){ return String(x.rfqId) !== String(id); });
+  if (String(currentRfqId) === String(id)) currentRfqId = null;
+  saveDB();
+  try {
+    if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+      await supabaseClient.from('kmi_rfq_responses').delete().eq('rfq_id', id);
+      await supabaseClient.from('kmi_rfqs').delete().eq('id', id);
+    }
+  } catch(e) { console.warn('RFQ remote delete failed:', e && e.message); }
+  if (currentOppId) renderOppRfqs(getOpp(currentOppId));
 }
 
 // ── BID DECISION ────────────────────────────────────────────────
@@ -36515,6 +36894,80 @@ function fromSBPurchaseOrder(r) {
   };
 }
 
+// ── RFQ / Vendor Pricing mappers ───────────────────────────────
+// scope_lines: [{ lineId, type:'unit'|'lump', description, unit, estQty,
+//                 costCode, costClass, sourceScopeItemId }]
+// invites:     [{ vendorId, contactId, token, status, sentAt, viewedAt, respondedAt }]
+// awards:      [{ lineId, vendorId }]
+function toSBRfq(r) {
+  return {
+    id: r.id,
+    parent_type: r.parentType || 'opportunity',
+    parent_id: r.parentId || null,
+    rfq_number: r.rfqNumber || '',
+    title: r.title || '',
+    status: r.status || 'draft',
+    due_date: r.dueDate || '',
+    docs_url: r.docsUrl || '',
+    notes: r.notes || '',
+    scope_lines: Array.isArray(r.scopeLines) ? r.scopeLines : [],
+    invites: Array.isArray(r.invites) ? r.invites : [],
+    awards: Array.isArray(r.awards) ? r.awards : [],
+    created: r.created || '',
+    created_by_user_id: r.createdByUserId || null
+  };
+}
+function fromSBRfq(r) {
+  return {
+    id: r.id,
+    parentType: r.parent_type || 'opportunity',
+    parentId: r.parent_id || null,
+    rfqNumber: r.rfq_number || '',
+    title: r.title || '',
+    status: r.status || 'draft',
+    dueDate: r.due_date || '',
+    docsUrl: r.docs_url || '',
+    notes: r.notes || '',
+    scopeLines: Array.isArray(r.scope_lines) ? r.scope_lines : [],
+    invites: Array.isArray(r.invites) ? r.invites : [],
+    awards: Array.isArray(r.awards) ? r.awards : [],
+    created: r.created || '',
+    createdByUserId: r.created_by_user_id || null
+  };
+}
+function toSBRfqResponse(r) {
+  return {
+    id: r.id,
+    rfq_id: r.rfqId || null,
+    vendor_id: r.vendorId || null,
+    token: r.token || '',
+    status: r.status || 'draft',
+    line_prices: Array.isArray(r.linePrices) ? r.linePrices : [],
+    lead_time_days: (r.leadTimeDays !== undefined && r.leadTimeDays !== '') ? r.leadTimeDays : null,
+    valid_through: r.validThrough || '',
+    vendor_notes: r.vendorNotes || '',
+    quote_file_path: r.quoteFilePath || '',
+    revision_count: r.revisionCount || 0,
+    submitted_at: r.submittedAt || ''
+  };
+}
+function fromSBRfqResponse(r) {
+  return {
+    id: r.id,
+    rfqId: r.rfq_id || null,
+    vendorId: r.vendor_id || null,
+    token: r.token || '',
+    status: r.status || 'draft',
+    linePrices: Array.isArray(r.line_prices) ? r.line_prices : [],
+    leadTimeDays: (r.lead_time_days !== null && r.lead_time_days !== undefined) ? r.lead_time_days : '',
+    validThrough: r.valid_through || '',
+    vendorNotes: r.vendor_notes || '',
+    quoteFilePath: r.quote_file_path || '',
+    revisionCount: r.revision_count || 0,
+    submittedAt: r.submitted_at || ''
+  };
+}
+
 // ── Foundation master-data mappers (cost codes / classes / customers) ──
 function toSBCostCode(r) {
   return {
@@ -36695,6 +37148,17 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_purchase_orders').upsert(db.purchaseOrders.map(toSBPurchaseOrder));
       if (r && r.error) errs.push('purchase_orders: ' + r.error.message);
     }
+    // RFQ / Vendor Pricing — non-fatal if tables missing on older Supabase
+    // projects (created by the rfq_round1 migration). Without the tables,
+    // RFQs only persist in localStorage on this device.
+    if ((db.rfqs || []).length) {
+      var r = await supabaseClient.from('kmi_rfqs').upsert(db.rfqs.map(toSBRfq));
+      if (r && r.error) errs.push('rfqs: ' + r.error.message);
+    }
+    if ((db.rfqResponses || []).length) {
+      var r = await supabaseClient.from('kmi_rfq_responses').upsert(db.rfqResponses.map(toSBRfqResponse));
+      if (r && r.error) errs.push('rfq_responses: ' + r.error.message);
+    }
     // Foundation master data — cost codes / classes / customers (Chunk 1).
     // These are populated by CSV import on the Templates page; if local is
     // empty we don't push (avoids wiping a populated cloud copy on a fresh
@@ -36771,7 +37235,8 @@ async function pullFromSupabase() {
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
-         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes] = await Promise.all([
+         mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
+         rfqsRes, rfqRespRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -36796,7 +37261,9 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_spec_sections').select('*').order('sort_order', {ascending:true}),
       supabaseClient.from('kmi_project_parameters').select('*').order('sort_order', {ascending:true}),
       supabaseClient.from('kmi_purchase_orders').select('*'),
-      supabaseClient.from('kmi_transmittals').select('*')
+      supabaseClient.from('kmi_transmittals').select('*'),
+      supabaseClient.from('kmi_rfqs').select('*'),
+      supabaseClient.from('kmi_rfq_responses').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -36961,6 +37428,20 @@ async function pullFromSupabase() {
     } else if (transRes && transRes.error) {
       console.warn('kmi_transmittals load error (table missing?):', transRes.error.message);
       if (!Array.isArray(db.transmittals)) db.transmittals = [];
+    }
+    // RFQ / Vendor Pricing — same preserve-on-missing pattern. If the
+    // rfq_round1 migration hasn't run yet, keep whatever's local.
+    if (rfqsRes && !rfqsRes.error) {
+      db.rfqs = (rfqsRes.data || []).map(fromSBRfq);
+    } else if (rfqsRes && rfqsRes.error) {
+      console.warn('kmi_rfqs load error (table missing?):', rfqsRes.error.message);
+      if (!Array.isArray(db.rfqs)) db.rfqs = [];
+    }
+    if (rfqRespRes && !rfqRespRes.error) {
+      db.rfqResponses = (rfqRespRes.data || []).map(fromSBRfqResponse);
+    } else if (rfqRespRes && rfqRespRes.error) {
+      console.warn('kmi_rfq_responses load error (table missing?):', rfqRespRes.error.message);
+      if (!Array.isArray(db.rfqResponses)) db.rfqResponses = [];
     }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
