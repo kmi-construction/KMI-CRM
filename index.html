@@ -1450,12 +1450,16 @@ textarea{resize:vertical;min-height:72px}
   <div class="card">
     <div class="ch">
       <span class="ct">Vendors</span>
-      <button class="btn btn-sm" onclick="rfqAddVendorRow()">+ Add vendor</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-sm" onclick="rfqAddVendorRow()">+ Add vendor</button>
+        <button class="btn btn-sm btn-p" onclick="rfqSend()" title="Email the RFQ link to each vendor">&rarr; Send to vendors</button>
+      </div>
     </div>
-    <div style="font-size:12px;color:#888;margin-bottom:10px">Vendors carried over from the opportunity's assignments. Pick a vendor, then optionally a contact. Sending invites comes in the next step.</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 26px;gap:6px;margin-bottom:6px">
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Vendors carried over from the opportunity's assignments. Pick a vendor, then optionally a contact. Sending emails each one a private link to submit their quote.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 124px 26px;gap:6px;margin-bottom:6px">
       <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Vendor</span>
       <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Contact</span>
+      <span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Status</span>
       <span></span>
     </div>
     <div id="rfqb-vendors"></div>
@@ -23532,6 +23536,150 @@ function rfqGenNumber(parentType, parentId) {
   return 'R' + (n < 10 ? '0' + n : '' + n);
 }
 
+// ── Tokens + vendor portal links (session 2) ───────────────────
+function rfqGenToken() {
+  var bytes = new Uint8Array(24);
+  (window.crypto || window.msCrypto).getRandomValues(bytes);
+  var hex = '';
+  for (var i = 0; i < bytes.length; i++) hex += ('0' + bytes[i].toString(16)).slice(-2);
+  return hex;  // 48 hex chars, unguessable
+}
+function rfqPortalBase() {
+  if (location.protocol.indexOf('http') === 0) return location.origin + '/rfq.html';
+  return 'https://kmi.build/rfq.html';
+}
+function rfqPortalLink(token) {
+  return rfqPortalBase() + '?t=' + encodeURIComponent(token);
+}
+function rfqResolveRecipient(inv) {
+  var vendor = getVendor(inv.vendorId);
+  var out = { vendorName: vendor ? vendor.name : 'Vendor', email: '', contactName: '' };
+  if (inv.contactId) {
+    var c = (db.vendorContacts || []).find(function(x){ return String(x.id) === String(inv.contactId); });
+    if (c) { out.email = c.email || ''; out.contactName = ((c.firstName||'') + ' ' + (c.lastName||'')).trim(); }
+  }
+  if (!out.email && vendor) out.email = vendor.email || '';
+  return out;
+}
+
+async function rfqCopyLink(idx) {
+  var r = getRfq(currentRfqId); if (!r) return;
+  rfqReadVendorsFromDOM(r);
+  var inv = (r.invites || [])[idx];
+  if (!inv || !inv.vendorId) { alert('Pick a vendor for this row first.'); return; }
+  if (!inv.token) {
+    inv.token = rfqGenToken();
+    saveDB();
+    if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+      var up = await supabaseClient.from('kmi_rfqs').upsert(toSBRfq(r));
+      if (up && up.error) { alert('Heads up: the link was generated but could not be saved to the cloud (' + up.error.message + '), so it may not work until the next sync.'); }
+    }
+  }
+  var link = rfqPortalLink(inv.token);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link).then(
+      function(){ alert('Vendor link copied to clipboard:\n\n' + link); },
+      function(){ window.prompt('Copy this vendor link:', link); }
+    );
+  } else {
+    window.prompt('Copy this vendor link:', link);
+  }
+}
+
+async function rfqSend() {
+  var r = getRfq(currentRfqId); if (!r) return;
+  // Capture any in-progress edits before validating
+  rfqReadLinesFromDOM(r);
+  rfqReadVendorsFromDOM(r);
+  r.title   = (g('rfqb-title').value || '').trim() || 'Untitled RFQ';
+  r.dueDate = g('rfqb-due').value || '';
+  r.docsUrl = (g('rfqb-docs').value || '').trim();
+  r.notes   = (g('rfqb-notes').value || '').trim();
+  r.scopeLines = (r.scopeLines || []).filter(function(l){ return (l.description || '').trim(); });
+  var seen = {};
+  r.invites = (r.invites || []).filter(function(iv){ if (!iv.vendorId) return false; var k = String(iv.vendorId); if (seen[k]) return false; seen[k] = true; return true; });
+
+  if (!r.scopeLines.length) { alert('Add at least one scope line before sending.'); return; }
+  if (!r.invites.length)    { alert('Add at least one vendor before sending.'); return; }
+  if (!r.dueDate)           { alert('Set a quote due date before sending \u2014 vendors see it and it controls when the portal closes.'); return; }
+  if (typeof supabaseClient === 'undefined' || !supabaseClient) {
+    alert('Not connected to Supabase. The vendor links resolve against the cloud database, so connect first, then send.');
+    return;
+  }
+
+  var resolved = r.invites.map(function(iv){ return { inv: iv, rcpt: rfqResolveRecipient(iv) }; });
+  var noEmail = resolved.filter(function(x){ return !x.rcpt.email; }).map(function(x){ return x.rcpt.vendorName; });
+  if (noEmail.length === resolved.length) {
+    alert('None of the selected vendors have an email on file (vendor or contact). Add an email, or use the Link button to share a link manually.');
+    return;
+  }
+  var willEmail = resolved.length - noEmail.length;
+  var confirmMsg = 'Send this RFQ to ' + willEmail + ' vendor(s) by email?';
+  if (noEmail.length) confirmMsg += '\n\nNo email on file (skipped \u2014 use the Link button to share manually): ' + noEmail.join(', ');
+  if (!confirm(confirmMsg)) return;
+
+  // Generate tokens for any invite missing one
+  r.invites.forEach(function(iv){ if (!iv.token) iv.token = rfqGenToken(); });
+
+  // Persist to the cloud BEFORE emailing so links resolve the instant they arrive
+  var up = await supabaseClient.from('kmi_rfqs').upsert(toSBRfq(r));
+  if (up && up.error) {
+    alert('Could not save the RFQ to the cloud (' + up.error.message + ').\n\nIf this mentions a missing table, run the rfq_round1 migration in Supabase first. No emails were sent.');
+    return;
+  }
+
+  var u = _currentUser || {};
+  var fromEmail = u.email || '';
+  var fromName  = ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+  var nowIso = new Date().toISOString();
+  var projectName = '';
+  if (r.parentType === 'opportunity') { var o = getOpp(r.parentId); projectName = o ? o.project : ''; }
+
+  var sent = 0, failed = [];
+  for (var i = 0; i < resolved.length; i++) {
+    var inv = resolved[i].inv, rcpt = resolved[i].rcpt;
+    if (!rcpt.email) continue;  // shareable via Link button; leave status as-is
+    var link = rfqPortalLink(inv.token);
+    var subject = 'Request for quote' + (projectName ? ' \u2014 ' + projectName : '') + ' (due ' + r.dueDate + ')';
+    var body = 'Hello ' + (rcpt.contactName || rcpt.vendorName) + ',\n\n' +
+      'KMI Construction is requesting a quote' + (projectName ? ' for ' + projectName : '') + '. ' +
+      'Please submit your pricing using the link below. Quote is due ' + r.dueDate + '.\n\n' +
+      link + '\n\n' +
+      (r.docsUrl ? ('Plans & specs: ' + r.docsUrl + '\n\n') : '') +
+      'Thank you,\n' + (fromName || 'KMI Construction');
+    var html = '<p>Hello ' + rfqEsc(rcpt.contactName || rcpt.vendorName) + ',</p>' +
+      '<p>KMI Construction is requesting a quote' + (projectName ? ' for <strong>' + rfqEsc(projectName) + '</strong>' : '') +
+      '. Please submit your pricing using the button below. Quote is due <strong>' + rfqEsc(r.dueDate) + '</strong>.</p>' +
+      '<p><a href="' + link + '" style="display:inline-block;background:#1f4e79;color:#ffffff;padding:11px 22px;border-radius:6px;text-decoration:none;font-weight:600">Submit your quote</a></p>' +
+      (r.docsUrl ? ('<p>Plans &amp; specs: <a href="' + rfqEsc(r.docsUrl) + '">' + rfqEsc(r.docsUrl) + '</a></p>') : '') +
+      '<p style="font-size:12px;color:#666">If the button doesn\'t work, paste this into your browser:<br>' + rfqEsc(link) + '</p>' +
+      '<p>Thank you,<br>' + rfqEsc(fromName || 'KMI Construction') + '</p>';
+    var payload = {
+      to: rcpt.email, subject: subject, text: body, html: html,
+      flowType: 'rfq_invite',
+      sentBy: (_currentUser ? _currentUser.id : null),
+      sentByEmail: fromEmail,
+      relatedEntityType: 'rfq', relatedEntityId: String(r.id)
+    };
+    if (fromEmail) { payload.from = fromEmail; payload.fromName = fromName; }
+    var result = await sendEmail(payload);
+    if (result && result.success) { inv.status = 'invited'; inv.sentAt = nowIso; sent++; }
+    else { failed.push(rcpt.vendorName + ' (' + ((result && result.error) || 'unknown error') + ')'); }
+  }
+
+  r.status = 'sent';
+  await supabaseClient.from('kmi_rfqs').upsert(toSBRfq(r));  // persist updated invite statuses
+  db.activity = db.activity || [];
+  db.activity.unshift({ text: 'RFQ ' + (r.rfqNumber || '') + ' sent to ' + sent + ' vendor(s)' + (projectName ? (' \u2014 ' + projectName) : ''), type: 'sent', time: 'Just now' });
+  saveDB();
+  renderRfqBuilder();
+
+  var msg = 'RFQ sent to ' + sent + ' vendor(s).';
+  if (failed.length)  msg += '\n\nFailed: ' + failed.join('; ');
+  if (noEmail.length) msg += '\n\nNo email (use Link to share): ' + noEmail.join(', ');
+  alert(msg);
+}
+
 function renderOppRfqs(o) {
   if (!o) return;
   var list = g('od-rfq-list');
@@ -23713,11 +23861,26 @@ function rfqVendorRowHtml(inv, idx) {
     var nm = ((c.firstName||'') + ' ' + (c.lastName||'')).trim() || c.email || 'Contact';
     return '<option value="' + c.id + '"' + (String(c.id)===String(inv.contactId)?' selected':'') + '>' + rfqEsc(nm) + '</option>';
   }).join('');
-  return '<div class="rfqb-ven" data-idx="' + idx + '" style="display:grid;grid-template-columns:1fr 1fr 26px;gap:6px;margin-bottom:6px;align-items:center">' +
+  return '<div class="rfqb-ven" data-idx="' + idx + '" style="display:grid;grid-template-columns:1fr 1fr 124px 26px;gap:6px;margin-bottom:6px;align-items:center">' +
     '<select class="rv-vendor" onchange="rfqVendorChanged()">' + vendorOpts + '</select>' +
     '<select class="rv-contact">' + contactOpts + '</select>' +
+    '<div style="display:flex;align-items:center;gap:6px">' + rfqInviteStatusChip(inv.status) +
+      '<button class="btn btn-sm" onclick="rfqCopyLink(' + idx + ')" title="Copy this vendor\'s private link" style="font-size:10px;padding:3px 7px">Link</button>' +
+    '</div>' +
     '<button class="btn btn-sm" onclick="rfqDeleteVendorRow(' + idx + ')" title="Remove vendor">\u00d7</button>' +
   '</div>';
+}
+function rfqInviteStatusChip(status) {
+  var s = status || 'pending';
+  var map = {
+    pending:   ['Not sent',  '#888',    '#f1f1f1'],
+    invited:   ['Sent',      '#185FA5', '#E6F1FB'],
+    viewed:    ['Viewed',    '#854F0B', '#FAEEDA'],
+    responded: ['Responded', '#3B6D11', '#EAF3DE'],
+    declined:  ['Declined',  '#A32D2D', '#FCEBEB']
+  };
+  var m = map[s] || map.pending;
+  return '<span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px;color:' + m[1] + ';background:' + m[2] + '">' + m[0] + '</span>';
 }
 function renderRfqVendors(r) {
   var box = g('rfqb-vendors');
@@ -37683,7 +37846,7 @@ async function renderEmailLog() {
 
 function renderEmailLogFilters() {
   var s = _emailLogState;
-  var flowOpts = ['password_reset','assignment_alert','proposal','welcome'];
+  var flowOpts = ['password_reset','assignment_alert','proposal','welcome','rfq_invite'];
   var statOpts = ['sent','failed','test_redirected','queued'];
   return '<div class="card" style="margin-bottom:14px">' +
     '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;align-items:end">' +
