@@ -3180,9 +3180,9 @@ var PERMISSIONS = {
   'email-pm-proposal':  ['full','full','read','read','none','none'],
   'delete-opportunity': ['full','read','read','read','none','none'],
   'add-customers':      ['full','full','full','read','none','none'],
-  'edit-customers':     ['full','read','read','read','none','none'],
+  'edit-customers':     ['full','full','full','read','none','none'],
   'add-pm':             ['full','full','full','read','none','none'],
-  'edit-pm':            ['full','read','read','read','none','none'],
+  'edit-pm':            ['full','full','full','read','none','none'],
   'add-vendors':        ['full','full','full','full','read','read'],
   'edit-vendors':       ['full','full','full','full','none','none'],
   'add-vendor-contacts':  ['full','full','full','full','read','read'],
@@ -3357,6 +3357,35 @@ function canAccess(action) {
 }
 function hasFull(action) { return canAccess(action) === 'full'; }
 function hasRead(action) { var a = canAccess(action); return a === 'full' || a === 'read'; }
+
+// ── Project-level scoping (Round 10) ────────────────────────────────────
+// Foreman is strictly scoped to the projects they're assigned to via
+// kmiAssignments: no fallback to the full list, and they can't open a project
+// (or its T&M tickets) they're not on. All other roles are unaffected — these
+// helpers return "unrestricted" for everyone except Foreman.
+function _isScopedUser(u) {
+  u = u || _currentUser;
+  return !!u && normalizeRole(u.role) === 'Foreman';
+}
+function _userAssignedProjectIds(u) {
+  u = u || _currentUser;
+  var ids = {};
+  if (!u) return ids;
+  var uid = String(u.id);
+  (db.projects || []).forEach(function(p){
+    if (Array.isArray(p.kmiAssignments) && p.kmiAssignments.some(function(a){ return String(a.userId) === uid; })) {
+      ids[String(p.id)] = 1;
+    }
+  });
+  return ids;
+}
+function _canAccessProject(p, u) {
+  u = u || _currentUser;
+  if (!_isScopedUser(u)) return true;          // non-scoped roles: unrestricted
+  if (!p) return false;
+  var uid = String((u || {}).id);
+  return Array.isArray(p.kmiAssignments) && p.kmiAssignments.some(function(a){ return String(a.userId) === uid; });
+}
 function requireFull(action, label) {
   if (hasFull(action)) return true;
   alert('You do not have permission to ' + (label || 'perform this action') + '. Contact an administrator to request access.');
@@ -4727,10 +4756,12 @@ function _mobAssignedProjects() {
     if (!Array.isArray(p.kmiAssignments)) return false;
     return p.kmiAssignments.some(function(a){ return String(a.userId) === uid; });
   });
+  // Round 10: Foreman is strictly scoped — assigned projects only, with no
+  // fallback to the full list even when they have zero assignments.
+  if (_isScopedUser()) return mine;
   if (mine.length) return mine;
-  // Admin / PM fallback: see everything when not explicitly assigned
-  // (foremen and supers with no assignments will also see all — better
-  // than an empty screen for first-time mobile users).
+  // Admin / PM / Superintendent fallback: see everything when not explicitly
+  // assigned (better than an empty screen for first-time mobile users).
   return all;
 }
 
@@ -4788,6 +4819,8 @@ function filterMobileProjects() {
 }
 
 function openMobileProjectDetail(id) {
+  var _p = getProj(id);
+  if (!_canAccessProject(_p)) { showToast("That project isn't assigned to you.", 'error'); return; }
   _mobileSelectedProjectId = id;
   nav('m-project-detail');
 }
@@ -4799,6 +4832,7 @@ function renderMobileProjectDetail() {
   }
   var p = getProj(_mobileSelectedProjectId);
   if (!p) { nav('m-projects'); return; }
+  if (!_canAccessProject(p)) { nav('m-projects'); return; }
   var c = getCust(p.customerId);
   var hdr = document.getElementById('m-pd-heading');
   if (hdr) hdr.textContent = (p.number || 'Project');
@@ -5687,7 +5721,10 @@ function _ntmApplyMobileProjectFilter() {
               tmEsc(o.textContent) + '</option>';
     }
   });
-  html += '<option value="__show_all__">— Show all projects —</option>';
+  // Round 10: Foreman stays locked to assigned projects — no "Show all" escape.
+  if (!_isScopedUser()) {
+    html += '<option value="__show_all__">— Show all projects —</option>';
+  }
   sel.innerHTML = html;
 
   // Handle the sentinel pick — flip the flag and rebuild via the
@@ -12575,8 +12612,13 @@ function tmCanDeleteTicket(t) {
 // ── List page ──────────────────────────────────────────────────────────
 function renderTmTickets() {
   // Project filter
+  var _tmProjPool = db.projects.slice();
+  if (_isScopedUser()) {
+    var _tmFiltIds = _userAssignedProjectIds();
+    _tmProjPool = _tmProjPool.filter(function(p){ return _tmFiltIds[String(p.id)]; });
+  }
   var projOpts = '<option value="">All projects</option>' +
-    db.projects.slice().sort(function(a,b){
+    _tmProjPool.sort(function(a,b){
       return String(a.number || '').localeCompare(String(b.number || ''));
     }).map(function(p){ return '<option value="' + p.id + '">' + tmEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>'; }).join('');
   g('tm-fp').innerHTML = projOpts;
@@ -12617,12 +12659,17 @@ function filterTmTickets() {
   var fs = g('tm-fs').value;
   var role = _currentUser ? normalizeRole(_currentUser.role) : '';
 
+  // Round 10: Foreman only sees tickets on projects they're assigned to.
+  var _tmScoped = _isScopedUser();
+  var _tmScopeIds = _tmScoped ? _userAssignedProjectIds() : null;
+
   // Remember these so they persist across re-renders (new ticket, smart
   // upload, navigating away and back). Store the raw search text, not the
   // lower-cased copy, so the input shows what the user typed.
   _tmFilter = { s: (g('tm-s').value || ''), fp: fp, fs: fs };
 
   var list = (db.tmTickets || []).filter(function(t){
+    if (_tmScoped && !_tmScopeIds[String(t.projectId)]) return false;
     if (fp && String(t.projectId) !== String(fp)) return false;
     if (fs) {
       if (fs === 'Rolled into COR') {
@@ -12809,8 +12856,14 @@ function initNewTmTicket(prefillProjectId) {
   g('ntm-id-display').textContent = '';
   g('ntm-pdf-btn').style.display = 'none';
 
-  // Project options — populate from projects (sorted by number)
-  var projects = db.projects.slice().sort(function(a,b){
+  // Project options — populate from projects (sorted by number). Foreman is
+  // scoped to assigned projects only.
+  var projects = db.projects.slice();
+  if (_isScopedUser()) {
+    var _ntmIds = _userAssignedProjectIds();
+    projects = projects.filter(function(p){ return _ntmIds[String(p.id)]; });
+  }
+  projects.sort(function(a,b){
     return String(a.number || '').localeCompare(String(b.number || ''));
   });
   g('ntm-project').innerHTML = '<option value="">Select project...</option>' +
@@ -27991,21 +28044,12 @@ function filterProj() {
   var s  = (g('prj-s').value  || '').toLowerCase();
   var fc = g('prj-fc').value;
   var ft = g('prj-ft').value;
-  // Round 9.1: field roles (Superintendent / Foreman) see only projects
-  // they're assigned to via kmiAssignments. Fallback to all projects when
-  // the user has zero assignments anywhere — matches mobile (_mobAssignedProjects)
-  // so a new hire isn't staring at an empty list.
+  // Round 10: Foreman is strictly scoped to the projects they're assigned to
+  // via kmiAssignments — no fallback to the full list. All other roles
+  // (including Superintendent) see every project.
   var _scope = db.projects;
-  if (_currentUser && (_currentUser.role === 'Superintendent' || _currentUser.role === 'Foreman')) {
-    var _uid = String(_currentUser.id);
-    var _hasAny = db.projects.some(function(p){
-      return Array.isArray(p.kmiAssignments) && p.kmiAssignments.some(function(a){ return String(a.userId) === _uid; });
-    });
-    if (_hasAny) {
-      _scope = db.projects.filter(function(p){
-        return Array.isArray(p.kmiAssignments) && p.kmiAssignments.some(function(a){ return String(a.userId) === _uid; });
-      });
-    }
+  if (_isScopedUser()) {
+    _scope = db.projects.filter(function(p){ return _canAccessProject(p); });
   }
   var list = _scope.filter(function(p){
     if (fc && String(p.customerId) !== String(fc)) return false;
@@ -28443,6 +28487,7 @@ function editProject(id, initialTab) {
   // the project's data). saveProject() still gates the actual write.
   if (!requireRead('view-project', 'view projects')) return;
   var p = getProj(id); if (!p) { alert('Project not found.'); return; }
+  if (!_canAccessProject(p)) { alert("You don't have access to that project — it isn't assigned to you."); return; }
   _editProjectId = id;
   _newProjectFromOppId = null;
   setActivePage('projects');
@@ -28810,6 +28855,7 @@ function readContactAssignments() {
 
 function viewProject(id) {
   var p = getProj(id); if (!p) return;
+  if (!_canAccessProject(p)) { alert("You don't have access to that project — it isn't assigned to you."); return; }
   var c = getCust(p.customerId);
   var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
   var addr = formatProjAddress(p) || '<span style="color:#aaa">—</span>';
