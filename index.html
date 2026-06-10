@@ -24003,6 +24003,12 @@ async function rfqDelete(id) {
 function rfqResponsesFor(rfqId) {
   return (db.rfqResponses || []).filter(function(x){ return String(x.rfqId) === String(rfqId); });
 }
+function rfqVendorName(vendorId) {
+  // String-safe: response vendor_id comes back as text, db.vendors ids are
+  // numbers, and getVendor() uses strict ===, so match on String() here.
+  var v = (db.vendors || []).find(function(x){ return String(x.id) === String(vendorId); });
+  return v ? v.name : 'Vendor';
+}
 function rfqLinePriceOf(resp, lineId) {
   if (!resp || !Array.isArray(resp.linePrices)) return null;
   return resp.linePrices.find(function(p){ return String(p.lineId) === String(lineId); }) || null;
@@ -24020,7 +24026,7 @@ function rfqMoney2(n) { return '$' + Number(n).toLocaleString('en-US', { minimum
 function rfqMatrixCols(r) {
   return rfqResponsesFor(r.id)
     .filter(function(x){ return x.status === 'submitted'; })
-    .map(function(resp){ var v = getVendor(resp.vendorId); return { resp: resp, vendorId: resp.vendorId, name: v ? v.name : 'Vendor' }; })
+    .map(function(resp){ return { resp: resp, vendorId: resp.vendorId, name: rfqVendorName(resp.vendorId) }; })
     .sort(function(a,b){ return a.name.localeCompare(b.name); });
 }
 function rfqMatrixCompute(r, cols) {
@@ -24049,7 +24055,7 @@ function renderRfqMatrix(r) {
 
   var respondedIds = {}; cols.forEach(function(c){ respondedIds[String(c.vendorId)] = true; });
   var waiting = (r.invites || []).filter(function(iv){ return iv.vendorId && !respondedIds[String(iv.vendorId)]; })
-    .map(function(iv){ var v = getVendor(iv.vendorId); return v ? v.name : 'Vendor'; });
+    .map(function(iv){ return rfqVendorName(iv.vendorId); });
 
   if (!cols.length) {
     box.innerHTML = '<div style="text-align:center;padding:20px;color:#888;font-size:13px">No vendor responses yet.' +
