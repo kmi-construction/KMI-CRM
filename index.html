@@ -2047,6 +2047,9 @@ textarea{resize:vertical;min-height:72px}
   <div class="card"><div class="ch"><span class="ct">Cost item templates</span><button class="btn btn-sm btn-p" onclick="showAddCostTmpl()">+ Add item</button></div><div id="t-cost"></div></div>
   <div class="card"><div class="ch"><span class="ct">Labor rates</span><button class="btn btn-sm btn-p" onclick="showAddLaborSet()">+ Add rate set</button></div><div id="t-labor"></div></div>
 
+  <!-- ── Crews (Productivity Phase 2) ───────────────────────────────── -->
+  <div class="card"><div class="ch"><span class="ct">Crews</span><button class="btn btn-sm btn-p" onclick="showAddCrew()">+ Add crew</button></div><div id="t-crews"></div></div>
+
   <!-- ── Material Templates (Round 2) ──────────────────────────────── -->
   <div class="card">
     <div class="ch">
@@ -3066,6 +3069,30 @@ var DB_DEFAULTS = {
   // template edits don't disturb live projects.
   // Shape: { id, label, lines: [{ id, description, unit, costCode, defaultUnitCost }] }
   materialTemplates: [],
+  // Productivity tracking (Phase 2) — global crew ratios. Cost is priced
+  // per project from that project's labor-rate snapshot (Mason/Laborer cost
+  // column); the crew itself stores only the mason:laborer composition.
+  crewTemplates: [
+    {id:'crew_1_1', name:'1:1', masons:1, laborers:1, sortOrder:1},
+    {id:'crew_2_1', name:'2:1', masons:2, laborers:1, sortOrder:2},
+    {id:'crew_3_2', name:'3:2', masons:3, laborers:2, sortOrder:3}
+  ],
+  // Productivity tracking (Phase 2) — global catalog of installation/labor
+  // items. itemType: 'production' (units x MDU x crew), 'field_dollar'
+  // ($ input), 'field_pct' (% of base labor). Estimates reference these.
+  prodItems: [
+    {id:'pi_dowels',   name:'Dowels',          unitLabel:'EA', itemType:'production',   defaultMdu:80,   defaultPct:null, defaultCrewId:null, sortOrder:1,  active:true},
+    {id:'pi_blkpart',  name:'Block Partition', unitLabel:'EA', itemType:'production',   defaultMdu:130,  defaultPct:null, defaultCrewId:null, sortOrder:2,  active:true},
+    {id:'pi_blkco',    name:'Block CO',        unitLabel:'EA', itemType:'production',   defaultMdu:67,   defaultPct:null, defaultCrewId:null, sortOrder:3,  active:true},
+    {id:'pi_joist',    name:'Joist Pockets',   unitLabel:'EA', itemType:'production',   defaultMdu:50,   defaultPct:null, defaultCrewId:null, sortOrder:4,  active:true},
+    {id:'pi_pheads',   name:'Patch Heads',     unitLabel:'EA', itemType:'production',   defaultMdu:10,   defaultPct:null, defaultCrewId:null, sortOrder:5,  active:true},
+    {id:'pi_pjambs',   name:'Patch Jambs',     unitLabel:'EA', itemType:'production',   defaultMdu:10,   defaultPct:null, defaultCrewId:null, sortOrder:6,  active:true},
+    {id:'pi_scaffold', name:'Scaffolding',     unitLabel:'',   itemType:'field_dollar', defaultMdu:null, defaultPct:null, defaultCrewId:null, sortOrder:20, active:true},
+    {id:'pi_grout',    name:'Grout & Rebar',   unitLabel:'',   itemType:'field_dollar', defaultMdu:null, defaultPct:null, defaultCrewId:null, sortOrder:21, active:true},
+    {id:'pi_super',    name:'Supervision',     unitLabel:'',   itemType:'field_pct',    defaultMdu:null, defaultPct:6,    defaultCrewId:null, sortOrder:30, active:true},
+    {id:'pi_cleanup',  name:'Clean-Up',        unitLabel:'',   itemType:'field_pct',    defaultMdu:null, defaultPct:4,    defaultCrewId:null, sortOrder:31, active:true},
+    {id:'pi_gc',       name:'GC Costs',        unitLabel:'',   itemType:'field_pct',    defaultMdu:null, defaultPct:5,    defaultCrewId:null, sortOrder:32, active:true}
+  ],
   clarGroups: ['brick veneer','stone veneer','precast','CMU','demolition','patching','granite','cladding support','terracotta']
 };
 
@@ -3113,6 +3140,8 @@ function loadDB() {
         costTmpls:    p.costTmpls    || DB_DEFAULTS.costTmpls,
         laborRateSets: labSets       || DB_DEFAULTS.laborRateSets,
         materialTemplates: p.materialTemplates || [],
+        crewTemplates: p.crewTemplates || JSON.parse(JSON.stringify(DB_DEFAULTS.crewTemplates)),
+        prodItems:     p.prodItems     || JSON.parse(JSON.stringify(DB_DEFAULTS.prodItems)),
         clarGroups:   p.clarGroups   || DB_DEFAULTS.clarGroups,
         companyTypes: p.companyTypes  || DB_DEFAULTS.companyTypes,
         projectTypes: p.projectTypes  || DB_DEFAULTS.projectTypes,
@@ -29390,6 +29419,7 @@ function renderTemplates() {
   renderGroupList();
   g('t-cost').innerHTML = '<table><thead><tr><th>Description</th><th>Unit</th><th>Default rate</th><th></th></tr></thead><tbody>' + db.costTmpls.map(function(t){ return '<tr><td>'+t.desc+'</td><td>'+t.unit+'</td><td>'+fmtC(t.rate)+'</td><td><button class="btn btn-sm" onclick="rmTmpl(\'cost\',\''+t.id+'\')" style="color:#A32D2D">Remove</button></td></tr>'; }).join('') + '</tbody></table>';
   renderLaborRates();
+  renderCrews();
   renderMaterialTemplates();
   renderFoundationMasterStatus();
   renderBprCostCodeMap();
@@ -35224,6 +35254,122 @@ function _getActiveLaborSet() {
   return s;
 }
 
+// ═══ PRODUCTIVITY (Phase 2) — crew cost helpers ══════════════════════
+// Resolve the classification rate list for a project: the project's applied
+// snapshot (p.laborRates) if present, else the active global rate set. Pass
+// p = null to price off the active global set (e.g. on the Templates page).
+function _prodRateList(p) {
+  if (p && Array.isArray(p.laborRates) && p.laborRates.length) return p.laborRates;
+  var active = _getActiveLaborSet();
+  return (active && Array.isArray(active.rates)) ? active.rates : [];
+}
+// Standard cost rate ($/hr — the "cost column") for a classification name.
+function _prodCostRate(p, classification) {
+  var want = String(classification || '').toLowerCase();
+  var row = _prodRateList(p).find(function(r){
+    return String(r.classification || '').toLowerCase() === want;
+  });
+  return row ? (Number(row.stdCostRate) || 0) : 0;
+}
+// Crew template lookup (id type-tolerant).
+function _prodCrew(crewId) {
+  return (db.crewTemplates || []).find(function(c){ return String(c.id) === String(crewId); }) || null;
+}
+// Crew-day cost = (masons x masonRate x 8) + (laborers x laborerRate x 8).
+function _prodCrewDayCost(p, crew) {
+  if (!crew) return 0;
+  var m = Number(crew.masons) || 0, l = Number(crew.laborers) || 0;
+  return (m * _prodCostRate(p, 'Mason') * 8) + (l * _prodCostRate(p, 'Laborer') * 8);
+}
+// Man-day cost = crew-day cost / mason count.
+function _prodManDayCost(p, crew) {
+  if (!crew) return 0;
+  var m = Number(crew.masons) || 0;
+  return m > 0 ? _prodCrewDayCost(p, crew) / m : 0;
+}
+
+// ── Crew template manager (Templates page) ───────────────────────────
+var _editCrewId = null;
+function renderCrews() {
+  var el = g('t-crews'); if (!el) return;
+  db.crewTemplates = db.crewTemplates || [];
+  if (!db.crewTemplates.length) {
+    el.innerHTML = '<div style="padding:12px;color:#aaa;font-size:12px;text-align:center">' +
+      'No crews yet \u2014 click + Add crew (e.g. 2:1 = 2 masons, 1 laborer)</div>';
+    return;
+  }
+  var note = '<div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">' +
+    'A crew is a mason:laborer ratio. The dollar figures below are priced from the ' +
+    '<strong>active labor rate set</strong> (Mason &amp; Laborer cost columns); on a project they ' +
+    're-price from that project\'s applied rate snapshot.</div>';
+  var rows = db.crewTemplates.slice().sort(function(a,b){
+      return (Number(a.sortOrder)||0) - (Number(b.sortOrder)||0);
+    }).map(function(c){
+      var nm = String(c.name||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return '<tr>' +
+        '<td>' + nm + '</td>' +
+        '<td style="text-align:right">' + (Number(c.masons)||0) + '</td>' +
+        '<td style="text-align:right">' + (Number(c.laborers)||0) + '</td>' +
+        '<td style="text-align:right">' + fmtC(_prodCrewDayCost(null, c)) + '</td>' +
+        '<td style="text-align:right">' + fmtC(_prodManDayCost(null, c)) + '</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button class="btn btn-sm" onclick="showEditCrew(\'' + c.id + '\')">Edit</button> ' +
+          '<button class="btn btn-sm" onclick="rmCrew(\'' + c.id + '\')" style="color:#A32D2D">Remove</button>' +
+        '</td></tr>';
+    }).join('');
+  el.innerHTML = note +
+    '<div style="overflow-x:auto"><table style="min-width:560px"><thead><tr>' +
+      '<th>Crew</th><th style="text-align:right">Masons</th><th style="text-align:right">Laborers</th>' +
+      '<th style="text-align:right">Crew-day $</th><th style="text-align:right">Man-day $</th><th></th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+function showAddCrew() { _editCrewId = null; _crewModal({name:'', masons:2, laborers:1}); }
+function showEditCrew(id) { var c = _prodCrew(id); if (!c) return; _editCrewId = id; _crewModal(c); }
+function _crewModal(c) {
+  showModal('<button class="xbtn" onclick="closeModal();_editCrewId=null;">&#215;</button>' +
+    '<div class="mt">' + (_editCrewId ? 'Edit crew' : 'Add crew') + '</div>' +
+    '<div class="msb">Name the crew (e.g. 2:1) and set how many masons and laborers it contains.</div>' +
+    '<div class="fgr" style="margin:12px 0 8px"><label>Name</label>' +
+      '<input id="cw-name" value="' + String(c.name||'').replace(/"/g,'&quot;') + '" placeholder="e.g. 2:1"></div>' +
+    '<div style="display:flex;gap:12px">' +
+      '<div class="fgr" style="flex:1"><label>Masons</label>' +
+        '<input id="cw-masons" type="number" min="1" step="1" value="' + (Number(c.masons)||1) + '"></div>' +
+      '<div class="fgr" style="flex:1"><label>Laborers</label>' +
+        '<input id="cw-laborers" type="number" min="0" step="1" value="' + (Number(c.laborers)||0) + '"></div>' +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal();_editCrewId=null;">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveCrew()">Save</button>' +
+    '</div>');
+}
+function saveCrew() {
+  var name = (g('cw-name').value || '').trim();
+  var masons = parseInt(g('cw-masons').value, 10);
+  var laborers = parseInt(g('cw-laborers').value, 10);
+  if (!name) { alert('Enter a crew name.'); return; }
+  if (!(masons >= 1)) { alert('A crew needs at least 1 mason.'); return; }
+  if (!(laborers >= 0)) laborers = 0;
+  db.crewTemplates = db.crewTemplates || [];
+  if (_editCrewId) {
+    var c = _prodCrew(_editCrewId);
+    if (c) { c.name = name; c.masons = masons; c.laborers = laborers; }
+  } else {
+    var maxSort = db.crewTemplates.reduce(function(m,x){ return Math.max(m, Number(x.sortOrder)||0); }, 0);
+    db.crewTemplates.push({ id: Date.now(), name: name, masons: masons, laborers: laborers, sortOrder: maxSort + 1 });
+  }
+  _editCrewId = null;
+  saveDB();
+  closeModal();
+  renderCrews();
+}
+function rmCrew(id) {
+  var c = _prodCrew(id); if (!c) return;
+  if (!confirm('Remove crew "' + (c.name || '') + '"?')) return;
+  db.crewTemplates = (db.crewTemplates || []).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+  renderCrews();
+}
+
 function renderLaborRates() {
   var el = g('t-labor'); if (!el) return;
   db.laborRateSets = db.laborRateSets || [];
@@ -36973,6 +37119,9 @@ function toSBProject(r) {
     // Round 2 — project material list snapshot and labor rate snapshot
     material_list:                 r.materialList                 || [],
     labor_rates:                   r.laborRates                   || null,
+    // Productivity tracking (Phase 2) — per-project production estimate.
+    // JSONB: { defaultCrewId, wageIncreasePct, lines:[...] }.
+    prod_estimate:                 r.prodEstimate                 || null,
     // Procurement Round 2 — curated per-project procurement list (separate
     // from material_list — see PROJECT PROCUREMENT REPORT module). JSONB
     // pass-through, no migration needed.
@@ -37038,6 +37187,7 @@ function fromSBProject(r) {
     // Round 2 — project material list snapshot and labor rate snapshot
     materialList:                Array.isArray(r.material_list) ? r.material_list : [],
     laborRates:                  r.labor_rates                   || null,
+    prodEstimate:                (r.prod_estimate && typeof r.prod_estimate === 'object') ? r.prod_estimate : null,
     // Procurement Round 2 — curated per-project procurement list
     procurementItems:            Array.isArray(r.procurement_items) ? r.procurement_items : [],
     // Procurement Round 3 — BPR materials parsed from PDF
@@ -37694,6 +37844,8 @@ async function pushToSupabase() {
       {key:'costTmpls',    value:db.costTmpls},
       {key:'laborRateSets',value:db.laborRateSets},
       {key:'materialTemplates', value:db.materialTemplates || []},
+      {key:'crewTemplates', value:db.crewTemplates || []},
+      {key:'prodItems',     value:db.prodItems     || []},
       {key:'companyTypes', value:db.companyTypes},
       {key:'projectTypes', value:db.projectTypes},
       {key:'projectRoles', value:db.projectRoles},
@@ -37944,7 +38096,7 @@ async function pullFromSupabase() {
     // Settings — copy known setting rows into db. Includes runtime-config
     // keys like anthropic_api_key that aren't part of the default db shape.
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
-                                'laborRates','laborRateSets','materialTemplates',
+                                'laborRates','laborRateSets','materialTemplates','crewTemplates','prodItems',
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
                                 'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
                                 'bprCostCodeMap',
