@@ -2050,6 +2050,9 @@ textarea{resize:vertical;min-height:72px}
   <!-- ── Crews (Productivity Phase 2) ───────────────────────────────── -->
   <div class="card"><div class="ch"><span class="ct">Crews</span><button class="btn btn-sm btn-p" onclick="showAddCrew()">+ Add crew</button></div><div id="t-crews"></div></div>
 
+  <!-- ── Production items (Productivity Phase 2 / 1b) ────────────────── -->
+  <div class="card"><div class="ch"><span class="ct">Production items</span><button class="btn btn-sm btn-p" onclick="showAddProdItem()">+ Add item</button></div><div id="t-prod-items"></div></div>
+
   <!-- ── Material Templates (Round 2) ──────────────────────────────── -->
   <div class="card">
     <div class="ch">
@@ -29420,6 +29423,7 @@ function renderTemplates() {
   g('t-cost').innerHTML = '<table><thead><tr><th>Description</th><th>Unit</th><th>Default rate</th><th></th></tr></thead><tbody>' + db.costTmpls.map(function(t){ return '<tr><td>'+t.desc+'</td><td>'+t.unit+'</td><td>'+fmtC(t.rate)+'</td><td><button class="btn btn-sm" onclick="rmTmpl(\'cost\',\''+t.id+'\')" style="color:#A32D2D">Remove</button></td></tr>'; }).join('') + '</tbody></table>';
   renderLaborRates();
   renderCrews();
+  renderProdItems();
   renderMaterialTemplates();
   renderFoundationMasterStatus();
   renderBprCostCodeMap();
@@ -35368,6 +35372,152 @@ function rmCrew(id) {
   db.crewTemplates = (db.crewTemplates || []).filter(function(x){ return String(x.id) !== String(id); });
   saveDB();
   renderCrews();
+}
+
+// ── Production item catalog manager (Templates page, 1b) ─────────────
+var _editProdItemId = null;
+var _PROD_TYPE_LABEL = { production:'Production', field_dollar:'Field \u2014 $', field_pct:'Field \u2014 %' };
+var _PROD_TYPE_STYLE = {
+  production:'background:#eef0f8;color:#3A4478',
+  field_dollar:'background:#faf1d6;color:#9A7A2E',
+  field_pct:'background:#eaf0fb;color:#185FA5'
+};
+function _prodItem(id) {
+  return (db.prodItems || []).find(function(x){ return String(x.id) === String(id); }) || null;
+}
+function _prodEsc(s) { return String(s == null ? '' : s).replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function renderProdItems() {
+  var el = g('t-prod-items'); if (!el) return;
+  db.prodItems = db.prodItems || [];
+  if (!db.prodItems.length) {
+    el.innerHTML = '<div style="padding:12px;color:#aaa;font-size:12px;text-align:center">' +
+      'No items yet \u2014 click + Add item</div>';
+    return;
+  }
+  var note = '<div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">' +
+    'The catalog of items available in any project\'s production estimate. ' +
+    '<strong>Production</strong> items are priced by units \u00d7 MDU \u00d7 crew; ' +
+    '<strong>Field \u2014 $</strong> by a dollar input; <strong>Field \u2014 %</strong> by a percent of base labor. ' +
+    'Editing an item here does not disturb estimates already built \u2014 those keep their own snapshot.</div>';
+  var rows = db.prodItems.slice().sort(function(a,b){
+      return (Number(a.sortOrder)||0) - (Number(b.sortOrder)||0);
+    }).map(function(it){
+      var t = it.itemType || 'production';
+      var active = it.active !== false;
+      var crewName = it.defaultCrewId
+        ? (function(){ var c = _prodCrew(it.defaultCrewId); return c ? c.name : '\u2014'; })()
+        : 'Project default';
+      var mdu = (t === 'production' && it.defaultMdu != null) ? it.defaultMdu : '\u2014';
+      var pct = (t === 'field_pct' && it.defaultPct != null) ? (it.defaultPct + '%') : '\u2014';
+      return '<tr style="' + (active ? '' : 'opacity:.5') + '">' +
+        '<td>' + _prodEsc(it.name) + '</td>' +
+        '<td><span style="' + (_PROD_TYPE_STYLE[t] || '') + ';padding:2px 8px;border-radius:100px;font-size:11px;font-weight:600">' +
+          (_PROD_TYPE_LABEL[t] || t) + '</span></td>' +
+        '<td>' + _prodEsc(it.unitLabel || '\u2014') + '</td>' +
+        '<td style="text-align:right">' + mdu + '</td>' +
+        '<td style="text-align:right">' + pct + '</td>' +
+        '<td>' + _prodEsc(crewName) + '</td>' +
+        '<td>' + (active ? 'Yes' : 'No') + '</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button class="btn btn-sm" onclick="showEditProdItem(\'' + it.id + '\')">Edit</button> ' +
+          '<button class="btn btn-sm" onclick="rmProdItem(\'' + it.id + '\')" style="color:#A32D2D">Remove</button>' +
+        '</td></tr>';
+    }).join('');
+  el.innerHTML = note +
+    '<div style="overflow-x:auto"><table style="min-width:720px"><thead><tr>' +
+      '<th>Item</th><th>Type</th><th>Unit</th>' +
+      '<th style="text-align:right">Default MDU</th><th style="text-align:right">Default %</th>' +
+      '<th>Default crew</th><th>Active</th><th></th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+function showAddProdItem() {
+  _editProdItemId = null;
+  _prodItemModal({ name:'', itemType:'production', unitLabel:'EA', defaultMdu:'', defaultPct:'', defaultCrewId:'', active:true });
+}
+function showEditProdItem(id) {
+  var it = _prodItem(id); if (!it) return;
+  _editProdItemId = id; _prodItemModal(it);
+}
+function _prodItemModal(it) {
+  var t = it.itemType || 'production';
+  function topt(v,l){ return '<option value="' + v + '"' + (t === v ? ' selected' : '') + '>' + l + '</option>'; }
+  var crewOpts = '<option value="">\u2014 Project default \u2014</option>' +
+    (db.crewTemplates || []).map(function(c){
+      var sel = String(it.defaultCrewId || '') === String(c.id) ? ' selected' : '';
+      return '<option value="' + c.id + '"' + sel + '>' + _prodEsc(c.name) + '</option>';
+    }).join('');
+  showModal('<button class="xbtn" onclick="closeModal();_editProdItemId=null;">&#215;</button>' +
+    '<div class="mt">' + (_editProdItemId ? 'Edit item' : 'Add item') + '</div>' +
+    '<div class="msb">Items appear in every project\'s production estimate. Type controls how the line calculates.</div>' +
+    '<div class="fgr" style="margin:12px 0 8px"><label>Name</label>' +
+      '<input id="pi-name" value="' + String(it.name||'').replace(/"/g,'&quot;') + '" placeholder="e.g. Brick Veneer - Modular"></div>' +
+    '<div style="display:flex;gap:12px">' +
+      '<div class="fgr" style="flex:2"><label>Type</label>' +
+        '<select id="pi-type" onchange="_prodItemTypeToggle()">' +
+          topt('production','Production (units \u00d7 MDU)') +
+          topt('field_dollar','Field labor \u2014 $') +
+          topt('field_pct','Field labor \u2014 % of base') +
+        '</select></div>' +
+      '<div class="fgr" style="flex:1"><label>Unit</label>' +
+        '<input id="pi-unit" value="' + String(it.unitLabel||'').replace(/"/g,'&quot;') + '" placeholder="EA"></div>' +
+    '</div>' +
+    '<div id="pi-mdu-row" class="fgr" style="margin-top:4px"><label>Default MDU (units / man-day)</label>' +
+      '<input id="pi-mdu" type="number" min="0" step="1" value="' + (it.defaultMdu != null ? it.defaultMdu : '') + '"></div>' +
+    '<div id="pi-pct-row" class="fgr" style="margin-top:4px"><label>Default % of base labor</label>' +
+      '<input id="pi-pct" type="number" min="0" step="0.5" value="' + (it.defaultPct != null ? it.defaultPct : '') + '"></div>' +
+    '<div class="fgr" style="margin-top:4px"><label>Default crew</label>' +
+      '<select id="pi-crew">' + crewOpts + '</select></div>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:#333">' +
+      '<input type="checkbox" id="pi-active"' + (it.active !== false ? ' checked' : '') + '> Active</label>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal();_editProdItemId=null;">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveProdItem()">Save</button>' +
+    '</div>');
+  _prodItemTypeToggle();
+}
+function _prodItemTypeToggle() {
+  var sel = g('pi-type'); var t = sel ? sel.value : 'production';
+  var mduRow = g('pi-mdu-row'), pctRow = g('pi-pct-row');
+  if (mduRow) mduRow.style.display = (t === 'production') ? '' : 'none';
+  if (pctRow) pctRow.style.display = (t === 'field_pct') ? '' : 'none';
+}
+function saveProdItem() {
+  var name = (g('pi-name').value || '').trim();
+  if (!name) { alert('Enter an item name.'); return; }
+  var type = g('pi-type').value || 'production';
+  var unit = (g('pi-unit').value || '').trim();
+  var mduRaw = g('pi-mdu').value, pctRaw = g('pi-pct').value;
+  var crewId = g('pi-crew').value || '';
+  var active = !!g('pi-active').checked;
+  var defaultMdu = (type === 'production' && mduRaw !== '') ? (parseFloat(mduRaw) || 0) : null;
+  var defaultPct = (type === 'field_pct'  && pctRaw !== '') ? (parseFloat(pctRaw) || 0) : null;
+  db.prodItems = db.prodItems || [];
+  if (_editProdItemId) {
+    var it = _prodItem(_editProdItemId);
+    if (it) {
+      it.name = name; it.itemType = type; it.unitLabel = unit;
+      it.defaultMdu = defaultMdu; it.defaultPct = defaultPct;
+      it.defaultCrewId = crewId || null; it.active = active;
+    }
+  } else {
+    var maxSort = db.prodItems.reduce(function(m,x){ return Math.max(m, Number(x.sortOrder)||0); }, 0);
+    db.prodItems.push({
+      id: Date.now(), name: name, unitLabel: unit, itemType: type,
+      defaultMdu: defaultMdu, defaultPct: defaultPct,
+      defaultCrewId: crewId || null, sortOrder: maxSort + 1, active: active
+    });
+  }
+  _editProdItemId = null;
+  saveDB();
+  closeModal();
+  renderProdItems();
+}
+function rmProdItem(id) {
+  var it = _prodItem(id); if (!it) return;
+  if (!confirm('Remove item "' + (it.name || '') + '"?\n\nExisting project estimates keep their own snapshot of this line.')) return;
+  db.prodItems = (db.prodItems || []).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+  renderProdItems();
 }
 
 function renderLaborRates() {
