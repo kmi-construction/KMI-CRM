@@ -35640,14 +35640,17 @@ function renderProjectProduction() {
     '<div style="display:flex;gap:4px;border-bottom:1px solid #e5e5e5;margin-bottom:18px">' +
       _pst('estimate', 'Estimate') +
       _pst('weekly', 'Weekly Entry') +
-      '<div style="padding:9px 16px;font-size:13px;font-weight:600;color:#bbb">Tracking ' +
-        '<span style="font-size:10px;background:#eee;color:#999;padding:1px 6px;border-radius:100px;margin-left:4px">Phase 3</span></div>' +
+      _pst('tracking', 'Tracking') +
     '</div>' +
     '<div id="nprj-prod-subcontent"></div>';
   if (_prodSubTab === 'weekly') renderProdWeeklyView();
+  else if (_prodSubTab === 'tracking') renderProdTrackingView();
   else renderProdEstimateView();
 }
-function prodSwSub(sub) { _prodSubTab = (sub === 'weekly') ? 'weekly' : 'estimate'; renderProjectProduction(); }
+function prodSwSub(sub) {
+  _prodSubTab = (sub === 'weekly' || sub === 'tracking') ? sub : 'estimate';
+  renderProjectProduction();
+}
 function renderProdEstimateView() {
   var host = g('nprj-prod-subcontent'); if (!host) return;
   var p = _prodCurrentProject(); if (!p) return;
@@ -36137,6 +36140,138 @@ async function prodWkRunUpload() {
     if (errEl) errEl.textContent = 'Extraction failed: ' + (e.message || String(e));
     if (btn) { btn.disabled = false; btn.textContent = '\u2728 Extract & fill'; }
   }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PRODUCTION TRACKING — Production sub-tab (Productivity Phase 3a)
+// Read-only. Rolls up the estimate (Phase 2) against weekly actuals
+// (Phase 1) into Est vs JTD vs Balance units, % complete, Est vs Actual
+// MDU, and Est / Earned / Actual / Variance dollars.
+//   Actual labor $   = sum(JTD craft hours x that craft's cost rate)
+//   Earned $         = Est $ x % complete (production lines)
+//   Actual MDU       = default crew cost / ((Actual $/unit) / 2)
+//   Variance         = Earned - Actual (production); Est - Actual (field)
+// ════════════════════════════════════════════════════════════════════
+function _prodJtdForLine(projectId, lineId) {
+  var o = { units:0, f:0, m:0, l:0 };
+  (db.prodWeekly || []).forEach(function(r){
+    if (String(r.projectId) !== String(projectId)) return;
+    var e = r.entries && r.entries[lineId]; if (!e) return;
+    o.units += Number(e.u)||0; o.f += Number(e.f)||0; o.m += Number(e.m)||0; o.l += Number(e.l)||0;
+  });
+  return o;
+}
+function _prodRecentUnitsForLine(projectId, lineId) {
+  var bestWk = null, bestU = 0;
+  (db.prodWeekly || []).forEach(function(r){
+    if (String(r.projectId) !== String(projectId)) return;
+    var e = r.entries && r.entries[lineId]; if (!e) return;
+    var u = Number(e.u) || 0; if (!u) return;
+    if (bestWk === null || String(r.weekEnding) > String(bestWk)) { bestWk = r.weekEnding; bestU = u; }
+  });
+  return bestU;
+}
+function renderProdTrackingView() {
+  var host = g('nprj-prod-subcontent'); if (!host) return;
+  var p = _prodCurrentProject(); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  var lines = est.lines || [];
+  if (!lines.length) {
+    host.innerHTML = '<div class="card"><div style="padding:16px;color:#888;font-size:13px">' +
+      'Build the estimate first on the <strong>Estimate</strong> tab \u2014 tracking compares it against weekly actuals.</div></div>';
+    return;
+  }
+  var comp = _prodCompute(p, est);
+  var defCrew = _prodCrew(est.defaultCrewId);
+  var mdc = _prodManDayCost(p, defCrew);                 // "Default Project Crew Cost"
+  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer');
+  function n(v){ return (Number(v)||0).toLocaleString(); }
+  function pc(x){ return (x*100).toFixed(0) + '%'; }
+  function td(v){ return '<td style="text-align:right">' + v + '</td>'; }
+  function vtd(v){ var col = v>0?'#1F7A4D':(v<0?'#A32D2D':'#555'); return '<td style="text-align:right;color:' + col + ';font-weight:600">' + (v>0?'+':'') + fmtC(v) + '</td>'; }
+  function estLineDollars(l){ var c = comp.perLine[l.id]; return (c ? c.pre : 0) * comp.wageMult; }
+
+  var prodLines = lines.filter(function(l){ return l.lineType === 'production'; });
+  var fieldLines = lines.filter(function(l){ return l.lineType !== 'production'; });
+
+  // ---- production rows ----
+  var sEstU=0, sJtdU=0, sEst=0, sEarn=0, sAct=0;
+  var prodBody = prodLines.map(function(l){
+    var estU = Number(l.estUnits)||0, estMdu = Number(l.estMdu)||0;
+    var jtd = _prodJtdForLine(p.id, l.id), jtdU = jtd.units;
+    var bal = estU - jtdU, pct = estU>0 ? jtdU/estU : 0;
+    var act = jtd.f*fRate + jtd.m*mRate + jtd.l*lRate;
+    var perUnit = jtdU>0 ? act/jtdU : 0;
+    var actMdu = (perUnit>0) ? (mdc / (perUnit/2)) : null;
+    var est$ = estLineDollars(l), earn$ = est$ * pct, v = earn$ - act;
+    var recent = _prodRecentUnitsForLine(p.id, l.id);
+    sEstU+=estU; sJtdU+=jtdU; sEst+=est$; sEarn+=earn$; sAct+=act;
+    var mduCol = (actMdu==null) ? '#555' : (actMdu >= estMdu ? '#1F7A4D' : '#A32D2D');
+    return '<tr><td>' + _prodEsc(l.itemName) + '</td>' +
+      td(n(estU)) + td(n(jtdU)) + td(n(bal)) + td(pc(pct)) +
+      td(recent ? n(recent) : '\u2014') +
+      td(estMdu || '\u2014') +
+      '<td style="text-align:right;color:' + mduCol + ';font-weight:600">' + (actMdu==null ? '\u2014' : actMdu.toFixed(0)) + '</td>' +
+      td(fmtC(est$)) + td(fmtC(earn$)) + td(fmtC(act)) +
+      td(jtdU>0 ? fmtC(perUnit) : '\u2014') + vtd(v) + '</tr>';
+  }).join('');
+
+  // ---- field rows ----
+  var fEst=0, fAct=0, fF=0, fM=0, fL=0;
+  var fieldBody = fieldLines.map(function(l){
+    var jtd = _prodJtdForLine(p.id, l.id);
+    var act = jtd.f*fRate + jtd.m*mRate + jtd.l*lRate;
+    var est$ = estLineDollars(l), v = est$ - act;
+    fEst+=est$; fAct+=act; fF+=jtd.f; fM+=jtd.m; fL+=jtd.l;
+    return '<tr><td>' + _prodEsc(l.itemName) + '</td>' +
+      td(n(jtd.f)) + td(n(jtd.m)) + td(n(jtd.l)) +
+      td(fmtC(est$)) + td(fmtC(act)) + vtd(v) + '</tr>';
+  }).join('');
+
+  // ---- headline ----
+  var totEst = sEst + fEst, totAct = sAct + fAct, totEarned = sEarn + fEst, totVar = totEarned - totAct;
+  var unitsPct = sEstU>0 ? sJtdU/sEstU : 0;
+  function metric(label, value, sub, accent){
+    return '<div class="card" style="border-left:3px solid ' + (accent||'var(--kmi)') + ';padding:14px 16px">' +
+      '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">' + label + '</div>' +
+      '<div style="font-size:23px;font-weight:600' + (accent && accent!=='var(--kmi)' ? ';color:' + accent : '') + '">' + value + '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:2px">' + sub + '</div></div>';
+  }
+  var varCol = totVar>0 ? '#1F7A4D' : (totVar<0 ? '#A32D2D' : 'var(--kmi)');
+  var metrics =
+    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px">' +
+      metric('Units complete', pc(unitsPct), n(sJtdU) + ' of ' + n(sEstU) + ' units', 'var(--kmi)') +
+      metric('Est. labor (full job)', fmtC(totEst), 'earned to date ' + fmtC(totEarned), 'var(--kmi)') +
+      metric('Actual labor (JTD)', fmtC(totAct), sJtdU>0 ? (fmtC(totAct/sJtdU) + ' / unit') : 'no units logged yet', 'var(--acd)') +
+      metric('Labor variance', (totVar>0?'+':'') + fmtC(totVar), 'earned \u2212 actual', varCol) +
+    '</div>';
+
+  // ---- production table ----
+  var prodTable = '<div class="card"><div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px">Production items</div>' +
+    '<div style="overflow-x:auto"><table style="min-width:1080px;font-variant-numeric:tabular-nums"><thead><tr>' +
+      '<th>Item</th><th style="text-align:right">Est units</th><th style="text-align:right">JTD units</th><th style="text-align:right">Balance</th>' +
+      '<th style="text-align:right">% comp</th><th style="text-align:right">Recent/wk</th><th style="text-align:right">Est MDU</th><th style="text-align:right">Act MDU</th>' +
+      '<th style="text-align:right">Est $</th><th style="text-align:right">Earned $</th><th style="text-align:right">Actual $</th><th style="text-align:right">$/unit</th><th style="text-align:right">Var $</th>' +
+    '</tr></thead><tbody>' + (prodBody || '<tr><td colspan="13" style="color:#aaa;text-align:center;padding:12px">No production items.</td></tr>') + '</tbody>' +
+    '<tfoot><tr style="border-top:2px solid #eee;font-weight:700">' +
+      '<td>Production subtotal</td>' + td(n(sEstU)) + td(n(sJtdU)) + td(n(sEstU-sJtdU)) + td(pc(unitsPct)) +
+      td('') + td('') + td('') + td(fmtC(sEst)) + td(fmtC(sEarn)) + td(fmtC(sAct)) +
+      td(sJtdU>0?fmtC(sAct/sJtdU):'\u2014') + vtd(sEarn - sAct) + '</tr></tfoot></table></div></div>';
+
+  // ---- field table ----
+  var fieldTable = fieldLines.length ? ('<div class="card"><div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px">Field labor</div>' +
+    '<div style="overflow-x:auto"><table style="min-width:640px;font-variant-numeric:tabular-nums"><thead><tr>' +
+      '<th>Item</th><th style="text-align:right">JTD Fmn hrs</th><th style="text-align:right">JTD Mason hrs</th><th style="text-align:right">JTD Lab hrs</th>' +
+      '<th style="text-align:right">Est $</th><th style="text-align:right">Actual $</th><th style="text-align:right">Var $</th>' +
+    '</tr></thead><tbody>' + fieldBody + '</tbody>' +
+    '<tfoot><tr style="border-top:2px solid #eee;font-weight:700"><td>Field subtotal</td>' +
+      td(n(fF)) + td(n(fM)) + td(n(fL)) + td(fmtC(fEst)) + td(fmtC(fAct)) + vtd(fEst - fAct) + '</tr></tfoot></table></div></div>') : '';
+
+  var footnote = '<div style="font-size:11px;color:#999;line-height:1.6;margin-top:4px">' +
+    'Actual MDU = ' + (defCrew ? ('default crew (' + _prodEsc(defCrew.name) + ') cost ' + fmtC(mdc)) : 'default crew cost') +
+    ' \u00f7 (Actual $/unit \u00f7 2). Earned $ = Est $ \u00d7 % complete; variance is Earned \u2212 Actual for production and Est \u2212 Actual for field labor.</div>';
+
+  host.innerHTML = metrics + prodTable + fieldTable + footnote;
 }
 
 function renderLaborRates() {
