@@ -35922,7 +35922,7 @@ function renderProdWeeklyView() {
       '</div>' +
       '<input type="date" value="' + _prodWeekEnding + '" onchange="prodWkGo(this.value)" style="padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-family:inherit">' +
       '<div style="flex:1"></div>' +
-      '<button class="btn btn-pdf btn-sm" onclick="alert(\'Smart upload (photo / PDF) arrives in Phase 1b.\')">\u2913 Smart upload</button>' +
+      '<button class="btn btn-pdf btn-sm" onclick="prodWkOpenUpload()">\u2913 Smart upload</button>' +
       '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save week</button>' +
     '</div></div>';
 
@@ -36031,6 +36031,113 @@ async function prodWkSave() {
     alert('Saved locally, but cloud sync failed: ' + (e.message || e));
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Save week'; }
+  }
+}
+
+// ── Smart upload (Phase 1b) — photo/PDF of a field sheet -> fill the week ──
+function prodWkOpenUpload() {
+  var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
+  if (!db.anthropic_api_key) {
+    alert('Smart upload needs the Anthropic API key. Add it in Settings first.'); return;
+  }
+  if (location.protocol === 'file:') {
+    alert('Smart upload needs the app served from a web URL (e.g. kmi.build). Opening the file directly blocks the API call.'); return;
+  }
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Smart upload \u2014 week ending ' + _prodWeekLabel(_prodWeekModel.weekEnding) + '</div>' +
+    '<div class="msb">Upload a photo or PDF of the weekly field production sheet. The AI reads units installed and crew hours per item and fills this week\'s grid for your review. Nothing is saved to the cloud until you click Save week.</div>' +
+    '<div class="fgr" style="margin:12px 0"><label>Photo or PDF</label>' +
+      '<input type="file" id="prodwk-up-file" accept="application/pdf,image/png,image/jpeg"></div>' +
+    '<div id="prodwk-up-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" id="prodwk-up-btn" onclick="prodWkRunUpload()">\u2728 Extract &amp; fill</button></div>'
+  );
+}
+function prodWkApplyExtracted(est, parsed) {
+  var items = (parsed && Array.isArray(parsed.items)) ? parsed.items : [];
+  var byName = {};
+  (est.lines || []).forEach(function(l){ byName[String(l.itemName).trim().toLowerCase()] = l; });
+  var n = 0, unmatched = [];
+  items.forEach(function(it){
+    var line = byName[String(it.name || '').trim().toLowerCase()];
+    if (!line) { if (it.name) unmatched.push(it.name); return; }
+    var e = _prodWeekModel.entries[line.id] || (_prodWeekModel.entries[line.id] = { u:'', f:'', m:'', l:'' });
+    if (line.lineType === 'production') { var u = Number(it.units); e.u = isNaN(u) ? '' : u; }
+    var f = Number(it.foremanHrs), m = Number(it.masonHrs), la = Number(it.laborerHrs);
+    e.f = isNaN(f) ? 0 : f; e.m = isNaN(m) ? 0 : m; e.l = isNaN(la) ? 0 : la;
+    n++;
+  });
+  return { n: n, unmatched: unmatched };
+}
+async function prodWkRunUpload() {
+  var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
+  var est = _prodEnsureEstimate(p);
+  var fileEl = g('prodwk-up-file'), errEl = g('prodwk-up-err'), btn = g('prodwk-up-btn');
+  if (errEl) errEl.textContent = '';
+  var file = fileEl && fileEl.files && fileEl.files[0];
+  if (!file) { if (errEl) errEl.textContent = 'Choose a photo or PDF.'; return; }
+  if (typeof SMART_UP_MAX_BYTES !== 'undefined' && file.size > SMART_UP_MAX_BYTES) {
+    if (errEl) errEl.textContent = 'File is larger than 20 MB.'; return;
+  }
+  var mt = (file.type || '').toLowerCase();
+  var isPdf = mt === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  var isJpg = mt === 'image/jpeg' || /\.jpe?g$/i.test(file.name || '');
+  var isPng = mt === 'image/png'  || /\.png$/i.test(file.name || '');
+  if (!isPdf && !isJpg && !isPng) { if (errEl) errEl.textContent = 'Use a PDF, JPG, or PNG.'; return; }
+  var apiMedia = isPdf ? 'application/pdf' : (isJpg ? 'image/jpeg' : 'image/png');
+  if (btn) { btn.disabled = true; btn.textContent = 'Extracting\u2026'; }
+  try {
+    var b64 = await _smartUpFileToBase64(file);
+    var itemList = (est.lines || []).map(function(l){
+      return '"' + String(l.itemName).replace(/"/g,'') + '" (' + (l.lineType === 'production' ? 'units + hours' : 'hours only') + ')';
+    }).join(', ');
+    var prompt =
+      'You are reading a hand-filled weekly field production sheet from a masonry construction project. For this one week, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
+      'Match every row on the sheet to one of these estimate items, using these EXACT names. Items marked "units + hours" track an installed-unit count; "hours only" items do not:\n  [' + itemList + ']\n\n' +
+      'Schema:\n{\n  "items": [\n    {"name": "<exact item name from the list>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>}\n  ]\n}\n\n' +
+      'Rules:\n- Match each sheet row to one listed item name EXACTLY. If a row matches no listed item, omit it.\n- Hours are numbers (use 0 for blank, never null).\n- Include "units" only for "units + hours" items; use null otherwise.\n- Return the items array even if empty; never invent values.';
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': db.anthropic_api_key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 4000,
+        messages: [{ role: 'user', content: [
+          isPdf ? { type: 'document', source: { type: 'base64', media_type: apiMedia, data: b64 } }
+                : { type: 'image',    source: { type: 'base64', media_type: apiMedia, data: b64 } },
+          { type: 'text', text: prompt }
+        ]}]
+      })
+    });
+    if (!resp.ok) { var t = await resp.text(); throw new Error('API ' + resp.status + ': ' + t.substring(0, 200)); }
+    var data = await resp.json();
+    var reply = '';
+    if (data && Array.isArray(data.content)) {
+      for (var i = 0; i < data.content.length; i++) {
+        if (data.content[i].type === 'text' && data.content[i].text) { reply = data.content[i].text; break; }
+      }
+    }
+    reply = String(reply || '').replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+    var parsed;
+    try { parsed = JSON.parse(reply); }
+    catch(e) { throw new Error('Could not parse the AI response as JSON. First 200 chars: ' + reply.substring(0, 200)); }
+    var res = prodWkApplyExtracted(est, parsed);
+    prodWkPersist();          // local autosave of the filled values
+    closeModal();
+    renderProdWeeklyView();   // reloads from the now-persisted week, showing the fills
+    var msg = res.n + ' item(s) filled from upload \u2014 review and Save week' +
+      (res.unmatched.length ? (' \u00b7 unmatched: ' + res.unmatched.slice(0, 6).join(', ')) : '');
+    if (typeof showToast === 'function') showToast(msg); else alert(msg);
+  } catch(e) {
+    console.error('prodWkRunUpload', e);
+    if (errEl) errEl.textContent = 'Extraction failed: ' + (e.message || String(e));
+    if (btn) { btn.disabled = false; btn.textContent = '\u2728 Extract & fill'; }
   }
 }
 
