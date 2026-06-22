@@ -36171,6 +36171,41 @@ function _prodRecentUnitsForLine(projectId, lineId) {
   });
   return bestU;
 }
+// Shared compute for the tracking report (screen + PDF use identical math).
+function _prodTrackingCompute(p) {
+  var est = _prodEnsureEstimate(p);
+  var comp = _prodCompute(p, est);
+  var defCrew = _prodCrew(est.defaultCrewId);
+  var mdc = _prodManDayCost(p, defCrew);
+  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer');
+  function estLineDollars(l){ var c = comp.perLine[l.id]; return (c ? c.pre : 0) * comp.wageMult; }
+  var prod = [], field = [];
+  var s = { estU:0, jtdU:0, est:0, earn:0, act:0 };
+  var f = { fF:0, fM:0, fL:0, est:0, act:0 };
+  (est.lines || []).forEach(function(l){
+    var jtd = _prodJtdForLine(p.id, l.id);
+    var est$ = estLineDollars(l);
+    var act = jtd.f*fRate + jtd.m*mRate + jtd.l*lRate;
+    if (l.lineType === 'production') {
+      var estU = Number(l.estUnits)||0, estMdu = Number(l.estMdu)||0, jtdU = jtd.units;
+      var pct = estU>0 ? jtdU/estU : 0;
+      var perUnit = jtdU>0 ? act/jtdU : 0;
+      var actMdu = (perUnit>0) ? (mdc / perUnit) : null;
+      var earn$ = est$ * pct;
+      prod.push({ name:l.itemName, estU:estU, jtdU:jtdU, bal:estU-jtdU, pct:pct,
+        recent:_prodRecentUnitsForLine(p.id, l.id), estMdu:estMdu, actMdu:actMdu,
+        est:est$, earn:earn$, act:act, perUnit:perUnit, varv:earn$-act });
+      s.estU+=estU; s.jtdU+=jtdU; s.est+=est$; s.earn+=earn$; s.act+=act;
+    } else {
+      field.push({ name:l.itemName, f:jtd.f, m:jtd.m, l:jtd.l, est:est$, act:act, varv:est$-act });
+      f.fF+=jtd.f; f.fM+=jtd.m; f.fL+=jtd.l; f.est+=est$; f.act+=act;
+    }
+  });
+  var totEst = s.est + f.est, totAct = s.act + f.act, totEarned = s.earn + f.est;
+  return { prod:prod, field:field, prodTot:s, fieldTot:f, mdc:mdc, defCrew:defCrew,
+    totEst:totEst, totAct:totAct, totEarned:totEarned, totVar:totEarned-totAct,
+    unitsPct: s.estU>0 ? s.jtdU/s.estU : 0 };
+}
 function renderProdTrackingView() {
   var host = g('nprj-prod-subcontent'); if (!host) return;
   var p = _prodCurrentProject(); if (!p) return;
@@ -36271,7 +36306,120 @@ function renderProdTrackingView() {
     'Actual MDU = ' + (defCrew ? ('default crew (' + _prodEsc(defCrew.name) + ') cost ' + fmtC(mdc)) : 'default crew cost') +
     ' \u00f7 Actual $/unit. Earned $ = Est $ \u00d7 % complete; variance is Earned \u2212 Actual for production and Est \u2212 Actual for field labor.</div>';
 
-  host.innerHTML = metrics + prodTable + fieldTable + footnote;
+  host.innerHTML =
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:14px">' +
+      '<button class="btn btn-pdf btn-sm" onclick="prodExportTrackingPdf()">\u2913 Export PDF</button></div>' +
+    metrics + prodTable + fieldTable + footnote;
+}
+
+// ── Tracking document PDF (Phase 3b) — landscape letter, jsPDF ──────────
+function prodExportTrackingPdf() {
+  var p = _prodCurrentProject(); if (!p) return;
+  if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return; }
+  var est = _prodEnsureEstimate(p);
+  if (!(est.lines || []).length) { alert('Build the estimate first, then export.'); return; }
+  var C = _prodTrackingCompute(p);
+
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ unit:'pt', format:'letter', orientation:'landscape' });
+  var PAGE_W = 792, PAGE_H = 612, LM = 36, RM = 756, FOOTER_TOP = 560;
+  var NAVY = [30,36,72], GOLD = [200,168,75], GOOD = [31,122,77], BAD = [163,45,45], GREY = [120,120,120];
+  function sf(st,sz,col){ doc.setFont('helvetica',st); doc.setFontSize(sz); doc.setTextColor(col?col[0]:0, col?col[1]:0, col?col[2]:0); }
+  function ln(x1,y1,x2,y2,w,rgb){ doc.setDrawColor(rgb?rgb[0]:0, rgb?rgb[1]:0, rgb?rgb[2]:0); doc.setLineWidth(w||0.5); doc.line(x1,y1,x2,y2); }
+  function letterhead(){
+    if (typeof KMI_LOGO_IMG === 'string' && KMI_LOGO_IMG) { try { doc.addImage(KMI_LOGO_IMG,'JPEG',LM,24,100,45); } catch(e){} }
+    sf('bold',18,[0,0,0]); doc.text('PRODUCTION TRACKING', LM+120, 52);
+  }
+  function money(v){ v = Number(v)||0; return (v<0?'-$':'$') + Math.abs(Math.round(v)).toLocaleString(); }
+  function num(v){ return (Number(v)||0).toLocaleString(); }
+  function pct(x){ return (x*100).toFixed(0) + '%'; }
+  function one(t,w){ var a = doc.splitTextToSize(String(t||''), w); return a.length ? a[0] : ''; }
+
+  var cols = [
+    {label:'Item', w:132, align:'left'},
+    {label:'Est units', w:46}, {label:'JTD', w:46}, {label:'Bal', w:46}, {label:'%', w:34},
+    {label:'Rec/wk', w:44}, {label:'Est MDU', w:46}, {label:'Act MDU', w:46},
+    {label:'Est $', w:58}, {label:'Earned $', w:58}, {label:'Actual $', w:58}, {label:'$/unit', w:48}, {label:'Var $', w:58}
+  ];
+  var cx = LM; cols.forEach(function(c){ c.left = cx; c.right = cx + c.w; cx += c.w; });
+
+  letterhead();
+  var y = 92;
+  sf('normal',10,[80,80,80]); doc.text('Project:', LM, y);
+  sf('normal',10,[0,0,0]);   doc.text(String((p.number||'') + (p.name ? ('  ' + p.name) : '')), LM+44, y);
+  sf('normal',10,[80,80,80]); doc.text('Generated:', RM-150, y);
+  sf('normal',10,[0,0,0]);   doc.text(new Date().toLocaleDateString('en-US'), RM-88, y);
+  y += 18;
+  sf('normal',9,GREY);
+  doc.text('Units complete ' + pct(C.unitsPct) + ' (' + num(C.prodTot.jtdU) + ' / ' + num(C.prodTot.estU) + ')      Est labor ' + money(C.totEst) +
+    '      Earned ' + money(C.totEarned) + '      Actual ' + money(C.totAct) + '      Variance ' + (C.totVar>=0?'+':'') + money(C.totVar), LM, y);
+  y += 16; ln(LM, y, RM, y, 0.8, GOLD); y += 14;
+
+  function header(yy){
+    sf('bold',7,[90,90,90]);
+    cols.forEach(function(c){ if (c.align==='left') doc.text(c.label, c.left, yy); else doc.text(c.label, c.right-3, yy, {align:'right'}); });
+    ln(LM, yy+4, RM, yy+4, 0.6, [180,180,180]);
+    return yy + 14;
+  }
+  function ensure(yy){
+    if (yy + 16 > FOOTER_TOP) { doc.addPage(); letterhead(); var ny = 92; sf('bold',11,NAVY); doc.text('Production items (cont.)', LM, ny); ny += 14; return header(ny); }
+    return yy;
+  }
+
+  sf('bold',11,NAVY); doc.text('Production items', LM, y); y += 14;
+  y = header(y);
+  C.prod.forEach(function(r){
+    y = ensure(y);
+    var ty = y + 10;
+    sf('normal',8,[0,0,0]); doc.text(one(r.name, cols[0].w-3), cols[0].left, ty);
+    function cell(i,t,col){ sf('normal',8,col||[0,0,0]); doc.text(String(t), cols[i].right-3, ty, {align:'right'}); }
+    cell(1,num(r.estU)); cell(2,num(r.jtdU)); cell(3,num(r.bal)); cell(4,pct(r.pct));
+    cell(5, r.recent ? num(r.recent) : '\u2014'); cell(6, r.estMdu || '\u2014');
+    cell(7, r.actMdu==null ? '\u2014' : r.actMdu.toFixed(0), r.actMdu==null ? [0,0,0] : (r.actMdu>=r.estMdu ? GOOD : BAD));
+    cell(8,money(r.est)); cell(9,money(r.earn)); cell(10,money(r.act));
+    cell(11, r.jtdU>0 ? money(r.perUnit) : '\u2014');
+    cell(12, (r.varv>0?'+':'') + money(r.varv), r.varv>0 ? GOOD : (r.varv<0 ? BAD : [0,0,0]));
+    y += 16; ln(LM, y, RM, y, 0.25, [238,238,238]);
+  });
+  var s = C.prodTot; y = ensure(y); var sty = y + 11; ln(LM, y, RM, y, 0.8, [170,170,170]);
+  sf('bold',8,[0,0,0]); doc.text('Production subtotal', cols[0].left, sty);
+  function stot(i,t,col){ sf('bold',8,col||[0,0,0]); doc.text(String(t), cols[i].right-3, sty, {align:'right'}); }
+  stot(1,num(s.estU)); stot(2,num(s.jtdU)); stot(3,num(s.estU-s.jtdU)); stot(4,pct(C.unitsPct));
+  stot(8,money(s.est)); stot(9,money(s.earn)); stot(10,money(s.act));
+  stot(11, s.jtdU>0 ? money(s.act/s.jtdU) : '\u2014');
+  stot(12, ((s.earn-s.act)>0?'+':'') + money(s.earn-s.act), (s.earn-s.act)>0 ? GOOD : ((s.earn-s.act)<0 ? BAD : [0,0,0]));
+  y += 24;
+
+  if (C.field.length) {
+    if (y + 40 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
+    sf('bold',11,NAVY); doc.text('Field labor', LM, y); y += 14;
+    var fcols = [{label:'Item',w:170,align:'left'},{label:'JTD Fmn hrs',w:74},{label:'JTD Mason hrs',w:80},{label:'JTD Lab hrs',w:74},{label:'Est $',w:82},{label:'Actual $',w:82},{label:'Var $',w:82}];
+    var fx = LM; fcols.forEach(function(c){ c.left = fx; c.right = fx + c.w; fx += c.w; });
+    var fRight = fcols[fcols.length-1].right;
+    sf('bold',7,[90,90,90]); fcols.forEach(function(c){ if (c.align==='left') doc.text(c.label, c.left, y); else doc.text(c.label, c.right-3, y, {align:'right'}); });
+    ln(LM, y+4, fRight, y+4, 0.6, [180,180,180]); y += 14;
+    C.field.forEach(function(r){
+      var ty = y + 10; sf('normal',8,[0,0,0]); doc.text(one(r.name, fcols[0].w-3), fcols[0].left, ty);
+      function fc(i,t,col){ sf('normal',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, ty, {align:'right'}); }
+      fc(1,num(r.f)); fc(2,num(r.m)); fc(3,num(r.l)); fc(4,money(r.est)); fc(5,money(r.act));
+      fc(6, (r.varv>0?'+':'') + money(r.varv), r.varv>0 ? GOOD : (r.varv<0 ? BAD : [0,0,0]));
+      y += 16; ln(LM, y, fRight, y, 0.25, [238,238,238]);
+    });
+    var ff = C.fieldTot; var fty = y + 11; ln(LM, y, fRight, y, 0.8, [170,170,170]);
+    sf('bold',8,[0,0,0]); doc.text('Field subtotal', fcols[0].left, fty);
+    function fst(i,t,col){ sf('bold',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, fty, {align:'right'}); }
+    fst(1,num(ff.fF)); fst(2,num(ff.fM)); fst(3,num(ff.fL)); fst(4,money(ff.est)); fst(5,money(ff.act));
+    fst(6, ((ff.est-ff.act)>0?'+':'') + money(ff.est-ff.act), (ff.est-ff.act)>0 ? GOOD : ((ff.est-ff.act)<0 ? BAD : [0,0,0]));
+    y += 24;
+  }
+
+  if (y + 30 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
+  sf('normal',7,GREY);
+  var fn = 'Actual MDU = ' + (C.defCrew ? ('default crew (' + C.defCrew.name + ') cost ' + money(C.mdc)) : 'default crew cost') +
+    ' \u00f7 Actual $/unit.   Earned $ = Est $ \u00d7 % complete.   Variance = Earned \u2212 Actual (production), Est \u2212 Actual (field labor).';
+  doc.text(doc.splitTextToSize(fn, RM-LM), LM, y);
+
+  doc.save('Production Tracking - ' + (p.number || p.name || 'project') + '.pdf');
 }
 
 function renderLaborRates() {
