@@ -2992,6 +2992,7 @@ var DB_DEFAULTS = {
   // superintendent, approved by KMI PM, then rolled into a Change Order Request.
   // See the COR module (separate) for how rolled-up tickets feed CORs.
   tmTickets: [],
+  prodWeekly: [],
   // CORs (Change Order Requests) — Round 4. Three types: T&M, Premium Time
   // (OT or DT), and Fixed Fee. T&M and Premium Time roll up approved T&M
   // tickets; Fixed Fee is purely manual. Issued to the customer; not signed
@@ -3131,6 +3132,7 @@ function loadDB() {
         submittals:       p.submittals       || [],
         specSections:     p.specSections     || [],
         tmTickets:      p.tmTickets      || [],
+        prodWeekly:     p.prodWeekly     || [],
         cors:           p.cors           || [],
         purchaseOrders: p.purchaseOrders || [],
         rfqs:           p.rfqs           || [],
@@ -35617,6 +35619,7 @@ function _prodCompute(p, est) {
   };
 }
 function _prodSetTxt(id, v) { var e = g(id); if (e) e.textContent = v; }
+var _prodSubTab = 'estimate';
 function renderProjectProduction() {
   var host = g('nprj-production-section'); if (!host) return;
   var p = _prodCurrentProject();
@@ -35625,6 +35628,26 @@ function renderProjectProduction() {
       'Save the project first, then re-open it to build its production estimate.</div></div>';
     return;
   }
+  function _pst(key, label) {
+    var on = (_prodSubTab === key);
+    return '<div onclick="prodSwSub(\'' + key + '\')" style="padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;border-bottom:2px solid ' +
+      (on ? 'var(--ac)' : 'transparent') + ';color:' + (on ? 'var(--kmi)' : '#888') + ';margin-bottom:-1px">' + label + '</div>';
+  }
+  host.innerHTML =
+    '<div style="display:flex;gap:4px;border-bottom:1px solid #e5e5e5;margin-bottom:18px">' +
+      _pst('estimate', 'Estimate') +
+      _pst('weekly', 'Weekly Entry') +
+      '<div style="padding:9px 16px;font-size:13px;font-weight:600;color:#bbb">Tracking ' +
+        '<span style="font-size:10px;background:#eee;color:#999;padding:1px 6px;border-radius:100px;margin-left:4px">Phase 3</span></div>' +
+    '</div>' +
+    '<div id="nprj-prod-subcontent"></div>';
+  if (_prodSubTab === 'weekly') renderProdWeeklyView();
+  else renderProdEstimateView();
+}
+function prodSwSub(sub) { _prodSubTab = (sub === 'weekly') ? 'weekly' : 'estimate'; renderProjectProduction(); }
+function renderProdEstimateView() {
+  var host = g('nprj-prod-subcontent'); if (!host) return;
+  var p = _prodCurrentProject(); if (!p) return;
   var est = _prodEnsureEstimate(p);
   var crews = db.crewTemplates || [];
   if (!crews.length) {
@@ -35832,6 +35855,179 @@ async function prodSaveEstimate() {
     alert('Saved locally, but cloud sync failed: ' + (e.message || e));
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Save estimate'; }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// WEEKLY DATA ENTRY — Production sub-tab (Productivity Phase 1a)
+// Rows = the estimate's line items. Per week: units installed (production
+// lines only) + Foreman/Mason/Laborer hours (all lines). Stored one row
+// per project+week in db.prodWeekly / kmi_prod_weekly. JTD units roll up
+// across weeks. Wage/dollars are not part of data entry.
+// ════════════════════════════════════════════════════════════════════
+var _prodWeekEnding = null;   // 'YYYY-MM-DD' currently-shown week
+var _prodWeekModel = null;    // { weekEnding, entries:{ lineId:{u,f,m,l} } }
+function _prodDateStr(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function _prodDefaultWeekEnding() {
+  var d = new Date(); var delta = 5 - d.getDay(); // Friday = 5
+  d.setDate(d.getDate() + delta);
+  return _prodDateStr(d);
+}
+function _prodAddDays(ws, n) {
+  var d = new Date(ws + 'T00:00:00'); d.setDate(d.getDate() + n); return _prodDateStr(d);
+}
+function _prodWeekLabel(ws) {
+  var d = new Date(ws + 'T00:00:00');
+  return d.toLocaleDateString(undefined, { weekday:'short', month:'numeric', day:'numeric', year:'2-digit' });
+}
+function _prodWeekStoredRow(projectId, weekEnding) {
+  return (db.prodWeekly || []).find(function(r){
+    return String(r.projectId) === String(projectId) && String(r.weekEnding) === String(weekEnding);
+  }) || null;
+}
+function _prodJtdUnitsLive(projectId, lineId, exceptWeek, liveUnits) {
+  var sum = 0;
+  (db.prodWeekly || []).forEach(function(r){
+    if (String(r.projectId) !== String(projectId)) return;
+    if (String(r.weekEnding) === String(exceptWeek)) return;
+    var e = r.entries && r.entries[lineId];
+    if (e) sum += (Number(e.u) || 0);
+  });
+  return sum + (Number(liveUnits) || 0);
+}
+function renderProdWeeklyView() {
+  var host = g('nprj-prod-subcontent'); if (!host) return;
+  var p = _prodCurrentProject(); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  var lines = est.lines || [];
+  if (!lines.length) {
+    host.innerHTML = '<div class="card"><div style="padding:16px;color:#888;font-size:13px">' +
+      'Build the estimate first on the <strong>Estimate</strong> tab \u2014 weekly entry uses those items as its rows.</div></div>';
+    return;
+  }
+  if (!_prodWeekEnding) _prodWeekEnding = _prodDefaultWeekEnding();
+  var stored = _prodWeekStoredRow(p.id, _prodWeekEnding);
+  _prodWeekModel = { weekEnding: _prodWeekEnding, entries: stored ? JSON.parse(JSON.stringify(stored.entries || {})) : {} };
+
+  var bar = '<div class="card"><div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">' +
+      '<div style="display:flex;align-items:center;gap:8px">' +
+        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,-7) + '\')">\u2039</button>' +
+        '<div style="font-size:15px;font-weight:600;min-width:200px;text-align:center">Week ending ' + _prodWeekLabel(_prodWeekEnding) + '</div>' +
+        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,7) + '\')">\u203a</button>' +
+      '</div>' +
+      '<input type="date" value="' + _prodWeekEnding + '" onchange="prodWkGo(this.value)" style="padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-family:inherit">' +
+      '<div style="flex:1"></div>' +
+      '<button class="btn btn-pdf btn-sm" onclick="alert(\'Smart upload (photo / PDF) arrives in Phase 1b.\')">\u2913 Smart upload</button>' +
+      '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save week</button>' +
+    '</div></div>';
+
+  function sec(label){ return '<tr><td colspan="7" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">' + label + '</td></tr>'; }
+  var prodLines = lines.filter(function(l){ return l.lineType === 'production'; });
+  var fieldLines = lines.filter(function(l){ return l.lineType !== 'production'; });
+  var body = '';
+  if (prodLines.length) { body += sec('Production') + prodLines.map(function(l){ return _prodWkRowHtml(l); }).join(''); }
+  if (fieldLines.length) { body += sec('Field Labor') + fieldLines.map(function(l){ return _prodWkRowHtml(l); }).join(''); }
+
+  var head = '<thead><tr><th>Item</th>' +
+    '<th style="text-align:right">Units installed</th>' +
+    '<th style="text-align:right">Foreman hrs</th><th style="text-align:right">Mason hrs</th><th style="text-align:right">Laborer hrs</th>' +
+    '<th style="text-align:right">Total hrs</th><th style="text-align:right">JTD units</th></tr></thead>';
+  var foot = '<tfoot><tr style="border-top:2px solid #eee;font-weight:600">' +
+    '<td style="padding-top:9px">Week totals</td>' +
+    '<td class="num" id="prodwk-t-units" style="padding-top:9px">\u2014</td>' +
+    '<td class="num" id="prodwk-t-f" style="padding-top:9px">\u2014</td>' +
+    '<td class="num" id="prodwk-t-m" style="padding-top:9px">\u2014</td>' +
+    '<td class="num" id="prodwk-t-l" style="padding-top:9px">\u2014</td>' +
+    '<td class="num" id="prodwk-t-tot" style="padding-top:9px">\u2014</td><td></td></tr></tfoot>';
+  var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this week</strong>. JTD units roll up across all weeks automatically. Field-labor items track hours only.</div>';
+  var table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:760px">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' + hint + '</div>';
+
+  host.innerHTML = bar + table;
+  prodWkRefresh();
+}
+function _prodWkRowHtml(l) {
+  var id = l.id;
+  var e = (_prodWeekModel.entries[id]) || { u:'', f:'', m:'', l:'' };
+  var isProd = (l.lineType === 'production');
+  function inp(field, w, step) {
+    return '<input type="number" min="0" step="' + step + '" value="' + (e[field] != null ? e[field] : '') +
+      '" style="width:' + w + 'px;text-align:right" oninput="prodWkEdit(\'' + id + '\',\'' + field + '\',this.value)" onchange="prodWkPersist()">';
+  }
+  var unitsCell = isProd ? '<td style="text-align:right">' + inp('u',84,'1') + '</td>' : '<td style="text-align:right;color:#ccc">\u2014</td>';
+  var jtdCell = isProd ? '<td style="text-align:right;color:var(--kmi3);font-weight:600" id="prodwk-jtd-' + id + '">\u2014</td>' : '<td style="text-align:right;color:#ccc">\u2014</td>';
+  return '<tr><td>' + _prodEsc(l.itemName) + '</td>' +
+    unitsCell +
+    '<td style="text-align:right">' + inp('f',78,'0.5') + '</td>' +
+    '<td style="text-align:right">' + inp('m',78,'0.5') + '</td>' +
+    '<td style="text-align:right">' + inp('l',78,'0.5') + '</td>' +
+    '<td style="text-align:right" id="prodwk-tot-' + id + '">\u2014</td>' +
+    jtdCell + '</tr>';
+}
+function prodWkRefresh() {
+  var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
+  var est = _prodEnsureEstimate(p);
+  var tu=0, tf=0, tm=0, tl=0, tt=0;
+  (est.lines || []).forEach(function(l){
+    var e = _prodWeekModel.entries[l.id] || {};
+    var u = Number(e.u)||0, f = Number(e.f)||0, m = Number(e.m)||0, la = Number(e.l)||0;
+    var tot = f + m + la;
+    _prodSetTxt('prodwk-tot-' + l.id, tot ? tot.toFixed(1) : '\u2014');
+    if (l.lineType === 'production') {
+      _prodSetTxt('prodwk-jtd-' + l.id, _prodJtdUnitsLive(p.id, l.id, _prodWeekModel.weekEnding, u).toLocaleString());
+      tu += u;
+    }
+    tf += f; tm += m; tl += la; tt += tot;
+  });
+  _prodSetTxt('prodwk-t-units', tu.toLocaleString());
+  _prodSetTxt('prodwk-t-f', tf.toFixed(1));
+  _prodSetTxt('prodwk-t-m', tm.toFixed(1));
+  _prodSetTxt('prodwk-t-l', tl.toFixed(1));
+  _prodSetTxt('prodwk-t-tot', tt.toFixed(1));
+}
+function prodWkEdit(lineId, field, val) {
+  if (!_prodWeekModel) return;
+  var e = _prodWeekModel.entries[lineId] || (_prodWeekModel.entries[lineId] = { u:'', f:'', m:'', l:'' });
+  if (val === '' || val == null) { e[field] = ''; }
+  else { var n = parseFloat(val); e[field] = isNaN(n) ? '' : n; }
+  prodWkRefresh();
+}
+function prodWkGo(weekEnding) {
+  if (!weekEnding) return;
+  _prodWeekEnding = weekEnding;
+  renderProdWeeklyView();
+}
+function prodWkPersist() {
+  var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
+  db.prodWeekly = db.prodWeekly || [];
+  var row = _prodWeekStoredRow(p.id, _prodWeekModel.weekEnding);
+  if (!row) {
+    row = { id: Date.now(), projectId: String(p.id), weekEnding: _prodWeekModel.weekEnding, entries: {}, note: '', createdAt: new Date().toISOString() };
+    db.prodWeekly.push(row);
+  }
+  row.entries = JSON.parse(JSON.stringify(_prodWeekModel.entries));
+  row.updatedAt = new Date().toISOString();
+  try { saveDB(); } catch(e) { console.warn('prodWkPersist', e); }
+}
+async function prodWkSave() {
+  var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
+  prodWkPersist();
+  var btn = g('prodwk-save-btn'); if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
+  try {
+    if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+      var row = _prodWeekStoredRow(p.id, _prodWeekModel.weekEnding);
+      if (row) {
+        var res = await supabaseClient.from('kmi_prod_weekly').upsert(toSBProdWeekly(row));
+        if (res && res.error) throw res.error;
+      }
+    }
+    if (typeof showToast === 'function') showToast('Week saved'); else alert('Week saved');
+  } catch(e) {
+    console.warn('prodWkSave', e);
+    alert('Saved locally, but cloud sync failed: ' + (e.message || e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save week'; }
   }
 }
 
@@ -37683,6 +37879,30 @@ function fromSBProject(r) {
 }
 
 // ── T&M Ticket mappers (Round 1) ───────────────────────────────────────
+// Productivity (Phase 1) — weekly data mappers. entries is keyed by estimate
+// line id: { lineId: { u:units, f:foremanHrs, m:masonHrs, l:laborerHrs } }.
+function toSBProdWeekly(r) {
+  return {
+    id: r.id,
+    project_id: r.projectId || null,
+    week_ending: r.weekEnding || null,
+    entries: r.entries || {},
+    note: r.note || '',
+    created_at: r.createdAt || null,
+    updated_at: r.updatedAt || null
+  };
+}
+function fromSBProdWeekly(r) {
+  return {
+    id: r.id,
+    projectId: r.project_id || null,
+    weekEnding: r.week_ending || '',
+    entries: (r.entries && typeof r.entries === 'object') ? r.entries : {},
+    note: r.note || '',
+    createdAt: r.created_at || '',
+    updatedAt: r.updated_at || ''
+  };
+}
 function toSBTmTicket(r) {
   return {
     id: r.id,
@@ -38245,6 +38465,11 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_tm_tickets').upsert(db.tmTickets.map(toSBTmTicket));
       if (r && r.error) errs.push('tm_tickets: ' + r.error.message);
     }
+    // Production weekly data (Phase 1) — non-fatal if table missing
+    if ((db.prodWeekly || []).length) {
+      var r = await supabaseClient.from('kmi_prod_weekly').upsert(db.prodWeekly.map(toSBProdWeekly));
+      if (r && r.error) errs.push('prod_weekly: ' + r.error.message);
+    }
     // CORs (Round 4.1) — non-fatal if table missing on older Supabase projects
     if ((db.cors || []).length) {
       var r = await supabaseClient.from('kmi_cors').upsert(db.cors.map(toSBCor));
@@ -38348,7 +38573,7 @@ async function pullFromSupabase() {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
          mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
-         rfqsRes, rfqRespRes] = await Promise.all([
+         rfqsRes, rfqRespRes, prodWkRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -38375,7 +38600,8 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_purchase_orders').select('*'),
       supabaseClient.from('kmi_transmittals').select('*'),
       supabaseClient.from('kmi_rfqs').select('*'),
-      supabaseClient.from('kmi_rfq_responses').select('*')
+      supabaseClient.from('kmi_rfq_responses').select('*'),
+      supabaseClient.from('kmi_prod_weekly').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -38472,6 +38698,13 @@ async function pullFromSupabase() {
     } else if (tmTix && tmTix.error) {
       console.warn('kmi_tm_tickets load error (table missing?):', tmTix.error.message);
       if (!Array.isArray(db.tmTickets)) db.tmTickets = [];
+    }
+    // Production weekly data (Phase 1) — preserve-on-missing pattern
+    if (prodWkRes && !prodWkRes.error) {
+      db.prodWeekly = (prodWkRes.data || []).map(fromSBProdWeekly);
+    } else if (prodWkRes && prodWkRes.error) {
+      console.warn('kmi_prod_weekly load error (table missing?):', prodWkRes.error.message);
+      if (!Array.isArray(db.prodWeekly)) db.prodWeekly = [];
     }
     // CORs (Round 4.1) — same preserve-on-missing pattern
     if (corsRes && !corsRes.error) {
