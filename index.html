@@ -1597,6 +1597,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="tab" id="nprj-tabhdr-procurement" onclick="npSwTab('procurement', this)">Procurement</div>
     <div class="tab" id="nprj-tabhdr-tm" onclick="npSwTab('tm', this)">T&amp;M Tickets</div>
     <div class="tab" id="nprj-tabhdr-cors" onclick="npSwTab('cors', this)">Change Orders</div>
+    <div class="tab" id="nprj-tabhdr-production" onclick="npSwTab('production', this)">Production</div>
   </div>
 
   <!-- ─── TAB 1: PROJECT DETAILS ─────────────────────────────────── -->
@@ -1811,6 +1812,11 @@ textarea{resize:vertical;min-height:72px}
       <div style="font-size:12px;color:#888;margin-bottom:10px">Time &amp; Material field tickets on this project. Click any column header to sort; use the dropdown to filter by status.</div>
       <div id="nprj-tm-list-section"></div>
     </div>
+  </div>
+
+  <!-- ─── TAB: PRODUCTION (Productivity Phase 2 / Round 2) ──────────── -->
+  <div id="nprj-tab-production" style="display:none">
+    <div id="nprj-production-section"></div>
   </div>
 
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;align-items:center">
@@ -26073,7 +26079,8 @@ var NPRJ_TAB_PERMS = {
   pos:         'view-purchase-orders',
   cors:        'view-cors',
   procurement: 'view-procurement',
-  tm:          'view-tm-tickets'
+  tm:          'view-tm-tickets',
+  production:  'view-project'
 };
 function npTabAllowed(tab) {
   var a = NPRJ_TAB_PERMS[tab];
@@ -26091,12 +26098,12 @@ function applyProjectTabPermissions() {
   var split = g('nprj-save-split'); if (split) split.style.display = canSave ? '' : 'none';
 }
 function npSwTab(tab, el) {
-  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'cors' && tab !== 'procurement' && tab !== 'tm') tab = 'details';
+  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'cors' && tab !== 'procurement' && tab !== 'tm' && tab !== 'production') tab = 'details';
   // Hide tab headers the current role can't access, then redirect off any
   // disallowed tab (e.g. the hardcoded 'details' default) to the first allowed one.
   applyProjectTabPermissions();
   if (!npTabAllowed(tab)) {
-    var _order = ['details','directory','submittals','pos','procurement','tm','cors'];
+    var _order = ['details','directory','submittals','pos','procurement','tm','cors','production'];
     var _alt = _order.find(function(t){ return npTabAllowed(t); });
     if (_alt && _alt !== tab) { return npSwTab(_alt, null); }
   }
@@ -26108,7 +26115,7 @@ function npSwTab(tab, el) {
   } else {
     // Header order: details(0) directory(1) submittals(2) pos(3)
     // procurement(4) tm(5) cors(6)
-    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : (tab === 'procurement' ? 4 : (tab === 'tm' ? 5 : (tab === 'cors' ? 6 : 0)))));
+    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : (tab === 'procurement' ? 4 : (tab === 'tm' ? 5 : (tab === 'cors' ? 6 : (tab === 'production' ? 7 : 0))))));
     if (heads[idx]) heads[idx].classList.add('active');
   }
   var dTab = g('nprj-tab-details');
@@ -26118,6 +26125,7 @@ function npSwTab(tab, el) {
   var cTab = g('nprj-tab-cors');
   var mTab = g('nprj-tab-procurement');
   var tTab = g('nprj-tab-tm');
+  var prodTab = g('nprj-tab-production');
   if (dTab) dTab.style.display = (tab === 'details')     ? '' : 'none';
   if (rTab) rTab.style.display = (tab === 'directory')   ? '' : 'none';
   if (sTab) sTab.style.display = (tab === 'submittals')  ? '' : 'none';
@@ -26125,6 +26133,7 @@ function npSwTab(tab, el) {
   if (cTab) cTab.style.display = (tab === 'cors')        ? '' : 'none';
   if (mTab) mTab.style.display = (tab === 'procurement') ? '' : 'none';
   if (tTab) tTab.style.display = (tab === 'tm')          ? '' : 'none';
+  if (prodTab) prodTab.style.display = (tab === 'production') ? '' : 'none';
   // Render PO list lazily when the PO tab is opened, so we always reflect
   // the latest db state (including POs added in another session).
   if (tab === 'pos' && typeof renderProjectPoList === 'function') {
@@ -26141,6 +26150,10 @@ function npSwTab(tab, el) {
   // Same pattern for the T&M Tickets tab.
   if (tab === 'tm' && typeof renderProjectTmList === 'function') {
     try { renderProjectTmList(); } catch(e) { console.warn('renderProjectTmList error', e); }
+  }
+  // Productivity (Phase 2) — render the production estimate lazily.
+  if (tab === 'production' && typeof renderProjectProduction === 'function') {
+    try { renderProjectProduction(); } catch(e) { console.warn('renderProjectProduction error', e); }
   }
 }
 
@@ -28471,6 +28484,8 @@ function _nprjRefreshAfterSave(p) {
       renderProjectSubmittalsSection();
     } else if (_npActiveTab === 'tm' && typeof renderProjectTmList === 'function') {
       renderProjectTmList();
+    } else if (_npActiveTab === 'production' && typeof renderProjectProduction === 'function') {
+      renderProjectProduction();
     }
     // Cheap details-tab refresh — picks up assignment rows, parameter answers,
     // labor template, material list, attachments in the new edit-mode context.
@@ -35518,6 +35533,306 @@ function rmProdItem(id) {
   db.prodItems = (db.prodItems || []).filter(function(x){ return String(x.id) !== String(id); });
   saveDB();
   renderProdItems();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PRODUCTION ESTIMATE — project workspace tab (Productivity Phase 2 / R2)
+// Reads/writes p.prodEstimate = { defaultCrewId, wageIncreasePct, lines:[] }.
+// Line: { id, itemId, itemName, lineType, unitLabel, estUnits, estMdu,
+//         amount, crewId, bprRef, source }.
+// Dollars: man-days x crew man-day cost, x (1 + wage%). MDU is units per
+// man-day; field_pct lines take a % of base labor (production + field_$).
+// ════════════════════════════════════════════════════════════════════
+function _prodCurrentProject() {
+  if (!_editProjectId) return null;
+  return getProj(_editProjectId) || null;
+}
+function _prodEnsureEstimate(p) {
+  if (!p.prodEstimate || typeof p.prodEstimate !== 'object') {
+    p.prodEstimate = {
+      defaultCrewId: (db.crewTemplates && db.crewTemplates[0]) ? db.crewTemplates[0].id : null,
+      wageIncreasePct: 0,
+      lines: []
+    };
+  }
+  if (!Array.isArray(p.prodEstimate.lines)) p.prodEstimate.lines = [];
+  return p.prodEstimate;
+}
+function _prodResolveCrew(est, line) {
+  return _prodCrew((line && line.crewId) || est.defaultCrewId);
+}
+function _prodNewLineFromItem(item) {
+  return {
+    id: 'pl_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+    itemId: item.id,
+    itemName: item.name,
+    lineType: item.itemType || 'production',
+    unitLabel: item.unitLabel || '',
+    estUnits: '',
+    estMdu: (item.itemType === 'production' && item.defaultMdu != null) ? item.defaultMdu : '',
+    amount: (item.itemType === 'field_pct' && item.defaultPct != null) ? item.defaultPct : '',
+    crewId: item.defaultCrewId || null,
+    bprRef: null,
+    source: 'manual'
+  };
+}
+// Compute every line + totals. Two passes so field_pct can price off base.
+function _prodCompute(p, est) {
+  var lines = est.lines || [], perLine = {}, base = 0, totMD = 0, totCD = 0;
+  lines.forEach(function(l){
+    if (l.lineType === 'field_pct') return;
+    var crew = _prodResolveCrew(est, l);
+    var mdc = _prodManDayCost(p, crew);
+    var masons = crew ? (Number(crew.masons) || 1) : 1;
+    var md = 0, pre = 0;
+    if (l.lineType === 'field_dollar') {
+      pre = Number(l.amount) || 0;
+      md = mdc > 0 ? pre / mdc : 0;
+    } else { // production
+      var u = Number(l.estUnits) || 0, mdu = Number(l.estMdu) || 0;
+      md = mdu > 0 ? u / mdu : 0;
+      pre = md * mdc;
+    }
+    var cd = masons > 0 ? md / masons : 0;
+    perLine[l.id] = { manDays: md, crewDays: cd, pre: pre };
+    base += pre; totMD += md; totCD += cd;
+  });
+  lines.forEach(function(l){
+    if (l.lineType !== 'field_pct') return;
+    var crew = _prodResolveCrew(est, l);
+    var mdc = _prodManDayCost(p, crew);
+    var masons = crew ? (Number(crew.masons) || 1) : 1;
+    var pre = base * ((Number(l.amount) || 0) / 100);
+    var md = mdc > 0 ? pre / mdc : 0;
+    var cd = masons > 0 ? md / masons : 0;
+    perLine[l.id] = { manDays: md, crewDays: cd, pre: pre };
+    totMD += md; totCD += cd;
+  });
+  var preTotal = Object.keys(perLine).reduce(function(s,k){ return s + perLine[k].pre; }, 0);
+  var wage = (Number(est.wageIncreasePct) || 0) / 100;
+  return {
+    perLine: perLine, base: base, preTotal: preTotal,
+    wageMult: 1 + wage, wageAmt: preTotal * wage,
+    totManDays: totMD, totCrewDays: totCD, totLabor: preTotal * (1 + wage)
+  };
+}
+function _prodSetTxt(id, v) { var e = g(id); if (e) e.textContent = v; }
+function renderProjectProduction() {
+  var host = g('nprj-production-section'); if (!host) return;
+  var p = _prodCurrentProject();
+  if (!p) {
+    host.innerHTML = '<div class="card"><div style="padding:16px;color:#888;font-size:13px">' +
+      'Save the project first, then re-open it to build its production estimate.</div></div>';
+    return;
+  }
+  var est = _prodEnsureEstimate(p);
+  var crews = db.crewTemplates || [];
+  if (!crews.length) {
+    host.innerHTML = '<div class="card"><div style="padding:16px;color:#A32D2D;font-size:13px">' +
+      'No crews defined yet. Add at least one crew on the Templates page (Crews) before building an estimate.</div></div>';
+    return;
+  }
+  var defCrewOpts = crews.map(function(c){
+    var sel = String(est.defaultCrewId || '') === String(c.id) ? ' selected' : '';
+    return '<option value="' + c.id + '"' + sel + '>' + _prodEsc(c.name) + '</option>';
+  }).join('');
+
+  // Rate hint if this project's Mason cost rate is unset
+  var rateHint = (_prodCostRate(p, 'Mason') > 0) ? '' :
+    '<div style="font-size:12px;color:#9A7A2E;background:#FFFCF3;border:1px solid var(--ac);border-radius:6px;padding:8px 12px;margin-bottom:12px">' +
+    'This project has no Mason/Laborer cost rates yet, so dollars read $0. Apply a labor rate template on the Project Details tab to price the estimate.</div>';
+
+  var metrics =
+    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">' +
+      _prodMetric('prod-m-labor', 'Est. Labor $', 'incl. wage increase') +
+      _prodMetric('prod-m-md', 'Man-Days', 'mason-days') +
+      _prodMetric('prod-m-cd', 'Crew-Days', 'by assigned crew') +
+    '</div>';
+
+  var params =
+    '<div class="card"><div style="display:flex;align-items:flex-end;gap:20px;flex-wrap:wrap">' +
+      '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Default crew</div>' +
+        '<select class="fs" onchange="prodEditEst(\'defaultCrewId\', this.value); prodPersistLocal();">' + defCrewOpts + '</select></div>' +
+      '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Wage increase</div>' +
+        '<div style="display:flex;align-items:center;gap:6px"><input type="number" min="0" step="0.5" value="' + (Number(est.wageIncreasePct) || 0) +
+        '" style="width:80px" oninput="prodEditEst(\'wageIncreasePct\', this.value)" onchange="prodPersistLocal()"><span style="font-size:12px;color:#666">% of labor</span></div></div>' +
+      '<div id="prod-wage-note" style="font-size:12px;color:var(--acd);font-weight:600;flex:1"></div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn btn-sm btn-p" onclick="prodShowAddItems()">+ Add items</button>' +
+        '<button class="btn btn-sm" id="prod-save-btn" onclick="prodSaveEstimate()">Save estimate</button>' +
+      '</div>' +
+    '</div></div>';
+
+  var lines = est.lines || [];
+  var prodRows = lines.filter(function(l){ return l.lineType === 'production'; });
+  var fieldRows = lines.filter(function(l){ return l.lineType !== 'production'; });
+
+  var table;
+  if (!lines.length) {
+    table = '<div class="card"><div style="padding:16px;color:#aaa;font-size:13px;text-align:center">' +
+      'No lines yet \u2014 click <strong>+ Add items</strong> to pull items from the catalog.</div></div>';
+  } else {
+    var head = '<thead><tr>' +
+      '<th>Item</th><th>Unit</th>' +
+      '<th style="text-align:right">Est. Units</th><th style="text-align:right">Est. MDU</th>' +
+      '<th>Driver</th><th>Crew</th>' +
+      '<th style="text-align:right">Est. Labor $</th>' +
+      '<th style="text-align:right">Crew-Days</th><th style="text-align:right">Man-Days</th><th></th>' +
+    '</tr></thead>';
+    var body = '';
+    if (prodRows.length) {
+      body += '<tr><td colspan="10" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Production</td></tr>';
+      body += prodRows.map(function(l){ return _prodRowHtml(est, l); }).join('');
+    }
+    if (fieldRows.length) {
+      body += '<tr><td colspan="10" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Field Labor</td></tr>';
+      body += fieldRows.map(function(l){ return _prodRowHtml(est, l); }).join('');
+    }
+    table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:880px">' + head + '<tbody>' + body + '</tbody></table></div></div>';
+  }
+
+  host.innerHTML = rateHint + metrics + params + table;
+  prodRefresh();
+}
+function _prodMetric(id, label, sub) {
+  return '<div class="card" style="border-left:3px solid var(--kmi);padding:14px 16px">' +
+    '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">' + label + '</div>' +
+    '<div id="' + id + '" style="font-size:24px;font-weight:600">\u2014</div>' +
+    '<div style="font-size:11px;color:#888;margin-top:2px">' + sub + '</div></div>';
+}
+function _prodCrewSelectHtml(est, l) {
+  var crews = db.crewTemplates || [];
+  var cur = l.crewId || '';
+  var opts = '<option value="">Default</option>' + crews.map(function(c){
+    var sel = String(cur) === String(c.id) ? ' selected' : '';
+    return '<option value="' + c.id + '"' + sel + '>' + _prodEsc(c.name) + '</option>';
+  }).join('');
+  return '<select class="fs" style="min-width:88px" onchange="prodEdit(\'' + l.id + '\',\'crewId\',this.value); prodPersistLocal();">' + opts + '</select>';
+}
+function _prodRowHtml(est, l) {
+  var id = l.id;
+  var unitsCell, mduCell, driverCell;
+  if (l.lineType === 'production') {
+    unitsCell = '<td style="text-align:right"><input type="number" min="0" step="1" value="' + (l.estUnits != null ? l.estUnits : '') +
+      '" style="width:78px;text-align:right" oninput="prodEdit(\'' + id + '\',\'estUnits\',this.value)" onchange="prodPersistLocal()"></td>';
+    mduCell = '<td style="text-align:right"><input type="number" min="0" step="1" value="' + (l.estMdu != null ? l.estMdu : '') +
+      '" style="width:78px;text-align:right" oninput="prodEdit(\'' + id + '\',\'estMdu\',this.value)" onchange="prodPersistLocal()"></td>';
+    driverCell = '<td style="color:#ccc">\u2014</td>';
+  } else if (l.lineType === 'field_dollar') {
+    unitsCell = '<td style="text-align:right;color:#ccc">\u2014</td>';
+    mduCell = '<td style="text-align:right;color:#ccc">\u2014</td>';
+    driverCell = '<td><span style="font-size:12px;color:#888">$</span> <input type="number" min="0" step="1" value="' + (l.amount != null ? l.amount : '') +
+      '" style="width:96px;text-align:right" oninput="prodEdit(\'' + id + '\',\'amount\',this.value)" onchange="prodPersistLocal()"></td>';
+  } else { // field_pct
+    unitsCell = '<td style="text-align:right;color:#ccc">\u2014</td>';
+    mduCell = '<td style="text-align:right;color:#ccc">\u2014</td>';
+    driverCell = '<td><input type="number" min="0" step="0.5" value="' + (l.amount != null ? l.amount : '') +
+      '" style="width:64px;text-align:right" oninput="prodEdit(\'' + id + '\',\'amount\',this.value)" onchange="prodPersistLocal()"> <span style="font-size:12px;color:#888">% of base</span></td>';
+  }
+  return '<tr>' +
+    '<td>' + _prodEsc(l.itemName) + '</td>' +
+    '<td style="color:#888">' + (_prodEsc(l.unitLabel) || '\u2014') + '</td>' +
+    unitsCell + mduCell + driverCell +
+    '<td>' + _prodCrewSelectHtml(est, l) + '</td>' +
+    '<td style="text-align:right" id="prod-lab-' + id + '">\u2014</td>' +
+    '<td style="text-align:right" id="prod-cd-' + id + '">\u2014</td>' +
+    '<td style="text-align:right" id="prod-md-' + id + '">\u2014</td>' +
+    '<td style="white-space:nowrap"><button class="btn btn-sm" onclick="prodRemoveLine(\'' + id + '\')" style="color:#A32D2D">\u2715</button></td>' +
+  '</tr>';
+}
+// Recompute and write the computed cells + metrics without re-rendering inputs.
+function prodRefresh() {
+  var p = _prodCurrentProject(); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  var comp = _prodCompute(p, est);
+  (est.lines || []).forEach(function(l){
+    var c = comp.perLine[l.id] || { manDays:0, crewDays:0, pre:0 };
+    _prodSetTxt('prod-lab-' + l.id, fmtC(c.pre * comp.wageMult));
+    _prodSetTxt('prod-cd-' + l.id, (c.crewDays || 0).toFixed(2));
+    _prodSetTxt('prod-md-' + l.id, (c.manDays || 0).toFixed(2));
+  });
+  _prodSetTxt('prod-m-labor', fmtC(comp.totLabor));
+  _prodSetTxt('prod-m-md', comp.totManDays.toFixed(1));
+  _prodSetTxt('prod-m-cd', comp.totCrewDays.toFixed(1));
+  var wn = g('prod-wage-note');
+  if (wn) wn.textContent = comp.wageAmt > 0 ? ('Wage increase adds ' + fmtC(comp.wageAmt) + ' across all lines') : '';
+}
+function prodEdit(lineId, field, val) {
+  var p = _prodCurrentProject(); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  var l = (est.lines || []).find(function(x){ return String(x.id) === String(lineId); });
+  if (!l) return;
+  if (field === 'estUnits' || field === 'estMdu' || field === 'amount') {
+    if (val === '' || val == null) { l[field] = ''; }
+    else { var n = parseFloat(val); l[field] = isNaN(n) ? '' : n; }
+  } else if (field === 'crewId') {
+    l.crewId = val || null;
+  }
+  prodRefresh();
+}
+function prodEditEst(field, val) {
+  var p = _prodCurrentProject(); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  if (field === 'defaultCrewId') { est.defaultCrewId = val || null; }
+  else if (field === 'wageIncreasePct') { var n = parseFloat(val); est.wageIncreasePct = isNaN(n) ? 0 : n; }
+  prodRefresh();
+}
+function prodPersistLocal() { try { saveDB(); } catch(e) { console.warn('prodPersistLocal', e); } }
+function prodShowAddItems() {
+  var items = (db.prodItems || []).filter(function(i){ return i.active !== false; })
+    .slice().sort(function(a,b){ return (Number(a.sortOrder)||0) - (Number(b.sortOrder)||0); });
+  if (!items.length) { alert('No production items in the catalog. Add some on the Templates page first.'); return; }
+  var rows = items.map(function(i){
+    return '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;font-size:13px;border-bottom:.5px solid #f0f0f0;cursor:pointer">' +
+      '<input type="checkbox" class="prod-add-chk" value="' + i.id + '">' +
+      '<span style="flex:1">' + _prodEsc(i.name) + '</span>' +
+      '<span style="font-size:11px;color:#888">' + (_PROD_TYPE_LABEL[i.itemType || 'production']) + '</span></label>';
+  }).join('');
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add items</div>' +
+    '<div class="msb">Pick catalog items to add to this estimate. Edit units, MDU, dollars and crew after adding.</div>' +
+    '<div style="max-height:50vh;overflow:auto;margin:10px 0;border:.5px solid #eee;border-radius:6px;padding:4px 10px">' + rows + '</div>' +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="prodAddSelected()">Add selected</button></div>');
+}
+function prodAddSelected() {
+  var p = _prodCurrentProject(); if (!p) { closeModal(); return; }
+  var est = _prodEnsureEstimate(p);
+  var added = 0;
+  document.querySelectorAll('.prod-add-chk:checked').forEach(function(ch){
+    var item = _prodItem(ch.value); if (!item) return;
+    est.lines.push(_prodNewLineFromItem(item)); added++;
+  });
+  closeModal();
+  if (added) { saveDB(); renderProjectProduction(); }
+}
+function prodRemoveLine(lineId) {
+  var p = _prodCurrentProject(); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  var l = (est.lines || []).find(function(x){ return String(x.id) === String(lineId); });
+  if (l && !confirm('Remove "' + (l.itemName || 'this line') + '" from the estimate?')) return;
+  est.lines = (est.lines || []).filter(function(x){ return String(x.id) !== String(lineId); });
+  saveDB();
+  renderProjectProduction();
+}
+async function prodSaveEstimate() {
+  var p = _prodCurrentProject();
+  if (!p) { alert('Save the project first, then build its production estimate.'); return; }
+  _prodEnsureEstimate(p);
+  saveDB();
+  var btn = g('prod-save-btn'); if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
+  try {
+    if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+      var res = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+      if (res && res.error) throw res.error;
+    }
+    if (typeof showToast === 'function') showToast('Production estimate saved'); else alert('Production estimate saved');
+  } catch(e) {
+    console.warn('prodSaveEstimate', e);
+    alert('Saved locally, but cloud sync failed: ' + (e.message || e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save estimate'; }
+  }
 }
 
 function renderLaborRates() {
