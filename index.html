@@ -2059,6 +2059,9 @@ textarea{resize:vertical;min-height:72px}
   <!-- ── Production items (Productivity Phase 2 / 1b) ────────────────── -->
   <div class="card"><div class="ch"><span class="ct">Production items</span><button class="btn btn-sm btn-p" onclick="showAddProdItem()">+ Add item</button></div><div id="t-prod-items"></div></div>
 
+  <!-- ── Production Categories (Productivity Phase 4a) ───────────────── -->
+  <div class="card"><div class="ch"><span class="ct">Production Categories</span><button class="btn btn-sm btn-p" onclick="showAddCategory()">+ Add category</button></div><div id="t-prod-categories"></div></div>
+
   <!-- ── Material Templates (Round 2) ──────────────────────────────── -->
   <div class="card">
     <div class="ch">
@@ -3090,6 +3093,17 @@ var DB_DEFAULTS = {
   // Productivity tracking (Phase 2) — global catalog of installation/labor
   // items. itemType: 'production' (units x MDU x crew), 'field_dollar'
   // ($ input), 'field_pct' (% of base labor). Estimates reference these.
+  // Productivity (Phase 4) — production categories. One carries isGeneral
+  // (its labor distributes across the others by labor share for % complete).
+  prodCategories: [
+    {id:'cat_cmu',      name:'CMU',                 isGeneral:false, sortOrder:1,  active:true},
+    {id:'cat_brick',    name:'Brick',               isGeneral:false, sortOrder:2,  active:true},
+    {id:'cat_stone',    name:'Stone / Restoration', isGeneral:false, sortOrder:3,  active:true},
+    {id:'cat_patch',    name:'Patching',            isGeneral:false, sortOrder:4,  active:true},
+    {id:'cat_terra',    name:'Terracotta',          isGeneral:false, sortOrder:5,  active:true},
+    {id:'cat_cladding', name:'Cladding Support',    isGeneral:false, sortOrder:6,  active:true},
+    {id:'cat_general',  name:'General',             isGeneral:true,  sortOrder:99, active:true}
+  ],
   prodItems: [
     {id:'pi_dowels',   name:'Dowels',          unitLabel:'EA', itemType:'production',   defaultMdu:80,   defaultPct:null, defaultCrewId:null, sortOrder:1,  active:true},
     {id:'pi_blkpart',  name:'Block Partition', unitLabel:'EA', itemType:'production',   defaultMdu:130,  defaultPct:null, defaultCrewId:null, sortOrder:2,  active:true},
@@ -3152,6 +3166,7 @@ function loadDB() {
         laborRateSets: labSets       || DB_DEFAULTS.laborRateSets,
         materialTemplates: p.materialTemplates || [],
         crewTemplates: p.crewTemplates || JSON.parse(JSON.stringify(DB_DEFAULTS.crewTemplates)),
+        prodCategories: p.prodCategories || JSON.parse(JSON.stringify(DB_DEFAULTS.prodCategories)),
         prodItems:     p.prodItems     || JSON.parse(JSON.stringify(DB_DEFAULTS.prodItems)),
         clarGroups:   p.clarGroups   || DB_DEFAULTS.clarGroups,
         companyTypes: p.companyTypes  || DB_DEFAULTS.companyTypes,
@@ -29444,6 +29459,7 @@ function renderTemplates() {
   renderLaborRates();
   renderCrews();
   renderProdItems();
+  renderProdCategories();
   renderMaterialTemplates();
   renderFoundationMasterStatus();
   renderBprCostCodeMap();
@@ -35433,6 +35449,7 @@ function renderProdItems() {
         '<td>' + _prodEsc(it.name) + '</td>' +
         '<td><span style="' + (_PROD_TYPE_STYLE[t] || '') + ';padding:2px 8px;border-radius:100px;font-size:11px;font-weight:600">' +
           (_PROD_TYPE_LABEL[t] || t) + '</span></td>' +
+        '<td>' + _prodEsc(_prodCategoryName(it.categoryId) || _prodCategoryName(_prodGeneralCategoryId()) || '\u2014') + '</td>' +
         '<td>' + _prodEsc(it.unitLabel || '\u2014') + '</td>' +
         '<td style="text-align:right">' + mdu + '</td>' +
         '<td style="text-align:right">' + pct + '</td>' +
@@ -35445,7 +35462,7 @@ function renderProdItems() {
     }).join('');
   el.innerHTML = note +
     '<div style="overflow-x:auto"><table style="min-width:720px"><thead><tr>' +
-      '<th>Item</th><th>Type</th><th>Unit</th>' +
+      '<th>Item</th><th>Type</th><th>Category</th><th>Unit</th>' +
       '<th style="text-align:right">Default MDU</th><th style="text-align:right">Default %</th>' +
       '<th>Default crew</th><th>Active</th><th></th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
@@ -35487,6 +35504,8 @@ function _prodItemModal(it) {
       '<input id="pi-pct" type="number" min="0" step="0.5" value="' + (it.defaultPct != null ? it.defaultPct : '') + '"></div>' +
     '<div class="fgr" style="margin-top:4px"><label>Default crew</label>' +
       '<select id="pi-crew">' + crewOpts + '</select></div>' +
+    '<div class="fgr" style="margin-top:4px"><label>Category</label>' +
+      '<select id="pi-category">' + _prodCategoryOptions(it.categoryId) + '</select></div>' +
     '<label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:#333">' +
       '<input type="checkbox" id="pi-active"' + (it.active !== false ? ' checked' : '') + '> Active</label>' +
     '<div class="mf">' +
@@ -35511,20 +35530,21 @@ function saveProdItem() {
   var active = !!g('pi-active').checked;
   var defaultMdu = (type === 'production' && mduRaw !== '') ? (parseFloat(mduRaw) || 0) : null;
   var defaultPct = (type === 'field_pct'  && pctRaw !== '') ? (parseFloat(pctRaw) || 0) : null;
+  var categoryId = (g('pi-category') && g('pi-category').value) || null;
   db.prodItems = db.prodItems || [];
   if (_editProdItemId) {
     var it = _prodItem(_editProdItemId);
     if (it) {
       it.name = name; it.itemType = type; it.unitLabel = unit;
       it.defaultMdu = defaultMdu; it.defaultPct = defaultPct;
-      it.defaultCrewId = crewId || null; it.active = active;
+      it.defaultCrewId = crewId || null; it.categoryId = categoryId; it.active = active;
     }
   } else {
     var maxSort = db.prodItems.reduce(function(m,x){ return Math.max(m, Number(x.sortOrder)||0); }, 0);
     db.prodItems.push({
       id: Date.now(), name: name, unitLabel: unit, itemType: type,
       defaultMdu: defaultMdu, defaultPct: defaultPct,
-      defaultCrewId: crewId || null, sortOrder: maxSort + 1, active: active
+      defaultCrewId: crewId || null, categoryId: categoryId, sortOrder: maxSort + 1, active: active
     });
   }
   _editProdItemId = null;
@@ -35538,6 +35558,82 @@ function rmProdItem(id) {
   db.prodItems = (db.prodItems || []).filter(function(x){ return String(x.id) !== String(id); });
   saveDB();
   renderProdItems();
+}
+
+// ── Production categories (Phase 4a) ─────────────────────────────────
+var _editCategoryId = null;
+function _prodCategory(id) { return (db.prodCategories || []).find(function(c){ return String(c.id) === String(id); }) || null; }
+function _prodCategoryName(id) { var c = _prodCategory(id); return c ? c.name : ''; }
+function _prodGeneralCategoryId() { var gen = (db.prodCategories || []).find(function(c){ return c.isGeneral; }); return gen ? gen.id : null; }
+function _prodCategoryOptions(currentId) {
+  var cur = currentId || _prodGeneralCategoryId();
+  return (db.prodCategories || []).filter(function(c){ return c.active !== false; })
+    .slice().sort(function(a,b){ return (Number(a.sortOrder)||0) - (Number(b.sortOrder)||0); })
+    .map(function(c){
+      var sel = String(cur) === String(c.id) ? ' selected' : '';
+      return '<option value="' + c.id + '"' + sel + '>' + _prodEsc(c.name) + (c.isGeneral ? ' (general)' : '') + '</option>';
+    }).join('');
+}
+function renderProdCategories() {
+  var el = g('t-prod-categories'); if (!el) return;
+  db.prodCategories = db.prodCategories || [];
+  if (!db.prodCategories.length) {
+    el.innerHTML = '<div style="padding:12px;color:#aaa;font-size:12px;text-align:center">No categories yet \u2014 click + Add category</div>';
+    return;
+  }
+  var rows = db.prodCategories.slice().sort(function(a,b){ return (Number(a.sortOrder)||0) - (Number(b.sortOrder)||0); }).map(function(c){
+    var typeCell = c.isGeneral
+      ? '<span style="color:#9A7A2E;font-size:12px">labor distributed across categories</span>'
+      : '<span style="color:#aaa;font-size:12px">standard</span>';
+    var nm = _prodEsc(c.name) + (c.isGeneral ? ' <span style="background:#faf1d6;color:#9A7A2E;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:600">distributed</span>' : '');
+    return '<tr><td>' + nm + '</td><td>' + typeCell + '</td>' +
+      '<td style="white-space:nowrap"><button class="btn btn-sm" onclick="showEditCategory(\'' + c.id + '\')">Edit</button>' +
+      (c.isGeneral ? '' : ' <button class="btn btn-sm" onclick="rmCategory(\'' + c.id + '\')" style="color:#A32D2D">Remove</button>') +
+      '</td></tr>';
+  }).join('');
+  el.innerHTML = '<table><thead><tr><th>Category</th><th>Type</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<div style="font-size:12px;color:#888;margin-top:10px;line-height:1.5">One category carries the <strong>General</strong> flag; its labor is distributed across the others by labor share when computing % complete. Items default to the catalog category and can be overridden per project on the estimate.</div>';
+}
+function showAddCategory() { _editCategoryId = null; _categoryModal({ name:'', isGeneral:false }); }
+function showEditCategory(id) { var c = _prodCategory(id); if (!c) return; _editCategoryId = id; _categoryModal(c); }
+function _categoryModal(c) {
+  showModal('<button class="xbtn" onclick="closeModal();_editCategoryId=null;">&#215;</button>' +
+    '<div class="mt">' + (_editCategoryId ? 'Edit category' : 'Add category') + '</div>' +
+    '<div class="msb">A production category groups items for the % complete calculation.</div>' +
+    '<div class="fgr" style="margin:12px 0 8px"><label>Name</label>' +
+      '<input id="cat-name" value="' + String(c.name||'').replace(/"/g,'&quot;') + '" placeholder="e.g. Brick"></div>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:13px;color:#333">' +
+      '<input type="checkbox" id="cat-gen"' + (c.isGeneral ? ' checked' : '') + '> General \u2014 distribute this category\'s labor across the others</label>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal();_editCategoryId=null;">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveCategory()">Save</button>' +
+    '</div>');
+}
+function saveCategory() {
+  var name = (g('cat-name').value || '').trim();
+  if (!name) { alert('Enter a category name.'); return; }
+  var isGen = !!g('cat-gen').checked;
+  db.prodCategories = db.prodCategories || [];
+  if (isGen) { db.prodCategories.forEach(function(c){ if (!_editCategoryId || String(c.id) !== String(_editCategoryId)) c.isGeneral = false; }); }
+  if (_editCategoryId) {
+    var c = _prodCategory(_editCategoryId);
+    if (c) { c.name = name; c.isGeneral = isGen; }
+  } else {
+    var maxSort = db.prodCategories.reduce(function(m,x){ return Math.max(m, Number(x.sortOrder)||0); }, 0);
+    db.prodCategories.push({ id: Date.now(), name: name, isGeneral: isGen, sortOrder: maxSort + 1, active: true });
+  }
+  _editCategoryId = null;
+  saveDB();
+  closeModal();
+  renderProdCategories();
+}
+function rmCategory(id) {
+  var c = _prodCategory(id); if (!c) return;
+  if (c.isGeneral) { alert('You can\'t remove the General category. Flag a different category as General first.'); return; }
+  if (!confirm('Remove category "' + (c.name || '') + '"? Items and estimate lines using it fall back to General.')) return;
+  db.prodCategories = (db.prodCategories || []).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+  renderProdCategories();
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -35577,6 +35673,7 @@ function _prodNewLineFromItem(item) {
     estMdu: (item.itemType === 'production' && item.defaultMdu != null) ? item.defaultMdu : '',
     amount: (item.itemType === 'field_pct' && item.defaultPct != null) ? item.defaultPct : '',
     crewId: item.defaultCrewId || null,
+    categoryId: item.categoryId || _prodGeneralCategoryId(),
     bprRef: null,
     source: 'manual'
   };
@@ -35702,7 +35799,7 @@ function renderProdEstimateView() {
       'No lines yet \u2014 click <strong>+ Add items</strong> to pull items from the catalog.</div></div>';
   } else {
     var head = '<thead><tr>' +
-      '<th>Item</th><th>Unit</th>' +
+      '<th>Item</th><th>Category</th><th>Unit</th>' +
       '<th style="text-align:right">Est. Units</th><th style="text-align:right">Est. MDU</th>' +
       '<th>Driver</th><th>Crew</th>' +
       '<th style="text-align:right">Est. Labor $</th>' +
@@ -35710,14 +35807,14 @@ function renderProdEstimateView() {
     '</tr></thead>';
     var body = '';
     if (prodRows.length) {
-      body += '<tr><td colspan="10" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Production</td></tr>';
+      body += '<tr>td colspan="11" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Production/td></tr>';
       body += prodRows.map(function(l){ return _prodRowHtml(est, l); }).join('');
     }
     if (fieldRows.length) {
-      body += '<tr><td colspan="10" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Field Labor</td></tr>';
+      body += '<tr><td colspan="11" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Field Labor</td></tr>';
       body += fieldRows.map(function(l){ return _prodRowHtml(est, l); }).join('');
     }
-    table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:880px">' + head + '<tbody>' + body + '</tbody></table></div></div>';
+    table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:980px">' + head + '<tbody>' + body + '</tbody></table></div></div>';
   }
 
   host.innerHTML = rateHint + metrics + params + table;
@@ -35737,6 +35834,10 @@ function _prodCrewSelectHtml(est, l) {
     return '<option value="' + c.id + '"' + sel + '>' + _prodEsc(c.name) + '</option>';
   }).join('');
   return '<select class="fs" style="min-width:88px" onchange="prodEdit(\'' + l.id + '\',\'crewId\',this.value); prodPersistLocal();">' + opts + '</select>';
+}
+function _prodCategorySelectHtml(l) {
+  return '<select class="fs" style="min-width:104px" onchange="prodEdit(\'' + l.id + '\',\'categoryId\',this.value); prodPersistLocal();">' +
+    _prodCategoryOptions(l.categoryId) + '</select>';
 }
 function _prodRowHtml(est, l) {
   var id = l.id;
@@ -35760,6 +35861,7 @@ function _prodRowHtml(est, l) {
   }
   return '<tr>' +
     '<td>' + _prodEsc(l.itemName) + '</td>' +
+    '<td>' + _prodCategorySelectHtml(l) + '</td>' +
     '<td style="color:#888">' + (_prodEsc(l.unitLabel) || '\u2014') + '</td>' +
     unitsCell + mduCell + driverCell +
     '<td>' + _prodCrewSelectHtml(est, l) + '</td>' +
@@ -35796,6 +35898,8 @@ function prodEdit(lineId, field, val) {
     else { var n = parseFloat(val); l[field] = isNaN(n) ? '' : n; }
   } else if (field === 'crewId') {
     l.crewId = val || null;
+  } else if (field === 'categoryId') {
+    l.categoryId = val || null;
   }
   prodRefresh();
 }
@@ -38926,6 +39030,7 @@ async function pushToSupabase() {
       {key:'laborRateSets',value:db.laborRateSets},
       {key:'materialTemplates', value:db.materialTemplates || []},
       {key:'crewTemplates', value:db.crewTemplates || []},
+      {key:'prodCategories', value:db.prodCategories || []},
       {key:'prodItems',     value:db.prodItems     || []},
       {key:'companyTypes', value:db.companyTypes},
       {key:'projectTypes', value:db.projectTypes},
@@ -39185,7 +39290,7 @@ async function pullFromSupabase() {
     // Settings — copy known setting rows into db. Includes runtime-config
     // keys like anthropic_api_key that aren't part of the default db shape.
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
-                                'laborRates','laborRateSets','materialTemplates','crewTemplates','prodItems',
+                                'laborRates','laborRateSets','materialTemplates','crewTemplates','prodItems','prodCategories',
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
                                 'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
                                 'bprCostCodeMap',
