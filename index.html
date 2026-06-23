@@ -31234,6 +31234,16 @@ function procSaveLinkPicker(itemId) {
 
 var _bprPendingItems = null;     // parser output staged for the picker
 var _bprPickerSelections = {};   // tracks checkbox state in the picker
+var _bprPickerDest = 'proc';     // 'proc' | 'prod' — which picker the upload flow opens
+
+// Production-estimate BPR picker state (parallel to the procurement picker).
+var _prodBprSel      = {};   // bprId → checked
+var _prodBprGroups   = [];   // [{ id, label, memberIds:[] }]
+var _prodBprGroupOf  = {};   // bprId → groupId
+var _prodBprMdu      = {};   // bprId → MDU override (defaults to layRate)
+var _prodBprLink     = {};   // bprId → itemId ('' = none)
+var _prodBprCat      = {};   // bprId → categoryId
+var _prodBprGroupMeta = {};  // groupId → { link, cat, mdu(optional override) }
 
 function _bprNewId(suffix) {
   return 'bpr' + Date.now() + '_' + Math.random().toString(36).slice(2, 8) + (suffix || '');
@@ -31425,6 +31435,7 @@ function _bprParseLines(lines) {
       quantity: qty,
       unitCost: unitCost,
       extendedMatCost: extMatCost,
+      layRate: (headerInfo && headerInfo.layRate != null && isFinite(headerInfo.layRate)) ? headerInfo.layRate : null,
       rodLengthLinFt: null,
       sourceCategory: 'material',
       defaultSkip: defaultSkip,
@@ -31546,17 +31557,23 @@ function _bprParseLines(lines) {
       totalQty,
       unit,
       totalMatCost,
-      { labelChunk: pendingHeader.labelChunk, unitCost: pendingHeader.unitCost }
+      { labelChunk: pendingHeader.labelChunk, unitCost: pendingHeader.unitCost, layRate: pendingHeader.layRate }
     );
     pendingHeader = null;
     pendingSubRows = [];
   }
 
-  function setPendingHeader(labelChunk, unitCost) {
+  function setPendingHeader(labelChunk, unitCost, layRate) {
     flushPending();
     pendingHeader = {
       labelChunk: (labelChunk || '').trim(),
-      unitCost: (unitCost != null && isFinite(unitCost)) ? unitCost : null
+      unitCost: (unitCost != null && isFinite(unitCost)) ? unitCost : null,
+      // Lay rate = units laid per production-mason-day. This maps 1:1 to
+      // the production estimate's MDU (units per man-day). "Lay 0.0"
+      // materials (Mortar, Dur-o-wal, Air Deduction) aren't separately
+      // laid — their labor is embedded in the block — so layRate 0/null
+      // flags them as non-laid downstream.
+      layRate: (layRate != null && isFinite(layRate)) ? layRate : null
     };
     pendingSubRows = [];
   }
@@ -31609,14 +31626,14 @@ function _bprParseLines(lines) {
         if (pendingHeader) {
           var lcM = pendingHeader.labelChunk || '';
           if (lcM.indexOf(mtCode) === 0 || lcM === mtCode) {
-            hdrM = { labelChunk: lcM, unitCost: pendingHeader.unitCost };
+            hdrM = { labelChunk: lcM, unitCost: pendingHeader.unitCost, layRate: pendingHeader.layRate };
           } else {
             // Code doesn't match — header is unrelated. Still surface
             // unitCost from header IF the labelChunk's first token
             // matches the totals code (loose match).
             var firstTok = lcM.split(/\s+/)[0] || '';
             if (firstTok === mtCode) {
-              hdrM = { labelChunk: lcM, unitCost: pendingHeader.unitCost };
+              hdrM = { labelChunk: lcM, unitCost: pendingHeader.unitCost, layRate: pendingHeader.layRate };
             }
           }
         }
@@ -31639,7 +31656,7 @@ function _bprParseLines(lines) {
         if (pendingHeader) {
           var lcMo = pendingHeader.labelChunk || '';
           if (lcMo.indexOf(mortCode) === 0) {
-            hdrMo = { labelChunk: lcMo, unitCost: pendingHeader.unitCost };
+            hdrMo = { labelChunk: lcMo, unitCost: pendingHeader.unitCost, layRate: pendingHeader.layRate };
           }
         }
         emitFromTotals(mortCode, mortQty, mortUnit, mortExtMt, hdrMo);
@@ -31692,6 +31709,7 @@ function _bprParseLines(lines) {
           quantity: 1,
           unitCost: amt,
           extendedMatCost: amt,
+          layRate: null,
           rodLengthLinFt: null,
           sourceCategory: 'lump_sum_other',
           defaultSkip: false,
@@ -31721,8 +31739,12 @@ function _bprParseLines(lines) {
       var labelChunk = line.slice(0, layIdx).trim();
       var afterLay = line.slice(layIdx);
       var costMatch = /\$(\d+(?:\.\d{2,3})?)/.exec(afterLay);
+      // Lay rate sits immediately after " Lay " as "<number> / <unit>/Day"
+      // (e.g. " Lay 120.0 / Pieces/Day"). Capture it as the MDU.
+      var layMatch = /^\s*Lay\s+([\d,]+(?:\.\d+)?)/.exec(afterLay);
+      var layRate = layMatch ? parseFloat(layMatch[1].replace(/,/g, '')) : null;
       if (labelChunk && costMatch) {
-        setPendingHeader(labelChunk, parseFloat(costMatch[1]));
+        setPendingHeader(labelChunk, parseFloat(costMatch[1]), layRate);
         continue;
       }
     }
@@ -31827,8 +31849,14 @@ function _bprApplyParsed(parsed, statusEl) {
     statusEl.innerHTML = '<span style="color:#1E6B36">' + _procEsc(summary) + '</span>';
   }
 
-  // Brief delay so user sees the success message, then open the picker
-  setTimeout(function(){ closeModal(); procOpenBprPicker(); }, 700);
+  // Brief delay so user sees the success message, then open the picker.
+  // _bprPickerDest routes to the procurement picker (default) or the
+  // production-estimate picker, set by whichever flow initiated the import.
+  setTimeout(function(){
+    closeModal();
+    if (typeof _bprPickerDest !== 'undefined' && _bprPickerDest === 'prod') prodOpenBprPicker();
+    else procOpenBprPicker();
+  }, 700);
 }
 
 // "Use BPR on file" — pull the latest budget version's source PDF straight
@@ -31885,6 +31913,7 @@ function procOpenBprFlow() {
     alert('You do not have permission to upload Bid Price Reports.');
     return;
   }
+  _bprPickerDest = 'proc';
   var p = getProj(_editProjectId); if (!p) return;
   p.bprMaterials = p.bprMaterials || [];
   if (p.bprMaterials.length) {
@@ -32526,6 +32555,425 @@ function _bprMergeMappingsInto(arr, mappings) {
 // Cleanup: when a procurement item is removed, its bprAssignments[] go
 // with it (the array is inline on the item, no global cleanup needed —
 // the existing procRemoveItem already drops the item entry).
+
+// ═══════════════════════════════════════════════════════════════════
+// PRODUCTION ESTIMATE — BPR IMPORT (Step 6)
+// ═══════════════════════════════════════════════════════════════════
+// Pulls estimate lines straight from a Tradesmen Bid Price Report. Each
+// material's lay rate IS the MDU (units per production-mason-day), so a
+// production line's units + MDU come directly off the report. Same-unit
+// rows can be merged in the picker; the combined MDU is the units-weighted
+// harmonic mean (Σunits ÷ Σ(units÷MDU)), which preserves total man-days and
+// matches the BPR's own "Avg. Lay Rate" on the class-totals line.
+//
+// "Lay 0.0" materials (Mortar, Dur-o-wal, Air Deduction) aren't separately
+// laid, so they carry no MDU and are excluded from the labor estimate.
+//
+// Each line/group optionally links to an app production item and/or a
+// category. Assignments are remembered (keyed on classCode|materialCode)
+// via _resolveBprProdItem + a "Remember?" prompt, mirroring the cost-code
+// map — so repeat materials pre-fill on the next import.
+
+function _prodFmtQty(n){ n = Number(n) || 0; return Math.round(n).toLocaleString(); }
+function _prodFmtMdu(n){
+  if (n === '' || n == null) return '';
+  n = Number(n) || 0;
+  if (!n) return '0';
+  return (Math.round(n * 10) === Math.round(n) * 10) ? String(Math.round(n)) : n.toFixed(1);
+}
+// Units-weighted harmonic mean of lay rates — preserves total man-days.
+function _prodBprCombinedMdu(rows){
+  var u = 0, d = 0;
+  rows.forEach(function(b){
+    var q = Number(b.quantity) || 0, m = Number(b.layRate) || 0;
+    u += q; if (m > 0) d += q / m;
+  });
+  return d > 0 ? u / d : 0;
+}
+
+// Resolve a remembered item/category for a BPR material. Priority mirrors
+// _resolveBprCostCode: project+material → project class → global+material →
+// global class.
+function _resolveBprProdItem(project, b){
+  var res = { itemId: '', categoryId: '' };
+  if (!b) return res;
+  var cls = String(b.classCode || ''); if (!cls) return res;
+  var mat = String(b.materialCode || '');
+  var pOv  = Array.isArray(project && project.bprProdItemMapOverrides) ? project.bprProdItemMapOverrides : [];
+  var gMap = Array.isArray(db.bprProdItemMap) ? db.bprProdItemMap : [];
+  function hit(list, reqMat){
+    return list.find(function(m){
+      if (!m || m.classCode !== cls) return false;
+      if (reqMat) return String(m.materialCode || '') === mat;
+      return !m.materialCode;
+    });
+  }
+  var e;
+  if (mat) { e = hit(pOv, true);  if (e) return { itemId: e.itemId || '', categoryId: e.categoryId || '' }; }
+  e = hit(pOv, false);            if (e) return { itemId: e.itemId || '', categoryId: e.categoryId || '' };
+  if (mat) { e = hit(gMap, true); if (e) return { itemId: e.itemId || '', categoryId: e.categoryId || '' }; }
+  e = hit(gMap, false);           if (e) return { itemId: e.itemId || '', categoryId: e.categoryId || '' };
+  return res;
+}
+
+// ── Entry: + From BPR on the estimate toolbar ───────────────────────
+function prodOpenBprFlow(){
+  if (!_editProjectId) { alert('Save the project first, then build its production estimate.'); return; }
+  _bprPickerDest = 'prod';
+  var p = getProj(_editProjectId); if (!p) return;
+  p.bprMaterials = p.bprMaterials || [];
+  if (p.bprMaterials.length) prodOpenBprPicker();
+  else procOpenBprUploadModal();   // shared upload/budget modal; routes back via _bprPickerDest
+}
+function prodBprReupload(){ _bprPickerDest = 'prod'; procOpenBprUploadModal(true); }
+
+// ── Picker open + state init ────────────────────────────────────────
+function prodOpenBprPicker(preserveState){
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var bpr = p.bprMaterials || [];
+  if (!bpr.length) { procOpenBprUploadModal(); return; }
+  var est = _prodEnsureEstimate(p);
+
+  var imported = {};
+  (est.lines || []).forEach(function(l){
+    if (l.source === 'bpr' && Array.isArray(l.bprRef)) l.bprRef.forEach(function(id){ imported[String(id)] = true; });
+  });
+
+  if (!preserveState){
+    _prodBprSel = {}; _prodBprGroups = []; _prodBprGroupOf = {};
+    _prodBprMdu = {}; _prodBprLink = {}; _prodBprCat = {}; _prodBprGroupMeta = {};
+    bpr.forEach(function(b){
+      var id = String(b.id);
+      var laid = (b.layRate != null && Number(b.layRate) > 0);
+      _prodBprSel[id] = laid && !b.defaultSkip && !imported[id];
+      _prodBprMdu[id] = (b.layRate != null) ? Number(b.layRate) : '';
+      var r = _resolveBprProdItem(p, b);
+      _prodBprLink[id] = r.itemId || '';
+      _prodBprCat[id]  = r.categoryId || '';
+    });
+  }
+  showModal(_prodBprPickerHtml(p, bpr, imported));
+}
+
+function _prodBprImportCount(p){
+  var n = _prodBprGroups.filter(function(grp){ return grp.memberIds.some(function(id){ return _prodBprSel[id]; }); }).length;
+  (p.bprMaterials || []).forEach(function(b){
+    var id = String(b.id);
+    if (_prodBprSel[id] && !_prodBprGroupOf[id] && Number(b.layRate) > 0) n++;
+  });
+  return n;
+}
+
+function _prodBprPickerHtml(p, bpr, imported){
+  imported = imported || {};
+  var itemsActive = (db.prodItems || []).filter(function(it){ return it.active !== false; })
+    .slice().sort(function(a,b){ return (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0); });
+  function itemOpts(cur){
+    return '<option value="">\u2014 none \u2014</option>' + itemsActive.map(function(it){
+      var sel = String(cur || '') === String(it.id) ? ' selected' : '';
+      return '<option value="' + it.id + '"' + sel + '>' + _prodEsc(it.name) + '</option>';
+    }).join('');
+  }
+  function catOpts(cur){ return _prodCategoryOptions(cur); }
+
+  var groups = {}, order = [];
+  bpr.forEach(function(b){ var k = b.classCode || 'UNC'; if (!groups[k]) { groups[k] = []; order.push(k); } groups[k].push(b); });
+
+  var chk = [], unitset = {};
+  bpr.forEach(function(b){
+    var id = String(b.id);
+    if (_prodBprSel[id] && !_prodBprGroupOf[id] && Number(b.layRate) > 0) { chk.push(b); unitset[b.unit || ''] = 1; }
+  });
+  var canGroup = chk.length >= 2 && Object.keys(unitset).length === 1;
+  var laidCount = bpr.filter(function(b){ return Number(b.layRate) > 0; }).length;
+
+  var html =
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Build estimate lines from Bid Price Report</div>' +
+    '<div class="msb">Qty and MDU come straight from the report. Check rows and <strong>Group selected</strong> to merge same-unit lines into one estimate line \u2014 MDU re-averages by units. Link each line to an app item and/or set a category. Mortar, wire, and air deduction aren\u2019t separately laid, so they\u2019re excluded.</div>' +
+    '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">' +
+      '<button type="button" class="btn btn-sm" onclick="prodBprSelAll(true)">Select all</button>' +
+      '<button type="button" class="btn btn-sm" onclick="prodBprSelAll(false)">Select none</button>' +
+      '<button type="button" class="btn btn-sm" onclick="prodBprCreateGroup()"' + (canGroup ? '' : ' disabled') +
+        ' title="' + (canGroup ? ('Combine the ' + chk.length + ' checked rows into one estimate line') : 'Check at least 2 ungrouped rows that share one unit') + '">' +
+        '\u2295 Group selected' + (canGroup ? (' (' + chk.length + ')') : '') + '</button>' +
+      '<span style="margin-left:auto;font-size:11px;color:#888">' + laidCount + ' laid materials' +
+        (_prodBprGroups.length ? (' \u00b7 ' + _prodBprGroups.length + ' group' + (_prodBprGroups.length === 1 ? '' : 's')) : '') + '</span>' +
+      '<button type="button" class="btn btn-sm" onclick="prodBprReupload()" title="Re-upload to replace stored BPR materials">Re-upload BPR</button>' +
+    '</div>';
+
+  if (_prodBprGroups.length){
+    var bprById = {}; bpr.forEach(function(b){ bprById[String(b.id)] = b; });
+    html += '<div style="background:#EEF6E9;border:1px solid #C8E0BB;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px">' +
+      '<div style="font-weight:600;color:#2E6B36;margin-bottom:4px">Merged lines \u2014 each becomes one estimate line:</div>';
+    _prodBprGroups.forEach(function(grp){
+      var meta = _prodBprGroupMeta[grp.id] || (_prodBprGroupMeta[grp.id] = { link:'', cat:'' });
+      var mem = grp.memberIds.map(function(id){ return bprById[id]; }).filter(function(b){ return b && _prodBprSel[String(b.id)]; });
+      var tq = mem.reduce(function(s,b){ return s + (Number(b.quantity) || 0); }, 0);
+      var mdu = _prodBprCombinedMdu(mem);
+      var unit = (mem[0] && mem[0].unit) || '';
+      html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 0;border-top:1px solid #DCEBD0">' +
+        '<span style="font-weight:600;color:#1E6B36">\u2295 ' + _prodEsc(grp.label) + '</span>' +
+        '<span style="color:#666">' + _prodFmtQty(tq) + ' ' + _prodEsc(unit) + '</span>' +
+        '<span style="background:#fff;border:1px solid #C8E0BB;border-radius:5px;padding:1px 7px">MDU <strong style="color:#1F5A8A">' + _prodFmtMdu(mdu) + '</strong></span>' +
+        '<select class="fs" style="min-width:130px;font-size:11px" onchange="prodBprSetGroupLink(\'' + grp.id + '\',this.value)">' + itemOpts(meta.link) + '</select>' +
+        '<select class="fs" style="min-width:120px;font-size:11px" onchange="prodBprSetGroupCat(\'' + grp.id + '\',this.value)">' + catOpts(meta.cat) + '</select>' +
+        '<span style="margin-left:auto;display:flex;gap:6px">' +
+          '<button type="button" onclick="prodBprRenameGroup(\'' + grp.id + '\')" style="font-size:11px;background:none;border:none;color:#1F5A8A;cursor:pointer">rename</button>' +
+          '<button type="button" onclick="prodBprUngroup(\'' + grp.id + '\')" style="font-size:11px;background:none;border:none;color:#A32D2D;cursor:pointer">ungroup</button>' +
+        '</span>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '<div style="max-height:48vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin-bottom:10px">';
+  order.forEach(function(cls){
+    var list = groups[cls];
+    var firstDesc = (list[0] && list[0].classDescription) || cls;
+    var anyLaid = list.some(function(b){ return Number(b.layRate) > 0; });
+    var bandColor = anyLaid ? '#F0F4FB' : '#F4F4F2';
+    var bandText  = anyLaid ? '#1F5A8A' : '#999';
+    html += '<div style="background:' + bandColor + ';padding:7px 12px;font-size:12px;font-weight:600;color:' + bandText + ';border-top:1px solid #eee">' +
+      _prodEsc(cls) + ' \u2014 ' + _prodEsc(firstDesc) +
+      (anyLaid ? '' : ' <span style="font-weight:400;font-size:10px">(not separately laid \u2014 excluded)</span>') + '</div>';
+    html += '<table style="width:100%;font-size:12px;table-layout:fixed">' +
+      '<colgroup><col style="width:30px"><col><col style="width:74px"><col style="width:46px"><col style="width:64px"><col style="width:150px"><col style="width:130px"></colgroup>' +
+      '<thead style="background:#fafafa"><tr>' +
+        '<th style="padding:5px 4px"></th>' +
+        '<th style="padding:5px 8px;text-align:left">Description</th>' +
+        '<th style="padding:5px 8px;text-align:right">Qty</th>' +
+        '<th style="padding:5px 4px;text-align:left">Unit</th>' +
+        '<th style="padding:5px 8px;text-align:right">MDU</th>' +
+        '<th style="padding:5px 6px;text-align:left">Link to item</th>' +
+        '<th style="padding:5px 6px;text-align:left">Category</th>' +
+      '</tr></thead><tbody>';
+    list.forEach(function(b){
+      var id = String(b.id);
+      var laid = Number(b.layRate) > 0;
+      var already = !!imported[id];
+      var gid = _prodBprGroupOf[id];
+      var rowStyle = !laid ? 'opacity:.5;' : (gid ? 'background:#FAFCF7;box-shadow:inset 3px 0 0 #6B9A4D;' : (already ? 'opacity:.6;' : ''));
+      var disabled = (!laid || already) ? ' disabled' : '';
+      var badge = '';
+      if (gid){ var grp = _prodBprGroups.find(function(g){ return g.id === gid; }); badge = ' <span style="font-size:10px;color:#2E6B36;background:#D7EBC4;padding:1px 6px;border-radius:8px">\u2295 ' + _prodEsc(grp ? grp.label : 'group') + '</span>'; }
+      else if (already) badge = ' <span style="font-size:10px;color:#1E6B36;background:#E3F4E8;padding:1px 6px;border-radius:8px">added</span>';
+      var rem = '';
+      var res = _resolveBprProdItem(p, b);
+      if (laid && !gid && (res.itemId || res.categoryId)) rem = ' <span title="Remembered from a prior import" style="font-size:11px;color:#1F5A8A">\u21ba</span>';
+      var checked = _prodBprSel[id] ? ' checked' : '';
+      html += '<tr style="border-top:1px solid #f3f3f3;' + rowStyle + '">' +
+        '<td style="padding:5px 4px;text-align:center"><input type="checkbox"' + checked + disabled + ' onchange="prodBprToggle(\'' + id + '\',this.checked)"></td>' +
+        '<td style="padding:5px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + _prodEsc(b.description || '') + '">' + _prodEsc(b.description || b.materialCode || '(material)') + badge + '</td>' +
+        '<td style="padding:5px 8px;text-align:right">' + _prodFmtQty(b.quantity) + '</td>' +
+        '<td style="padding:5px 4px;color:#888">' + _prodEsc(b.unit || '') + '</td>' +
+        '<td style="padding:5px 8px;text-align:right">' + (laid ? ('<input value="' + _prodFmtMdu(_prodBprMdu[id]) + '"' + (gid ? ' disabled' : '') + ' onchange="prodBprSetMdu(\'' + id + '\',this.value)" style="width:50px;text-align:right;font-size:11px">' + rem) : '<span style="color:#bbb">\u2014</span>') + '</td>' +
+        '<td style="padding:5px 6px">' + ((laid && !gid) ? ('<select class="fs" style="width:100%;font-size:11px" onchange="prodBprSetLink(\'' + id + '\',this.value)">' + itemOpts(_prodBprLink[id]) + '</select>') : '<span style="color:#bbb">\u2014</span>') + '</td>' +
+        '<td style="padding:5px 6px">' + ((laid && !gid) ? ('<select class="fs" style="width:100%;font-size:11px" onchange="prodBprSetCat(\'' + id + '\',this.value)">' + catOpts(_prodBprCat[id]) + '</select>') : '<span style="color:#bbb">\u2014</span>') + '</td>' +
+      '</tr>';
+    });
+    html += '</tbody></table>';
+  });
+  html += '</div>';
+
+  var n = _prodBprImportCount(p);
+  html += '<div class="mbtns" style="justify-content:space-between;align-items:center">' +
+    '<span style="font-size:11px;color:#888">' + n + ' line' + (n === 1 ? '' : 's') + ' will be added</span>' +
+    '<span style="display:flex;gap:8px">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="prodBprSavePicker()">Import ' + n + ' line' + (n === 1 ? '' : 's') + '</button>' +
+    '</span>' +
+  '</div>';
+  return html;
+}
+
+// ── Picker handlers ─────────────────────────────────────────────────
+function prodBprSelAll(v){
+  var p = getProj(_editProjectId); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  var imported = {};
+  (est.lines || []).forEach(function(l){ if (l.source === 'bpr' && Array.isArray(l.bprRef)) l.bprRef.forEach(function(id){ imported[String(id)] = true; }); });
+  (p.bprMaterials || []).forEach(function(b){
+    var id = String(b.id);
+    if (Number(b.layRate) > 0 && !_prodBprGroupOf[id] && !imported[id]) _prodBprSel[id] = v;
+  });
+  prodOpenBprPicker(true);
+}
+function prodBprToggle(id, v){ _prodBprSel[String(id)] = v; prodOpenBprPicker(true); }
+function prodBprSetMdu(id, v){ var n = parseFloat(String(v).replace(/,/g, '')); _prodBprMdu[String(id)] = isFinite(n) ? n : ''; }
+function prodBprSetLink(id, v){ _prodBprLink[String(id)] = v || ''; }
+function prodBprSetCat(id, v){ _prodBprCat[String(id)] = v || ''; }
+function prodBprSetGroupLink(gid, v){ (_prodBprGroupMeta[gid] = _prodBprGroupMeta[gid] || { link:'', cat:'' }).link = v || ''; }
+function prodBprSetGroupCat(gid, v){ (_prodBprGroupMeta[gid] = _prodBprGroupMeta[gid] || { link:'', cat:'' }).cat = v || ''; }
+
+function prodBprCreateGroup(){
+  var p = getProj(_editProjectId); if (!p) return;
+  var bprById = {}; (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+  var checked = Object.keys(_prodBprSel).filter(function(id){
+    return _prodBprSel[id] && !_prodBprGroupOf[id] && bprById[id] && Number(bprById[id].layRate) > 0;
+  });
+  if (checked.length < 2) { alert('Check at least 2 ungrouped rows to merge.'); return; }
+  var units = {}; checked.forEach(function(id){ units[bprById[id].unit || ''] = 1; });
+  if (Object.keys(units).length > 1) { alert('All merged lines must share the same unit. Selected units: ' + Object.keys(units).join(', ')); return; }
+  var defLabel = checked.slice(0, 2).map(function(id){ return bprById[id].description || bprById[id].materialCode || ''; }).filter(Boolean).join(' + ');
+  if (checked.length > 2) defLabel += ' + ' + (checked.length - 2) + ' more';
+  var label = prompt('Label for the combined estimate line:', defLabel);
+  if (label === null) return;
+  label = (label || '').trim(); if (!label) { alert('Group needs a label.'); return; }
+  var gid = _bprNewGroupId();
+  _prodBprGroups.push({ id: gid, label: label, memberIds: checked.slice() });
+  _prodBprGroupMeta[gid] = { link: _prodBprLink[checked[0]] || '', cat: _prodBprCat[checked[0]] || '' };
+  checked.forEach(function(id){ _prodBprGroupOf[id] = gid; });
+  prodOpenBprPicker(true);
+}
+function prodBprUngroup(gid){
+  var grp = _prodBprGroups.find(function(g){ return g.id === gid; }); if (!grp) return;
+  grp.memberIds.forEach(function(id){ delete _prodBprGroupOf[id]; });
+  _prodBprGroups = _prodBprGroups.filter(function(g){ return g.id !== gid; });
+  delete _prodBprGroupMeta[gid];
+  prodOpenBprPicker(true);
+}
+function prodBprRenameGroup(gid){
+  var grp = _prodBprGroups.find(function(g){ return g.id === gid; }); if (!grp) return;
+  var nl = prompt('Rename merged line:', grp.label); if (nl === null) return;
+  nl = (nl || '').trim(); if (!nl) { alert('Label cannot be empty.'); return; }
+  grp.label = nl; prodOpenBprPicker(true);
+}
+
+// ── Save: build estimate lines ──────────────────────────────────────
+function prodBprSavePicker(){
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var est = _prodEnsureEstimate(p);
+  var bprById = {}; (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+  var gen = _prodGeneralCategoryId();
+  function newLineId(){ return 'pl_' + Date.now() + '_' + Math.floor(Math.random() * 100000); }
+  var added = 0, groupedAdded = 0;
+
+  _prodBprGroups.forEach(function(grp){
+    var meta = _prodBprGroupMeta[grp.id] || {};
+    var mem = grp.memberIds.map(function(id){ return bprById[id]; }).filter(function(b){ return b && _prodBprSel[String(b.id)]; });
+    if (!mem.length) return;
+    var units = mem.reduce(function(s,b){ return s + (Number(b.quantity) || 0); }, 0);
+    est.lines.push({
+      id: newLineId(), itemId: meta.link || null, itemName: grp.label, lineType: 'production',
+      unitLabel: (mem[0] && mem[0].unit) || '', estUnits: units, estMdu: _prodBprCombinedMdu(mem),
+      amount: '', crewId: null, categoryId: meta.cat || gen,
+      bprRef: mem.map(function(b){ return b.id; }), source: 'bpr'
+    });
+    added++; groupedAdded++;
+  });
+
+  (p.bprMaterials || []).forEach(function(b){
+    var id = String(b.id);
+    if (!_prodBprSel[id] || _prodBprGroupOf[id]) return;
+    if (!(Number(b.layRate) > 0)) return;
+    var mdu = _prodBprMdu[id];
+    mdu = (mdu === '' || mdu == null) ? (Number(b.layRate) || 0) : (Number(mdu) || 0);
+    est.lines.push({
+      id: newLineId(), itemId: _prodBprLink[id] || null, itemName: b.description || b.materialCode || '(material)', lineType: 'production',
+      unitLabel: b.unit || '', estUnits: Number(b.quantity) || 0, estMdu: mdu,
+      amount: '', crewId: null, categoryId: _prodBprCat[id] || gen,
+      bprRef: [b.id], source: 'bpr'
+    });
+    added++;
+  });
+
+  var learn = _prodBprComputeLearnMappings(p);
+
+  _prodBprGroups = []; _prodBprGroupOf = {}; _prodBprGroupMeta = {};
+
+  if (added) saveDB();
+  closeModal();
+  renderProdEstimateView();
+  if (typeof showToast === 'function') {
+    showToast(added ? ('Added ' + added + ' line' + (added === 1 ? '' : 's') + (groupedAdded ? (' (' + groupedAdded + ' merged)') : '') + '.') : 'No lines selected.', added ? 'success' : 'info');
+  }
+  if (added && learn && learn.length) _prodBprPromptLearn(p, learn);
+}
+
+// ── Learn-as-you-go: remember item/category assignments ─────────────
+function _prodBprComputeLearnMappings(p){
+  var bprById = {}; (p.bprMaterials || []).forEach(function(b){ bprById[String(b.id)] = b; });
+  var out = [];
+  function consider(b, itemId, categoryId){
+    if (!b || !b.classCode) return;
+    itemId = String(itemId || ''); categoryId = String(categoryId || '');
+    if (!itemId && !categoryId) return;
+    var cur = _resolveBprProdItem(p, b);
+    if (String(cur.itemId || '') === itemId && String(cur.categoryId || '') === categoryId) return;
+    out.push({ classCode: b.classCode, materialCode: String(b.materialCode || '') || null, itemId: itemId || null, categoryId: categoryId || null });
+  }
+  _prodBprGroups.forEach(function(grp){
+    var meta = _prodBprGroupMeta[grp.id] || {};
+    grp.memberIds.forEach(function(id){ if (_prodBprSel[id]) consider(bprById[id], meta.link, meta.cat); });
+  });
+  (p.bprMaterials || []).forEach(function(b){
+    var id = String(b.id);
+    if (!_prodBprSel[id] || _prodBprGroupOf[id]) return;
+    if (!(Number(b.layRate) > 0)) return;
+    consider(b, _prodBprLink[id], _prodBprCat[id]);
+  });
+  return out;
+}
+function _prodBprMergeMappingsInto(arr, mappings){
+  mappings.forEach(function(m){
+    var idx = arr.findIndex(function(x){ return x.classCode === m.classCode && (x.materialCode || null) === (m.materialCode || null); });
+    var e = { classCode: m.classCode, materialCode: m.materialCode || null, itemId: m.itemId || null, categoryId: m.categoryId || null };
+    if (idx >= 0) arr[idx] = e; else arr.push(e);
+  });
+}
+function _prodBprPromptLearn(p, mappings){
+  if (!mappings || !mappings.length) return;
+  var itemById = {}; (db.prodItems || []).forEach(function(it){ itemById[String(it.id)] = it; });
+  var catById  = {}; (db.prodCategories || []).forEach(function(c){ catById[String(c.id)] = c; });
+  var rowsHtml = mappings.map(function(m){
+    var it = m.itemId ? itemById[String(m.itemId)] : null;
+    var c  = m.categoryId ? catById[String(m.categoryId)] : null;
+    var tgt = [it ? ('item: ' + it.name) : '', c ? ('category: ' + c.name) : ''].filter(Boolean).join('  \u00b7  ');
+    return '<div style="display:flex;align-items:center;padding:5px 0;border-top:1px solid #f0f0ec;font-size:12px">' +
+      '<span style="font-family:monospace;color:#5D4391;min-width:54px">' + _prodEsc(m.classCode) + '</span>' +
+      (m.materialCode
+        ? '<span style="font-family:monospace;color:#888;font-size:11px;margin-right:8px">/ ' + _prodEsc(m.materialCode) + '</span>'
+        : '<span style="color:#888;font-size:11px;margin-right:8px">(all materials)</span>') +
+      '<span style="margin:0 8px;color:#888">\u2192</span><span>' + _prodEsc(tgt) + '</span></div>';
+  }).join('');
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Remember these assignments?</div>' +
+    '<div class="msb">You set ' + mappings.length + ' item/category assignment' + (mappings.length === 1 ? '' : 's') + ' that ' +
+      (mappings.length === 1 ? 'isn\'t' : 'aren\'t') + ' already remembered. Saving pre-fills ' + (mappings.length === 1 ? 'it' : 'them') +
+      ' the next time these BPR lines appear. Choose where to save:</div>' +
+    '<div class="sb3" style="margin-bottom:14px">' + rowsHtml + '</div>' +
+    '<div class="mbtns" style="flex-wrap:wrap;gap:8px">' +
+      '<button class="btn" onclick="closeModal()">Don\'t save</button>' +
+      '<button class="btn" onclick="_prodBprLearnApply(\'' + _prodEsc(String(p.id)) + '\',\'project\')" title="Save only on this project">Save to this project</button>' +
+      '<button class="btn btn-p" onclick="_prodBprLearnApply(\'' + _prodEsc(String(p.id)) + '\',\'global\')" title="Save globally for all future imports">Save globally</button>' +
+    '</div>'
+  );
+  window._prodBprPendingLearn = mappings;
+}
+function _prodBprLearnApply(projectId, scope){
+  var mappings = window._prodBprPendingLearn || [];
+  if (!mappings.length) { closeModal(); return; }
+  if (scope === 'global'){
+    db.bprProdItemMap = Array.isArray(db.bprProdItemMap) ? db.bprProdItemMap : [];
+    _prodBprMergeMappingsInto(db.bprProdItemMap, mappings);
+    if (typeof supabaseClient !== 'undefined' && supabaseClient){
+      supabaseClient.from('kmi_settings')
+        .upsert({ key: 'bprProdItemMap', value: db.bprProdItemMap })
+        .then(function(r){ if (r && r.error) console.warn('bprProdItemMap sync error:', r.error.message); });
+    }
+  } else {
+    var p = getProj(projectId); if (!p) { closeModal(); return; }
+    p.bprProdItemMapOverrides = Array.isArray(p.bprProdItemMapOverrides) ? p.bprProdItemMapOverrides : [];
+    _prodBprMergeMappingsInto(p.bprProdItemMapOverrides, mappings);
+  }
+  saveDB();
+  window._prodBprPendingLearn = null;
+  closeModal();
+  if (typeof showToast === 'function') showToast('Saved ' + mappings.length + ' assignment' + (mappings.length === 1 ? '' : 's') + (scope === 'global' ? ' globally.' : ' to this project.'), 'success');
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // BPR WORKLIST + ASSIGNMENT + MERGE + SPLIT — Procurement Round 3.3
@@ -35799,6 +36247,7 @@ function renderProdEstimateView() {
       '<div id="prod-wage-note" style="font-size:12px;color:var(--acd);font-weight:600;flex:1"></div>' +
       '<div style="display:flex;gap:8px">' +
         '<button class="btn btn-sm btn-p" onclick="prodShowAddItems()">+ Add items</button>' +
+        '<button class="btn btn-sm" onclick="prodOpenBprFlow()" title="' + ((p.bprMaterials && p.bprMaterials.length) ? 'Build estimate lines from the Bid Price Report' : 'Upload the Bid Price Report PDF to pull quantities and lay rates') + '">+ From BPR' + ((p.bprMaterials && p.bprMaterials.length) ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
         '<button class="btn btn-sm" id="prod-save-btn" onclick="prodSaveEstimate()">Save estimate</button>' +
       '</div>' +
     '</div></div>';
@@ -39566,7 +40015,8 @@ async function pushToSupabase() {
       {key:'budgetEquipmentSplit', value:db.budgetEquipmentSplit},
       {key:'budgetQtyConversions', value:db.budgetQtyConversions},
       {key:'budgetAutoRoutes',     value:db.budgetAutoRoutes},
-      {key:'bprCostCodeMap',       value:db.bprCostCodeMap || []}
+      {key:'bprCostCodeMap',       value:db.bprCostCodeMap || []},
+      {key:'bprProdItemMap',       value:db.bprProdItemMap || []}
     ];
     var r = await supabaseClient.from('kmi_settings').upsert(settingsRows);
     if (r.error) errs.push('settings: ' + r.error.message);
@@ -39820,6 +40270,7 @@ async function pullFromSupabase() {
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
                                 'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
                                 'bprCostCodeMap',
+                                'bprProdItemMap',
                                 'anthropic_api_key'];
     (settings.data || []).forEach(function(row) {
       if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
