@@ -35831,7 +35831,7 @@ function renderProdEstimateView() {
     table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:980px">' + head + '<tbody>' + body + '</tbody></table></div></div>';
   }
 
-  host.innerHTML = rateHint + metrics + params + table;
+  host.innerHTML = rateHint + _prodPendingPanelHtml(p) + metrics + params + table;
   prodRefresh();
 }
 function _prodMetric(id, label, sub) {
@@ -35852,6 +35852,150 @@ function _prodCrewSelectHtml(est, l) {
 function _prodCategorySelectHtml(l) {
   return '<select class="fs" style="min-width:104px" onchange="prodEdit(\'' + l.id + '\',\'categoryId\',this.value); prodPersistLocal();">' +
     _prodCategoryOptions(l.categoryId) + '</select>';
+}
+
+// ── Custom field items: PM resolution (Phase 5b) ─────────────────────
+// Field crews add custom items on mobile (db.prodWeekly[].custom). The PM
+// resolves each from the Estimate tab: allocate to an existing line, or add
+// a new estimate line. Either way the logged units/hours move into that
+// line's weekly entries (actuals) and the custom item is marked resolved.
+function _prodPendingCustom(p) {
+  var out = [];
+  (db.prodWeekly || []).forEach(function(r){
+    if (String(r.projectId) !== String(p.id)) return;
+    (r.custom || []).forEach(function(c){
+      if (c && c.status !== 'resolved' && c.name && String(c.name).trim()) out.push({ rowId: r.id, weekEnding: r.weekEnding, item: c });
+    });
+  });
+  out.sort(function(a,b){ return String(a.weekEnding).localeCompare(String(b.weekEnding)) || String(a.item.name).localeCompare(String(b.item.name)); });
+  return out;
+}
+function _prodFindWeekRow(rowId) { return (db.prodWeekly || []).find(function(r){ return String(r.id) === String(rowId); }) || null; }
+function _prodFindCustom(rowId, custId) { var r = _prodFindWeekRow(rowId); if (!r) return null; return (r.custom || []).find(function(c){ return String(c.id) === String(custId); }) || null; }
+function _prodPendingPanelHtml(p) {
+  var pend = _prodPendingCustom(p);
+  if (!pend.length) return '';
+  var rows = pend.map(function(x){
+    var c = x.item;
+    var hrs = (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.l)||0);
+    var meta = ((Number(c.u)||0) ? (Number(c.u).toLocaleString() + ' units \u00b7 ') : '') + hrs + ' hrs (F ' + (Number(c.f)||0) + ' / M ' + (Number(c.m)||0) + ' / L ' + (Number(c.l)||0) + ')';
+    return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;border-top:.5px solid #f0e4be">' +
+      '<div style="flex:1;min-width:200px"><div style="font-weight:600;font-size:13px">' + _prodEsc(c.name) + '</div>' +
+        '<div style="font-size:11px;color:#8a7a40">Week ' + _prodEsc(x.weekEnding) + ' \u00b7 ' + meta + '</div></div>' +
+      '<button class="btn btn-sm" onclick="prodResolveOpenAlloc(\'' + x.rowId + '\',\'' + c.id + '\')">Allocate to line</button>' +
+      '<button class="btn btn-sm btn-p" onclick="prodResolveOpenAdd(\'' + x.rowId + '\',\'' + c.id + '\')">Add to estimate</button>' +
+    '</div>';
+  }).join('');
+  return '<div class="card" style="background:#fffaf0;border:1px solid #f0e0a8">' +
+    '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#9A7A2E;margin-bottom:3px">Pending field items (' + pend.length + ')</div>' +
+    '<div style="font-size:12px;color:#8a7a40">Custom items logged by the field crew. Add each to the estimate or allocate it to an existing line \u2014 its logged units/hours move onto that line as actuals.</div>' +
+    rows + '</div>';
+}
+function prodResolveOpenAlloc(rowId, custId) {
+  var p = _prodCurrentProject(); if (!p) return;
+  var c = _prodFindCustom(rowId, custId); if (!c) return;
+  var est = _prodEnsureEstimate(p);
+  if (!(est.lines || []).length) { alert('No estimate lines yet \u2014 use "Add to estimate" instead.'); return; }
+  var wk = _prodFindWeekRow(rowId);
+  var opts = (est.lines || []).map(function(l){ return '<option value="' + l.id + '">' + _prodEsc(l.itemName) + ' (' + (l.lineType === 'production' ? 'production' : 'field') + ')</option>'; }).join('');
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Allocate \u201c' + _prodEsc(c.name) + '\u201d</div>' +
+    '<div class="msb">Merge this item\u2019s logged units/hours into an existing estimate line for week ' + _prodEsc(wk ? wk.weekEnding : '') + '. It then tracks as actuals on that line.</div>' +
+    '<div class="fgr" style="margin:12px 0"><label>Estimate line</label><select id="presolve-line">' + opts + '</select></div>' +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="prodResolveAllocSave(\'' + rowId + '\',\'' + custId + '\')">Allocate</button></div>');
+}
+async function prodResolveAllocSave(rowId, custId) {
+  var p = _prodCurrentProject(); if (!p) return;
+  var lineId = g('presolve-line') ? g('presolve-line').value : '';
+  if (!lineId) return;
+  _prodResolveMerge(rowId, custId, lineId);
+  closeModal();
+  await _prodResolvePersist(p, rowId);
+  renderProjectProduction();
+}
+function prodResolveOpenAdd(rowId, custId) {
+  var p = _prodCurrentProject(); if (!p) return;
+  var c = _prodFindCustom(rowId, custId); if (!c) return;
+  var wk = _prodFindWeekRow(rowId);
+  var hasUnits = (Number(c.u)||0) > 0;
+  var crewOpts = (db.crewTemplates || []).map(function(cr){ return '<option value="' + cr.id + '">' + _prodEsc(cr.name) + '</option>'; }).join('');
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add \u201c' + _prodEsc(c.name) + '\u201d to estimate</div>' +
+    '<div class="msb">Creates a new estimate line; the custom item\u2019s logged units/hours move onto it as actuals for week ' + _prodEsc(wk ? wk.weekEnding : '') + '.</div>' +
+    '<div class="fgr" style="margin-top:8px"><label>Name</label><input id="presolve-name" value="' + _prodEsc(c.name||'').replace(/"/g,'&quot;') + '"></div>' +
+    '<div class="fgr" style="margin-top:6px"><label>Type</label><select id="presolve-type" onchange="_presolveTypeChange()">' +
+      '<option value="production"' + (hasUnits?' selected':'') + '>Production (units + MDU)</option>' +
+      '<option value="field_dollar"' + (!hasUnits?' selected':'') + '>Field labor ($)</option>' +
+      '<option value="field_pct">Field labor (% of base)</option>' +
+    '</select></div>' +
+    '<div id="presolve-prod"' + (hasUnits?'':' style="display:none"') + '>' +
+      '<div class="fgr" style="margin-top:6px"><label>Unit label</label><input id="presolve-unit" placeholder="EA, SF, LF\u2026"></div>' +
+      '<div style="display:flex;gap:10px"><div class="fgr" style="flex:1;margin-top:6px"><label>Est units</label><input id="presolve-units" type="number" value="' + (Number(c.u)||'') + '"></div>' +
+      '<div class="fgr" style="flex:1;margin-top:6px"><label>Est MDU</label><input id="presolve-mdu" type="number"></div></div>' +
+    '</div>' +
+    '<div id="presolve-amt"' + (hasUnits?' style="display:none"':'') + '><div class="fgr" style="margin-top:6px"><label id="presolve-amt-lbl">Estimated $</label><input id="presolve-amount" type="number"></div></div>' +
+    '<div class="fgr" style="margin-top:6px"><label>Crew</label><select id="presolve-crew">' + crewOpts + '</select></div>' +
+    '<div class="fgr" style="margin-top:6px"><label>Category</label><select id="presolve-cat">' + _prodCategoryOptions(null) + '</select></div>' +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="prodResolveAddSave(\'' + rowId + '\',\'' + custId + '\')">Add line</button></div>');
+}
+function _presolveTypeChange() {
+  var t = g('presolve-type') ? g('presolve-type').value : 'production';
+  if (g('presolve-prod')) g('presolve-prod').style.display = (t === 'production') ? '' : 'none';
+  if (g('presolve-amt')) g('presolve-amt').style.display = (t === 'production') ? 'none' : '';
+  if (g('presolve-amt-lbl')) g('presolve-amt-lbl').textContent = (t === 'field_pct') ? '% of base labor' : 'Estimated $';
+}
+async function prodResolveAddSave(rowId, custId) {
+  var p = _prodCurrentProject(); if (!p) return;
+  var c = _prodFindCustom(rowId, custId); if (!c) return;
+  var est = _prodEnsureEstimate(p);
+  var name = ((g('presolve-name') && g('presolve-name').value) || '').trim() || c.name || 'Custom item';
+  var type = g('presolve-type') ? g('presolve-type').value : 'production';
+  var line = {
+    id: 'pl_' + Date.now() + '_' + Math.floor(Math.random()*1000),
+    itemId: null, itemName: name, lineType: type,
+    unitLabel: (type === 'production' && g('presolve-unit')) ? (g('presolve-unit').value || '') : '',
+    estUnits:  (type === 'production' && g('presolve-units')) ? (g('presolve-units').value || '') : '',
+    estMdu:    (type === 'production' && g('presolve-mdu')) ? (g('presolve-mdu').value || '') : '',
+    amount:    (type !== 'production' && g('presolve-amount')) ? (g('presolve-amount').value || '') : '',
+    crewId:    (g('presolve-crew') && g('presolve-crew').value) || null,
+    categoryId:(g('presolve-cat') && g('presolve-cat').value) || _prodGeneralCategoryId(),
+    bprRef: null, source: 'custom'
+  };
+  est.lines = est.lines || [];
+  est.lines.push(line);
+  _prodResolveMerge(rowId, custId, line.id);
+  closeModal();
+  saveDB();
+  try {
+    if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+      var r1 = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+      if (r1 && r1.error) throw r1.error;
+    }
+  } catch(e) { console.warn('resolve add: project sync failed', e); }
+  await _prodResolvePersist(p, rowId);
+  renderProjectProduction();
+}
+function _prodResolveMerge(rowId, custId, lineId) {
+  var r = _prodFindWeekRow(rowId); if (!r) return;
+  var c = (r.custom || []).find(function(x){ return String(x.id) === String(custId); }); if (!c) return;
+  r.entries = r.entries || {};
+  var e = r.entries[lineId] || (r.entries[lineId] = { u:'', f:'', m:'', l:'' });
+  e.u = (Number(e.u)||0) + (Number(c.u)||0);
+  e.f = (Number(e.f)||0) + (Number(c.f)||0);
+  e.m = (Number(e.m)||0) + (Number(c.m)||0);
+  e.l = (Number(e.l)||0) + (Number(c.l)||0);
+  c.status = 'resolved'; c.resolvedLineId = lineId; c.resolvedAt = new Date().toISOString();
+  saveDB();
+}
+async function _prodResolvePersist(p, rowId) {
+  var r = _prodFindWeekRow(rowId);
+  try {
+    if (typeof supabaseClient !== 'undefined' && supabaseClient && r) {
+      var res = await supabaseClient.from('kmi_prod_weekly').upsert(toSBProdWeekly(r));
+      if (res && res.error) throw res.error;
+    }
+    if (typeof showToast === 'function') showToast('Custom item resolved');
+  } catch(e) { console.warn('resolve persist failed', e); alert('Resolved on this device, but cloud sync failed: ' + (e.message || e)); }
 }
 function _prodRowHtml(est, l) {
   var id = l.id;
@@ -36322,12 +36466,12 @@ function _prodTrackingCompute(p) {
       s.estU+=estU; s.jtdU+=jtdU; s.est+=est$; s.earn+=earn$; s.act+=act;
       if (isGen) { generalLabor += est$; } else { var b = _catBucket(effCat); b.direct += est$; b.estU += estU; b.jtdU += jtdU; }
     } else {
-      field.push({ name:l.itemName, f:jtd.f, m:jtd.m, l:jtd.l, est:est$, act:act, varv:est$-act });
+      field.push({ name:l.itemName, f:jtd.f, m:jtd.m, l:jtd.l, est:est$, act:act, catId:effCat, isGen:isGen, earn:0, varv:0 });
       f.fF+=jtd.f; f.fM+=jtd.m; f.fL+=jtd.l; f.est+=est$; f.act+=act;
       if (isGen) { generalLabor += est$; } else { _catBucket(effCat).direct += est$; }
     }
   });
-  var totEst = s.est + f.est, totAct = s.act + f.act, totEarned = s.earn + f.est;
+  var totEst = s.est + f.est, totAct = s.act + f.act;
   // Category-based % complete (Phase 4b): General labor distributed across the
   // real categories by direct-labor share; category % from its unit items; the
   // overall figure is labor-weighted earned / labor.
@@ -36347,8 +36491,23 @@ function _prodTrackingCompute(p) {
   });
   categories.sort(function(a,b){ return a.sortOrder - b.sortOrder; });
   var pctCompleteLabor = catLaborSum > 0 ? catEarnedSum / catLaborSum : 0;
+  // Field-labor earned value (Phase 5b refinement): General items earn at the
+  // overall % complete; category-tied items earn at their category's % complete.
+  // Variance = Earned - Actual (not Est - Actual).
+  var catPctMap = {};
+  categories.forEach(function(c){ catPctMap[String(c.id)] = c.pct; });
+  f.earn = 0;
+  field.forEach(function(r){
+    var pctForItem = r.isGen ? pctCompleteLabor : (catPctMap[String(r.catId)] || 0);
+    r.earn = r.est * pctForItem;
+    r.varv = r.earn - r.act;
+    f.earn += r.earn;
+  });
+  // Totals now treat field labor on an earned basis too.
+  var totEarned = s.earn + f.earn;
+  var totVar = totEarned - totAct;
   return { prod:prod, field:field, prodTot:s, fieldTot:f, mdc:mdc, defCrew:defCrew,
-    totEst:totEst, totAct:totAct, totEarned:totEarned, totVar:totEarned-totAct,
+    totEst:totEst, totAct:totAct, totEarned:totEarned, totVar:totVar,
     unitsPct: s.estU>0 ? s.jtdU/s.estU : 0,
     categories:categories, generalLabor:generalLabor, catLaborSum:catLaborSum,
     catEarnedSum:catEarnedSum, pctCompleteLabor:pctCompleteLabor };
@@ -36400,19 +36559,15 @@ function renderProdTrackingView() {
   }).join('');
 
   // ---- field rows ----
-  var fEst=0, fAct=0, fF=0, fM=0, fL=0;
-  var fieldBody = fieldLines.map(function(l){
-    var jtd = _prodJtdForLine(p.id, l.id);
-    var act = jtd.f*fRate + jtd.m*mRate + jtd.l*lRate;
-    var est$ = estLineDollars(l), v = est$ - act;
-    fEst+=est$; fAct+=act; fF+=jtd.f; fM+=jtd.m; fL+=jtd.l;
-    return '<tr><td>' + _prodEsc(l.itemName) + '</td>' +
-      td(n(jtd.f)) + td(n(jtd.m)) + td(n(jtd.l)) +
-      td(fmtC(est$)) + td(fmtC(act)) + vtd(v) + '</tr>';
+  var fieldBody = C.field.map(function(r){
+    return '<tr><td>' + _prodEsc(r.name) + '</td>' +
+      td(n(r.f)) + td(n(r.m)) + td(n(r.l)) +
+      td(fmtC(r.est)) + td(fmtC(r.earn)) + td(fmtC(r.act)) + vtd(r.varv) + '</tr>';
   }).join('');
+  var fEst = C.fieldTot.est, fEarn = C.fieldTot.earn, fAct = C.fieldTot.act, fF = C.fieldTot.fF, fM = C.fieldTot.fM, fL = C.fieldTot.fL;
 
   // ---- headline ----
-  var totEst = sEst + fEst, totAct = sAct + fAct, totEarned = sEarn + fEst, totVar = totEarned - totAct;
+  var totEst = C.totEst, totAct = C.totAct, totEarned = C.totEarned, totVar = C.totVar;
   var unitsPct = sEstU>0 ? sJtdU/sEstU : 0;
   function metric(label, value, sub, accent){
     return '<div class="card" style="border-left:3px solid ' + (accent||'var(--kmi)') + ';padding:14px 16px">' +
@@ -36443,12 +36598,12 @@ function renderProdTrackingView() {
 
   // ---- field table ----
   var fieldTable = fieldLines.length ? ('<div class="card"><div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px">Field labor</div>' +
-    '<div style="overflow-x:auto"><table style="min-width:640px;font-variant-numeric:tabular-nums"><thead><tr>' +
+    '<div style="overflow-x:auto"><table style="min-width:700px;font-variant-numeric:tabular-nums"><thead><tr>' +
       '<th>Item</th><th style="text-align:right">JTD Fmn hrs</th><th style="text-align:right">JTD Mason hrs</th><th style="text-align:right">JTD Lab hrs</th>' +
-      '<th style="text-align:right">Est $</th><th style="text-align:right">Actual $</th><th style="text-align:right">Var $</th>' +
+      '<th style="text-align:right">Est $</th><th style="text-align:right">Earned $</th><th style="text-align:right">Actual $</th><th style="text-align:right">Var $</th>' +
     '</tr></thead><tbody>' + fieldBody + '</tbody>' +
     '<tfoot><tr style="border-top:2px solid #eee;font-weight:700"><td>Field subtotal</td>' +
-      td(n(fF)) + td(n(fM)) + td(n(fL)) + td(fmtC(fEst)) + td(fmtC(fAct)) + vtd(fEst - fAct) + '</tr></tfoot></table></div></div>') : '';
+      td(n(fF)) + td(n(fM)) + td(n(fL)) + td(fmtC(fEst)) + td(fmtC(fEarn)) + td(fmtC(fAct)) + vtd(fEarn - fAct) + '</tr></tfoot></table></div></div>') : '';
 
   var catTable = C.categories.length ? ('<div class="card"><div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px">Category completion</div>' +
     '<div style="overflow-x:auto"><table style="min-width:520px;font-variant-numeric:tabular-nums"><thead><tr>' +
@@ -36464,7 +36619,7 @@ function renderProdTrackingView() {
 
   var footnote = '<div style="font-size:11px;color:#999;line-height:1.6;margin-top:4px">' +
     'Actual MDU = ' + (defCrew ? ('default crew (' + _prodEsc(defCrew.name) + ') cost ' + fmtC(mdc)) : 'default crew cost') +
-    ' \u00f7 Actual $/unit. Earned $ = Est $ \u00d7 % complete; variance is Earned \u2212 Actual for production and Est \u2212 Actual for field labor. ' +
+    ' \u00f7 Actual $/unit. Earned $ = Est $ \u00d7 % complete; variance is Earned \u2212 Actual. Field labor earns at the overall % complete (General items) or the category % complete (category-tied items). ' +
     'Overall % complete is labor-weighted across categories, with General labor distributed by direct-labor share.</div>';
 
   host.innerHTML =
@@ -36554,7 +36709,7 @@ function prodExportTrackingPdf() {
   if (C.field.length) {
     if (y + 40 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
     sf('bold',11,NAVY); doc.text('Field labor', LM, y); y += 14;
-    var fcols = [{label:'Item',w:170,align:'left'},{label:'JTD Fmn hrs',w:74},{label:'JTD Mason hrs',w:80},{label:'JTD Lab hrs',w:74},{label:'Est $',w:82},{label:'Actual $',w:82},{label:'Var $',w:82}];
+    var fcols = [{label:'Item',w:158,align:'left'},{label:'JTD Fmn hrs',w:66},{label:'JTD Mason hrs',w:72},{label:'JTD Lab hrs',w:66},{label:'Est $',w:74},{label:'Earned $',w:74},{label:'Actual $',w:74},{label:'Var $',w:74}];
     var fx = LM; fcols.forEach(function(c){ c.left = fx; c.right = fx + c.w; fx += c.w; });
     var fRight = fcols[fcols.length-1].right;
     sf('bold',7,[90,90,90]); fcols.forEach(function(c){ if (c.align==='left') doc.text(c.label, c.left, y); else doc.text(c.label, c.right-3, y, {align:'right'}); });
@@ -36562,15 +36717,15 @@ function prodExportTrackingPdf() {
     C.field.forEach(function(r){
       var ty = y + 10; sf('normal',8,[0,0,0]); doc.text(one(r.name, fcols[0].w-3), fcols[0].left, ty);
       function fc(i,t,col){ sf('normal',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, ty, {align:'right'}); }
-      fc(1,num(r.f)); fc(2,num(r.m)); fc(3,num(r.l)); fc(4,money(r.est)); fc(5,money(r.act));
-      fc(6, (r.varv>0?'+':'') + money(r.varv), r.varv>0 ? GOOD : (r.varv<0 ? BAD : [0,0,0]));
+      fc(1,num(r.f)); fc(2,num(r.m)); fc(3,num(r.l)); fc(4,money(r.est)); fc(5,money(r.earn)); fc(6,money(r.act));
+      fc(7, (r.varv>0?'+':'') + money(r.varv), r.varv>0 ? GOOD : (r.varv<0 ? BAD : [0,0,0]));
       y += 16; ln(LM, y, fRight, y, 0.25, [238,238,238]);
     });
     var ff = C.fieldTot; var fty = y + 11; ln(LM, y, fRight, y, 0.8, [170,170,170]);
     sf('bold',8,[0,0,0]); doc.text('Field subtotal', fcols[0].left, fty);
     function fst(i,t,col){ sf('bold',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, fty, {align:'right'}); }
-    fst(1,num(ff.fF)); fst(2,num(ff.fM)); fst(3,num(ff.fL)); fst(4,money(ff.est)); fst(5,money(ff.act));
-    fst(6, ((ff.est-ff.act)>0?'+':'') + money(ff.est-ff.act), (ff.est-ff.act)>0 ? GOOD : ((ff.est-ff.act)<0 ? BAD : [0,0,0]));
+    fst(1,num(ff.fF)); fst(2,num(ff.fM)); fst(3,num(ff.fL)); fst(4,money(ff.est)); fst(5,money(ff.earn)); fst(6,money(ff.act));
+    fst(7, ((ff.earn-ff.act)>0?'+':'') + money(ff.earn-ff.act), (ff.earn-ff.act)>0 ? GOOD : ((ff.earn-ff.act)<0 ? BAD : [0,0,0]));
     y += 24;
   }
 
@@ -36599,7 +36754,7 @@ function prodExportTrackingPdf() {
   if (y + 30 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
   sf('normal',7,GREY);
   var fn = 'Actual MDU = ' + (C.defCrew ? ('default crew (' + C.defCrew.name + ') cost ' + money(C.mdc)) : 'default crew cost') +
-    ' \u00f7 Actual $/unit.   Earned $ = Est $ \u00d7 % complete.   Variance = Earned \u2212 Actual (production), Est \u2212 Actual (field labor).';
+    ' \u00f7 Actual $/unit.   Earned $ = Est $ \u00d7 % complete.   Variance = Earned \u2212 Actual.   Field labor earns at the overall % (General) or category % (category-tied).';
   doc.text(doc.splitTextToSize(fn, RM-LM), LM, y);
 
   doc.save('Production Tracking - ' + (p.number || p.name || 'project') + '.pdf');
@@ -36651,7 +36806,7 @@ function renderMobileWeekly() {
   if (fieldLines.length) { html += sec('Field Labor') + fieldLines.map(function(l){ return _mobWkCard(l); }).join(''); }
 
   html += sec('Custom items');
-  html += '<div id="mwk-custom-wrap">' + (_mobWeekModel.custom || []).map(_mobWkCustomCard).join('') + '</div>';
+  html += '<div id="mwk-custom-wrap">' + (_mobWeekModel.custom || []).filter(function(c){ return c.status !== 'resolved'; }).map(_mobWkCustomCard).join('') + '</div>';
   html += '<button onclick="mobWkAddCustom()" style="width:100%;background:#fff;border:1px dashed #c9ccd8;color:var(--kmi);border-radius:11px;padding:12px;font-size:14px;font-weight:600;margin-bottom:16px">+ Add custom item</button>';
 
   html += sec('Notes');
@@ -36736,7 +36891,7 @@ function mobWkRefresh() {
     }
     thrs += tot;
   });
-  (_mobWeekModel.custom || []).forEach(function(c){ thrs += (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.l)||0); tunits += (Number(c.u)||0); });
+  (_mobWeekModel.custom || []).forEach(function(c){ if (c.status === 'resolved') return; thrs += (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.l)||0); tunits += (Number(c.u)||0); });
   var h = document.getElementById('mwk-t-hrs'); if (h) h.textContent = thrs.toFixed(1);
   var uE = document.getElementById('mwk-t-units'); if (uE) uE.textContent = tunits.toLocaleString();
 }
