@@ -32591,6 +32591,23 @@ function _prodBprCombinedMdu(rows){
   return d > 0 ? u / d : 0;
 }
 
+// ── Field-$ override helpers ────────────────────────────────────────
+// When a BPR row is linked to a Field-$ item (scaffold, grout & rebar),
+// the link wins over BPR: the line becomes a flat labor-dollar line, not a
+// production line with an MDU. The dollar is the labor portion only —
+// man-days × the estimate default crew's man-day cost — frozen onto the
+// line so it no longer re-drives off units/MDU (mirrors a manual Field $).
+function _prodBprFieldDollarMdc(p, est){
+  return _prodManDayCost(p, _prodCrew(est && est.defaultCrewId));
+}
+function _prodBprManDaysSingle(b, mduOverride){
+  var lr = Number(mduOverride) > 0 ? Number(mduOverride) : (Number(b.layRate) || 0);
+  return lr > 0 ? (Number(b.quantity) || 0) / lr : 0;
+}
+function _prodBprManDaysGroup(mem){
+  return mem.reduce(function(s,b){ var lr = Number(b.layRate) || 0; return s + (lr > 0 ? (Number(b.quantity) || 0) / lr : 0); }, 0);
+}
+
 // Resolve a remembered item/category for a BPR material. Priority mirrors
 // _resolveBprCostCode: project+material → project class → global+material →
 // global class.
@@ -32685,6 +32702,9 @@ function _prodBprImportCount(p){
 
 function _prodBprPickerHtml(p, bpr, imported){
   imported = imported || {};
+  var est = _prodEnsureEstimate(p);
+  var fdMdc = _prodBprFieldDollarMdc(p, est);
+  function _bprLinkType(itemId){ var it = itemId ? _prodItem(itemId) : null; return it ? (it.itemType || 'production') : 'production'; }
   var itemsActive = (db.prodItems || []).filter(function(it){ return it.active !== false; })
     .slice().sort(function(a,b){ return (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0); });
   function itemOpts(cur){
@@ -32709,7 +32729,7 @@ function _prodBprPickerHtml(p, bpr, imported){
   var html =
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Build estimate lines from Bid Price Report</div>' +
-    '<div class="msb">Qty and MDU come straight from the report. Check rows and <strong>Group selected</strong> to merge same-unit lines into one estimate line \u2014 MDU re-averages by units. Link each line to an app item and/or set a category. Mortar, wire, and air deduction aren\u2019t separately laid, so they\u2019re excluded.</div>' +
+    '<div class="msb">Qty and MDU come straight from the report. Check rows and <strong>Group selected</strong> to merge same-unit lines into one estimate line \u2014 MDU re-averages by units. Link each line to an app item and/or set a category. Linking to a <strong>Field-$ item</strong> (e.g. Scaffolding, Grout &amp; Rebar) converts the row to a flat labor-dollar line \u2014 the MDU column then shows the auto-calculated labor and no longer drives off units. Mortar, wire, and air deduction aren\u2019t separately laid, so they\u2019re excluded.</div>' +
     '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">' +
       '<button type="button" class="btn btn-sm" onclick="prodBprSelAll(true)">Select all</button>' +
       '<button type="button" class="btn btn-sm" onclick="prodBprSelAll(false)">Select none</button>' +
@@ -32731,10 +32751,21 @@ function _prodBprPickerHtml(p, bpr, imported){
       var tq = mem.reduce(function(s,b){ return s + (Number(b.quantity) || 0); }, 0);
       var mdu = _prodBprCombinedMdu(mem);
       var unit = (mem[0] && mem[0].unit) || '';
+      var gType = _bprLinkType(meta.link);
+      var gItem = meta.link ? _prodItem(meta.link) : null;
+      var driverChip;
+      if (gType === 'field_dollar') {
+        var gLab = Math.round(_prodBprManDaysGroup(mem) * fdMdc * 100) / 100;
+        driverChip = '<span style="background:#fff;border:1px solid #C8E0BB;border-radius:5px;padding:1px 7px" title="Labor auto-calc (field $)">field-$ <strong style="color:#1E6B36">' + fmtC(gLab) + '</strong></span>';
+      } else if (gType === 'field_pct') {
+        driverChip = '<span style="background:#fff;border:1px solid #C8E0BB;border-radius:5px;padding:1px 7px" title="% of base (field %)">field-% <strong style="color:#5D4391">' + ((gItem && gItem.defaultPct != null) ? gItem.defaultPct : 0) + '%</strong></span>';
+      } else {
+        driverChip = '<span style="background:#fff;border:1px solid #C8E0BB;border-radius:5px;padding:1px 7px">MDU <strong style="color:#1F5A8A">' + _prodFmtMdu(mdu) + '</strong></span>';
+      }
       html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 0;border-top:1px solid #DCEBD0">' +
         '<span style="font-weight:600;color:#1E6B36">\u2295 ' + _prodEsc(grp.label) + '</span>' +
         '<span style="color:#666">' + _prodFmtQty(tq) + ' ' + _prodEsc(unit) + '</span>' +
-        '<span style="background:#fff;border:1px solid #C8E0BB;border-radius:5px;padding:1px 7px">MDU <strong style="color:#1F5A8A">' + _prodFmtMdu(mdu) + '</strong></span>' +
+        driverChip +
         '<select class="fs" style="min-width:130px;font-size:11px" onchange="prodBprSetGroupLink(\'' + grp.id + '\',this.value)">' + itemOpts(meta.link) + '</select>' +
         '<select class="fs" style="min-width:120px;font-size:11px" onchange="prodBprSetGroupCat(\'' + grp.id + '\',this.value)">' + catOpts(meta.cat) + '</select>' +
         '<span style="margin-left:auto;display:flex;gap:6px">' +
@@ -32781,12 +32812,25 @@ function _prodBprPickerHtml(p, bpr, imported){
       var res = _resolveBprProdItem(p, b);
       if (laid && !gid && (res.itemId || res.categoryId)) rem = ' <span title="Remembered from a prior import" style="font-size:11px;color:#1F5A8A">\u21ba</span>';
       var checked = _prodBprSel[id] ? ' checked' : '';
+      var rowLinkType = (laid && !gid) ? _bprLinkType(_prodBprLink[id]) : 'production';
+      var mduCellInner;
+      if (!laid) {
+        mduCellInner = '<span style="color:#bbb">\u2014</span>';
+      } else if (rowLinkType === 'field_dollar') {
+        var rLab = Math.round(_prodBprManDaysSingle(b, _prodBprMdu[id]) * fdMdc * 100) / 100;
+        mduCellInner = '<span title="Labor auto-calc (field $) \u2014 link overrides MDU" style="font-size:11px;color:#1E6B36;font-weight:600">' + fmtC(rLab) + '</span>' + rem;
+      } else if (rowLinkType === 'field_pct') {
+        var rItem = _prodItem(_prodBprLink[id]);
+        mduCellInner = '<span title="% of base (field %) \u2014 link overrides MDU" style="font-size:11px;color:#5D4391;font-weight:600">' + ((rItem && rItem.defaultPct != null) ? rItem.defaultPct : 0) + '%</span>' + rem;
+      } else {
+        mduCellInner = '<input value="' + _prodFmtMdu(_prodBprMdu[id]) + '"' + (gid ? ' disabled' : '') + ' onchange="prodBprSetMdu(\'' + id + '\',this.value)" style="width:50px;text-align:right;font-size:11px">' + rem;
+      }
       html += '<tr style="border-top:1px solid #f3f3f3;' + rowStyle + '">' +
         '<td style="padding:5px 4px;text-align:center"><input type="checkbox"' + checked + disabled + ' onchange="prodBprToggle(\'' + id + '\',this.checked)"></td>' +
         '<td style="padding:5px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + _prodEsc(b.description || '') + '">' + _prodEsc(b.description || b.materialCode || '(material)') + badge + '</td>' +
         '<td style="padding:5px 8px;text-align:right">' + _prodFmtQty(b.quantity) + '</td>' +
         '<td style="padding:5px 4px;color:#888">' + _prodEsc(b.unit || '') + '</td>' +
-        '<td style="padding:5px 8px;text-align:right">' + (laid ? ('<input value="' + _prodFmtMdu(_prodBprMdu[id]) + '"' + (gid ? ' disabled' : '') + ' onchange="prodBprSetMdu(\'' + id + '\',this.value)" style="width:50px;text-align:right;font-size:11px">' + rem) : '<span style="color:#bbb">\u2014</span>') + '</td>' +
+        '<td style="padding:5px 8px;text-align:right">' + mduCellInner + '</td>' +
         '<td style="padding:5px 6px">' + ((laid && !gid) ? ('<select class="fs" style="width:100%;font-size:11px" onchange="prodBprSetLink(\'' + id + '\',this.value)">' + itemOpts(_prodBprLink[id]) + '</select>') : '<span style="color:#bbb">\u2014</span>') + '</td>' +
         '<td style="padding:5px 6px">' + ((laid && !gid) ? ('<select class="fs" style="width:100%;font-size:11px" onchange="prodBprSetCat(\'' + id + '\',this.value)">' + catOpts(_prodBprCat[id]) + '</select>') : '<span style="color:#bbb">\u2014</span>') + '</td>' +
       '</tr>';
@@ -32820,9 +32864,9 @@ function prodBprSelAll(v){
 }
 function prodBprToggle(id, v){ _prodBprSel[String(id)] = v; prodOpenBprPicker(true); }
 function prodBprSetMdu(id, v){ var n = parseFloat(String(v).replace(/,/g, '')); _prodBprMdu[String(id)] = isFinite(n) ? n : ''; }
-function prodBprSetLink(id, v){ _prodBprLink[String(id)] = v || ''; }
+function prodBprSetLink(id, v){ _prodBprLink[String(id)] = v || ''; prodOpenBprPicker(true); }
 function prodBprSetCat(id, v){ _prodBprCat[String(id)] = v || ''; }
-function prodBprSetGroupLink(gid, v){ (_prodBprGroupMeta[gid] = _prodBprGroupMeta[gid] || { link:'', cat:'' }).link = v || ''; }
+function prodBprSetGroupLink(gid, v){ (_prodBprGroupMeta[gid] = _prodBprGroupMeta[gid] || { link:'', cat:'' }).link = v || ''; prodOpenBprPicker(true); }
 function prodBprSetGroupCat(gid, v){ (_prodBprGroupMeta[gid] = _prodBprGroupMeta[gid] || { link:'', cat:'' }).cat = v || ''; }
 
 function prodBprCreateGroup(){
@@ -32867,6 +32911,7 @@ function prodBprSavePicker(){
   var gen = _prodGeneralCategoryId();
   function newLineId(){ return 'pl_' + Date.now() + '_' + Math.floor(Math.random() * 100000); }
   var added = 0, groupedAdded = 0;
+  var fdMdc = _prodBprFieldDollarMdc(p, est);
 
   _prodBprGroups.forEach(function(grp){
     var meta = _prodBprGroupMeta[grp.id] || {};
@@ -32874,12 +32919,21 @@ function prodBprSavePicker(){
     if (!mem.length) return;
     var units = mem.reduce(function(s,b){ return s + (Number(b.quantity) || 0); }, 0);
     var gItem = meta.link ? _prodItem(meta.link) : null;
-    est.lines.push({
-      id: newLineId(), itemId: meta.link || null, itemName: (gItem ? gItem.name : grp.label), lineType: 'production',
-      unitLabel: (mem[0] && mem[0].unit) || '', estUnits: units, estMdu: _prodBprCombinedMdu(mem),
+    var gType = gItem ? (gItem.itemType || 'production') : 'production';
+    var line = {
+      id: newLineId(), itemId: meta.link || null, itemName: (gItem ? gItem.name : grp.label), lineType: gType,
+      unitLabel: (gType === 'production') ? ((mem[0] && mem[0].unit) || '') : (gItem ? (gItem.unitLabel || '') : ''),
+      estUnits: (gType === 'production') ? units : '',
+      estMdu: (gType === 'production') ? _prodBprCombinedMdu(mem) : '',
       amount: '', crewId: null, categoryId: meta.cat || gen,
       bprRef: mem.map(function(b){ return b.id; }), source: 'bpr'
-    });
+    };
+    if (gType === 'field_dollar') {
+      line.amount = Math.round(_prodBprManDaysGroup(mem) * fdMdc * 100) / 100;
+    } else if (gType === 'field_pct') {
+      line.amount = (gItem && gItem.defaultPct != null) ? gItem.defaultPct : '';
+    }
+    est.lines.push(line);
     added++; groupedAdded++;
   });
 
@@ -32890,12 +32944,22 @@ function prodBprSavePicker(){
     var mdu = _prodBprMdu[id];
     mdu = (mdu === '' || mdu == null) ? (Number(b.layRate) || 0) : (Number(mdu) || 0);
     var sItem = _prodBprLink[id] ? _prodItem(_prodBprLink[id]) : null;
-    est.lines.push({
-      id: newLineId(), itemId: _prodBprLink[id] || null, itemName: (sItem ? sItem.name : (b.description || b.materialCode || '(material)')), lineType: 'production',
-      unitLabel: b.unit || '', estUnits: Number(b.quantity) || 0, estMdu: mdu,
+    var sType = sItem ? (sItem.itemType || 'production') : 'production';
+    var line = {
+      id: newLineId(), itemId: _prodBprLink[id] || null,
+      itemName: (sItem ? sItem.name : (b.description || b.materialCode || '(material)')), lineType: sType,
+      unitLabel: (sType === 'production') ? (b.unit || '') : (sItem ? (sItem.unitLabel || '') : ''),
+      estUnits: (sType === 'production') ? (Number(b.quantity) || 0) : '',
+      estMdu: (sType === 'production') ? mdu : '',
       amount: '', crewId: null, categoryId: _prodBprCat[id] || gen,
       bprRef: [b.id], source: 'bpr'
-    });
+    };
+    if (sType === 'field_dollar') {
+      line.amount = Math.round(_prodBprManDaysSingle(b, mdu) * fdMdc * 100) / 100;
+    } else if (sType === 'field_pct') {
+      line.amount = (sItem && sItem.defaultPct != null) ? sItem.defaultPct : '';
+    }
+    est.lines.push(line);
     added++;
   });
 
