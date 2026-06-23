@@ -32655,7 +32655,7 @@ function prodOpenBprPicker(preserveState){
 
   var imported = {};
   (est.lines || []).forEach(function(l){
-    if (l.source === 'bpr' && Array.isArray(l.bprRef)) l.bprRef.forEach(function(id){ imported[String(id)] = true; });
+    if (Array.isArray(l.bprRef)) l.bprRef.forEach(function(id){ imported[String(id)] = true; });
   });
 
   if (!preserveState){
@@ -32811,7 +32811,7 @@ function prodBprSelAll(v){
   var p = getProj(_editProjectId); if (!p) return;
   var est = _prodEnsureEstimate(p);
   var imported = {};
-  (est.lines || []).forEach(function(l){ if (l.source === 'bpr' && Array.isArray(l.bprRef)) l.bprRef.forEach(function(id){ imported[String(id)] = true; }); });
+  (est.lines || []).forEach(function(l){ if (Array.isArray(l.bprRef)) l.bprRef.forEach(function(id){ imported[String(id)] = true; }); });
   (p.bprMaterials || []).forEach(function(b){
     var id = String(b.id);
     if (Number(b.layRate) > 0 && !_prodBprGroupOf[id] && !imported[id]) _prodBprSel[id] = v;
@@ -32873,8 +32873,9 @@ function prodBprSavePicker(){
     var mem = grp.memberIds.map(function(id){ return bprById[id]; }).filter(function(b){ return b && _prodBprSel[String(b.id)]; });
     if (!mem.length) return;
     var units = mem.reduce(function(s,b){ return s + (Number(b.quantity) || 0); }, 0);
+    var gItem = meta.link ? _prodItem(meta.link) : null;
     est.lines.push({
-      id: newLineId(), itemId: meta.link || null, itemName: grp.label, lineType: 'production',
+      id: newLineId(), itemId: meta.link || null, itemName: (gItem ? gItem.name : grp.label), lineType: 'production',
       unitLabel: (mem[0] && mem[0].unit) || '', estUnits: units, estMdu: _prodBprCombinedMdu(mem),
       amount: '', crewId: null, categoryId: meta.cat || gen,
       bprRef: mem.map(function(b){ return b.id; }), source: 'bpr'
@@ -32888,8 +32889,9 @@ function prodBprSavePicker(){
     if (!(Number(b.layRate) > 0)) return;
     var mdu = _prodBprMdu[id];
     mdu = (mdu === '' || mdu == null) ? (Number(b.layRate) || 0) : (Number(mdu) || 0);
+    var sItem = _prodBprLink[id] ? _prodItem(_prodBprLink[id]) : null;
     est.lines.push({
-      id: newLineId(), itemId: _prodBprLink[id] || null, itemName: b.description || b.materialCode || '(material)', lineType: 'production',
+      id: newLineId(), itemId: _prodBprLink[id] || null, itemName: (sItem ? sItem.name : (b.description || b.materialCode || '(material)')), lineType: 'production',
       unitLabel: b.unit || '', estUnits: Number(b.quantity) || 0, estMdu: mdu,
       amount: '', crewId: null, categoryId: _prodBprCat[id] || gen,
       bprRef: [b.id], source: 'bpr'
@@ -36200,6 +36202,8 @@ function _prodCompute(p, est) {
 }
 function _prodSetTxt(id, v) { var e = g(id); if (e) e.textContent = v; }
 var _prodSubTab = 'estimate';
+var _prodMergeMode = false;   // estimate-screen merge: checkbox column visible
+var _prodMergeSel  = {};      // lineId → checked, for merge selection
 function renderProjectProduction() {
   var host = g('nprj-production-section'); if (!host) return;
   var p = _prodCurrentProject();
@@ -36266,6 +36270,9 @@ function renderProdEstimateView() {
       '<div style="display:flex;gap:8px">' +
         '<button class="btn btn-sm btn-p" onclick="prodShowAddItems()">+ Add items</button>' +
         '<button class="btn btn-sm" onclick="prodOpenBprFlow()" title="' + ((p.bprMaterials && p.bprMaterials.length) ? 'Build estimate lines from the Bid Price Report' : 'Upload the Bid Price Report PDF to pull quantities and lay rates') + '">+ From BPR' + ((p.bprMaterials && p.bprMaterials.length) ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
+        ((est.lines || []).filter(function(l){ return l.lineType === 'production'; }).length >= 2
+          ? '<button class="btn btn-sm' + (_prodMergeMode ? ' btn-p' : '') + '" onclick="prodToggleMergeMode()" title="Combine production lines that share a unit">' + (_prodMergeMode ? 'Done merging' : 'Merge lines') + '</button>'
+          : '') +
         '<button class="btn btn-sm" id="prod-save-btn" onclick="prodSaveEstimate()">Save estimate</button>' +
       '</div>' +
     '</div></div>';
@@ -36274,12 +36281,30 @@ function renderProdEstimateView() {
   var prodRows = lines.filter(function(l){ return l.lineType === 'production'; });
   var fieldRows = lines.filter(function(l){ return l.lineType !== 'production'; });
 
+  // Merge action bar (only while merge mode is on)
+  var mergeBar = '';
+  if (_prodMergeMode) {
+    var picked = prodRows.filter(function(l){ return _prodMergeSel[l.id]; });
+    var units = {}; picked.forEach(function(l){ units[l.unitLabel || ''] = 1; });
+    var canMerge = picked.length >= 2 && Object.keys(units).length === 1;
+    var clash = picked.length >= 2 && Object.keys(units).length > 1;
+    var hint = clash ? 'Selected lines span more than one unit \u2014 pick one unit'
+      : (canMerge ? (picked.length + ' lines selected') : 'Check 2 or more production lines that share a unit');
+    mergeBar = '<div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#F0F4FB;border:1px solid #cdddf0;margin-bottom:12px">' +
+      '<button class="btn btn-sm btn-p" onclick="prodMergeSelected()"' + (canMerge ? '' : ' disabled') + '>\u2295 Merge selected' + (canMerge ? (' (' + picked.length + ')') : '') + '</button>' +
+      '<span style="font-size:12px;color:' + (clash ? '#A32D2D' : '#666') + '">' + hint + '</span>' +
+      '<button class="btn btn-sm" style="margin-left:auto" onclick="prodToggleMergeMode()">Done</button>' +
+    '</div>';
+  }
+
+  var span = _prodMergeMode ? 12 : 11;
   var table;
   if (!lines.length) {
     table = '<div class="card"><div style="padding:16px;color:#aaa;font-size:13px;text-align:center">' +
       'No lines yet \u2014 click <strong>+ Add items</strong> to pull items from the catalog.</div></div>';
   } else {
     var head = '<thead><tr>' +
+      (_prodMergeMode ? '<th style="width:30px"></th>' : '') +
       '<th>Item</th><th>Category</th><th>Unit</th>' +
       '<th style="text-align:right">Est. Units</th><th style="text-align:right">Est. MDU</th>' +
       '<th>Driver</th><th>Crew</th>' +
@@ -36288,17 +36313,17 @@ function renderProdEstimateView() {
     '</tr></thead>';
     var body = '';
     if (prodRows.length) {
-      body += '<tr>td colspan="11" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Production/td></tr>';
+      body += '<tr><td colspan="' + span + '" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Production</td></tr>';
       body += prodRows.map(function(l){ return _prodRowHtml(est, l); }).join('');
     }
     if (fieldRows.length) {
-      body += '<tr><td colspan="11" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Field Labor</td></tr>';
+      body += '<tr><td colspan="' + span + '" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">Field Labor</td></tr>';
       body += fieldRows.map(function(l){ return _prodRowHtml(est, l); }).join('');
     }
     table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:980px">' + head + '<tbody>' + body + '</tbody></table></div></div>';
   }
 
-  host.innerHTML = rateHint + _prodPendingPanelHtml(p) + metrics + params + table;
+  host.innerHTML = rateHint + _prodPendingPanelHtml(p) + metrics + params + mergeBar + table;
   prodRefresh();
 }
 function _prodMetric(id, label, sub) {
@@ -36484,8 +36509,22 @@ function _prodRowHtml(est, l) {
     driverCell = '<td><input type="number" min="0" step="0.5" value="' + (l.amount != null ? l.amount : '') +
       '" style="width:64px;text-align:right" oninput="prodEdit(\'' + id + '\',\'amount\',this.value)" onchange="prodPersistLocal()"> <span style="font-size:12px;color:#888">% of base</span></td>';
   }
+  var chkCell = _prodMergeMode
+    ? ('<td style="text-align:center">' + (l.lineType === 'production'
+        ? '<input type="checkbox" ' + (_prodMergeSel[id] ? 'checked ' : '') + 'onchange="prodMergeToggleSel(\'' + id + '\',this.checked)">'
+        : '') + '</td>')
+    : '';
+  var nameCell;
+  if (l.mergedFrom && l.mergedFrom.length) {
+    nameCell = _prodEsc(l.itemName) +
+      ' <span style="font-size:10px;color:#1F5A8A;background:#E7F0FB;border-radius:8px;padding:1px 7px;white-space:nowrap">merged \u00b7 ' + l.mergedFrom.length + '</span>' +
+      ' <button class="btn btn-sm" style="padding:1px 7px;font-size:11px" onclick="prodUnmergeLine(\'' + id + '\')">un-merge</button>';
+  } else {
+    nameCell = _prodEsc(l.itemName);
+  }
   return '<tr>' +
-    '<td>' + _prodEsc(l.itemName) + '</td>' +
+    chkCell +
+    '<td>' + nameCell + '</td>' +
     '<td>' + _prodCategorySelectHtml(l) + '</td>' +
     '<td style="color:#888">' + (_prodEsc(l.unitLabel) || '\u2014') + '</td>' +
     unitsCell + mduCell + driverCell +
@@ -36572,6 +36611,139 @@ function prodRemoveLine(lineId) {
   est.lines = (est.lines || []).filter(function(x){ return String(x.id) !== String(lineId); });
   saveDB();
   renderProjectProduction();
+}
+
+// ── Estimate-screen line merge / un-merge ───────────────────────────
+// Combine 2+ same-unit production lines into one: units summed, MDU =
+// units-weighted harmonic mean (preserves man-days, same as the BPR
+// picker). The original lines are snapshotted on mergedFrom so the merge
+// can be reversed. Any weekly actuals logged against the members are
+// re-pointed onto the merged line (summed per week); their per-member
+// originals are captured so un-merge restores them exactly.
+function prodToggleMergeMode() {
+  _prodMergeMode = !_prodMergeMode;
+  if (!_prodMergeMode) _prodMergeSel = {};
+  renderProdEstimateView();
+}
+function prodMergeToggleSel(lineId, checked) {
+  _prodMergeSel[String(lineId)] = checked;
+  renderProdEstimateView();
+}
+function _prodNum(x) { var n = parseFloat(x); return isFinite(n) ? n : 0; }
+// All weekly entry blocks for (project,line) → [{rowId, e:{u,f,m,l}}]
+function _prodCaptureLineActuals(projId, lineId) {
+  var out = [];
+  (db.prodWeekly || []).forEach(function(r){
+    if (String(r.projectId) !== String(projId)) return;
+    if (r.entries && r.entries[lineId]) out.push({ rowId: r.id, e: JSON.parse(JSON.stringify(r.entries[lineId])) });
+  });
+  return out;
+}
+function prodMergeSelected() {
+  var p = _prodCurrentProject(); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  var picked = (est.lines || []).filter(function(l){ return l.lineType === 'production' && _prodMergeSel[l.id]; });
+  if (picked.length < 2) { alert('Check at least 2 production lines to merge.'); return; }
+  var units = {}; picked.forEach(function(l){ units[l.unitLabel || ''] = 1; });
+  if (Object.keys(units).length > 1) { alert('All merged lines must share the same unit. Selected units: ' + Object.keys(units).join(', ')); return; }
+
+  var defLabel = picked[0].itemName + (picked.length > 1 ? (' + ' + (picked.length - 1) + ' more') : '');
+  var label = prompt('Label for the merged line:', defLabel);
+  if (label === null) return;
+  label = (label || '').trim(); if (!label) { alert('Merged line needs a label.'); return; }
+
+  var mergedId = 'pl_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+
+  // Snapshot members (incl. their current actuals) for un-merge.
+  var members = picked.map(function(l){
+    var snap = JSON.parse(JSON.stringify(l));
+    snap.actualsSnapshot = _prodCaptureLineActuals(p.id, l.id);
+    return snap;
+  });
+
+  // Merge math
+  var totalUnits = 0, denom = 0;
+  picked.forEach(function(l){ var u = _prodNum(l.estUnits), m = _prodNum(l.estMdu); totalUnits += u; if (m > 0) denom += u / m; });
+  var mergedMdu = denom > 0 ? (totalUnits / denom) : 0;
+
+  // Combined bprRef (dedup)
+  var refSet = {}; picked.forEach(function(l){ (Array.isArray(l.bprRef) ? l.bprRef : []).forEach(function(id){ refSet[String(id)] = id; }); });
+  var bprRef = Object.keys(refSet).map(function(k){ return refSet[k]; });
+
+  var merged = {
+    id: mergedId,
+    itemId: picked[0].itemId || null,
+    itemName: label,
+    lineType: 'production',
+    unitLabel: picked[0].unitLabel || '',
+    estUnits: totalUnits,
+    estMdu: mergedMdu,
+    amount: '',
+    crewId: picked[0].crewId || null,
+    categoryId: picked[0].categoryId || null,
+    bprRef: bprRef,
+    source: 'merged',
+    mergedFrom: members
+  };
+
+  // Re-point weekly actuals from members onto the merged line (sum per week).
+  members.forEach(function(snap){
+    (snap.actualsSnapshot || []).forEach(function(rec){
+      var row = (db.prodWeekly || []).find(function(r){ return String(r.id) === String(rec.rowId); });
+      if (!row) return;
+      row.entries = row.entries || {};
+      var t = row.entries[mergedId] || (row.entries[mergedId] = { u: 0, f: 0, m: 0, l: 0 });
+      t.u = _prodNum(t.u) + _prodNum(rec.e.u);
+      t.f = _prodNum(t.f) + _prodNum(rec.e.f);
+      t.m = _prodNum(t.m) + _prodNum(rec.e.m);
+      t.l = _prodNum(t.l) + _prodNum(rec.e.l);
+      delete row.entries[snap.id];
+    });
+  });
+
+  // Replace the picked lines with the merged line, in place of the first.
+  var inserted = false, newLines = [];
+  (est.lines || []).forEach(function(l){
+    if (l.lineType === 'production' && _prodMergeSel[l.id]) { if (!inserted) { newLines.push(merged); inserted = true; } }
+    else newLines.push(l);
+  });
+  if (!inserted) newLines.push(merged);
+  est.lines = newLines;
+
+  _prodMergeSel = {};
+  saveDB();
+  renderProdEstimateView();
+  if (typeof showToast === 'function') showToast('Merged ' + picked.length + ' lines into "' + label + '".', 'success');
+}
+function prodUnmergeLine(lineId) {
+  var p = _prodCurrentProject(); if (!p) return;
+  var est = _prodEnsureEstimate(p);
+  var i = (est.lines || []).findIndex(function(l){ return String(l.id) === String(lineId); });
+  if (i < 0) return;
+  var ml = est.lines[i];
+  if (!ml.mergedFrom || !ml.mergedFrom.length) { alert('This line has nothing to un-merge.'); return; }
+
+  // Warn if production was logged against the merged line — un-merge restores
+  // the members' earlier actuals and drops anything logged on the merged line.
+  var hasLive = (db.prodWeekly || []).some(function(r){ return String(r.projectId) === String(p.id) && r.entries && r.entries[ml.id]; });
+  if (hasLive && !confirm('Un-merging restores the original lines and the actuals they had before merging. Any production logged against the merged line will be removed. Continue?')) return;
+
+  // Drop the merged line's actuals, then restore each member's snapshot.
+  (db.prodWeekly || []).forEach(function(r){ if (r.entries) delete r.entries[ml.id]; });
+  ml.mergedFrom.forEach(function(snap){
+    (snap.actualsSnapshot || []).forEach(function(rec){
+      var row = (db.prodWeekly || []).find(function(r){ return String(r.id) === String(rec.rowId); });
+      if (!row) return;
+      row.entries = row.entries || {};
+      row.entries[snap.id] = JSON.parse(JSON.stringify(rec.e));
+    });
+  });
+
+  var members = ml.mergedFrom.map(function(snap){ var c = JSON.parse(JSON.stringify(snap)); delete c.actualsSnapshot; return c; });
+  est.lines.splice.apply(est.lines, [i, 1].concat(members));
+  saveDB();
+  renderProdEstimateView();
+  if (typeof showToast === 'function') showToast('Un-merged into ' + members.length + ' lines.', 'info');
 }
 async function prodSaveEstimate() {
   var p = _prodCurrentProject();
