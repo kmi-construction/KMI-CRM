@@ -32633,6 +32633,24 @@ function prodOpenBprPicker(preserveState){
   var p = getProj(_editProjectId); if (!p) return;
   var bpr = p.bprMaterials || [];
   if (!bpr.length) { procOpenBprUploadModal(); return; }
+
+  // Legacy guard: BPR materials parsed before lay-rate (MDU) capture was
+  // added carry no layRate, so every row would lock as "not laid." Detect
+  // that case and prompt a one-time re-upload rather than showing a picker
+  // full of disabled rows with no explanation.
+  if (!bpr.some(function(b){ return Number(b.layRate) > 0; })) {
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt">Re-upload the BPR to capture lay rates</div>' +
+      '<div class="msb">This project\u2019s Bid Price Report was imported before lay-rate (MDU) capture was added, so there\u2019s no production rate to build estimate lines from \u2014 that\u2019s why every row is locked. Re-upload the same BPR PDF (or use the copy on file from Budget) and the lay rates will come through. Your existing procurement assignments are carried forward.</div>' +
+      '<div class="mbtns">' +
+        '<button class="btn" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-p" onclick="prodBprReupload()">Re-upload BPR</button>' +
+      '</div>'
+    );
+    return;
+  }
+
   var est = _prodEnsureEstimate(p);
 
   var imported = {};
