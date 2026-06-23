@@ -36286,10 +36286,16 @@ function _prodTrackingCompute(p) {
   var prod = [], field = [];
   var s = { estU:0, jtdU:0, est:0, earn:0, act:0 };
   var f = { fF:0, fM:0, fL:0, est:0, act:0 };
+  var generalId = _prodGeneralCategoryId();
+  var catMap = {};            // catId -> { direct, estU, jtdU }
+  var generalLabor = 0;
+  function _catBucket(id){ return catMap[id] || (catMap[id] = { direct:0, estU:0, jtdU:0 }); }
   (est.lines || []).forEach(function(l){
     var jtd = _prodJtdForLine(p.id, l.id);
     var est$ = estLineDollars(l);
     var act = jtd.f*fRate + jtd.m*mRate + jtd.l*lRate;
+    var effCat = l.categoryId || generalId;
+    var isGen = (generalId != null && String(effCat) === String(generalId));
     if (l.lineType === 'production') {
       var estU = Number(l.estUnits)||0, estMdu = Number(l.estMdu)||0, jtdU = jtd.units;
       var pct = estU>0 ? jtdU/estU : 0;
@@ -36300,15 +36306,38 @@ function _prodTrackingCompute(p) {
         recent:_prodRecentUnitsForLine(p.id, l.id), estMdu:estMdu, actMdu:actMdu,
         est:est$, earn:earn$, act:act, perUnit:perUnit, varv:earn$-act });
       s.estU+=estU; s.jtdU+=jtdU; s.est+=est$; s.earn+=earn$; s.act+=act;
+      if (isGen) { generalLabor += est$; } else { var b = _catBucket(effCat); b.direct += est$; b.estU += estU; b.jtdU += jtdU; }
     } else {
       field.push({ name:l.itemName, f:jtd.f, m:jtd.m, l:jtd.l, est:est$, act:act, varv:est$-act });
       f.fF+=jtd.f; f.fM+=jtd.m; f.fL+=jtd.l; f.est+=est$; f.act+=act;
+      if (isGen) { generalLabor += est$; } else { _catBucket(effCat).direct += est$; }
     }
   });
   var totEst = s.est + f.est, totAct = s.act + f.act, totEarned = s.earn + f.est;
+  // Category-based % complete (Phase 4b): General labor distributed across the
+  // real categories by direct-labor share; category % from its unit items; the
+  // overall figure is labor-weighted earned / labor.
+  var nonGeneral = totEst - generalLabor;
+  var factor = nonGeneral > 0 ? (totEst / nonGeneral) : 1;
+  var categories = [], catLaborSum = 0, catEarnedSum = 0;
+  Object.keys(catMap).forEach(function(cid){
+    var m = catMap[cid];
+    var catLabor = m.direct * factor;
+    var unitsPct = m.estU > 0 ? m.jtdU/m.estU : 0;
+    var earned = catLabor * unitsPct;
+    catLaborSum += catLabor; catEarnedSum += earned;
+    var cobj = _prodCategory(cid);
+    categories.push({ id:cid, name:_prodCategoryName(cid) || '(uncategorized)',
+      sortOrder: cobj ? (Number(cobj.sortOrder)||0) : 0,
+      labor:catLabor, direct:m.direct, estU:m.estU, jtdU:m.jtdU, pct:unitsPct, earned:earned });
+  });
+  categories.sort(function(a,b){ return a.sortOrder - b.sortOrder; });
+  var pctCompleteLabor = catLaborSum > 0 ? catEarnedSum / catLaborSum : 0;
   return { prod:prod, field:field, prodTot:s, fieldTot:f, mdc:mdc, defCrew:defCrew,
     totEst:totEst, totAct:totAct, totEarned:totEarned, totVar:totEarned-totAct,
-    unitsPct: s.estU>0 ? s.jtdU/s.estU : 0 };
+    unitsPct: s.estU>0 ? s.jtdU/s.estU : 0,
+    categories:categories, generalLabor:generalLabor, catLaborSum:catLaborSum,
+    catEarnedSum:catEarnedSum, pctCompleteLabor:pctCompleteLabor };
 }
 function renderProdTrackingView() {
   var host = g('nprj-prod-subcontent'); if (!host) return;
@@ -36329,6 +36358,7 @@ function renderProdTrackingView() {
   function td(v){ return '<td style="text-align:right">' + v + '</td>'; }
   function vtd(v){ var col = v>0?'#1F7A4D':(v<0?'#A32D2D':'#555'); return '<td style="text-align:right;color:' + col + ';font-weight:600">' + (v>0?'+':'') + fmtC(v) + '</td>'; }
   function estLineDollars(l){ var c = comp.perLine[l.id]; return (c ? c.pre : 0) * comp.wageMult; }
+  var C = _prodTrackingCompute(p);
 
   var prodLines = lines.filter(function(l){ return l.lineType === 'production'; });
   var fieldLines = lines.filter(function(l){ return l.lineType !== 'production'; });
@@ -36379,7 +36409,7 @@ function renderProdTrackingView() {
   var varCol = totVar>0 ? '#1F7A4D' : (totVar<0 ? '#A32D2D' : 'var(--kmi)');
   var metrics =
     '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px">' +
-      metric('Units complete', pc(unitsPct), n(sJtdU) + ' of ' + n(sEstU) + ' units', 'var(--kmi)') +
+      metric('% Complete', pc(C.pctCompleteLabor), n(sJtdU) + ' of ' + n(sEstU) + ' units \u00b7 labor-weighted', 'var(--kmi)') +
       metric('Est. labor (full job)', fmtC(totEst), 'earned to date ' + fmtC(totEarned), 'var(--kmi)') +
       metric('Actual labor (JTD)', fmtC(totAct), sJtdU>0 ? (fmtC(totAct/sJtdU) + ' / unit') : 'no units logged yet', 'var(--acd)') +
       metric('Labor variance', (totVar>0?'+':'') + fmtC(totVar), 'earned \u2212 actual', varCol) +
@@ -36406,14 +36436,27 @@ function renderProdTrackingView() {
     '<tfoot><tr style="border-top:2px solid #eee;font-weight:700"><td>Field subtotal</td>' +
       td(n(fF)) + td(n(fM)) + td(n(fL)) + td(fmtC(fEst)) + td(fmtC(fAct)) + vtd(fEst - fAct) + '</tr></tfoot></table></div></div>') : '';
 
+  var catTable = C.categories.length ? ('<div class="card"><div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px">Category completion</div>' +
+    '<div style="overflow-x:auto"><table style="min-width:520px;font-variant-numeric:tabular-nums"><thead><tr>' +
+      '<th>Category</th><th style="text-align:right">Labor $</th><th style="text-align:right">% complete</th><th style="text-align:right">Earned $</th>' +
+    '</tr></thead><tbody>' +
+    C.categories.map(function(c){
+      return '<tr><td>' + _prodEsc(c.name) + '</td>' + td(fmtC(c.labor)) + td(pc(c.pct)) + td(fmtC(c.earned)) + '</tr>';
+    }).join('') +
+    '</tbody><tfoot><tr style="border-top:2px solid #eee;font-weight:700"><td>Overall</td>' +
+      td(fmtC(C.catLaborSum)) + td(pc(C.pctCompleteLabor)) + td(fmtC(C.catEarnedSum)) + '</tr></tfoot></table></div>' +
+    (C.generalLabor>0 ? ('<div style="font-size:11px;color:#888;margin-top:10px">General labor ' + fmtC(C.generalLabor) + ' distributed across the categories above by direct-labor share.</div>') : '') +
+    '</div>') : '';
+
   var footnote = '<div style="font-size:11px;color:#999;line-height:1.6;margin-top:4px">' +
     'Actual MDU = ' + (defCrew ? ('default crew (' + _prodEsc(defCrew.name) + ') cost ' + fmtC(mdc)) : 'default crew cost') +
-    ' \u00f7 Actual $/unit. Earned $ = Est $ \u00d7 % complete; variance is Earned \u2212 Actual for production and Est \u2212 Actual for field labor.</div>';
+    ' \u00f7 Actual $/unit. Earned $ = Est $ \u00d7 % complete; variance is Earned \u2212 Actual for production and Est \u2212 Actual for field labor. ' +
+    'Overall % complete is labor-weighted across categories, with General labor distributed by direct-labor share.</div>';
 
   host.innerHTML =
     '<div style="display:flex;justify-content:flex-end;margin-bottom:14px">' +
       '<button class="btn btn-pdf btn-sm" onclick="prodExportTrackingPdf()">\u2913 Export PDF</button></div>' +
-    metrics + prodTable + fieldTable + footnote;
+    metrics + prodTable + fieldTable + catTable + footnote;
 }
 
 // ── Tracking document PDF (Phase 3b) — landscape letter, jsPDF ──────────
@@ -36455,7 +36498,7 @@ function prodExportTrackingPdf() {
   sf('normal',10,[0,0,0]);   doc.text(new Date().toLocaleDateString('en-US'), RM-88, y);
   y += 18;
   sf('normal',9,GREY);
-  doc.text('Units complete ' + pct(C.unitsPct) + ' (' + num(C.prodTot.jtdU) + ' / ' + num(C.prodTot.estU) + ')      Est labor ' + money(C.totEst) +
+  doc.text('Complete ' + pct(C.pctCompleteLabor) + ' (' + num(C.prodTot.jtdU) + ' / ' + num(C.prodTot.estU) + ' units)      Est labor ' + money(C.totEst) +
     '      Earned ' + money(C.totEarned) + '      Actual ' + money(C.totAct) + '      Variance ' + (C.totVar>=0?'+':'') + money(C.totVar), LM, y);
   y += 16; ln(LM, y, RM, y, 0.8, GOLD); y += 14;
 
@@ -36515,6 +36558,28 @@ function prodExportTrackingPdf() {
     fst(1,num(ff.fF)); fst(2,num(ff.fM)); fst(3,num(ff.fL)); fst(4,money(ff.est)); fst(5,money(ff.act));
     fst(6, ((ff.est-ff.act)>0?'+':'') + money(ff.est-ff.act), (ff.est-ff.act)>0 ? GOOD : ((ff.est-ff.act)<0 ? BAD : [0,0,0]));
     y += 24;
+  }
+
+  if (C.categories.length) {
+    if (y + 46 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
+    sf('bold',11,NAVY); doc.text('Category completion', LM, y); y += 14;
+    var ccols = [{label:'Category',w:200,align:'left'},{label:'Labor $',w:110},{label:'% complete',w:90},{label:'Earned $',w:110}];
+    var ccx = LM; ccols.forEach(function(c){ c.left = ccx; c.right = ccx + c.w; ccx += c.w; });
+    var cRight = ccols[ccols.length-1].right;
+    sf('bold',7,[90,90,90]); ccols.forEach(function(c){ if (c.align==='left') doc.text(c.label, c.left, y); else doc.text(c.label, c.right-3, y, {align:'right'}); });
+    ln(LM, y+4, cRight, y+4, 0.6, [180,180,180]); y += 14;
+    C.categories.forEach(function(c){
+      var ty = y + 10; sf('normal',8,[0,0,0]); doc.text(one(c.name, ccols[0].w-3), ccols[0].left, ty);
+      function cc(i,t){ sf('normal',8,[0,0,0]); doc.text(String(t), ccols[i].right-3, ty, {align:'right'}); }
+      cc(1, money(c.labor)); cc(2, pct(c.pct)); cc(3, money(c.earned));
+      y += 16; ln(LM, y, cRight, y, 0.25, [238,238,238]);
+    });
+    var cty = y + 11; ln(LM, y, cRight, y, 0.8, [170,170,170]);
+    sf('bold',8,[0,0,0]); doc.text('Overall', ccols[0].left, cty);
+    function cst(i,t){ sf('bold',8,[0,0,0]); doc.text(String(t), ccols[i].right-3, cty, {align:'right'}); }
+    cst(1, money(C.catLaborSum)); cst(2, pct(C.pctCompleteLabor)); cst(3, money(C.catEarnedSum));
+    y += 22;
+    if (C.generalLabor > 0) { sf('normal',7,GREY); doc.text('General labor ' + money(C.generalLabor) + ' distributed across the categories by direct-labor share.', LM, y); y += 14; }
   }
 
   if (y + 30 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
