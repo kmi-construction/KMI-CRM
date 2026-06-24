@@ -2042,6 +2042,28 @@ textarea{resize:vertical;min-height:72px}
     <div id="t-spec-sections"></div>
   </div>
 
+  <!-- ── Product Library lists (Product Lists Round 1) ────────────────
+       Self-service document types and product categories. Edits reflow
+       every related dropdown in the Product Library and Submittals. -->
+  <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px">
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Document types</span>
+        <span style="font-size:11px;color:#888;font-weight:400">Attachment / submittal types for Product Library documents</span>
+        <button class="btn btn-sm btn-p" style="margin-left:auto" onclick="showAddProductListItem('docType')">+ Add</button>
+      </div>
+      <div id="t-product-doc-types"></div>
+    </div>
+    <div class="card">
+      <div class="ch">
+        <span class="ct">Product categories</span>
+        <span style="font-size:11px;color:#888;font-weight:400">Categories for products in the Product Library</span>
+        <button class="btn btn-sm btn-p" style="margin-left:auto" onclick="showAddProductListItem('category')">+ Add</button>
+      </div>
+      <div id="t-product-categories"></div>
+    </div>
+  </div>
+
   <!-- ── Project Parameters (Form-fill Round 1) ──────────────────────
        Master list of project-level questions (Block Size, Wire Size,
        Mortar Color, etc.) whose answers are captured on each project
@@ -2995,6 +3017,12 @@ var DB_DEFAULTS = {
   // as a fallback for environments where the round5 migration hasn't
   // run yet.
   specSections: [],
+  // Product Library lists (Product Lists Round 1) — document types and
+  // product categories, managed via Templates, backed by dedicated tables.
+  // Empty here; getters fall back to PRODUCT_DOC_TYPES / PRODUCT_CATEGORIES
+  // when the list is empty (migration not yet run).
+  productDocTypes: [],
+  productCategories: [],
   // Project parameters (Form-fill Round 1) — master list managed via
   // Templates. Each parameter (e.g. "Block Size", "Wire Size", "Mortar
   // Color") gets a name, input type, and optional option list. Per-project
@@ -3156,6 +3184,8 @@ function loadDB() {
         productDocuments: p.productDocuments || [],
         submittals:       p.submittals       || [],
         specSections:     p.specSections     || [],
+        productDocTypes:   p.productDocTypes   || [],
+        productCategories: p.productCategories || [],
         tmTickets:      p.tmTickets      || [],
         prodWeekly:     p.prodWeekly     || [],
         cors:           p.cors           || [],
@@ -7275,6 +7305,27 @@ function getSpecSections(includeInactive) {
 
 var DOC_STALENESS_YEARS = 3;
 
+// Active, sorted name lists backing the Product Library dropdowns. Managed
+// via Templates (Product Lists Round 1); fall back to the hardcoded arrays
+// when the managed list is empty (e.g. migration not yet run).
+function _productListNames(coll, fallbackArr, includeInactive) {
+  var live = (db[coll] || []).filter(function(t){
+    return includeInactive ? true : (t.isActive !== false);
+  });
+  if (!live.length) return fallbackArr.slice();
+  return live.slice().sort(function(a, b){
+    var ao = (a.sortOrder || 0), bo = (b.sortOrder || 0);
+    if (ao !== bo) return ao - bo;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  }).map(function(t){ return t.name; });
+}
+function getProductDocTypes(includeInactive) {
+  return _productListNames('productDocTypes', PRODUCT_DOC_TYPES, includeInactive);
+}
+function getProductCategories(includeInactive) {
+  return _productListNames('productCategories', PRODUCT_CATEGORIES, includeInactive);
+}
+
 // ── Module state ─────────────────────────────────────────────────────
 var _editManufacturerId = null;
 var _editProductId      = null;
@@ -7572,7 +7623,7 @@ function renderProducts() {
   if (catSel) {
     var prevCat = catSel.value;
     catSel.innerHTML = '<option value="">All categories</option>' +
-      PRODUCT_CATEGORIES.map(function(c){ return '<option>' + plEsc(c) + '</option>'; }).join('');
+      getProductCategories().map(function(c){ return '<option>' + plEsc(c) + '</option>'; }).join('');
     catSel.value = prevCat;
   }
   if (csiSel) {
@@ -7677,8 +7728,10 @@ function _populateProductSelects() {
       return '<option value="' + plEsc(m.id) + '"' + sel + '>' + plEsc(m.name) + '</option>';
     }).join('');
 
+  var _catList = getProductCategories();
+  if (p && p.category && _catList.indexOf(p.category) === -1) _catList = [p.category].concat(_catList);
   catSel.innerHTML = '<option value="">— Select —</option>' +
-    PRODUCT_CATEGORIES.map(function(c){
+    _catList.map(function(c){
       var sel = (p && p.category === c) ? ' selected' : '';
       return '<option' + sel + '>' + plEsc(c) + '</option>';
     }).join('');
@@ -7867,7 +7920,10 @@ function _docStalePill(d) {
 }
 
 function _docDocTypeOpts(selected) {
-  return PRODUCT_DOC_TYPES.map(function(t){
+  var types = getProductDocTypes();
+  // Keep the doc's current type visible even if it was later deactivated.
+  if (selected && types.indexOf(selected) === -1) types = [selected].concat(types);
+  return types.map(function(t){
     return '<option' + (t === selected ? ' selected' : '') + '>' + plEsc(t) + '</option>';
   }).join('');
 }
@@ -29481,6 +29537,7 @@ function renderTemplates() {
   renderBudgetSettingsForms();
   renderAutoRoutes();
   renderSpecSections();
+  renderProductLists();
   renderProjectParameters();
 }
 
@@ -29489,6 +29546,30 @@ function renderTemplates() {
 // Stored in db.specSections; displayed via the Templates page.
 
 var _editSpecSectionId = null;
+
+// ── Product Library lists manager (Product Lists Round 1) ───────────
+// One generic manager drives both the Document Types and Product Categories
+// cards on Templates. Mirrors the Spec Sections pattern; values are stored
+// by NAME on product / document records, so a rename can optionally rewrite
+// existing records (decision 5: apply on rename).
+var _editProductListId = null;
+var _editProductListKind = null;
+var PRODUCT_LIST_CFG = {
+  docType: {
+    dbKey: 'productDocTypes', table: 'kmi_product_doc_types', toSB: function(r){ return toSBProductDocType(r); },
+    title: 'document type', plural: 'document types', container: 't-product-doc-types',
+    placeholder: 'e.g. Warranty Letter',
+    usageColl: 'productDocuments', usageField: 'documentType', usageNoun: 'document',
+    usageTable: 'kmi_product_documents', usageToSB: function(r){ return toSBProductDocument(r); }
+  },
+  category: {
+    dbKey: 'productCategories', table: 'kmi_product_categories', toSB: function(r){ return toSBProductCategory(r); },
+    title: 'product category', plural: 'product categories', container: 't-product-categories',
+    placeholder: 'e.g. Lintel',
+    usageColl: 'products', usageField: 'category', usageNoun: 'product',
+    usageTable: 'kmi_products', usageToSB: function(r){ return toSBProduct(r); }
+  }
+};
 
 function renderSpecSections() {
   var el = g('t-spec-sections');
@@ -29692,8 +29773,185 @@ async function deleteSpecSection(id) {
   renderSpecSections();
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// PROJECT PROCUREMENT REPORT — Round 2
+// ── Product Library lists: render / form / save / delete ────────────
+function renderProductLists() { renderProductList('docType'); renderProductList('category'); }
+function renderProductList(kind) {
+  var cfg = PRODUCT_LIST_CFG[kind]; if (!cfg) return;
+  var el = g(cfg.container); if (!el) return;
+  var list = (db[cfg.dbKey] || []).slice().sort(function(a, b){
+    var ao = (a.sortOrder || 0), bo = (b.sortOrder || 0);
+    if (ao !== bo) return ao - bo;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  if (!list.length) {
+    el.innerHTML = '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center">' +
+      'No ' + cfg.plural + ' yet — run the Product Lists SQL migration in Supabase to seed the standard list, or click "+ Add" to create one.</div>';
+    return;
+  }
+  var canEdit = canAccess('templates') === 'full';
+  var html = '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+    '<th style="padding:6px 8px;text-align:left">Name</th>' +
+    '<th style="padding:6px 8px;text-align:center;width:72px">Active</th>' +
+    '<th style="padding:6px 8px;text-align:right;width:60px">Sort</th>' +
+    '<th style="padding:6px 8px;width:130px"></th>' +
+    '</tr></thead><tbody>';
+  list.forEach(function(s){
+    var dim = (s.isActive === false) ? 'opacity:0.55' : '';
+    var sid = plEsc(String(s.id));
+    html += '<tr style="' + dim + '">' +
+      '<td style="padding:6px 8px">' + plEsc(s.name || '') + '</td>' +
+      '<td style="padding:6px 8px;text-align:center;font-size:11px">' +
+        (s.isActive === false ? '<span style="color:#888">inactive</span>' : '<span style="color:#3B6D11">●</span>') + '</td>' +
+      '<td style="padding:6px 8px;text-align:right;color:#888">' + (s.sortOrder || 0) + '</td>' +
+      '<td style="padding:6px 8px;text-align:right">' +
+        (canEdit ? '<button class="btn btn-sm" onclick="showEditProductListItem(\'' + kind + '\',\'' + sid + '\')">✎ Edit</button> ' : '') +
+        (canEdit ? '<button class="btn btn-sm" onclick="deleteProductListItem(\'' + kind + '\',\'' + sid + '\')" style="color:#A32D2D">×</button>' : '') +
+      '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function _productListFormHtml(kind, s) {
+  s = s || {};
+  var cfg = PRODUCT_LIST_CFG[kind];
+  return '<div class="fg">' +
+    '<div class="fgr"><label>Name *</label>' +
+      '<input id="pli-name" value="' + plEsc(s.name || '') + '" placeholder="' + cfg.placeholder + '"></div>' +
+    '<div class="fgr"><label>Sort order</label>' +
+      '<input id="pli-sort" type="number" step="10" value="' + (s.sortOrder || 0) + '">' +
+      '<div style="font-size:10px;color:#888;margin-top:3px">Lower numbers appear first. Increment by 10 to leave room to insert later.</div></div>' +
+    '<div class="fgr"><label>Active</label>' +
+      '<select id="pli-active">' +
+        '<option value="true"' +  ((s.isActive === false) ? '' : ' selected') + '>Active (shown in dropdowns)</option>' +
+        '<option value="false"' + ((s.isActive === false) ? ' selected' : '') + '>Inactive (hidden from dropdowns; existing references still display)</option>' +
+      '</select></div>' +
+  '</div>';
+}
+
+function showAddProductListItem(kind) {
+  var cfg = PRODUCT_LIST_CFG[kind]; if (!cfg) return;
+  if (!requireFull('templates', 'add ' + cfg.plural)) return;
+  _editProductListKind = kind; _editProductListId = null;
+  var maxSort = 0; (db[cfg.dbKey] || []).forEach(function(s){ if ((s.sortOrder || 0) > maxSort) maxSort = s.sortOrder || 0; });
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Add ' + cfg.title + '</div>' +
+    '<div class="msb">Adds to every ' + cfg.title + ' dropdown in the Product Library and Submittals</div>' +
+    _productListFormHtml(kind, {sortOrder: maxSort + 10, isActive: true}) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" onclick="saveProductListItem(\'' + kind + '\')">Add</button></div>');
+}
+
+function showEditProductListItem(kind, id) {
+  var cfg = PRODUCT_LIST_CFG[kind]; if (!cfg) return;
+  if (!requireFull('templates', 'edit ' + cfg.plural)) return;
+  var s = (db[cfg.dbKey] || []).find(function(x){ return String(x.id) === String(id); });
+  if (!s) { alert('Not found.'); return; }
+  _editProductListKind = kind; _editProductListId = id;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Edit ' + cfg.title + '</div>' +
+    '<div class="msb">' + plEsc(s.name || '') + '</div>' +
+    _productListFormHtml(kind, s) +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" onclick="saveProductListItem(\'' + kind + '\')">Save changes</button></div>');
+}
+
+async function saveProductListItem(kind) {
+  var cfg = PRODUCT_LIST_CFG[kind]; if (!cfg) return;
+  var name = (g('pli-name').value || '').trim();
+  var sortRaw = (g('pli-sort').value || '0').trim();
+  var isActive = (g('pli-active').value !== 'false');
+  if (!name) { alert('Name is required.'); return; }
+  if (!Array.isArray(db[cfg.dbKey])) db[cfg.dbKey] = [];
+
+  // Dedupe by name (case-insensitive) — names are the stored value, so dupes
+  // would make the dropdowns ambiguous.
+  var nameLc = name.toLowerCase();
+  var clash = db[cfg.dbKey].find(function(x){
+    return String(x.id) !== String(_editProductListId) && String(x.name || '').toLowerCase() === nameLc;
+  });
+  if (clash) { alert('A ' + cfg.title + ' named "' + clash.name + '" already exists. Edit that one instead, or pick a different name.'); return; }
+
+  var sortOrder = parseInt(sortRaw, 10); if (!isFinite(sortOrder)) sortOrder = 0;
+  var nowIso = new Date().toISOString();
+  var uid = _currentUser ? _currentUser.id : null;
+  var record, oldName = null;
+  if (_editProductListId) {
+    record = db[cfg.dbKey].find(function(x){ return String(x.id) === String(_editProductListId); });
+    if (record) {
+      oldName = record.name;
+      record.name = name; record.isActive = isActive; record.sortOrder = sortOrder;
+      record.updatedAt = nowIso; record.updatedByUserId = uid;
+    }
+  } else {
+    record = { id: 'pl_' + Date.now(), name: name, isActive: isActive, sortOrder: sortOrder,
+      createdAt: nowIso, createdByUserId: uid, updatedAt: nowIso, updatedByUserId: uid };
+    db[cfg.dbKey].push(record);
+  }
+
+  // Apply-on-rename (decision 5): offer to rewrite existing records that
+  // stored the old name, so they stay linked to this entry.
+  var affected = [];
+  if (oldName != null && oldName !== name) {
+    var cand = (db[cfg.usageColl] || []).filter(function(x){ return x[cfg.usageField] === oldName; });
+    if (cand.length) {
+      if (confirm('Rename "' + oldName + '" to "' + name + '" on ' + cand.length + ' existing ' +
+          cfg.usageNoun + (cand.length === 1 ? '' : 's') + ' too?\n\n' +
+          'OK = update them so they stay linked to this ' + cfg.title + '.\n' +
+          'Cancel = leave them with the old text ("' + oldName + '").')) {
+        cand.forEach(function(x){ x[cfg.usageField] = name; });
+        affected = cand;
+      }
+    }
+  }
+
+  saveDB();
+
+  if (supabaseClient && record) {
+    try {
+      var r = await supabaseClient.from(cfg.table).upsert(cfg.toSB(record));
+      if (r && r.error) console.warn(cfg.table + ' push warning:', r.error.message);
+    } catch (e) { console.warn(cfg.table + ' push threw:', e); }
+    if (affected.length) {
+      try {
+        var r2 = await supabaseClient.from(cfg.usageTable).upsert(affected.map(cfg.usageToSB));
+        if (r2 && r2.error) console.warn(cfg.usageTable + ' rename re-push warning:', r2.error.message);
+      } catch (e) { console.warn(cfg.usageTable + ' rename re-push threw:', e); }
+    }
+  }
+
+  closeModal();
+  _editProductListId = null; _editProductListKind = null;
+  renderProductList(kind);
+  if (affected.length && typeof showToast === 'function') {
+    showToast('Renamed and updated ' + affected.length + ' ' + cfg.usageNoun + (affected.length === 1 ? '' : 's') + '.', 'success');
+  }
+}
+
+async function deleteProductListItem(kind, id) {
+  var cfg = PRODUCT_LIST_CFG[kind]; if (!cfg) return;
+  if (!requireFull('templates', 'delete ' + cfg.plural)) return;
+  var s = (db[cfg.dbKey] || []).find(function(x){ return String(x.id) === String(id); });
+  if (!s) return;
+  var usage = (db[cfg.usageColl] || []).filter(function(x){ return x[cfg.usageField] === s.name; }).length;
+  var msg = 'Delete ' + cfg.title + ' "' + s.name + '"?';
+  if (usage) {
+    msg += '\n\nIn use by ' + usage + ' ' + cfg.usageNoun + (usage === 1 ? '' : 's') +
+      '. Those keep their stored text and still display, but this option will no longer appear in dropdowns — same as deactivating it. ' +
+      'To hide it without affecting anything, click Cancel and use Edit → set Active to Inactive instead.';
+  }
+  if (!confirm(msg)) return;
+  db[cfg.dbKey] = (db[cfg.dbKey] || []).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+  if (supabaseClient) {
+    try {
+      var r = await supabaseClient.from(cfg.table).delete().eq('id', String(id));
+      if (r && r.error) console.warn(cfg.table + ' delete warning:', r.error.message);
+    } catch (e) { console.warn(cfg.table + ' delete threw:', e); }
+  }
+  renderProductList(kind);
+}
 // ═══════════════════════════════════════════════════════════════════
 // A curated, per-project procurement list reconciled against PO line
 // items. Distinct from p.materialList — that's the estimating/COR
@@ -39376,6 +39634,60 @@ function fromSBSpecSection(r) {
   };
 }
 
+// ── Product Library list mappers (Product Lists Round 1) ────────
+// Document types and product categories are simple single-label lists.
+// id is TEXT (string seed ids + Date.now() ids). Stored value on product
+// / document records is the NAME, so these tables drive the dropdowns
+// while existing records keep matching by name.
+function toSBProductDocType(r) {
+  return {
+    id:                 String(r.id),
+    name:               r.name || '',
+    sort_order:         r.sortOrder || 0,
+    is_active:          (r.isActive !== false),
+    created_at:         r.createdAt || null,
+    created_by_user_id: r.createdByUserId || null,
+    updated_at:         r.updatedAt || null,
+    updated_by_user_id: r.updatedByUserId || null
+  };
+}
+function fromSBProductDocType(r) {
+  return {
+    id:              r.id,
+    name:            r.name || '',
+    sortOrder:       r.sort_order || 0,
+    isActive:        (r.is_active !== false),
+    createdAt:       r.created_at || null,
+    createdByUserId: r.created_by_user_id || null,
+    updatedAt:       r.updated_at || null,
+    updatedByUserId: r.updated_by_user_id || null
+  };
+}
+function toSBProductCategory(r) {
+  return {
+    id:                 String(r.id),
+    name:               r.name || '',
+    sort_order:         r.sortOrder || 0,
+    is_active:          (r.isActive !== false),
+    created_at:         r.createdAt || null,
+    created_by_user_id: r.createdByUserId || null,
+    updated_at:         r.updatedAt || null,
+    updated_by_user_id: r.updatedByUserId || null
+  };
+}
+function fromSBProductCategory(r) {
+  return {
+    id:              r.id,
+    name:            r.name || '',
+    sortOrder:       r.sort_order || 0,
+    isActive:        (r.is_active !== false),
+    createdAt:       r.created_at || null,
+    createdByUserId: r.created_by_user_id || null,
+    updatedAt:       r.updated_at || null,
+    updatedByUserId: r.updated_by_user_id || null
+  };
+}
+
 // ── Production catalog mappers (Prod Catalog Round 1) ───────────
 // Production categories and items moved out of the kmi_settings JSON
 // blob into dedicated tables so they're queryable and protected by the
@@ -40273,6 +40585,15 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_spec_sections').upsert(db.specSections.map(toSBSpecSection));
       if (r && r.error) errs.push('spec_sections: ' + r.error.message);
     }
+    // Product Library lists (Product Lists Round 1) — non-fatal if tables missing
+    if ((db.productDocTypes || []).length) {
+      var r = await supabaseClient.from('kmi_product_doc_types').upsert(db.productDocTypes.map(toSBProductDocType));
+      if (r && r.error) errs.push('product_doc_types: ' + r.error.message);
+    }
+    if ((db.productCategories || []).length) {
+      var r = await supabaseClient.from('kmi_product_categories').upsert(db.productCategories.map(toSBProductCategory));
+      if (r && r.error) errs.push('product_categories: ' + r.error.message);
+    }
     // Project parameters (Form-fill Round 1) — non-fatal if table missing
     if ((db.projectParameters || []).length) {
       var r = await supabaseClient.from('kmi_project_parameters').upsert(db.projectParameters.map(toSBProjectParameter));
@@ -40423,7 +40744,7 @@ async function pullFromSupabase() {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
          mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
-         rfqsRes, rfqRespRes, prodWkRes, prodCatRes, prodItemRes] = await Promise.all([
+         rfqsRes, rfqRespRes, prodWkRes, prodCatRes, prodItemRes, prodDocTypeRes, prodCategoryRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -40453,7 +40774,9 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_rfq_responses').select('*'),
       supabaseClient.from('kmi_prod_weekly').select('*'),
       supabaseClient.from('kmi_prod_categories').select('*'),
-      supabaseClient.from('kmi_prod_items').select('*')
+      supabaseClient.from('kmi_prod_items').select('*'),
+      supabaseClient.from('kmi_product_doc_types').select('*'),
+      supabaseClient.from('kmi_product_categories').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -40658,6 +40981,19 @@ async function pullFromSupabase() {
     } else if (specRes && specRes.error) {
       console.warn('kmi_spec_sections load error (table missing?):', specRes.error.message);
       if (!Array.isArray(db.specSections)) db.specSections = [];
+    }
+    // Product Library lists (Product Lists Round 1) — same preserve-on-missing
+    if (prodDocTypeRes && !prodDocTypeRes.error) {
+      db.productDocTypes = (prodDocTypeRes.data || []).map(fromSBProductDocType);
+    } else if (prodDocTypeRes && prodDocTypeRes.error) {
+      console.warn('kmi_product_doc_types load error (table missing?):', prodDocTypeRes.error.message);
+      if (!Array.isArray(db.productDocTypes)) db.productDocTypes = [];
+    }
+    if (prodCategoryRes && !prodCategoryRes.error) {
+      db.productCategories = (prodCategoryRes.data || []).map(fromSBProductCategory);
+    } else if (prodCategoryRes && prodCategoryRes.error) {
+      console.warn('kmi_product_categories load error (table missing?):', prodCategoryRes.error.message);
+      if (!Array.isArray(db.productCategories)) db.productCategories = [];
     }
     // Project parameters (Form-fill Round 1) — same preserve-on-missing pattern
     if (projParamsRes && !projParamsRes.error) {
