@@ -36078,23 +36078,30 @@ function saveProdItem() {
   var defaultPct = (type === 'field_pct'  && pctRaw !== '') ? (parseFloat(pctRaw) || 0) : null;
   var categoryId = (g('pi-category') && g('pi-category').value) || null;
   db.prodItems = db.prodItems || [];
+  var _nowIso = new Date().toISOString();
+  var _savedItem = null;
   if (_editProdItemId) {
     var it = _prodItem(_editProdItemId);
     if (it) {
       it.name = name; it.itemType = type; it.unitLabel = unit;
       it.defaultMdu = defaultMdu; it.defaultPct = defaultPct;
       it.defaultCrewId = crewId || null; it.categoryId = categoryId; it.active = active;
+      it.updatedAt = _nowIso;
+      _savedItem = it;
     }
   } else {
     var maxSort = db.prodItems.reduce(function(m,x){ return Math.max(m, Number(x.sortOrder)||0); }, 0);
-    db.prodItems.push({
+    _savedItem = {
       id: Date.now(), name: name, unitLabel: unit, itemType: type,
       defaultMdu: defaultMdu, defaultPct: defaultPct,
-      defaultCrewId: crewId || null, categoryId: categoryId, sortOrder: maxSort + 1, active: active
-    });
+      defaultCrewId: crewId || null, categoryId: categoryId, sortOrder: maxSort + 1, active: active,
+      createdAt: _nowIso, updatedAt: _nowIso
+    };
+    db.prodItems.push(_savedItem);
   }
   _editProdItemId = null;
   saveDB();
+  if (_savedItem) _syncProdItemToCloud(_savedItem);
   closeModal();
   renderProdItems();
 }
@@ -36103,6 +36110,7 @@ function rmProdItem(id) {
   if (!confirm('Remove item "' + (it.name || '') + '"?\n\nExisting project estimates keep their own snapshot of this line.')) return;
   db.prodItems = (db.prodItems || []).filter(function(x){ return String(x.id) !== String(id); });
   saveDB();
+  _deleteProdCloudRow('kmi_prod_items', id);
   renderProdItems();
 }
 
@@ -36159,17 +36167,19 @@ function saveCategory() {
   var name = (g('cat-name').value || '').trim();
   if (!name) { alert('Enter a category name.'); return; }
   var isGen = !!g('cat-gen').checked;
+  var _nowIso = new Date().toISOString();
   db.prodCategories = db.prodCategories || [];
-  if (isGen) { db.prodCategories.forEach(function(c){ if (!_editCategoryId || String(c.id) !== String(_editCategoryId)) c.isGeneral = false; }); }
+  if (isGen) { db.prodCategories.forEach(function(c){ if (!_editCategoryId || String(c.id) !== String(_editCategoryId)) { if (c.isGeneral) c.updatedAt = _nowIso; c.isGeneral = false; } }); }
   if (_editCategoryId) {
     var c = _prodCategory(_editCategoryId);
-    if (c) { c.name = name; c.isGeneral = isGen; }
+    if (c) { c.name = name; c.isGeneral = isGen; c.updatedAt = _nowIso; }
   } else {
     var maxSort = db.prodCategories.reduce(function(m,x){ return Math.max(m, Number(x.sortOrder)||0); }, 0);
-    db.prodCategories.push({ id: Date.now(), name: name, isGeneral: isGen, sortOrder: maxSort + 1, active: true });
+    db.prodCategories.push({ id: Date.now(), name: name, isGeneral: isGen, sortOrder: maxSort + 1, active: true, createdAt: _nowIso, updatedAt: _nowIso });
   }
   _editCategoryId = null;
   saveDB();
+  _syncProdCategoriesToCloud();
   closeModal();
   renderProdCategories();
 }
@@ -36179,6 +36189,7 @@ function rmCategory(id) {
   if (!confirm('Remove category "' + (c.name || '') + '"? Items and estimate lines using it fall back to General.')) return;
   db.prodCategories = (db.prodCategories || []).filter(function(x){ return String(x.id) !== String(id); });
   saveDB();
+  _deleteProdCloudRow('kmi_prod_categories', id);
   renderProdCategories();
 }
 
@@ -36334,8 +36345,8 @@ function renderProdEstimateView() {
       '<div style="display:flex;gap:8px">' +
         '<button class="btn btn-sm btn-p" onclick="prodShowAddItems()">+ Add items</button>' +
         '<button class="btn btn-sm" onclick="prodOpenBprFlow()" title="' + ((p.bprMaterials && p.bprMaterials.length) ? 'Build estimate lines from the Bid Price Report' : 'Upload the Bid Price Report PDF to pull quantities and lay rates') + '">+ From BPR' + ((p.bprMaterials && p.bprMaterials.length) ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
-        (_prodHasMergeableLines(est)
-          ? '<button class="btn btn-sm' + (_prodMergeMode ? ' btn-p' : '') + '" onclick="prodToggleMergeMode()" title="Combine 2 or more lines of the same type">' + (_prodMergeMode ? 'Done merging' : 'Merge lines') + '</button>'
+        ((est.lines || []).filter(function(l){ return l.lineType === 'production'; }).length >= 2
+          ? '<button class="btn btn-sm' + (_prodMergeMode ? ' btn-p' : '') + '" onclick="prodToggleMergeMode()" title="Combine production lines that share a unit">' + (_prodMergeMode ? 'Done merging' : 'Merge lines') + '</button>'
           : '') +
         '<button class="btn btn-sm" id="prod-save-btn" onclick="prodSaveEstimate()">Save estimate</button>' +
       '</div>' +
@@ -36348,25 +36359,15 @@ function renderProdEstimateView() {
   // Merge action bar (only while merge mode is on)
   var mergeBar = '';
   if (_prodMergeMode) {
-    var picked = lines.filter(function(l){ return _prodMergeSel[l.id]; });
-    var ptypes = {}; picked.forEach(function(l){ ptypes[l.lineType || 'production'] = 1; });
-    var ptypeKeys = Object.keys(ptypes);
-    var sameType = ptypeKeys.length === 1;
-    var unitClash = false;
-    if (sameType && ptypeKeys[0] === 'production') {
-      var punits = {}; picked.forEach(function(l){ punits[l.unitLabel || ''] = 1; });
-      unitClash = Object.keys(punits).length > 1;
-    }
-    var typeClash = picked.length >= 2 && !sameType;
-    var canMerge = picked.length >= 2 && sameType && !unitClash;
-    var hint;
-    if (typeClash) hint = 'Selected lines are different types \u2014 merge production, field-$, and field-% separately';
-    else if (unitClash) hint = 'Selected production lines span more than one unit \u2014 pick one unit';
-    else if (canMerge) hint = picked.length + ' lines selected';
-    else hint = 'Check 2 or more lines of the same type';
+    var picked = prodRows.filter(function(l){ return _prodMergeSel[l.id]; });
+    var units = {}; picked.forEach(function(l){ units[l.unitLabel || ''] = 1; });
+    var canMerge = picked.length >= 2 && Object.keys(units).length === 1;
+    var clash = picked.length >= 2 && Object.keys(units).length > 1;
+    var hint = clash ? 'Selected lines span more than one unit \u2014 pick one unit'
+      : (canMerge ? (picked.length + ' lines selected') : 'Check 2 or more production lines that share a unit');
     mergeBar = '<div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#F0F4FB;border:1px solid #cdddf0;margin-bottom:12px">' +
       '<button class="btn btn-sm btn-p" onclick="prodMergeSelected()"' + (canMerge ? '' : ' disabled') + '>\u2295 Merge selected' + (canMerge ? (' (' + picked.length + ')') : '') + '</button>' +
-      '<span style="font-size:12px;color:' + ((typeClash || unitClash) ? '#A32D2D' : '#666') + '">' + hint + '</span>' +
+      '<span style="font-size:12px;color:' + (clash ? '#A32D2D' : '#666') + '">' + hint + '</span>' +
       '<button class="btn btn-sm" style="margin-left:auto" onclick="prodToggleMergeMode()">Done</button>' +
     '</div>';
   }
@@ -36584,7 +36585,9 @@ function _prodRowHtml(est, l) {
       '" style="width:64px;text-align:right" oninput="prodEdit(\'' + id + '\',\'amount\',this.value)" onchange="prodPersistLocal()"> <span style="font-size:12px;color:#888">% of base</span></td>';
   }
   var chkCell = _prodMergeMode
-    ? ('<td style="text-align:center"><input type="checkbox" ' + (_prodMergeSel[id] ? 'checked ' : '') + 'onchange="prodMergeToggleSel(\'' + id + '\',this.checked)"></td>')
+    ? ('<td style="text-align:center">' + (l.lineType === 'production'
+        ? '<input type="checkbox" ' + (_prodMergeSel[id] ? 'checked ' : '') + 'onchange="prodMergeToggleSel(\'' + id + '\',this.checked)">'
+        : '') + '</td>')
     : '';
   var nameCell;
   if (l.mergedFrom && l.mergedFrom.length) {
@@ -36711,24 +36714,13 @@ function _prodCaptureLineActuals(projId, lineId) {
   });
   return out;
 }
-// True when at least one line type has 2+ lines (so a merge is possible).
-function _prodHasMergeableLines(est) {
-  var byType = {};
-  ((est && est.lines) || []).forEach(function(l){ var t = l.lineType || 'production'; byType[t] = (byType[t] || 0) + 1; });
-  return Object.keys(byType).some(function(t){ return byType[t] >= 2; });
-}
 function prodMergeSelected() {
   var p = _prodCurrentProject(); if (!p) return;
   var est = _prodEnsureEstimate(p);
-  var picked = (est.lines || []).filter(function(l){ return _prodMergeSel[l.id]; });
-  if (picked.length < 2) { alert('Check at least 2 lines of the same type to merge.'); return; }
-  var types = {}; picked.forEach(function(l){ types[l.lineType || 'production'] = 1; });
-  if (Object.keys(types).length > 1) { alert('All merged lines must be the same type. Merge production, field-$, and field-% lines separately.'); return; }
-  var type = Object.keys(types)[0];
-  if (type === 'production') {
-    var units = {}; picked.forEach(function(l){ units[l.unitLabel || ''] = 1; });
-    if (Object.keys(units).length > 1) { alert('All merged production lines must share the same unit. Selected units: ' + Object.keys(units).join(', ')); return; }
-  }
+  var picked = (est.lines || []).filter(function(l){ return l.lineType === 'production' && _prodMergeSel[l.id]; });
+  if (picked.length < 2) { alert('Check at least 2 production lines to merge.'); return; }
+  var units = {}; picked.forEach(function(l){ units[l.unitLabel || ''] = 1; });
+  if (Object.keys(units).length > 1) { alert('All merged lines must share the same unit. Selected units: ' + Object.keys(units).join(', ')); return; }
 
   var defLabel = picked[0].itemName + (picked.length > 1 ? (' + ' + (picked.length - 1) + ' more') : '');
   var label = prompt('Label for the merged line:', defLabel);
@@ -36744,6 +36736,11 @@ function prodMergeSelected() {
     return snap;
   });
 
+  // Merge math
+  var totalUnits = 0, denom = 0;
+  picked.forEach(function(l){ var u = _prodNum(l.estUnits), m = _prodNum(l.estMdu); totalUnits += u; if (m > 0) denom += u / m; });
+  var mergedMdu = denom > 0 ? (totalUnits / denom) : 0;
+
   // Combined bprRef (dedup)
   var refSet = {}; picked.forEach(function(l){ (Array.isArray(l.bprRef) ? l.bprRef : []).forEach(function(id){ refSet[String(id)] = id; }); });
   var bprRef = Object.keys(refSet).map(function(k){ return refSet[k]; });
@@ -36752,10 +36749,10 @@ function prodMergeSelected() {
     id: mergedId,
     itemId: picked[0].itemId || null,
     itemName: label,
-    lineType: type,
+    lineType: 'production',
     unitLabel: picked[0].unitLabel || '',
-    estUnits: '',
-    estMdu: '',
+    estUnits: totalUnits,
+    estMdu: mergedMdu,
     amount: '',
     crewId: picked[0].crewId || null,
     categoryId: picked[0].categoryId || null,
@@ -36763,16 +36760,6 @@ function prodMergeSelected() {
     source: 'merged',
     mergedFrom: members
   };
-  if (type === 'production') {
-    // Units summed; MDU = units-weighted harmonic mean (preserves man-days).
-    var totalUnits = 0, denom = 0;
-    picked.forEach(function(l){ var u = _prodNum(l.estUnits), m = _prodNum(l.estMdu); totalUnits += u; if (m > 0) denom += u / m; });
-    merged.estUnits = totalUnits;
-    merged.estMdu = denom > 0 ? (totalUnits / denom) : 0;
-  } else {
-    // field_dollar → sum the $ amounts; field_pct → sum the percents.
-    merged.amount = picked.reduce(function(s,l){ return s + _prodNum(l.amount); }, 0);
-  }
 
   // Re-point weekly actuals from members onto the merged line (sum per week).
   members.forEach(function(snap){
@@ -36792,7 +36779,7 @@ function prodMergeSelected() {
   // Replace the picked lines with the merged line, in place of the first.
   var inserted = false, newLines = [];
   (est.lines || []).forEach(function(l){
-    if (_prodMergeSel[l.id]) { if (!inserted) { newLines.push(merged); inserted = true; } }
+    if (l.lineType === 'production' && _prodMergeSel[l.id]) { if (!inserted) { newLines.push(merged); inserted = true; } }
     else newLines.push(l);
   });
   if (!inserted) newLines.push(merged);
@@ -39367,6 +39354,87 @@ function fromSBSpecSection(r) {
   };
 }
 
+// ── Production catalog mappers (Prod Catalog Round 1) ───────────
+// Production categories and items moved out of the kmi_settings JSON
+// blob into dedicated tables so they're queryable and protected by the
+// same preserve-on-missing sync guard every other module uses. JS keeps
+// `active`; the DB column is `is_active`. id is TEXT so it holds both the
+// string seeds (cat_cmu) and Date.now() numeric ids.
+function toSBProdCategory(r) {
+  return {
+    id:          String(r.id),
+    name:        r.name || '',
+    is_general:  !!r.isGeneral,
+    sort_order:  Number(r.sortOrder) || 0,
+    is_active:   (r.active !== false),
+    created_at:  r.createdAt || null,
+    updated_at:  r.updatedAt || null
+  };
+}
+function fromSBProdCategory(r) {
+  return {
+    id:        r.id,
+    name:      r.name || '',
+    isGeneral: !!r.is_general,
+    sortOrder: Number(r.sort_order) || 0,
+    active:    (r.is_active !== false),
+    createdAt: r.created_at || null,
+    updatedAt: r.updated_at || null
+  };
+}
+function toSBProdItem(r) {
+  return {
+    id:              String(r.id),
+    name:            r.name || '',
+    unit_label:      r.unitLabel || '',
+    item_type:       r.itemType || 'production',
+    default_mdu:     (r.defaultMdu != null ? r.defaultMdu : null),
+    default_pct:     (r.defaultPct != null ? r.defaultPct : null),
+    default_crew_id: (r.defaultCrewId != null ? String(r.defaultCrewId) : null),
+    category_id:     (r.categoryId != null ? String(r.categoryId) : null),
+    sort_order:      Number(r.sortOrder) || 0,
+    is_active:       (r.active !== false),
+    created_at:      r.createdAt || null,
+    updated_at:      r.updatedAt || null
+  };
+}
+function fromSBProdItem(r) {
+  return {
+    id:            r.id,
+    name:          r.name || '',
+    unitLabel:     r.unit_label || '',
+    itemType:      r.item_type || 'production',
+    defaultMdu:    (r.default_mdu != null ? r.default_mdu : null),
+    defaultPct:    (r.default_pct != null ? r.default_pct : null),
+    defaultCrewId: (r.default_crew_id != null ? r.default_crew_id : null),
+    categoryId:    (r.category_id != null ? r.category_id : null),
+    sortOrder:     Number(r.sort_order) || 0,
+    active:        (r.is_active !== false),
+    createdAt:     r.created_at || null,
+    updatedAt:     r.updated_at || null
+  };
+}
+// Per-change cloud writes so a catalog edit reaches the dedicated table
+// immediately, instead of waiting on (and possibly missing) the 1.5s
+// debounced full push. All fire-and-forget; non-fatal if the table is
+// missing on an older Supabase project.
+function _syncProdCategoriesToCloud() {
+  if (typeof supabaseClient === 'undefined' || !supabaseClient) return;
+  if (!Array.isArray(db.prodCategories) || !db.prodCategories.length) return;
+  supabaseClient.from('kmi_prod_categories').upsert(db.prodCategories.map(toSBProdCategory))
+    .then(function(r){ if (r && r.error) console.warn('prod_categories sync error:', r.error.message); });
+}
+function _syncProdItemToCloud(item) {
+  if (typeof supabaseClient === 'undefined' || !supabaseClient || !item) return;
+  supabaseClient.from('kmi_prod_items').upsert(toSBProdItem(item))
+    .then(function(r){ if (r && r.error) console.warn('prod_item sync error:', r.error.message); });
+}
+function _deleteProdCloudRow(table, id) {
+  if (typeof supabaseClient === 'undefined' || !supabaseClient || id == null) return;
+  supabaseClient.from(table).delete().eq('id', String(id))
+    .then(function(r){ if (r && r.error) console.warn(table + ' delete error:', r.error.message); });
+}
+
 // ── Project Parameter mappers (Form-fill Round 1) ───────────────
 // Master list of "questions" each project answers (Block Size, Wire
 // Size, Mortar Color, etc.). Per-project answers ride on the project
@@ -40218,6 +40286,18 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_prod_weekly').upsert(db.prodWeekly.map(toSBProdWeekly));
       if (r && r.error) errs.push('prod_weekly: ' + r.error.message);
     }
+    // Production catalog (Prod Catalog Round 1) — dedicated tables. Non-fatal
+    // if the tables are missing on an older Supabase project (created by the
+    // prod_catalog_round1 migration). These are now the sole source of truth
+    // for categories/items; they are no longer written to kmi_settings.
+    if ((db.prodCategories || []).length) {
+      var r = await supabaseClient.from('kmi_prod_categories').upsert(db.prodCategories.map(toSBProdCategory));
+      if (r && r.error) errs.push('prod_categories: ' + r.error.message);
+    }
+    if ((db.prodItems || []).length) {
+      var r = await supabaseClient.from('kmi_prod_items').upsert(db.prodItems.map(toSBProdItem));
+      if (r && r.error) errs.push('prod_items: ' + r.error.message);
+    }
     // CORs (Round 4.1) — non-fatal if table missing on older Supabase projects
     if ((db.cors || []).length) {
       var r = await supabaseClient.from('kmi_cors').upsert(db.cors.map(toSBCor));
@@ -40283,8 +40363,6 @@ async function pushToSupabase() {
       {key:'laborRateSets',value:db.laborRateSets},
       {key:'materialTemplates', value:db.materialTemplates || []},
       {key:'crewTemplates', value:db.crewTemplates || []},
-      {key:'prodCategories', value:db.prodCategories || []},
-      {key:'prodItems',     value:db.prodItems     || []},
       {key:'companyTypes', value:db.companyTypes},
       {key:'projectTypes', value:db.projectTypes},
       {key:'projectRoles', value:db.projectRoles},
@@ -40323,7 +40401,7 @@ async function pullFromSupabase() {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
          mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
-         rfqsRes, rfqRespRes, prodWkRes] = await Promise.all([
+         rfqsRes, rfqRespRes, prodWkRes, prodCatRes, prodItemRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -40351,7 +40429,9 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_transmittals').select('*'),
       supabaseClient.from('kmi_rfqs').select('*'),
       supabaseClient.from('kmi_rfq_responses').select('*'),
-      supabaseClient.from('kmi_prod_weekly').select('*')
+      supabaseClient.from('kmi_prod_weekly').select('*'),
+      supabaseClient.from('kmi_prod_categories').select('*'),
+      supabaseClient.from('kmi_prod_items').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -40456,6 +40536,53 @@ async function pullFromSupabase() {
       console.warn('kmi_prod_weekly load error (table missing?):', prodWkRes.error.message);
       if (!Array.isArray(db.prodWeekly)) db.prodWeekly = [];
     }
+    // Production catalog (Prod Catalog Round 1) — dedicated tables with A1
+    // carry-forward. These used to live in the kmi_settings JSON blob; the
+    // blob is no longer read into db (removed from ALLOWED_SETTING_KEYS), so
+    // on first load after the migration the tables are empty. When that
+    // happens, migrate the richest local/legacy copy up into the table once
+    // and keep it locally. Preserve-on-missing if the table doesn't exist yet.
+    function _richerArr(a, b) {
+      a = Array.isArray(a) ? a : []; b = Array.isArray(b) ? b : [];
+      return (b.length > a.length) ? b : a;
+    }
+    var _legacyProdCats = null, _legacyProdItems = null;
+    (settings.data || []).forEach(function(row) {
+      if (row.key === 'prodCategories' && Array.isArray(row.value)) _legacyProdCats = row.value;
+      if (row.key === 'prodItems'      && Array.isArray(row.value)) _legacyProdItems = row.value;
+    });
+    if (prodCatRes && !prodCatRes.error) {
+      var _cloudCats = (prodCatRes.data || []).map(fromSBProdCategory);
+      if (_cloudCats.length) {
+        db.prodCategories = _cloudCats;
+      } else {
+        var _seedCats = _richerArr(db.prodCategories, _legacyProdCats);
+        if (_seedCats.length) {
+          db.prodCategories = _seedCats;
+          var _cfCat = await supabaseClient.from('kmi_prod_categories').upsert(_seedCats.map(toSBProdCategory));
+          if (_cfCat && _cfCat.error) console.warn('prod_categories carry-forward error:', _cfCat.error.message);
+        }
+      }
+    } else if (prodCatRes && prodCatRes.error) {
+      console.warn('kmi_prod_categories load error (table missing?):', prodCatRes.error.message);
+      if (!Array.isArray(db.prodCategories)) db.prodCategories = [];
+    }
+    if (prodItemRes && !prodItemRes.error) {
+      var _cloudItems = (prodItemRes.data || []).map(fromSBProdItem);
+      if (_cloudItems.length) {
+        db.prodItems = _cloudItems;
+      } else {
+        var _seedItems = _richerArr(db.prodItems, _legacyProdItems);
+        if (_seedItems.length) {
+          db.prodItems = _seedItems;
+          var _cfItem = await supabaseClient.from('kmi_prod_items').upsert(_seedItems.map(toSBProdItem));
+          if (_cfItem && _cfItem.error) console.warn('prod_items carry-forward error:', _cfItem.error.message);
+        }
+      }
+    } else if (prodItemRes && prodItemRes.error) {
+      console.warn('kmi_prod_items load error (table missing?):', prodItemRes.error.message);
+      if (!Array.isArray(db.prodItems)) db.prodItems = [];
+    }
     // CORs (Round 4.1) — same preserve-on-missing pattern
     if (corsRes && !corsRes.error) {
       db.cors = (corsRes.data || []).map(fromSBCor);
@@ -40544,7 +40671,7 @@ async function pullFromSupabase() {
     // Settings — copy known setting rows into db. Includes runtime-config
     // keys like anthropic_api_key that aren't part of the default db shape.
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
-                                'laborRates','laborRateSets','materialTemplates','crewTemplates','prodItems','prodCategories',
+                                'laborRates','laborRateSets','materialTemplates','crewTemplates',
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
                                 'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
                                 'bprCostCodeMap',
