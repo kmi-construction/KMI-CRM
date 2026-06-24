@@ -36345,9 +36345,14 @@ function renderProdEstimateView() {
       '<div style="display:flex;gap:8px">' +
         '<button class="btn btn-sm btn-p" onclick="prodShowAddItems()">+ Add items</button>' +
         '<button class="btn btn-sm" onclick="prodOpenBprFlow()" title="' + ((p.bprMaterials && p.bprMaterials.length) ? 'Build estimate lines from the Bid Price Report' : 'Upload the Bid Price Report PDF to pull quantities and lay rates') + '">+ From BPR' + ((p.bprMaterials && p.bprMaterials.length) ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
-        ((est.lines || []).filter(function(l){ return l.lineType === 'production'; }).length >= 2
-          ? '<button class="btn btn-sm' + (_prodMergeMode ? ' btn-p' : '') + '" onclick="prodToggleMergeMode()" title="Combine production lines that share a unit">' + (_prodMergeMode ? 'Done merging' : 'Merge lines') + '</button>'
-          : '') +
+        (function(){
+          var byType = {};
+          (est.lines || []).forEach(function(l){ byType[l.lineType] = (byType[l.lineType] || 0) + 1; });
+          var mergeable = Object.keys(byType).some(function(t){ return byType[t] >= 2; });
+          return mergeable
+            ? '<button class="btn btn-sm' + (_prodMergeMode ? ' btn-p' : '') + '" onclick="prodToggleMergeMode()" title="Combine same-type lines (production lines must also share a unit)">' + (_prodMergeMode ? 'Done merging' : 'Merge lines') + '</button>'
+            : '';
+        })() +
         '<button class="btn btn-sm" id="prod-save-btn" onclick="prodSaveEstimate()">Save estimate</button>' +
       '</div>' +
     '</div></div>';
@@ -36359,15 +36364,22 @@ function renderProdEstimateView() {
   // Merge action bar (only while merge mode is on)
   var mergeBar = '';
   if (_prodMergeMode) {
-    var picked = prodRows.filter(function(l){ return _prodMergeSel[l.id]; });
-    var units = {}; picked.forEach(function(l){ units[l.unitLabel || ''] = 1; });
-    var canMerge = picked.length >= 2 && Object.keys(units).length === 1;
-    var clash = picked.length >= 2 && Object.keys(units).length > 1;
-    var hint = clash ? 'Selected lines span more than one unit \u2014 pick one unit'
-      : (canMerge ? (picked.length + ' lines selected') : 'Check 2 or more production lines that share a unit');
+    var picked = lines.filter(function(l){ return _prodMergeSel[l.id]; });
+    var typeKeys = Object.keys((function(){ var t = {}; picked.forEach(function(l){ t[l.lineType] = 1; }); return t; })());
+    var multiType = typeKeys.length > 1;
+    var prodUnits = {}; picked.forEach(function(l){ if (l.lineType === 'production') prodUnits[l.unitLabel || ''] = 1; });
+    var unitClash = !multiType && typeKeys[0] === 'production' && Object.keys(prodUnits).length > 1;
+    var canMerge = picked.length >= 2 && !multiType && !unitClash;
+    var typeLabel = { production:'production', field_dollar:'field-$', field_pct:'field-%' };
+    var barClash = (picked.length >= 2) && (multiType || unitClash);
+    var hint;
+    if (multiType) hint = 'Selected lines are different types \u2014 merge one type at a time';
+    else if (unitClash) hint = 'Production lines span more than one unit \u2014 pick one unit';
+    else if (canMerge) hint = picked.length + ' ' + (typeLabel[typeKeys[0]] || '') + ' lines selected';
+    else hint = 'Check 2 or more lines of the same type (production lines must share a unit)';
     mergeBar = '<div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#F0F4FB;border:1px solid #cdddf0;margin-bottom:12px">' +
       '<button class="btn btn-sm btn-p" onclick="prodMergeSelected()"' + (canMerge ? '' : ' disabled') + '>\u2295 Merge selected' + (canMerge ? (' (' + picked.length + ')') : '') + '</button>' +
-      '<span style="font-size:12px;color:' + (clash ? '#A32D2D' : '#666') + '">' + hint + '</span>' +
+      '<span style="font-size:12px;color:' + (barClash ? '#A32D2D' : '#666') + '">' + hint + '</span>' +
       '<button class="btn btn-sm" style="margin-left:auto" onclick="prodToggleMergeMode()">Done</button>' +
     '</div>';
   }
@@ -36585,9 +36597,7 @@ function _prodRowHtml(est, l) {
       '" style="width:64px;text-align:right" oninput="prodEdit(\'' + id + '\',\'amount\',this.value)" onchange="prodPersistLocal()"> <span style="font-size:12px;color:#888">% of base</span></td>';
   }
   var chkCell = _prodMergeMode
-    ? ('<td style="text-align:center">' + (l.lineType === 'production'
-        ? '<input type="checkbox" ' + (_prodMergeSel[id] ? 'checked ' : '') + 'onchange="prodMergeToggleSel(\'' + id + '\',this.checked)">'
-        : '') + '</td>')
+    ? ('<td style="text-align:center"><input type="checkbox" ' + (_prodMergeSel[id] ? 'checked ' : '') + 'onchange="prodMergeToggleSel(\'' + id + '\',this.checked)"></td>')
     : '';
   var nameCell;
   if (l.mergedFrom && l.mergedFrom.length) {
@@ -36717,10 +36727,15 @@ function _prodCaptureLineActuals(projId, lineId) {
 function prodMergeSelected() {
   var p = _prodCurrentProject(); if (!p) return;
   var est = _prodEnsureEstimate(p);
-  var picked = (est.lines || []).filter(function(l){ return l.lineType === 'production' && _prodMergeSel[l.id]; });
-  if (picked.length < 2) { alert('Check at least 2 production lines to merge.'); return; }
-  var units = {}; picked.forEach(function(l){ units[l.unitLabel || ''] = 1; });
-  if (Object.keys(units).length > 1) { alert('All merged lines must share the same unit. Selected units: ' + Object.keys(units).join(', ')); return; }
+  var picked = (est.lines || []).filter(function(l){ return _prodMergeSel[l.id]; });
+  if (picked.length < 2) { alert('Check at least 2 lines of the same type to merge.'); return; }
+  var types = {}; picked.forEach(function(l){ types[l.lineType] = 1; });
+  if (Object.keys(types).length > 1) { alert('All merged lines must be the same type \u2014 merge production, field-$ and field-% lines separately.'); return; }
+  var mType = picked[0].lineType;
+  if (mType === 'production') {
+    var units = {}; picked.forEach(function(l){ units[l.unitLabel || ''] = 1; });
+    if (Object.keys(units).length > 1) { alert('All merged production lines must share the same unit. Selected units: ' + Object.keys(units).join(', ')); return; }
+  }
 
   var defLabel = picked[0].itemName + (picked.length > 1 ? (' + ' + (picked.length - 1) + ' more') : '');
   var label = prompt('Label for the merged line:', defLabel);
@@ -36736,11 +36751,6 @@ function prodMergeSelected() {
     return snap;
   });
 
-  // Merge math
-  var totalUnits = 0, denom = 0;
-  picked.forEach(function(l){ var u = _prodNum(l.estUnits), m = _prodNum(l.estMdu); totalUnits += u; if (m > 0) denom += u / m; });
-  var mergedMdu = denom > 0 ? (totalUnits / denom) : 0;
-
   // Combined bprRef (dedup)
   var refSet = {}; picked.forEach(function(l){ (Array.isArray(l.bprRef) ? l.bprRef : []).forEach(function(id){ refSet[String(id)] = id; }); });
   var bprRef = Object.keys(refSet).map(function(k){ return refSet[k]; });
@@ -36749,10 +36759,10 @@ function prodMergeSelected() {
     id: mergedId,
     itemId: picked[0].itemId || null,
     itemName: label,
-    lineType: 'production',
-    unitLabel: picked[0].unitLabel || '',
-    estUnits: totalUnits,
-    estMdu: mergedMdu,
+    lineType: mType,
+    unitLabel: (mType === 'production') ? (picked[0].unitLabel || '') : '',
+    estUnits: '',
+    estMdu: '',
     amount: '',
     crewId: picked[0].crewId || null,
     categoryId: picked[0].categoryId || null,
@@ -36760,6 +36770,18 @@ function prodMergeSelected() {
     source: 'merged',
     mergedFrom: members
   };
+  if (mType === 'production') {
+    // Units-weighted MDU: total units / sum(units/mdu).
+    var totalUnits = 0, denom = 0;
+    picked.forEach(function(l){ var u = _prodNum(l.estUnits), m = _prodNum(l.estMdu); totalUnits += u; if (m > 0) denom += u / m; });
+    merged.estUnits = totalUnits;
+    merged.estMdu = denom > 0 ? (totalUnits / denom) : 0;
+  } else {
+    // field_dollar ($) and field_pct (% of base) both carry their value in
+    // amount and merge by simple sum.
+    var sum = 0; picked.forEach(function(l){ sum += _prodNum(l.amount); });
+    merged.amount = sum;
+  }
 
   // Re-point weekly actuals from members onto the merged line (sum per week).
   members.forEach(function(snap){
@@ -36779,7 +36801,7 @@ function prodMergeSelected() {
   // Replace the picked lines with the merged line, in place of the first.
   var inserted = false, newLines = [];
   (est.lines || []).forEach(function(l){
-    if (l.lineType === 'production' && _prodMergeSel[l.id]) { if (!inserted) { newLines.push(merged); inserted = true; } }
+    if (_prodMergeSel[l.id]) { if (!inserted) { newLines.push(merged); inserted = true; } }
     else newLines.push(l);
   });
   if (!inserted) newLines.push(merged);
