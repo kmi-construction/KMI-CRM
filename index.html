@@ -2012,6 +2012,7 @@ textarea{resize:vertical;min-height:72px}
     </div>
     <span class="eqb-summary" id="eqb-summary"></span>
     <div class="eqb-codes" id="eqb-codes"></div>
+    <button class="btn btn-p" id="eqb-add-btn" onclick="_eqbShowAdd()" style="display:none;margin-left:8px">+ Add</button>
   </div>
   <div class="eqb-board" id="eqb-board"></div>
 </div>
@@ -28338,14 +28339,14 @@ function _eqbUnitRow(e){
   else if(e.isDown){ meta='<span class="eqb-rmeta red">DOWN</span>'; }
   else { var sv=_eqbSvc(e.serviceDate), d=_eqbDays(e);
     meta='<span class="eqb-rmeta '+(sv.cls==='ok'?'':sv.cls)+'">'+((d!=null&&d>0)?d+'d':(e.currentCol==='yard'?'avail':(sv.cls==='red'?'svc!':(sv.short||'')))) +'</span>'; }
-  return '<div class="eqb-row s-'+s+(rented?' rented':'')+(drag?' draggable':'')+'" data-id="'+_eqbEsc(e.id)+'">'+
+  return '<div class="eqb-row s-'+s+(rented?' rented':'')+(drag?' draggable':'')+'" data-id="'+_eqbEsc(e.id)+'" onclick="_eqbRowClick(\''+_eqbEsc(e.id)+'\')">'+
     '<span class="eqb-rdot '+s+'"></span><span class="eqb-rico" style="color:'+t.color+'">'+_eqbIcon(e.eqType)+'</span>'+
     '<span class="eqb-rmid"><span class="eqb-rtop"><span class="eqb-runit">'+_eqbEsc(e.unitNo||'—')+'</span>'+((rented&&e.vendor)?'<span class="eqb-rvend">'+_eqbEsc(e.vendor)+'</span>':'')+'</span>'+
     '<span class="eqb-rname">'+_eqbEsc(e.name||'')+'</span></span>'+meta+'</div>';
 }
 function _eqbPkgRow(e){
   var p=EQB_PKG[e.pkgType]||{label:'Package',code:(e.costCode||''),color:'#5A6B2B'}, code=p.code||'', total=_eqbInvTotal(e.id);
-  return '<div class="eqb-row eqb-pkg k'+code+'" data-id="'+_eqbEsc(e.id)+'">'+
+  return '<div class="eqb-row eqb-pkg k'+code+'" data-id="'+_eqbEsc(e.id)+'" onclick="_eqbRowClick(\''+_eqbEsc(e.id)+'\')">'+
     '<span class="eqb-rdot green"></span><span class="eqb-rico" style="color:'+p.color+'">'+_eqbPkgIcon(e.pkgType)+'</span>'+
     '<span class="eqb-rmid"><span class="eqb-rtop"><span class="eqb-rcode c'+code+'">C'+(code||'?')+'</span><span class="eqb-rname">'+_eqbEsc(e.vendor||'Vendor')+'</span></span>'+
     '<span class="eqb-rvend">'+_eqbEsc(p.label)+'</span></span>'+
@@ -28415,6 +28416,7 @@ async function _eqbApplyMove(id, toCol, fromCol){
 
 function renderEquipment(){
   var host=g('eqb-board'); if(!host) return;
+  var _ab=g('eqb-add-btn'); if(_ab) _ab.style.display = (typeof hasFull==='function' && hasFull('edit-equipment')) ? '' : 'none';
   var cols=_eqbColumns();
   var active=(db.equipment||[]).filter(function(e){ return !e.struck; });
   function vis(e){ var cat=(e.kind==='package')?'package':e.ownership; return _eqbFilter==='all' || cat===_eqbFilter || (_eqbFilter==='rented'&&e.kind==='package'); }
@@ -28433,6 +28435,169 @@ function renderEquipment(){
   _eqbRenderCodes(active);
   _eqbRenderSummary(active);
   _eqbInitDrag();
+}
+
+// ── Equipment add / edit / delete forms ──────────────────────────
+var _editEquipId = null;
+
+function _eqbFormHtml(e){
+  e = e || {};
+  var kind = e.kind || 'unit';
+  var own  = e.ownership || 'owned';
+  var typeOpts = Object.keys(EQB_TYPES).filter(function(k){ return k!=='GEN'; }).map(function(k){
+    return '<option value="'+k+'"'+(((e.eqType||'TH')===k)?' selected':'')+'>'+EQB_TYPES[k].label+'</option>';
+  }).join('');
+  var pkgOpts = Object.keys(EQB_PKG).map(function(k){
+    return '<option value="'+k+'"'+(((e.pkgType||'frame')===k)?' selected':'')+'>'+EQB_PKG[k].label+' (Code '+EQB_PKG[k].code+')</option>';
+  }).join('');
+  var colOpts = _eqbColumns().map(function(c){
+    return '<option value="'+_eqbEsc(c.id)+'"'+((String(e.currentCol||'yard')===String(c.id))?' selected':'')+'>'+_eqbEsc(c.name)+'</option>';
+  }).join('');
+  return '<div class="fg">'+
+      '<div class="fgr"><label>Kind</label><select id="eqf-kind" onchange="_eqbFormSync()">'+
+        '<option value="unit"'+(kind==='unit'?' selected':'')+'>Unit — machine</option>'+
+        '<option value="package"'+(kind==='package'?' selected':'')+'>Package — scaffold / winter</option></select></div>'+
+      '<div class="fgr"><label>Location</label><select id="eqf-col">'+colOpts+'</select></div>'+
+      '<div class="fgr full" id="eqf-unit-wrap"><div class="fg" style="margin:0">'+
+        '<div class="fgr"><label>Name *</label><input id="eqf-name" value="'+_eqbEsc(e.name||'')+'" placeholder="e.g. Skytrak 10054"></div>'+
+        '<div class="fgr"><label>Unit / serial #</label><input id="eqf-unit" value="'+_eqbEsc(e.unitNo||'')+'" placeholder="e.g. FL-204"></div>'+
+        '<div class="fgr"><label>Type</label><select id="eqf-type">'+typeOpts+'</select></div>'+
+        '<div class="fgr"><label>Ownership</label><select id="eqf-own" onchange="_eqbFormSync()"><option value="owned"'+(own==='owned'?' selected':'')+'>Owned</option><option value="rented"'+(own==='rented'?' selected':'')+'>Rented</option></select></div>'+
+        '<div class="fgr"><label>Service due</label><input id="eqf-svc" type="date" value="'+_eqbEsc(e.serviceDate||'')+'"></div>'+
+        '<div class="fgr" id="eqf-vendor-wrap"><label>Rental vendor</label><input id="eqf-vendor" value="'+_eqbEsc(e.ownership==='rented'?(e.vendor||''):'')+'" placeholder="e.g. United Rentals"></div>'+
+        '<div class="fgr" id="eqf-ron-wrap"><label>On-rent date</label><input id="eqf-ron" type="date" value="'+_eqbEsc(e.rentalOn||'')+'"></div>'+
+      '</div></div>'+
+      '<div class="fgr full" id="eqf-pkg-wrap"><div class="fg" style="margin:0">'+
+        '<div class="fgr"><label>Package type</label><select id="eqf-pkg" onchange="_eqbFormSync()">'+pkgOpts+'</select></div>'+
+        '<div class="fgr"><label>Vendor *</label><input id="eqf-pvendor" value="'+_eqbEsc(e.kind==='package'?(e.vendor||''):'')+'" placeholder="e.g. Safway Services"></div>'+
+        '<div class="fgr"><label>On-site date</label><input id="eqf-onsite" type="date" value="'+_eqbEsc(e.onSite||'')+'"></div>'+
+        '<div class="fgr"><label>Cost code</label><input id="eqf-pcode" value="" disabled></div>'+
+      '</div></div>'+
+    '</div>';
+}
+
+function _eqbFormSync(){
+  var kind = (g('eqf-kind')||{}).value || 'unit';
+  var uw=g('eqf-unit-wrap'), pw=g('eqf-pkg-wrap');
+  if(uw) uw.style.display = (kind==='unit') ? '' : 'none';
+  if(pw) pw.style.display = (kind==='package') ? '' : 'none';
+  var own = (g('eqf-own')||{}).value || 'owned';
+  var showRent = (kind==='unit' && own==='rented');
+  var vw=g('eqf-vendor-wrap'), rw=g('eqf-ron-wrap');
+  if(vw) vw.style.display = showRent ? '' : 'none';
+  if(rw) rw.style.display = showRent ? '' : 'none';
+  var pk = (g('eqf-pkg')||{}).value || 'frame', pc=g('eqf-pcode');
+  if(pc) pc.value = EQB_PKG[pk] ? ('Code '+EQB_PKG[pk].code+(EQB_PKG[pk].seasonal?' · seasonal':'')) : '';
+}
+
+function _eqbShowAdd(){
+  if(!requireFull('edit-equipment','add equipment')) return;
+  _editEquipId = null;
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Add equipment</div><div class="msb">Machine, rental, or a scaffold / winter package</div>'+
+    _eqbFormHtml(null)+
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="_eqbSaveForm()">Add</button></div>');
+  _eqbFormSync();
+}
+
+function _eqbShowEdit(id){
+  if(!requireFull('edit-equipment','edit equipment')) return;
+  var e=(db.equipment||[]).filter(function(x){ return String(x.id)===String(id); })[0];
+  if(!e){ alert('Equipment not found.'); return; }
+  _editEquipId = e.id;
+  var label = e.kind==='package' ? (e.vendor||'Package') : (e.unitNo||e.name||'Unit');
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Edit equipment</div><div class="msb">'+_eqbEsc(label)+'</div>'+
+    _eqbFormHtml(e)+
+    '<div class="mf"><button class="btn" style="color:#A32D2D;border-color:#A32D2D" onclick="_eqbDelForm()">Delete</button><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="_eqbSaveForm()">Save changes</button></div>');
+  _eqbFormSync();
+}
+
+function _eqbRowClick(id){
+  if(!hasFull('edit-equipment')) return;   // movers without edit rights (e.g. Super) just drag
+  _eqbShowEdit(id);
+}
+
+async function _eqbSaveForm(){
+  var kind = (g('eqf-kind').value) || 'unit';
+  var col  = (g('eqf-col').value)  || 'yard';
+  var nowISO = new Date().toISOString();
+  var editing  = (_editEquipId != null);
+  var existing = editing ? (db.equipment||[]).filter(function(x){ return String(x.id)===String(_editEquipId); })[0] : null;
+  var rec;
+  if(kind==='unit'){
+    var name=(g('eqf-name').value||'').trim();
+    if(!name){ alert('Please enter a name for the unit.'); return; }
+    var own=(g('eqf-own').value)||'owned';
+    rec={
+      kind:'unit', name:name, unitNo:(g('eqf-unit').value||'').trim(),
+      eqType:(g('eqf-type').value)||'TH', ownership:own,
+      serviceDate:(g('eqf-svc').value)||null, currentCol:col,
+      vendor: own==='rented' ? (g('eqf-vendor').value||'').trim() : '',
+      rentalOn: own==='rented' ? ((g('eqf-ron').value)||null) : null,
+      rentalOff: existing ? existing.rentalOff : null,
+      costCode: own==='rented' ? '5' : null,
+      isDown: (col==='maint'),
+      pkgType:null, onSite:null, seasonal:false, struck:false
+    };
+  } else {
+    var pk=(g('eqf-pkg').value)||'frame';
+    var pv=(g('eqf-pvendor').value||'').trim();
+    if(!pv){ alert('Please enter the package vendor.'); return; }
+    rec={
+      kind:'package', pkgType:pk, vendor:pv, name:'',
+      onSite:(g('eqf-onsite').value)||null, currentCol:col,
+      costCode:(EQB_PKG[pk]||{}).code||null, seasonal:(pk==='winter'),
+      struck: existing ? !!existing.struck : false,
+      ownership:null, unitNo:'', eqType:'', isDown:false, serviceDate:null, rentalOn:null, rentalOff:null
+    };
+  }
+  db.equipment = db.equipment || [];
+  var saved;
+  if(editing && existing){
+    if(kind==='unit'){
+      rec.assignedAt = (String(existing.currentCol)!==String(col)) ? nowISO : (existing.assignedAt||nowISO);
+    } else { rec.assignedAt = existing.assignedAt || null; }
+    rec.id=existing.id; rec.qrToken=existing.qrToken||null;
+    rec.createdAt=existing.createdAt||nowISO; rec.createdByUserId=existing.createdByUserId||null;
+    rec.updatedAt=nowISO; rec.updatedByUserId=(_currentUser&&_currentUser.id)||null;
+    Object.assign(existing, rec); saved=existing;
+  } else {
+    rec.id='eq'+Date.now();
+    rec.assignedAt = (kind==='unit') ? nowISO : null;
+    rec.qrToken=null;
+    rec.createdAt=nowISO; rec.createdByUserId=(_currentUser&&_currentUser.id)||null;
+    rec.updatedAt=nowISO; rec.updatedByUserId=(_currentUser&&_currentUser.id)||null;
+    db.equipment.push(rec); saved=rec;
+  }
+  saveDB(); closeModal(); _editEquipId=null;
+  var ap=document.querySelector('.pg.active'); if(ap && ap.id==='pg-equipment') renderEquipment();
+  showToast((kind==='package'?(saved.vendor+' package'):(saved.unitNo||saved.name))+(editing?' updated':' added'),'success');
+  if(supabaseClient){
+    try{ var r=await supabaseClient.from('kmi_equipment').upsert(toSBEquipment(saved)); if(r&&r.error) showToast('Not saved to cloud: '+r.error.message,'error'); }
+    catch(err){ showToast('Save failed: '+((err&&err.message)||err),'error'); }
+  }
+}
+
+async function _eqbDelForm(){
+  if(!_editEquipId) return;
+  if(!requireFull('edit-equipment','delete equipment')) return;
+  var e=(db.equipment||[]).filter(function(x){ return String(x.id)===String(_editEquipId); })[0];
+  if(!e) return;
+  var label = e.kind==='package' ? (e.vendor+' package') : (e.unitNo||e.name||'this unit');
+  if(!confirm('Delete '+label+'? This also removes its move history and any attached invoices.')) return;
+  var id=e.id;
+  db.equipment        = (db.equipment||[]).filter(function(x){ return String(x.id)!==String(id); });
+  db.equipmentMoves   = (db.equipmentMoves||[]).filter(function(m){ return String(m.equipmentId)!==String(id); });
+  db.equipmentInvoices= (db.equipmentInvoices||[]).filter(function(iv){ return String(iv.equipmentId)!==String(id); });
+  saveDB(); closeModal(); _editEquipId=null;
+  var ap=document.querySelector('.pg.active'); if(ap && ap.id==='pg-equipment') renderEquipment();
+  showToast('Deleted '+label,'success');
+  if(supabaseClient){
+    try{
+      await supabaseClient.from('kmi_equipment').delete().eq('id', id);
+      await supabaseClient.from('kmi_equipment_moves').delete().eq('equipment_id', id);
+      await supabaseClient.from('kmi_equipment_invoices').delete().eq('equipment_id', id);
+    }catch(err){ console.warn('equipment delete cloud error:', err); }
+  }
 }
 
 function renderProjects() {
