@@ -28342,7 +28342,7 @@ function _eqbUnitRow(e){
   return '<div class="eqb-row s-'+s+(rented?' rented':'')+(drag?' draggable':'')+'" data-id="'+_eqbEsc(e.id)+'" onclick="_eqbRowClick(\''+_eqbEsc(e.id)+'\')">'+
     '<span class="eqb-rdot '+s+'"></span><span class="eqb-rico" style="color:'+t.color+'">'+_eqbIcon(e.eqType)+'</span>'+
     '<span class="eqb-rmid"><span class="eqb-rtop"><span class="eqb-runit">'+_eqbEsc(e.unitNo||'—')+'</span>'+((rented&&e.vendor)?'<span class="eqb-rvend">'+_eqbEsc(e.vendor)+'</span>':'')+'</span>'+
-    '<span class="eqb-rname">'+_eqbEsc(e.name||'')+'</span></span>'+meta+'</div>';
+    '<span class="eqb-rname">'+_eqbEsc((e.manufacturer?e.manufacturer+' ':'')+(e.model||e.name||''))+'</span></span>'+meta+'</div>';
 }
 function _eqbPkgRow(e){
   var p=EQB_PKG[e.pkgType]||{label:'Package',code:(e.costCode||''),color:'#5A6B2B'}, code=p.code||'', total=_eqbInvTotal(e.id);
@@ -28403,7 +28403,7 @@ async function _eqbApplyMove(id, toCol, fromCol){
   db.equipmentMoves.unshift(mv);
   saveDB();
   renderEquipment();
-  showToast((e.unitNo||e.name||'Equipment')+' → '+_eqbColName(toCol), 'success');
+  showToast((e.unitNo||e.model||e.name||'Equipment')+' → '+_eqbColName(toCol), 'success');
   if (supabaseClient){
     try {
       var r1=await supabaseClient.from('kmi_equipment').upsert(toSBEquipment(e));
@@ -28459,11 +28459,14 @@ function _eqbFormHtml(e){
         '<option value="package"'+(kind==='package'?' selected':'')+'>Package — scaffold / winter</option></select></div>'+
       '<div class="fgr"><label>Location</label><select id="eqf-col">'+colOpts+'</select></div>'+
       '<div class="fgr full" id="eqf-unit-wrap"><div class="fg" style="margin:0">'+
-        '<div class="fgr"><label>Name *</label><input id="eqf-name" value="'+_eqbEsc(e.name||'')+'" placeholder="e.g. Skytrak 10054"></div>'+
-        '<div class="fgr"><label>Unit / serial #</label><input id="eqf-unit" value="'+_eqbEsc(e.unitNo||'')+'" placeholder="e.g. FL-204"></div>'+
+        '<div class="fgr"><label>Manufacturer</label><input id="eqf-mfr" value="'+_eqbEsc(e.manufacturer||'')+'" placeholder="e.g. JLG"></div>'+
+        '<div class="fgr"><label>Model *</label><input id="eqf-model" value="'+_eqbEsc(e.model||e.name||'')+'" placeholder="e.g. 600S"></div>'+
+        '<div class="fgr"><label>Serial #</label><input id="eqf-serial" value="'+_eqbEsc(e.serial||'')+'" placeholder="Manufacturer serial"></div>'+
+        '<div class="fgr"><label>KMI Unit #</label><input id="eqf-unit" value="'+_eqbEsc(e.unitNo||'')+'" placeholder="e.g. FL-204"></div>'+
         '<div class="fgr"><label>Type</label><select id="eqf-type">'+typeOpts+'</select></div>'+
         '<div class="fgr"><label>Ownership</label><select id="eqf-own" onchange="_eqbFormSync()"><option value="owned"'+(own==='owned'?' selected':'')+'>Owned</option><option value="rented"'+(own==='rented'?' selected':'')+'>Rented</option></select></div>'+
         '<div class="fgr"><label>Service due</label><input id="eqf-svc" type="date" value="'+_eqbEsc(e.serviceDate||'')+'"></div>'+
+        '<div class="fgr" id="eqf-purchase-wrap"><label>Purchase date</label><input id="eqf-purchase" type="date" value="'+_eqbEsc(e.purchaseDate||'')+'"></div>'+
         '<div class="fgr" id="eqf-vendor-wrap"><label>Rental vendor</label><input id="eqf-vendor" value="'+_eqbEsc(e.ownership==='rented'?(e.vendor||''):'')+'" placeholder="e.g. United Rentals"></div>'+
         '<div class="fgr" id="eqf-ron-wrap"><label>On-rent date</label><input id="eqf-ron" type="date" value="'+_eqbEsc(e.rentalOn||'')+'"></div>'+
       '</div></div>'+
@@ -28486,6 +28489,8 @@ function _eqbFormSync(){
   var vw=g('eqf-vendor-wrap'), rw=g('eqf-ron-wrap');
   if(vw) vw.style.display = showRent ? '' : 'none';
   if(rw) rw.style.display = showRent ? '' : 'none';
+  var pdw=g('eqf-purchase-wrap');
+  if(pdw) pdw.style.display = (kind==='unit' && own==='owned') ? '' : 'none';
   var pk = (g('eqf-pkg')||{}).value || 'frame', pc=g('eqf-pcode');
   if(pc) pc.value = EQB_PKG[pk] ? ('Code '+EQB_PKG[pk].code+(EQB_PKG[pk].seasonal?' · seasonal':'')) : '';
 }
@@ -28504,7 +28509,7 @@ function _eqbShowEdit(id){
   var e=(db.equipment||[]).filter(function(x){ return String(x.id)===String(id); })[0];
   if(!e){ alert('Equipment not found.'); return; }
   _editEquipId = e.id;
-  var label = e.kind==='package' ? (e.vendor||'Package') : (e.unitNo||e.name||'Unit');
+  var label = e.kind==='package' ? (e.vendor||'Package') : (e.unitNo||e.model||e.name||'Unit');
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Edit equipment</div><div class="msb">'+_eqbEsc(label)+'</div>'+
     _eqbFormHtml(e)+
     '<div class="mf"><button class="btn" style="color:#A32D2D;border-color:#A32D2D" onclick="_eqbDelForm()">Delete</button><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="_eqbSaveForm()">Save changes</button></div>');
@@ -28524,13 +28529,16 @@ async function _eqbSaveForm(){
   var existing = editing ? (db.equipment||[]).filter(function(x){ return String(x.id)===String(_editEquipId); })[0] : null;
   var rec;
   if(kind==='unit'){
-    var name=(g('eqf-name').value||'').trim();
-    if(!name){ alert('Please enter a name for the unit.'); return; }
+    var model=(g('eqf-model').value||'').trim();
+    if(!model){ alert('Please enter the model.'); return; }
     var own=(g('eqf-own').value)||'owned';
     rec={
-      kind:'unit', name:name, unitNo:(g('eqf-unit').value||'').trim(),
+      kind:'unit', model:model, name:model, manufacturer:(g('eqf-mfr').value||'').trim(),
+      unitNo:(g('eqf-unit').value||'').trim(), serial:(g('eqf-serial').value||'').trim(),
       eqType:(g('eqf-type').value)||'TH', ownership:own,
-      serviceDate:(g('eqf-svc').value)||null, currentCol:col,
+      serviceDate:(g('eqf-svc').value)||null,
+      purchaseDate: own==='owned' ? ((g('eqf-purchase').value)||null) : null,
+      currentCol:col,
       vendor: own==='rented' ? (g('eqf-vendor').value||'').trim() : '',
       rentalOn: own==='rented' ? ((g('eqf-ron').value)||null) : null,
       rentalOff: existing ? existing.rentalOff : null,
@@ -28547,7 +28555,7 @@ async function _eqbSaveForm(){
       onSite:(g('eqf-onsite').value)||null, currentCol:col,
       costCode:(EQB_PKG[pk]||{}).code||null, seasonal:(pk==='winter'),
       struck: existing ? !!existing.struck : false,
-      ownership:null, unitNo:'', eqType:'', isDown:false, serviceDate:null, rentalOn:null, rentalOff:null
+      ownership:null, unitNo:'', eqType:'', isDown:false, serviceDate:null, rentalOn:null, rentalOff:null, manufacturer:'', model:'', purchaseDate:null, serial:''
     };
   }
   db.equipment = db.equipment || [];
@@ -28570,7 +28578,7 @@ async function _eqbSaveForm(){
   }
   saveDB(); closeModal(); _editEquipId=null;
   var ap=document.querySelector('.pg.active'); if(ap && ap.id==='pg-equipment') renderEquipment();
-  showToast((kind==='package'?(saved.vendor+' package'):(saved.unitNo||saved.name))+(editing?' updated':' added'),'success');
+  showToast((kind==='package'?(saved.vendor+' package'):(saved.unitNo||saved.model||saved.name))+(editing?' updated':' added'),'success');
   if(supabaseClient){
     try{ var r=await supabaseClient.from('kmi_equipment').upsert(toSBEquipment(saved)); if(r&&r.error) showToast('Not saved to cloud: '+r.error.message,'error'); }
     catch(err){ showToast('Save failed: '+((err&&err.message)||err),'error'); }
@@ -28582,7 +28590,7 @@ async function _eqbDelForm(){
   if(!requireFull('edit-equipment','delete equipment')) return;
   var e=(db.equipment||[]).filter(function(x){ return String(x.id)===String(_editEquipId); })[0];
   if(!e) return;
-  var label = e.kind==='package' ? (e.vendor+' package') : (e.unitNo||e.name||'this unit');
+  var label = e.kind==='package' ? (e.vendor+' package') : (e.unitNo||e.model||e.name||'this unit');
   if(!confirm('Delete '+label+'? This also removes its move history and any attached invoices.')) return;
   var id=e.id;
   db.equipment        = (db.equipment||[]).filter(function(x){ return String(x.id)!==String(id); });
@@ -40071,14 +40079,18 @@ function toSBEquipment(r) {
     id:                 r.id,
     kind:               r.kind || 'unit',
     name:               r.name || null,
+    manufacturer:       r.manufacturer || null,
+    model:              r.model || null,
     current_col:        r.currentCol || null,
     cost_code:          r.costCode || null,
     vendor:             r.vendor || null,
     ownership:          r.ownership || null,
     unit_no:            r.unitNo || null,
+    serial:             r.serial || null,
     eq_type:            r.eqType || null,
     is_down:            !!r.isDown,
     service_date:       r.serviceDate || null,
+    purchase_date:      r.purchaseDate || null,
     assigned_at:        r.assignedAt || null,
     rental_on:          r.rentalOn || null,
     rental_off:         r.rentalOff || null,
@@ -40100,14 +40112,18 @@ function fromSBEquipment(r) {
     id:              r.id,
     kind:            r.kind || 'unit',
     name:            r.name || '',
+    manufacturer:    r.manufacturer || '',
+    model:           r.model || '',
     currentCol:      r.current_col || null,
     costCode:        r.cost_code || null,
     vendor:          r.vendor || '',
     ownership:       r.ownership || null,
     unitNo:          r.unit_no || '',
+    serial:          r.serial || '',
     eqType:          r.eq_type || '',
     isDown:          !!r.is_down,
     serviceDate:     r.service_date || null,
+    purchaseDate:    r.purchase_date || null,
     assignedAt:      r.assigned_at || null,
     rentalOn:        r.rental_on || null,
     rentalOff:       r.rental_off || null,
