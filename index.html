@@ -14,6 +14,8 @@
      when compiling submittal packages. pdf.js reads-only; pdf-lib both
      reads and writes form fields, which is why both are loaded. -->
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<!-- SortableJS — drag-and-drop for the Equipment board (tiles between job columns). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.2/Sortable.min.js"></script>
 <script>if(window['pdfjsLib']){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -3053,6 +3055,12 @@ var DB_DEFAULTS = {
   // Function in production). Both non-fatal if their tables are missing.
   rfqs:          [],
   rfqResponses:  [],
+  // Equipment board — units (owned/rented machines) + scaffold/winter
+  // packages, their move/strike audit log, and attached vendor invoices.
+  // Non-fatal if the kmi_equipment* tables are missing (preserve local).
+  equipment:         [],
+  equipmentMoves:    [],
+  equipmentInvoices: [],
   // Foundation master data (imported from CSV on Templates page)
   costCodes:           [],   // { id, code, description, isBudgetable, active }
   costClasses:         [],   // { id, classNo, description, active }
@@ -3192,6 +3200,9 @@ function loadDB() {
         purchaseOrders: p.purchaseOrders || [],
         rfqs:           p.rfqs           || [],
         rfqResponses:   p.rfqResponses   || [],
+        equipment:         p.equipment         || [],
+        equipmentMoves:    p.equipmentMoves    || [],
+        equipmentInvoices: p.equipmentInvoices || [],
         costCodes:           p.costCodes           || [],
         costClasses:         p.costClasses         || [],
         customersFoundation: p.customersFoundation || [],
@@ -3295,6 +3306,13 @@ var PERMISSIONS = {
   // Void, Revise. Same trust shape as edit (Admin/PM/PC). Field roles never
   // transition POs; Accounting reads only.
   'issue-purchase-orders':  ['full','full','full','none','none','none'],
+  // Equipment board — units (owned/rented machines) + scaffold/winter packages.
+  // View: everyone with board access (Accounting & Foreman read-only). Move:
+  // office (Admin/PM/PC) + Superintendent — the field lead who directs the iron.
+  // Edit (add/edit/delete equipment & packages, mark struck): office only.
+  'view-equipment': ['full','full','full','read','full','read'],
+  'move-equipment': ['full','full','full','none','full','none'],
+  'edit-equipment': ['full','full','full','none','none','none'],
   // Procurement tab: reconciles the project material list / BPR imports against
   // PO line items (what's ordered, lead times, dates). Field roles get READ —
   // they already consume the read-only mobile procurement page. Accounting
@@ -39608,6 +39626,136 @@ function fromSBTransmittal(r) {
   };
 }
 
+// ── Equipment board mappers ─────────────────────────────────────
+// Units (owned/rented machines) and packages (scaffold/winter) share one
+// table, discriminated by `kind`. Unit-only / package-only fields ride along
+// as nulls on the other kind. qr_token / source / ap_invoice_id are reserved
+// for the future QR and AP work (see migration notes).
+function toSBEquipment(r) {
+  return {
+    id:                 r.id,
+    kind:               r.kind || 'unit',
+    name:               r.name || null,
+    current_col:        r.currentCol || null,
+    cost_code:          r.costCode || null,
+    vendor:             r.vendor || null,
+    ownership:          r.ownership || null,
+    unit_no:            r.unitNo || null,
+    eq_type:            r.eqType || null,
+    is_down:            !!r.isDown,
+    service_date:       r.serviceDate || null,
+    assigned_at:        r.assignedAt || null,
+    rental_on:          r.rentalOn || null,
+    rental_off:         r.rentalOff || null,
+    qr_token:           r.qrToken || null,
+    pkg_type:           r.pkgType || null,
+    on_site:            r.onSite || null,
+    struck:             !!r.struck,
+    struck_at:          r.struckAt || null,
+    seasonal:           !!r.seasonal,
+    notes:              r.notes || null,
+    created_at:         r.createdAt || null,
+    created_by_user_id: r.createdByUserId || null,
+    updated_at:         r.updatedAt || null,
+    updated_by_user_id: r.updatedByUserId || null
+  };
+}
+function fromSBEquipment(r) {
+  return {
+    id:              r.id,
+    kind:            r.kind || 'unit',
+    name:            r.name || '',
+    currentCol:      r.current_col || null,
+    costCode:        r.cost_code || null,
+    vendor:          r.vendor || '',
+    ownership:       r.ownership || null,
+    unitNo:          r.unit_no || '',
+    eqType:          r.eq_type || '',
+    isDown:          !!r.is_down,
+    serviceDate:     r.service_date || null,
+    assignedAt:      r.assigned_at || null,
+    rentalOn:        r.rental_on || null,
+    rentalOff:       r.rental_off || null,
+    qrToken:         r.qr_token || null,
+    pkgType:         r.pkg_type || null,
+    onSite:          r.on_site || null,
+    struck:          !!r.struck,
+    struckAt:        r.struck_at || null,
+    seasonal:        !!r.seasonal,
+    notes:           r.notes || '',
+    createdAt:       r.created_at || null,
+    createdByUserId: r.created_by_user_id || null,
+    updatedAt:       r.updated_at || null,
+    updatedByUserId: r.updated_by_user_id || null
+  };
+}
+function toSBEquipmentMove(r) {
+  return {
+    id:               r.id,
+    equipment_id:     r.equipmentId,
+    from_col:         r.fromCol || null,
+    to_col:           r.toCol || null,
+    moved_by_user_id: r.movedByUserId || null,
+    moved_by_device:  r.movedByDevice || null,
+    source:           r.source || 'manual',
+    note:             r.note || null,
+    moved_at:         r.movedAt || null,
+    created_at:       r.createdAt || null
+  };
+}
+function fromSBEquipmentMove(r) {
+  return {
+    id:            r.id,
+    equipmentId:   r.equipment_id,
+    fromCol:       r.from_col || null,
+    toCol:         r.to_col || null,
+    movedByUserId: r.moved_by_user_id || null,
+    movedByDevice: r.moved_by_device || null,
+    source:        r.source || 'manual',
+    note:          r.note || '',
+    movedAt:       r.moved_at || null,
+    createdAt:     r.created_at || null
+  };
+}
+function toSBEquipmentInvoice(r) {
+  return {
+    id:                 r.id,
+    equipment_id:       r.equipmentId,
+    vendor:             r.vendor || null,
+    invoice_no:         r.invoiceNo || null,
+    invoice_date:       r.invoiceDate || null,
+    amount:             (r.amount != null && !isNaN(Number(r.amount))) ? Number(r.amount) : 0,
+    period_start:       r.periodStart || null,
+    period_end:         r.periodEnd || null,
+    cost_code:          r.costCode || null,
+    job_col:            r.jobCol || null,
+    file_url:           r.fileUrl || null,
+    ap_invoice_id:      r.apInvoiceId || null,
+    source:             r.source || 'manual',
+    created_at:         r.createdAt || null,
+    created_by_user_id: r.createdByUserId || null
+  };
+}
+function fromSBEquipmentInvoice(r) {
+  return {
+    id:              r.id,
+    equipmentId:     r.equipment_id,
+    vendor:          r.vendor || '',
+    invoiceNo:       r.invoice_no || '',
+    invoiceDate:     r.invoice_date || null,
+    amount:          (r.amount != null) ? Number(r.amount) : 0,
+    periodStart:     r.period_start || null,
+    periodEnd:       r.period_end || null,
+    costCode:        r.cost_code || null,
+    jobCol:          r.job_col || null,
+    fileUrl:         r.file_url || '',
+    apInvoiceId:     r.ap_invoice_id || null,
+    source:          r.source || 'manual',
+    createdAt:       r.created_at || null,
+    createdByUserId: r.created_by_user_id || null
+  };
+}
+
 // ── Spec Section mappers (Round 5) ──────────────────────────────
 function toSBSpecSection(r) {
   return {
@@ -40746,7 +40894,8 @@ async function pullFromSupabase() {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
          mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
-         rfqsRes, rfqRespRes, prodWkRes, prodCatRes, prodItemRes, prodDocTypeRes, prodCategoryRes] = await Promise.all([
+         rfqsRes, rfqRespRes, prodWkRes, prodCatRes, prodItemRes, prodDocTypeRes, prodCategoryRes,
+         eqRes, eqMoveRes, eqInvRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -40778,7 +40927,10 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_prod_categories').select('*'),
       supabaseClient.from('kmi_prod_items').select('*'),
       supabaseClient.from('kmi_product_doc_types').select('*'),
-      supabaseClient.from('kmi_product_categories').select('*')
+      supabaseClient.from('kmi_product_categories').select('*'),
+      supabaseClient.from('kmi_equipment').select('*'),
+      supabaseClient.from('kmi_equipment_moves').select('*'),
+      supabaseClient.from('kmi_equipment_invoices').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -40996,6 +41148,25 @@ async function pullFromSupabase() {
     } else if (prodCategoryRes && prodCategoryRes.error) {
       console.warn('kmi_product_categories load error (table missing?):', prodCategoryRes.error.message);
       if (!Array.isArray(db.productCategories)) db.productCategories = [];
+    }
+    // Equipment board (units + packages, moves, invoices) — preserve-on-missing.
+    if (eqRes && !eqRes.error) {
+      db.equipment = (eqRes.data || []).map(fromSBEquipment);
+    } else if (eqRes && eqRes.error) {
+      console.warn('kmi_equipment load error (table missing?):', eqRes.error.message);
+      if (!Array.isArray(db.equipment)) db.equipment = [];
+    }
+    if (eqMoveRes && !eqMoveRes.error) {
+      db.equipmentMoves = (eqMoveRes.data || []).map(fromSBEquipmentMove);
+    } else if (eqMoveRes && eqMoveRes.error) {
+      console.warn('kmi_equipment_moves load error (table missing?):', eqMoveRes.error.message);
+      if (!Array.isArray(db.equipmentMoves)) db.equipmentMoves = [];
+    }
+    if (eqInvRes && !eqInvRes.error) {
+      db.equipmentInvoices = (eqInvRes.data || []).map(fromSBEquipmentInvoice);
+    } else if (eqInvRes && eqInvRes.error) {
+      console.warn('kmi_equipment_invoices load error (table missing?):', eqInvRes.error.message);
+      if (!Array.isArray(db.equipmentInvoices)) db.equipmentInvoices = [];
     }
     // Project parameters (Form-fill Round 1) — same preserve-on-missing pattern
     if (projParamsRes && !projParamsRes.error) {
