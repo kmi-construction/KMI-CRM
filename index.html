@@ -2039,6 +2039,7 @@ textarea{resize:vertical;min-height:72px}
     <span class="eqb-summary" id="eqb-summary"></span>
     <div class="eqb-codes" id="eqb-codes"></div>
     <button class="btn btn-p" id="eqb-add-btn" onclick="_eqbShowAdd()" style="display:none;margin-left:8px">+ Add</button>
+    <button class="btn" id="eqb-pin-btn" onclick="_eqbPinModal()" style="display:none;margin-left:6px">&#9881; Trucking PIN</button>
   </div>
   <div class="eqb-board" id="eqb-board"></div>
 </div>
@@ -3160,6 +3161,7 @@ var DB_DEFAULTS = {
   equipment:         [],
   equipmentMoves:    [],
   equipmentInvoices: [],
+  truckingPin: '',
   // Foundation master data (imported from CSV on Templates page)
   costCodes:           [],   // { id, code, description, isBudgetable, active }
   costClasses:         [],   // { id, classNo, description, active }
@@ -28443,6 +28445,7 @@ async function _eqbApplyMove(id, toCol, fromCol){
 function renderEquipment(){
   var host=g('eqb-board'); if(!host) return;
   var _ab=g('eqb-add-btn'); if(_ab) _ab.style.display = (typeof hasFull==='function' && hasFull('edit-equipment')) ? '' : 'none';
+  var _pb=g('eqb-pin-btn'); if(_pb) _pb.style.display = (_currentUser && normalizeRole(_currentUser.role)==='Admin') ? '' : 'none';
   var cols=_eqbColumns();
   var active=(db.equipment||[]).filter(function(e){ return !e.struck; });
   function vis(e){ var cat=(e.kind==='package')?'package':e.ownership; return _eqbFilter==='all' || cat===_eqbFilter || (_eqbFilter==='rented'&&e.kind==='package'); }
@@ -28762,7 +28765,7 @@ async function _eqbQrLabel(id){
     if(typeof QRCode!=='undefined'){ new QRCode(box, {text:url, width:150, height:150, correctLevel:QRCode.CorrectLevel.M}); }
     else { box.textContent='QR library not loaded'; }
   }catch(err){ console.warn('QR render error:', err); }
-  if(isNew && supabaseClient){
+  if(supabaseClient){   // re-push every open so the token is always persisted, even if a prior sync failed
     try{ var r=await supabaseClient.from('kmi_equipment').upsert(toSBEquipment(e)); if(r&&r.error) showToast('QR token not saved to cloud: '+r.error.message,'error'); }
     catch(err){ showToast('QR token save failed: '+((err&&err.message)||err),'error'); }
   }
@@ -28790,6 +28793,29 @@ function _eqbQrPdf(id){
     if(imgUrl){ doc.addImage(imgUrl,'PNG', 1.74, 0.44, 1.12, 1.12); }
     doc.save('KMI-'+String(e.unitNo||e.qrToken).replace(/[^A-Za-z0-9_-]/g,'')+'-label.pdf');
   }catch(err){ alert('Could not generate label PDF: '+((err&&err.message)||err)); }
+}
+
+// ── Trucking PIN (Admin) — paired-device secret for QR scan-to-move ──
+function _eqbPinModal(){
+  if(!_currentUser || normalizeRole(_currentUser.role)!=='Admin'){ alert('Only an Admin can set the trucking PIN.'); return; }
+  var cur=(db.truckingPin||'');
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Trucking PIN</div>'+
+    '<div class="msb">Field crews enter this once to pair a phone for scan-to-move. Rotate it to revoke every paired device.</div>'+
+    '<div class="fg"><div class="fgr full"><label>PIN (4&ndash;6 digits)</label><input id="eqb-pinin" inputmode="numeric" maxlength="6" value="'+_eqbEsc(cur)+'" placeholder="e.g. 4827"></div></div>'+
+    (cur ? '<div style="font-size:11.5px;color:#627D98">A PIN is set. Changing it un-pairs every device immediately.</div>'
+         : '<div style="font-size:11.5px;color:#C0392B">No PIN set yet &mdash; scan-to-move pairing stays disabled until you set one.</div>')+
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="_eqbPinSave()">Save PIN</button></div>');
+}
+async function _eqbPinSave(){
+  if(!_currentUser || normalizeRole(_currentUser.role)!=='Admin') return;
+  var v=((g('eqb-pinin').value)||'').replace(/\D/g,'');
+  if(v.length<4){ alert('PIN must be at least 4 digits.'); return; }
+  db.truckingPin=v; saveDB(); closeModal();
+  showToast('Trucking PIN updated','success');
+  if(supabaseClient){
+    try{ var r=await supabaseClient.from('kmi_settings').upsert({key:'truckingPin', value:v}); if(r&&r.error) showToast('PIN not saved to cloud: '+r.error.message,'error'); }
+    catch(err){ showToast('PIN save failed: '+((err&&err.message)||err),'error'); }
+  }
 }
 
 function renderProjects() {
@@ -41842,7 +41868,7 @@ async function pullFromSupabase() {
                                 'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
                                 'bprCostCodeMap',
                                 'bprProdItemMap',
-                                'anthropic_api_key'];
+                                'anthropic_api_key','truckingPin'];
     (settings.data || []).forEach(function(row) {
       if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
     });
