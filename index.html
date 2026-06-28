@@ -16,6 +16,8 @@
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <!-- SortableJS — drag-and-drop for the Equipment board (tiles between job columns). -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.2/Sortable.min.js"></script>
+<!-- QRCode.js — generates printable scan-to-move labels for equipment units. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>if(window['pdfjsLib']){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -996,6 +998,16 @@ textarea{resize:vertical;min-height:72px}
 .eqb-invaddrow{display:flex;gap:6px;align-items:center}
 .eqb-invaddrow input{padding:6px 8px;border:1px solid #DCE3EC;border-radius:6px;font-size:12.5px;min-width:0}
 .eqb-invnote{font-size:11px;color:#627D98;margin-top:10px}
+.eqb-qrwrap{display:flex;justify-content:center;padding:6px 0 4px}
+.eqb-qrcard{display:flex;align-items:center;gap:16px;border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:#fff;box-shadow:0 2px 8px rgba(16,42,67,.08)}
+.eqb-qrleft{min-width:120px}
+.eqb-qrkmi{font-weight:800;font-size:13px;color:var(--ac)}
+.eqb-qrunit{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:24px;color:var(--kmi);margin-top:2px}
+.eqb-qrmodel{font-size:12px;color:#627D98;margin-top:2px}
+.eqb-qrscan{font-size:10px;color:#9FB3C8;margin-top:10px;text-transform:uppercase;letter-spacing:.5px}
+.eqb-qrcode{width:150px;height:150px;display:grid;place-items:center}
+.eqb-qrcode img,.eqb-qrcode canvas{display:block}
+.eqb-qrurl{text-align:center;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;color:#627D98;margin-top:12px;word-break:break-all}
 .sortable-ghost{opacity:.35}
 .sortable-fallback{box-shadow:0 12px 28px rgba(16,42,67,.3)!important;cursor:grabbing!important}
 </style>
@@ -28525,9 +28537,10 @@ function _eqbShowEdit(id){
   _editEquipId = e.id;
   var label = e.kind==='package' ? (e.vendor||'Package') : (e.unitNo||e.model||e.name||'Unit');
   var strikeBtn = (e.kind==='package' && !e.struck) ? '<button class="btn" style="color:#8A6D24;border-color:#C8A84B" onclick="_eqbStrike(\''+_eqbEsc(e.id)+'\')">Mark struck</button>' : '';
+  var qrBtn = (e.kind!=='package') ? '<button class="btn" onclick="_eqbQrLabel(\''+_eqbEsc(e.id)+'\')">QR label</button>' : '';
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Edit equipment</div><div class="msb">'+_eqbEsc(label)+'</div>'+
     _eqbFormHtml(e)+
-    '<div class="mf"><button class="btn" style="color:#A32D2D;border-color:#A32D2D" onclick="_eqbDelForm()">Delete</button>'+strikeBtn+'<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="_eqbSaveForm()">Save changes</button></div>');
+    '<div class="mf"><button class="btn" style="color:#A32D2D;border-color:#A32D2D" onclick="_eqbDelForm()">Delete</button>'+strikeBtn+qrBtn+'<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="_eqbSaveForm()">Save changes</button></div>');
   _eqbFormSync();
 }
 
@@ -28713,6 +28726,70 @@ async function _eqbInvDel(invId, eqId){
     try{ await supabaseClient.from('kmi_equipment_invoices').delete().eq('id', invId); }
     catch(err){ console.warn('invoice delete cloud error:', err); }
   }
+}
+
+// ── Equipment QR: token + printable scan-to-move label (units only) ──
+// Sticker encodes https://kmi.build/?eq=TOKEN. The boot-flow interception
+// and trucking move screen that consume the token come in the next session.
+function _eqbGenToken(){
+  var c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789', s='';   // no I/O/0/1 — easier to read on a label
+  for(var i=0;i<12;i++) s+=c.charAt(Math.floor(Math.random()*c.length));
+  return s;
+}
+
+async function _eqbQrLabel(id){
+  if(!requireFull('edit-equipment','manage QR labels')) return;
+  var e=(db.equipment||[]).filter(function(x){ return String(x.id)===String(id); })[0];
+  if(!e || e.kind==='package'){ alert('QR labels are for units only.'); return; }
+  var isNew=false;
+  if(!e.qrToken){
+    e.qrToken=_eqbGenToken();
+    e.updatedAt=new Date().toISOString(); e.updatedByUserId=(_currentUser&&_currentUser.id)||null;
+    isNew=true; saveDB();
+  }
+  var url='https://kmi.build/?eq='+e.qrToken;
+  var title=(e.unitNo||e.model||'Unit');
+  var modelTxt=((e.manufacturer?e.manufacturer+' ':'')+(e.model||e.name||'')).trim();
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">QR label</div><div class="msb">'+_eqbEsc(title)+' — scan to move</div>'+
+    '<div class="eqb-qrwrap"><div class="eqb-qrcard">'+
+      '<div class="eqb-qrleft"><div class="eqb-qrkmi">KMI</div><div class="eqb-qrunit">'+_eqbEsc(e.unitNo||'—')+'</div><div class="eqb-qrmodel">'+_eqbEsc(modelTxt)+'</div><div class="eqb-qrscan">Scan to move</div></div>'+
+      '<div class="eqb-qrcode" id="eqb-qrbox"></div>'+
+    '</div></div>'+
+    '<div class="eqb-qrurl">'+_eqbEsc(url)+'</div>'+
+    '<div class="mf"><button class="btn" onclick="closeModal()">Close</button><button class="btn btn-p" onclick="_eqbQrPdf(\''+_eqbEsc(e.id)+'\')">Save label PDF</button></div>');
+  try{
+    var box=g('eqb-qrbox'); box.innerHTML='';
+    if(typeof QRCode!=='undefined'){ new QRCode(box, {text:url, width:150, height:150, correctLevel:QRCode.CorrectLevel.M}); }
+    else { box.textContent='QR library not loaded'; }
+  }catch(err){ console.warn('QR render error:', err); }
+  if(isNew && supabaseClient){
+    try{ var r=await supabaseClient.from('kmi_equipment').upsert(toSBEquipment(e)); if(r&&r.error) showToast('QR token not saved to cloud: '+r.error.message,'error'); }
+    catch(err){ showToast('QR token save failed: '+((err&&err.message)||err),'error'); }
+  }
+}
+
+function _eqbQrPdf(id){
+  var e=(db.equipment||[]).filter(function(x){ return String(x.id)===String(id); })[0];
+  if(!e || !e.qrToken) return;
+  var box=g('eqb-qrbox'), imgUrl=null;
+  var canvas=box?box.querySelector('canvas'):null;
+  if(canvas){ try{ imgUrl=canvas.toDataURL('image/png'); }catch(err){} }
+  if(!imgUrl){ var img=box?box.querySelector('img'):null; if(img&&img.src) imgUrl=img.src; }
+  try{
+    var JS=(window.jspdf&&window.jspdf.jsPDF)||window.jsPDF;
+    var doc=new JS({unit:'in', format:[3,2], orientation:'landscape'});
+    doc.setFillColor(30,36,72); doc.rect(0,0,3,2,'F');
+    doc.setFillColor(255,255,255); doc.rect(0.08,0.08,2.84,1.84,'F');
+    doc.setTextColor(30,36,72);
+    doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.text('KMI', 0.22, 0.42);
+    doc.setFontSize(22); doc.text(String(e.unitNo||'—'), 0.22, 0.80);
+    var modelTxt=((e.manufacturer?e.manufacturer+' ':'')+(e.model||e.name||'')).trim();
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(98,125,152);
+    doc.text(modelTxt.substring(0,28), 0.22, 1.04);
+    doc.setFontSize(8); doc.setTextColor(150,150,150); doc.text('Scan to move', 0.22, 1.74);
+    if(imgUrl){ doc.addImage(imgUrl,'PNG', 1.74, 0.44, 1.12, 1.12); }
+    doc.save('KMI-'+String(e.unitNo||e.qrToken).replace(/[^A-Za-z0-9_-]/g,'')+'-label.pdf');
+  }catch(err){ alert('Could not generate label PDF: '+((err&&err.message)||err)); }
 }
 
 function renderProjects() {
