@@ -2268,8 +2268,8 @@ textarea{resize:vertical;min-height:72px}
   <div class="card" style="border:1px solid var(--ac);background:#FFFCF3">
     <div class="ch"><span class="ct">Foundation master data</span><span style="font-size:11px;color:#888;font-weight:400">Used by the budget feature for CSV exports back to Foundation Software</span></div>
     <div style="font-size:12px;color:#666;margin-bottom:12px;line-height:1.5">
-      Upload exports from Foundation to keep cost codes, cost classes, and the customer master in sync.
-      Each upload <strong>replaces</strong> the corresponding table after a confirmation prompt.
+      Upload exports from Foundation to keep cost codes, cost classes, the customer master, GL accounts, and the vendor master in sync.
+      Each upload <strong>replaces</strong> the corresponding table after a confirmation prompt (vendors reconcile rather than replace).
       The <em>budgetable</em> flag on cost codes — which controls whether a code is selectable in the budget UI — is preserved when re-importing.
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
@@ -2306,6 +2306,36 @@ textarea{resize:vertical;min-height:72px}
           Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'customersFoundation')">
         </label>
       </div>
+      <!-- GL accounts (AP S1) -->
+      <div style="background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
+        <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:6px">GL accounts</div>
+        <div style="font-size:11px;color:#888;margin-bottom:8px;min-height:30px">
+          Required: <code>gl_account_no</code>, <code>description</code>. Optional: <code>account_type</code>. Used by AP overhead coding &amp; export.
+        </div>
+        <div id="t-fnd-gl-status" style="font-size:11px;color:#555;margin-bottom:8px"></div>
+        <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
+          Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'glAccounts')">
+        </label>
+      </div>
+      <!-- Vendor master (AP S1) -->
+      <div style="background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
+        <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:6px">Vendor master</div>
+        <div style="font-size:11px;color:#888;margin-bottom:8px;min-height:30px">
+          Required: <code>vendor_no</code>, <code>name</code>. Reconciles to existing app vendors (links, doesn&rsquo;t replace).
+        </div>
+        <div id="t-fnd-vendor-status" style="font-size:11px;color:#555;margin-bottom:8px"></div>
+        <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
+          Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'vendorsFoundation')">
+        </label>
+      </div>
+    </div>
+    <!-- Vendor reconciliation (AP S1) -->
+    <div style="margin-top:14px;background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
+      <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:4px">Vendor reconciliation</div>
+      <div style="font-size:11px;color:#888;margin-bottom:10px">
+        Foundation vendor master &harr; app vendors. <strong>Review</strong> rows are near matches awaiting confirmation; confirm to link or reject to keep them separate.
+      </div>
+      <div id="t-fnd-vendor-reconcile"></div>
     </div>
   </div>
 
@@ -3214,6 +3244,7 @@ var DB_DEFAULTS = {
   // Foundation master data (imported from CSV on Templates page)
   costCodes:           [],   // { id, code, description, isBudgetable, active }
   costClasses:         [],   // { id, classNo, description, active }
+  glAccounts:          [],   // { id, glNo, description, accountType, active }  (Foundation GL master — AP S1)
   customersFoundation: [],   // { id, customerNo, name, sortName, address1, address2, city, state, zip, active }
   budgetTemplate:      [],   // { id, sortOrder, description, costCode, costClass, sourceType, sourceKey, defaultAmount }
   projectBudgets:      [],   // { id, projectId, version, createdAt, createdBy, sourcePdfPath, taxRate, lines, totals, notes }
@@ -36101,6 +36132,23 @@ function renderFoundationMasterStatus() {
   cfEl.innerHTML = cf
     ? '<span style="color:#3B6D11">&#10003; ' + cf + ' loaded</span>'
     : '<span style="color:#A32D2D">No data — upload required</span>';
+  // AP Session 1 — GL accounts + vendor master
+  var glEl = g('t-fnd-gl-status');
+  if (glEl) {
+    var gl = (db.glAccounts || []).length;
+    glEl.innerHTML = gl
+      ? '<span style="color:#3B6D11">&#10003; ' + gl + ' loaded</span>'
+      : '<span style="color:#A32D2D">No data — upload required</span>';
+  }
+  var vnEl = g('t-fnd-vendor-status');
+  if (vnEl) {
+    var linked = (db.vendors || []).filter(function(v){ return v.reconcileStatus === 'linked'; }).length;
+    var review = (db.vendors || []).filter(function(v){ return v.reconcileStatus === 'review'; }).length;
+    vnEl.innerHTML = (linked || review)
+      ? '<span style="color:#3B6D11">&#10003; ' + linked + ' linked</span>' + (review ? ' <span style="color:#7A5C00">&middot; ' + review + ' to review</span>' : '')
+      : '<span style="color:#A32D2D">No vendors linked — upload required</span>';
+  }
+  renderVendorReconcile();
 }
 
 // ── BPR Classification → Cost Code Map (Round 4.1) ───────────────────
@@ -36574,6 +36622,10 @@ function importFoundationCSV(evt, type) {
       importFoundationCostClasses(rows);
     } else if (type === 'customersFoundation') {
       importFoundationCustomers(rows);
+    } else if (type === 'glAccounts') {
+      importFoundationGLAccounts(rows);
+    } else if (type === 'vendorsFoundation') {
+      importFoundationVendors(rows);
     }
   };
   reader.onerror = function() { alert('Error reading file.'); };
@@ -36665,6 +36717,273 @@ function importFoundationCostClasses(rows) {
   }
   renderTemplates();
   alert('\u2714 Imported ' + parsed.length + ' cost class' + (parsed.length === 1 ? '' : 'es') + '.');
+}
+
+// ── GL accounts (Foundation chart of accounts) — AP Session 1 ─────────
+// Replace strategy, mirroring cost codes. id TEXT, so cloud delete-all
+// uses a never-matching id rather than a numeric .gte('id',0).
+function importFoundationGLAccounts(rows) {
+  var parsed = [];
+  var skipped = 0;
+  rows.forEach(function(r){
+    var no   = (r.gl_account_no || r.gl_no || r.account_no || r.no || r['GL Account No'] || r['GL No'] || r['Account No'] || '').trim();
+    var desc = (r.description || r.desc || r.name || r['Description'] || r['Account Name'] || '').trim();
+    var atyp = (r.account_type || r.type || r['Account Type'] || '').trim();
+    if (!no) { skipped++; return; }
+    parsed.push({
+      id: String(Date.now() + parsed.length),
+      glNo: no,
+      description: desc,
+      accountType: atyp,
+      active: true
+    });
+  });
+  if (!parsed.length) {
+    alert('No valid rows found.\n\nExpected columns include "gl_account_no" and "description".');
+    return;
+  }
+  if (!confirm('Replace the GL account list with ' + parsed.length + ' row' + (parsed.length === 1 ? '' : 's') + ' from this CSV?' +
+               (skipped ? '\n\n' + skipped + ' row(s) were skipped (missing GL number).' : ''))) {
+    return;
+  }
+  db.glAccounts = parsed;
+  saveDB();
+  if (supabaseClient) {
+    (async function(){
+      try {
+        var del = await supabaseClient.from('kmi_gl_accounts').delete().neq('id', '___none___');
+        if (del && del.error) console.warn('gl_accounts delete error:', del.error.message);
+        var ins = await supabaseClient.from('kmi_gl_accounts').insert(parsed.map(toSBGLAccount));
+        if (ins && ins.error) console.warn('gl_accounts insert error:', ins.error.message);
+      } catch (e) { console.warn('gl_accounts sync exception:', e); }
+    })();
+  }
+  renderFoundationMasterStatus();
+  alert('\u2714 Imported ' + parsed.length + ' GL account' + (parsed.length === 1 ? '' : 's') + '.');
+}
+
+// ── Vendor master (Foundation) — AP Session 1 ─────────────────────────
+// Normalizes a vendor name for matching: lowercase, drop punctuation,
+// collapse whitespace, strip common legal suffixes.
+function _normVendorName(s) {
+  var t = String(s || '').toLowerCase();
+  t = t.replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  t = t.replace(/\b(inc|incorporated|llc|llp|lp|corp|corporation|co|company|ltd|the)\b/g, ' ');
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+// Reconciles a Foundation vendor export against existing app vendors.
+// Links exact name matches, flags near matches for review, and creates
+// new linked app vendors for Foundation vendors with no counterpart.
+// Does NOT replace the vendor table — app-only vendors are left untouched.
+function importFoundationVendors(rows) {
+  var fnd = [];
+  var skipped = 0;
+  rows.forEach(function(r){
+    var no = (r.vendor_no || r.no || r['Vendor No'] || r['Vendor Number'] || '').trim();
+    var nm = (r.name || r.vendor_name || r['Name'] || r['Vendor Name'] || '').trim();
+    if (!no || !nm) { skipped++; return; }
+    fnd.push({ no: no, name: nm });
+  });
+  if (!fnd.length) {
+    alert('No valid rows found.\n\nExpected columns include "vendor_no" and "name".');
+    return;
+  }
+
+  // Index existing app vendors by normalized name.
+  var byNorm = {};
+  (db.vendors || []).forEach(function(v){
+    var k = _normVendorName(v.name);
+    if (k && !(k in byNorm)) byNorm[k] = v;
+  });
+  // Index by already-linked Foundation # so re-imports are stable.
+  var byFnd = {};
+  (db.vendors || []).forEach(function(v){
+    if (v.foundationVendorNo) byFnd[String(v.foundationVendorNo)] = v;
+  });
+
+  var linked = 0, review = 0, created = 0, alreadyLinked = 0;
+  var touched = [];   // app vendor records changed/created this run
+
+  fnd.forEach(function(f){
+    var existing = byFnd[String(f.no)];
+    if (existing) {
+      // Already tied to this Foundation #; refresh the stored name only.
+      if (existing.foundationVendorName !== f.name) {
+        existing.foundationVendorName = f.name;
+        touched.push(existing);
+      }
+      alreadyLinked++;
+      return;
+    }
+    var nk = _normVendorName(f.name);
+    var match = byNorm[nk];
+    if (match && !match.foundationVendorNo) {
+      // Exact normalized match on an unlinked app vendor → auto-link.
+      match.foundationVendorNo = f.no;
+      match.foundationVendorName = f.name;
+      match.reconcileStatus = 'linked';
+      byFnd[String(f.no)] = match;
+      touched.push(match);
+      linked++;
+      return;
+    }
+    // Near match: an unlinked app vendor whose name contains / is contained
+    // by the Foundation name (token-level). Flag for human confirmation.
+    var near = null;
+    if (!match) {
+      (db.vendors || []).some(function(v){
+        if (v.foundationVendorNo) return false;
+        var vk = _normVendorName(v.name);
+        if (!vk || !nk) return false;
+        if (vk.indexOf(nk) === 0 || nk.indexOf(vk) === 0) { near = v; return true; }
+        return false;
+      });
+    }
+    if (near) {
+      near.foundationVendorNo = f.no;
+      near.foundationVendorName = f.name;
+      near.reconcileStatus = 'review';
+      byFnd[String(f.no)] = near;
+      touched.push(near);
+      review++;
+      return;
+    }
+    // No counterpart → create a new app vendor straight from Foundation.
+    var nv = {
+      id: String(Date.now() + created + linked + review),
+      name: f.name,
+      primaryContact:'', vendorType:'', email:'', phone:'',
+      address:'', cityState:'', website:'', notes:'',
+      foundationVendorNo: f.no,
+      foundationVendorName: f.name,
+      reconcileStatus: 'linked'
+    };
+    db.vendors.push(nv);
+    byFnd[String(f.no)] = nv;
+    touched.push(nv);
+    created++;
+  });
+
+  if (!confirm('Reconcile ' + fnd.length + ' Foundation vendor' + (fnd.length === 1 ? '' : 's') + '?\n\n' +
+               '\u2022 ' + linked + ' auto-linked (exact match)\n' +
+               '\u2022 ' + review + ' need review (near match)\n' +
+               '\u2022 ' + created + ' new vendors created (no match)\n' +
+               '\u2022 ' + alreadyLinked + ' already linked\n' +
+               (skipped ? '\u2022 ' + skipped + ' skipped (missing #/name)\n' : '') +
+               '\nApp-only vendors are left untouched. Near matches stay editable below.')) {
+    // Roll back in-memory changes by reloading from storage.
+    loadDB();
+    renderFoundationMasterStatus();
+    return;
+  }
+
+  saveDB();
+  if (supabaseClient) {
+    (async function(){
+      try {
+        var up = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
+        if (up && up.error) console.warn('vendors upsert error:', up.error.message);
+      } catch (e) { console.warn('vendors sync exception:', e); }
+    })();
+  }
+  renderFoundationMasterStatus();
+  alert('\u2714 Reconciled ' + fnd.length + ' Foundation vendor' + (fnd.length === 1 ? '' : 's') + '.\n\n' +
+        linked + ' linked, ' + review + ' to review, ' + created + ' created.');
+}
+
+// Reconciliation panel — lists linked + review vendors on the sync screen.
+function renderVendorReconcile() {
+  var el = g('t-fnd-vendor-reconcile');
+  if (!el) return;
+  var rows = (db.vendors || []).filter(function(v){
+    return v.foundationVendorNo || v.reconcileStatus === 'review';
+  });
+  if (!rows.length) {
+    el.innerHTML = '<div style="font-size:12px;color:#888;padding:8px 0">' +
+      'No Foundation vendors linked yet. Import a vendor CSV above to reconcile.</div>';
+    return;
+  }
+  rows.sort(function(a, b){
+    var ra = a.reconcileStatus === 'review' ? 0 : 1;
+    var rb = b.reconcileStatus === 'review' ? 0 : 1;
+    if (ra !== rb) return ra - rb;
+    return String(a.foundationVendorName || a.name).localeCompare(String(b.foundationVendorName || b.name));
+  });
+  var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
+    '<thead><tr style="background:#F6F7FA">' +
+    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Foundation vendor</th>' +
+    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Fnd #</th>' +
+    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">App vendor</th>' +
+    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Status</th>' +
+    '<th style="padding:6px 8px;border-bottom:1px solid #e3e6ee"></th>' +
+    '</tr></thead><tbody>';
+  rows.forEach(function(v){
+    var isReview = v.reconcileStatus === 'review';
+    var pill = isReview
+      ? '<span style="background:#FDF4E0;color:#7A5C00;padding:2px 8px;border-radius:10px;font-weight:600">Review</span>'
+      : '<span style="background:#E7F3E0;color:#3B6D11;padding:2px 8px;border-radius:10px;font-weight:600">Linked</span>';
+    var action = isReview
+      ? '<button class="btn btn-sm" style="border-color:#3B6D11;color:#3B6D11" onclick="vendorReconcileConfirm(\'' + v.id + '\')">Confirm link</button> ' +
+        '<button class="btn btn-sm" onclick="vendorReconcileReject(\'' + v.id + '\')">Not a match</button>'
+      : '<button class="btn btn-sm" onclick="vendorReconcileReject(\'' + v.id + '\')">Unlink</button>';
+    html += '<tr' + (isReview ? ' style="background:#FFFBF0"' : '') + '>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4">' + escapeHtml(v.foundationVendorName || '') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4;font-family:monospace">' + escapeHtml(v.foundationVendorNo || '') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4">' + escapeHtml(v.name || '') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4">' + pill + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4;text-align:right;white-space:nowrap">' + action + '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function _vendorReconcilePersist() {
+  saveDB();
+  if (supabaseClient) {
+    (async function(){
+      try {
+        var up = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
+        if (up && up.error) console.warn('vendors upsert error:', up.error.message);
+      } catch (e) { console.warn('vendors sync exception:', e); }
+    })();
+  }
+  renderFoundationMasterStatus();
+}
+
+function vendorReconcileConfirm(id) {
+  var v = (db.vendors || []).find(function(x){ return String(x.id) === String(id); });
+  if (!v) return;
+  v.reconcileStatus = 'linked';
+  _vendorReconcilePersist();
+}
+
+// Rejects a tentative/confirmed link: clears the Foundation fields off the
+// app vendor and re-creates the Foundation vendor as its own linked record
+// so it isn't lost.
+function vendorReconcileReject(id) {
+  var v = (db.vendors || []).find(function(x){ return String(x.id) === String(id); });
+  if (!v) return;
+  if (!confirm('Unlink "' + (v.foundationVendorName || v.name) + '" from app vendor "' + v.name + '"?\n\n' +
+               'The Foundation vendor will be kept as its own record.')) return;
+  var fNo = v.foundationVendorNo, fName = v.foundationVendorName;
+  v.foundationVendorNo = '';
+  v.foundationVendorName = '';
+  v.reconcileStatus = null;
+  if (fNo) {
+    var dup = (db.vendors || []).some(function(x){ return String(x.foundationVendorNo) === String(fNo); });
+    if (!dup) {
+      db.vendors.push({
+        id: String(Date.now()),
+        name: fName || ('Vendor ' + fNo),
+        primaryContact:'', vendorType:'', email:'', phone:'',
+        address:'', cityState:'', website:'', notes:'',
+        foundationVendorNo: fNo, foundationVendorName: fName, reconcileStatus: 'linked'
+      });
+    }
+  }
+  _vendorReconcilePersist();
 }
 
 function importFoundationCustomers(rows) {
@@ -40205,7 +40524,10 @@ function toSBVendor(r) {
     vendor_type:r.vendorType||'',
     email:r.email||'', phone:r.phone||'',
     address:r.address||'', city_state:r.cityState||'',
-    website:r.website||'', notes:r.notes||''
+    website:r.website||'', notes:r.notes||'',
+    foundation_vendor_no:r.foundationVendorNo||'',
+    foundation_vendor_name:r.foundationVendorName||'',
+    reconcile_status:r.reconcileStatus||null
   };
 }
 function fromSBVendor(r) {
@@ -40215,7 +40537,10 @@ function fromSBVendor(r) {
     vendorType:r.vendor_type||'',
     email:r.email||'', phone:r.phone||'',
     address:r.address||'', cityState:r.city_state||'',
-    website:r.website||'', notes:r.notes||''
+    website:r.website||'', notes:r.notes||'',
+    foundationVendorNo:r.foundation_vendor_no||'',
+    foundationVendorName:r.foundation_vendor_name||'',
+    reconcileStatus:r.reconcile_status||null
   };
 }
 
@@ -41496,6 +41821,18 @@ function fromSBCostClass(r) {
     active:r.active!==false
   };
 }
+function toSBGLAccount(r) {
+  return {
+    id:String(r.id), gl_no:r.glNo||'', description:r.description||'',
+    account_type:r.accountType||'', active:r.active!==false
+  };
+}
+function fromSBGLAccount(r) {
+  return {
+    id:r.id, glNo:r.gl_no||'', description:r.description||'',
+    accountType:r.account_type||'', active:r.active!==false
+  };
+}
 function toSBCustFnd(r) {
   return {
     id:r.id, customer_no:r.customerNo||'', name:r.name||'',
@@ -41831,6 +42168,19 @@ async function pullFromSupabase() {
     } else if (!Array.isArray(db.vendorContacts)) {
       db.vendorContacts = [];
     } // else: keep local db.vendorContacts as-is
+    // AP Session 1 — GL accounts (separate fetch; non-fatal if table missing).
+    try {
+      var glRes = await supabaseClient.from('kmi_gl_accounts').select('*');
+      if (glRes && !glRes.error) {
+        db.glAccounts = (glRes.data || []).map(fromSBGLAccount);
+      } else {
+        if (glRes && glRes.error) console.warn('kmi_gl_accounts load error (table missing?):', glRes.error.message);
+        if (!Array.isArray(db.glAccounts)) db.glAccounts = [];
+      }
+    } catch (e) {
+      console.warn('kmi_gl_accounts load exception:', e);
+      if (!Array.isArray(db.glAccounts)) db.glAccounts = [];
+    }
     // Merge pulled users with local auth state. After the password-sync migration,
     // the cloud is the source of truth for passwordHash/Salt/status/mustReset, but
     // we still fall back to local values for any row whose cloud columns are blank
