@@ -36893,32 +36893,37 @@ function importFoundationVendors(rows) {
 }
 
 // Reconciliation panel — lists linked + review vendors on the sync screen.
+// Review rows (needing action) always render; linked rows are searchable and
+// capped so a full Foundation master (~1,500+ vendors) stays responsive.
 function renderVendorReconcile() {
   var el = g('t-fnd-vendor-reconcile');
   if (!el) return;
-  var rows = (db.vendors || []).filter(function(v){
+  var all = (db.vendors || []).filter(function(v){
     return v.foundationVendorNo || v.reconcileStatus === 'review';
   });
-  if (!rows.length) {
+  if (!all.length) {
     el.innerHTML = '<div style="font-size:12px;color:#888;padding:8px 0">' +
       'No Foundation vendors linked yet. Import a vendor CSV above to reconcile.</div>';
     return;
   }
-  rows.sort(function(a, b){
-    var ra = a.reconcileStatus === 'review' ? 0 : 1;
-    var rb = b.reconcileStatus === 'review' ? 0 : 1;
-    if (ra !== rb) return ra - rb;
-    return String(a.foundationVendorName || a.name).localeCompare(String(b.foundationVendorName || b.name));
-  });
-  var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
-    '<thead><tr style="background:#F6F7FA">' +
-    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Foundation vendor</th>' +
-    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Fnd #</th>' +
-    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">App vendor</th>' +
-    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Status</th>' +
-    '<th style="padding:6px 8px;border-bottom:1px solid #e3e6ee"></th>' +
-    '</tr></thead><tbody>';
-  rows.forEach(function(v){
+  var reviews = all.filter(function(v){ return v.reconcileStatus === 'review'; });
+  var linked  = all.filter(function(v){ return v.reconcileStatus !== 'review'; });
+  reviews.sort(function(a, b){ return String(a.foundationVendorName || a.name).localeCompare(String(b.foundationVendorName || b.name)); });
+  linked.sort(function(a, b){ return String(a.foundationVendorName || a.name).localeCompare(String(b.foundationVendorName || b.name)); });
+
+  var q = String(window._vendorReconSearch || '').toLowerCase().trim();
+  var shownLinked = linked;
+  if (q) {
+    shownLinked = linked.filter(function(v){
+      return (v.name || '').toLowerCase().indexOf(q) >= 0 ||
+             (v.foundationVendorName || '').toLowerCase().indexOf(q) >= 0 ||
+             String(v.foundationVendorNo || '').toLowerCase().indexOf(q) >= 0;
+    });
+  }
+  var CAP = 100;
+  var linkedCapped = shownLinked.slice(0, CAP);
+
+  function rowHtml(v){
     var isReview = v.reconcileStatus === 'review';
     var pill = isReview
       ? '<span style="background:#FDF4E0;color:#7A5C00;padding:2px 8px;border-radius:10px;font-weight:600">Review</span>'
@@ -36927,16 +36932,50 @@ function renderVendorReconcile() {
       ? '<button class="btn btn-sm" style="border-color:#3B6D11;color:#3B6D11" onclick="vendorReconcileConfirm(\'' + v.id + '\')">Confirm link</button> ' +
         '<button class="btn btn-sm" onclick="vendorReconcileReject(\'' + v.id + '\')">Not a match</button>'
       : '<button class="btn btn-sm" onclick="vendorReconcileReject(\'' + v.id + '\')">Unlink</button>';
-    html += '<tr' + (isReview ? ' style="background:#FFFBF0"' : '') + '>' +
+    return '<tr' + (isReview ? ' style="background:#FFFBF0"' : '') + '>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4">' + escapeHtml(v.foundationVendorName || '') + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4;font-family:monospace">' + escapeHtml(v.foundationVendorNo || '') + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4">' + escapeHtml(v.name || '') + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4">' + pill + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4;text-align:right;white-space:nowrap">' + action + '</td>' +
     '</tr>';
-  });
-  html += '</tbody></table>';
-  el.innerHTML = html;
+  }
+
+  var head = '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' +
+    '<div style="font-size:12px;color:#555"><strong style="color:#3B6D11">' + linked.length + '</strong> linked' +
+      (reviews.length ? ' &middot; <strong style="color:#7A5C00">' + reviews.length + '</strong> to review' : '') + '</div>' +
+    '<input id="t-fnd-vendor-recon-search" oninput="vendorReconcileFilter(this.value)" placeholder="Search linked vendors\u2026" ' +
+      'value="' + escapeHtml(window._vendorReconSearch || '') + '" ' +
+      'style="padding:5px 9px;border:1px solid #d8dce6;border-radius:6px;font-size:12px;min-width:200px">' +
+  '</div>';
+
+  var body = '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
+    '<thead><tr style="background:#F6F7FA">' +
+    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Foundation vendor</th>' +
+    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Fnd #</th>' +
+    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">App vendor</th>' +
+    '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Status</th>' +
+    '<th style="padding:6px 8px;border-bottom:1px solid #e3e6ee"></th>' +
+    '</tr></thead><tbody>' +
+    reviews.map(rowHtml).join('') +
+    linkedCapped.map(rowHtml).join('') +
+    '</tbody></table>';
+
+  var note = '';
+  if (q) {
+    note = '<div style="font-size:11px;color:#888;margin-top:6px">' + shownLinked.length + ' linked match \u201c' + escapeHtml(q) + '\u201d' +
+      (shownLinked.length > CAP ? ' (showing first ' + CAP + ')' : '') + '.</div>';
+  } else if (linked.length > CAP) {
+    note = '<div style="font-size:11px;color:#888;margin-top:6px">Showing first ' + CAP + ' of ' + linked.length + ' linked vendors. Search to find a specific one.</div>';
+  }
+  el.innerHTML = head + body + note;
+}
+
+function vendorReconcileFilter(val) {
+  window._vendorReconSearch = val;
+  renderVendorReconcile();
+  var s = g('t-fnd-vendor-recon-search');
+  if (s) { s.focus(); try { s.setSelectionRange(s.value.length, s.value.length); } catch (e) {} }
 }
 
 function _vendorReconcilePersist() {
