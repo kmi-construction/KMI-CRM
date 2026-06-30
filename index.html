@@ -37253,6 +37253,43 @@ function apDupOf(rec){
   return match ? match.id : null;
 }
 
+// Some vendor PDFs carry stray bytes before the %PDF header or after the final
+// %%EOF (Bay Building Supplies invoices have a leading byte), which makes the
+// Anthropic document API reject them as "not a valid PDF". Read the raw bytes,
+// trim to the %PDF … %%EOF window, and base64-encode the cleaned slice.
+function _abToBase64(bytes){
+  var bin = '', chunk = 0x8000;
+  for (var i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+function apFileToCleanPdfBase64(file){
+  return new Promise(function(resolve, reject){
+    var r = new FileReader();
+    r.onload = function(){
+      try {
+        var bytes = new Uint8Array(r.result);
+        // find %PDF within the first few KB
+        var start = -1, lim = Math.min(bytes.length - 4, 8192);
+        for (var i = 0; i <= lim; i++) {
+          if (bytes[i]===0x25 && bytes[i+1]===0x50 && bytes[i+2]===0x44 && bytes[i+3]===0x46) { start = i; break; }
+        }
+        if (start < 0) start = 0;
+        // find the last %%EOF
+        var end = bytes.length;
+        for (var j = bytes.length - 5; j >= start; j--) {
+          if (bytes[j]===0x25 && bytes[j+1]===0x25 && bytes[j+2]===0x45 && bytes[j+3]===0x4F && bytes[j+4]===0x46) { end = j + 5; break; }
+        }
+        var clean = (start > 0 || end < bytes.length) ? bytes.subarray(start, end) : bytes;
+        resolve(_abToBase64(clean));
+      } catch(e){ reject(e); }
+    };
+    r.onerror = function(){ reject(new Error('FileReader error')); };
+    r.readAsArrayBuffer(file);
+  });
+}
+
 async function apHandleUpload(evt){
   if(!requireFull('ap-invoices','upload AP invoices')){ evt.target.value=''; return; }
   var files = evt.target.files ? Array.prototype.slice.call(evt.target.files) : [];
@@ -37267,7 +37304,7 @@ async function apHandleUpload(evt){
     var file=files[fi];
     apSetBanner('info','Reading '+(fi+1)+' of '+files.length+': '+apEsc(file.name)+'\u2026 (10\u201330s each)');
     var b64=null, ex=null, readErr='';
-    try { b64 = await bgFileToBase64(file); } catch(e){ readErr='could not read the file'; }
+    try { b64 = await apFileToCleanPdfBase64(file); } catch(e){ readErr='could not read the file'; }
     if(b64){
       try {
         var resp = await fetch(fnUrl,{ method:'POST', headers:{'Content-Type':'application/json','apikey':creds.key,'Authorization':'Bearer '+creds.key}, body:JSON.stringify({pdf_base64:b64}) });
