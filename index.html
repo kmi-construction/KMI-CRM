@@ -38018,34 +38018,101 @@ function apSetApprBanner(kind, html){
   el.innerHTML=html;
 }
 
-function _apQueueRow(i, withReassign){
+// ── AP register: filterable list with stat-box status filter ────────
+var _apReg = { status:'pending', ven:'', no:'', job:'', code:'', cls:'', appr:'', amin:'', amax:'', dfrom:'', dto:'' };
+
+function _apInvLines(i){ return (db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)===String(i.id); }); }
+function _apInvDateISO(i){
+  var s=String(i.invoiceDate||'').trim();
+  var m=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if(m){ var y=m[3].length===2?('20'+m[3]):m[3]; return y+'-'+('0'+m[1]).slice(-2)+'-'+('0'+m[2]).slice(-2); }
+  var d=Date.parse(s); if(!isNaN(d)) return new Date(d).toISOString().slice(0,10);
+  return i.createdAt?String(i.createdAt).slice(0,10):'';
+}
+// Scope: Accounting/Admin see everything; a PM sees only invoices routed to or
+// decided by them (any status).
+function _apRegScopedBase(){
+  var all=(db.apInvoices||[]).slice();
+  if(_apIsAcct()) return all;
+  var me=_currentUser?String(_currentUser.id):'';
+  return all.filter(function(i){ return String(i.approverId)===me || String(i.approvedBy)===me; });
+}
+function _apRegPasses(i){
+  var r=_apReg;
+  if(r.status!=='all'){
+    if(r.status==='unassigned'){ if(!(i.status==='pending' && !i.approverId)) return false; }
+    else if(String(i.status)!==r.status) return false;
+  }
+  if(r.ven && (apVendorDisplayName(i)||i.vendorName||'')!==r.ven) return false;
+  if(r.no && String(i.invoiceNo||'').toLowerCase().indexOf(r.no.toLowerCase())<0) return false;
+  var lines=_apInvLines(i);
+  if(r.job && String(i.jobNo||'')!==r.job && !lines.some(function(l){return String(l.jobNo||'')===r.job;})) return false;
+  if(r.code && !lines.some(function(l){return String(l.costCode||'')===r.code || String(l.glNo||'')===r.code;})) return false;
+  if(r.cls && !lines.some(function(l){return String(l.costClass||'')===r.cls;})) return false;
+  if(r.appr){ if(r.appr==='__none__'){ if(i.approverId) return false; } else if(String(i.approverId)!==r.appr) return false; }
+  var amin=parseFloat(r.amin); if(!isNaN(amin) && (Number(i.total)||0)<amin) return false;
+  var amax=parseFloat(r.amax); if(!isNaN(amax) && (Number(i.total)||0)>amax) return false;
+  if(r.dfrom||r.dto){ var iso=_apInvDateISO(i); if(!iso) return false; if(r.dfrom && iso<r.dfrom) return false; if(r.dto && iso>r.dto) return false; }
+  return true;
+}
+function _apRegRow(i){
+  var withReassign=_apCanReassign() && (i.status==='pending'||i.status==='hold');
   var days=_apDaysWaiting(i);
-  var daysTxt = (i.status==='pending' && days!=null) ? (days>=7?('<span style="color:#b23636;font-weight:600">'+days+'d</span>'):(days+'d')) : '\u2014';
-  var apprCell = withReassign
-    ? '<td onclick="event.stopPropagation()"><select onchange="apReassign(\''+i.id+'\',this.value,event)" style="padding:4px 7px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apApproverOptions(i.approverId)+'</select></td>'
-    : '<td>'+apEsc(apApproverName(i.approverId))+'</td>';
+  var dateCell=apEsc(i.invoiceDate||_apInvDateISO(i)||'\u2014');
+  if(i.status==='pending' && days!=null) dateCell += ' <span style="font-size:11px;color:'+(days>=7?'#b23636':'#9aa0b4')+'">('+days+'d)</span>';
+  var apprCell=withReassign
+    ? '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4" onclick="event.stopPropagation()"><select onchange="apReassign(\''+i.id+'\',this.value,event)" style="padding:3px 6px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apApproverOptions(i.approverId)+'</select></td>'
+    : '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4">'+(i.approverId?apEsc(apApproverName(i.approverId)):'<span style="color:#9aa0b4">\u2014</span>')+'</td>';
   return '<tr style="cursor:pointer" onclick="apOpenReview(\''+i.id+'\')">'+
-    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4"><strong>'+apEsc(apVendorDisplayName(i)||i.vendorName||'(unknown)')+'</strong></td>'+
-    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
-    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4">'+apInvoiceJobCell(i)+'</td>'+
-    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apMoney(i.total)+'</td>'+
-    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4;font-size:11.5px;color:#666">'+_apCodingSummary(i)+'</td>'+
-    apprCell.replace('<td','<td style="padding:9px 12px;border-bottom:1px solid #eef0f4"')+
-    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4">'+daysTxt+'</td>'+
-    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4">'+apStatusPill(i.status)+'</td>'+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4"><strong>'+apEsc(apVendorDisplayName(i)||i.vendorName||'(unknown)')+'</strong>'+(i.foundationVendorNo?' <span style="background:#e7f3e0;color:#3B6D11;font-size:10px;font-weight:700;padding:1px 6px;border-radius:9px">'+apEsc(i.foundationVendorNo)+'</span>':'')+'</td>'+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4">'+apInvoiceJobCell(i)+'</td>'+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apMoney(i.total)+'</td>'+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4;font-size:11.5px;color:#666">'+_apCodingSummary(i)+'</td>'+
+    apprCell+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4;font-size:11.5px;color:#888">'+dateCell+'</td>'+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4">'+apStatusPill(i.status)+'</td>'+
   '</tr>';
 }
-function _apQueueTable(list, withReassign){
-  var heads=['Vendor','Invoice #','Job','Amount','Coding','Approver','Waiting','Status'];
-  return '<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'+
-    heads.map(function(h){return '<th style="text-align:left;padding:8px 12px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h+'</th>';}).join('')+
-    '</tr></thead><tbody>'+list.map(function(i){return _apQueueRow(i, withReassign);}).join('')+'</tbody></table>';
+function _apRegSync(){
+  function v(id){ var e=g(id); return e?e.value:''; }
+  _apReg.ven=v('ap-f-ven'); _apReg.no=v('ap-f-no'); _apReg.job=v('ap-f-job');
+  _apReg.code=v('ap-f-code'); _apReg.cls=v('ap-f-cls'); _apReg.appr=v('ap-f-appr');
+  _apReg.amin=v('ap-f-amin'); _apReg.amax=v('ap-f-amax'); _apReg.dfrom=v('ap-f-dfrom'); _apReg.dto=v('ap-f-dto');
 }
-function _apSection(title, list, withReassign, headBg){
-  if(!list.length) return '';
-  return '<div class="card" style="background:#fff;border:1px solid #EEE;border-radius:9px;overflow:hidden;margin-bottom:18px">'+
-    '<div style="padding:9px 14px;background:'+(headBg||'var(--kmi)')+';color:#fff;font-size:12px;font-weight:600;display:flex;justify-content:space-between;align-items:center"><span>'+title+'</span><span style="background:rgba(255,255,255,.16);border-radius:10px;padding:1px 9px;font-size:11px">'+list.length+'</span></div>'+
-    _apQueueTable(list, withReassign)+'</div>';
+function _apRegOnFilter(){ _apRegSync(); _apRegRender(); }
+function _apRegStatus(s){ _apReg.status=s; _apRegRender(); }
+function apRegClear(){ _apReg={ status:_apReg.status, ven:'', no:'', job:'', code:'', cls:'', appr:'', amin:'', amax:'', dfrom:'', dto:'' };
+  ['ap-f-ven','ap-f-no','ap-f-job','ap-f-code','ap-f-cls','ap-f-appr','ap-f-amin','ap-f-amax','ap-f-dfrom','ap-f-dto'].forEach(function(id){ var e=g(id); if(e) e.value=''; });
+  _apRegRender();
+}
+
+function _apRegRender(){
+  var base=_apRegScopedBase();
+  // stat counts over the scoped set
+  var c={ pending:0, unassigned:0, hold:0, approved:0, exported:0, rejected:0, all:base.length };
+  base.forEach(function(i){
+    if(c[i.status]!=null) c[i.status]++;
+    if(i.status==='pending' && !i.approverId) c.unassigned++;
+  });
+  var boxes=[['pending','Pending'],['unassigned','Unassigned'],['hold','On hold'],['approved','Approved'],['exported','Exported'],['rejected','Rejected'],['all','All']];
+  var statsEl=g('ap-appr-stats');
+  if(statsEl) statsEl.innerHTML='<div style="display:flex;gap:10px;flex-wrap:wrap">'+boxes.map(function(b){
+    var on=_apReg.status===b[0];
+    return '<div onclick="_apRegStatus(\''+b[0]+'\')" style="cursor:pointer;background:'+(on?'#fffdf6':'#fff')+';border:1px solid #e3e6ee;border-top:3px solid '+(on?'var(--ac)':'transparent')+';border-radius:9px;padding:10px 15px;min-width:100px'+(on?';box-shadow:0 2px 10px rgba(200,168,75,.18)':'')+'"><div style="font-size:20px;font-weight:700;color:var(--kmi)">'+c[b[0]]+'</div><div style="font-size:10.5px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+b[1]+'</div></div>';
+  }).join('')+'</div>';
+
+  // filtered list (newest invoice date first)
+  var list=base.filter(_apRegPasses).sort(function(a,b){ return String(_apInvDateISO(b)).localeCompare(String(_apInvDateISO(a))); });
+  var tot=list.reduce(function(t,i){return t+(Number(i.total)||0);},0);
+  var totEl=g('ap-appr-total'); if(totEl) totEl.innerHTML=list.length+' invoice'+(list.length===1?'':'s')+' &middot; <strong style="color:var(--kmi);font-size:14px">'+apMoney(tot)+'</strong> total';
+
+  var tEl=g('ap-appr-table'); if(!tEl) return;
+  if(!list.length){ tEl.innerHTML='<div style="padding:30px;text-align:center;color:#999;font-size:13px">No invoices match these filters.</div>'; return; }
+  var heads=['Vendor','Invoice #','Job','Amount','Coding','Approver','Date','Status'];
+  tEl.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'+
+    heads.map(function(h){return '<th style="text-align:left;padding:8px 11px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee;white-space:nowrap">'+h+'</th>';}).join('')+
+    '</tr></thead><tbody>'+list.map(_apRegRow).join('')+'</tbody></table>';
 }
 
 function renderApApprovals(){
@@ -38053,50 +38120,44 @@ function renderApApprovals(){
   var el=g('ap-appr-view'); if(!el) return;
   g('ap-appr-review').style.display='none';
   el.style.display='block';
-  var all=(db.apInvoices||[]).slice().sort(function(a,b){ return String(a.queuedAt||'').localeCompare(String(b.queuedAt||'')); });
-  var pending=all.filter(function(i){return i.status==='pending';});
-  var held=all.filter(function(i){return i.status==='hold';});
-  var unassigned=pending.filter(function(i){return !i.approverId;});
-  var acct=_apIsAcct();
-  var meId=_currentUser?String(_currentUser.id):'';
-  var overdue=pending.filter(function(i){ var d=_apDaysWaiting(i); return d!=null && d>=7; });
-  var pend$=pending.reduce(function(t,i){return t+(Number(i.total)||0);},0);
+  var base=_apRegScopedBase();
+  // distinct values for the selects, from the scoped set
+  function uniq(a){ var o={},out=[]; a.forEach(function(v){ if(v!=null&&v!==''&&!o[v]){o[v]=1;out.push(v);} }); return out.sort(); }
+  var vens=uniq(base.map(function(i){return apVendorDisplayName(i)||i.vendorName;}));
+  var jobs=uniq(base.reduce(function(acc,i){ acc.push(i.jobNo); _apInvLines(i).forEach(function(l){acc.push(l.jobNo);}); return acc; },[]));
+  var clss=(db.costClasses||[]).filter(function(c){return c.active!==false;}).map(function(c){return c.classNo;});
+  if(!clss.length) clss=uniq(base.reduce(function(acc,i){ _apInvLines(i).forEach(function(l){acc.push(l.costClass);}); return acc; },[]));
+  var codes=(db.costCodes||[]).filter(function(c){return c.active!==false;}).map(function(c){return c.code;});
+  // approvers present in scope (id→name)
+  var apprIds=uniq(base.map(function(i){return String(i.approverId||'');}).filter(function(x){return x;}));
+  var anyUnassigned=base.some(function(i){return !i.approverId;});
 
-  // KPIs
-  var kpis=[
-    { n: acct? pending.length : pending.filter(function(i){return String(i.approverId)===meId;}).length, l: acct?'Pending':'Awaiting me' },
-    { n: unassigned.length, l:'Unassigned' },
-    { n: held.length, l:'On hold' },
-    { n: overdue.length, l:'Overdue (7d+)' }
-  ];
-  var kpiHtml='<div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">'+kpis.map(function(k){
-    return '<div style="background:#fff;border:.5px solid #e3e6ee;border-radius:9px;padding:12px 16px;min-width:120px"><div style="font-size:22px;font-weight:700;color:var(--kmi)">'+k.n+'</div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+k.l+'</div></div>';
-  }).join('')+'</div>';
+  function sel(id,label,vals,cur){ return '<select id="'+id+'" onchange="_apRegOnFilter()" style="font-family:inherit;border:1px solid #d8dce6;border-radius:6px;padding:6px 8px;font-size:12.5px;min-width:120px"><option value="">'+label+'</option>'+vals.map(function(v){return '<option'+(String(v)===String(cur)?' selected':'')+'>'+apEsc(v)+'</option>';}).join('')+'</select>'; }
+  var apprOpts='<option value="">All approvers</option>'+(anyUnassigned?'<option value="__none__"'+(_apReg.appr==='__none__'?' selected':'')+'>\u2014 unassigned \u2014</option>':'')+apprIds.map(function(id){return '<option value="'+apEsc(id)+'"'+(String(_apReg.appr)===String(id)?' selected':'')+'>'+apEsc(apApproverName(id))+'</option>';}).join('');
 
-  var body='';
-  if(acct){
-    body += _apSection('Unassigned &mdash; no single PM on the job (route these)', unassigned, true, 'var(--acd)');
-    body += _apSection('Pending approval', pending.filter(function(i){return !!i.approverId;}), true);
-    body += _apSection('On hold', held, true);
-    if(!pending.length && !held.length) body='<div style="padding:26px;text-align:center;color:#888;font-size:13px">Nothing awaiting approval.</div>';
-  } else {
-    var mine=pending.filter(function(i){return String(i.approverId)===meId;});
-    var mineHold=held.filter(function(i){return String(i.approverId)===meId;});
-    body += _apSection('Awaiting your approval', mine, false);
-    body += _apSection('On hold', mineHold, false);
-    if(!mine.length && !mineHold.length) body='<div style="padding:26px;text-align:center;color:#888;font-size:13px">Nothing is waiting on you right now.</div>';
-  }
-  el.innerHTML = kpiHtml + body;
+  var filters='<div style="background:#fff;border:1px solid #e7e9f0;border-radius:9px;padding:12px 14px;margin-bottom:16px;display:flex;gap:10px 12px;flex-wrap:wrap;align-items:flex-end">'+
+    '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">Vendor</label>'+sel('ap-f-ven','All vendors',vens,_apReg.ven)+'</div>'+
+    '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">Invoice #</label><input id="ap-f-no" oninput="_apRegOnFilter()" value="'+apEsc(_apReg.no)+'" placeholder="search\u2026" style="border:1px solid #d8dce6;border-radius:6px;padding:6px 8px;font-size:12.5px;min-width:120px"></div>'+
+    '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">Job</label>'+sel('ap-f-job','All jobs',jobs,_apReg.job)+'</div>'+
+    '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">Cost code</label><input id="ap-f-code" list="ap-f-code-list" oninput="_apRegOnFilter()" value="'+apEsc(_apReg.code)+'" placeholder="all / search\u2026" style="border:1px solid #d8dce6;border-radius:6px;padding:6px 8px;font-size:12.5px;min-width:130px"><datalist id="ap-f-code-list">'+codes.map(function(c){return '<option value="'+apEsc(c)+'">';}).join('')+'</datalist></div>'+
+    '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">Class</label>'+sel('ap-f-cls','All classes',clss,_apReg.cls)+'</div>'+
+    '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">Approver</label><select id="ap-f-appr" onchange="_apRegOnFilter()" style="border:1px solid #d8dce6;border-radius:6px;padding:6px 8px;font-size:12.5px;min-width:140px">'+apprOpts+'</select></div>'+
+    '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">Amount</label><div style="display:flex;gap:5px;align-items:center"><input id="ap-f-amin" oninput="_apRegOnFilter()" value="'+apEsc(_apReg.amin)+'" placeholder="min" style="width:74px;border:1px solid #d8dce6;border-radius:6px;padding:6px 7px;font-size:12.5px"><span style="color:#aaa">\u2013</span><input id="ap-f-amax" oninput="_apRegOnFilter()" value="'+apEsc(_apReg.amax)+'" placeholder="max" style="width:74px;border:1px solid #d8dce6;border-radius:6px;padding:6px 7px;font-size:12.5px"></div></div>'+
+    '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">Date</label><div style="display:flex;gap:5px;align-items:center"><input id="ap-f-dfrom" type="date" onchange="_apRegOnFilter()" value="'+apEsc(_apReg.dfrom)+'" style="border:1px solid #d8dce6;border-radius:6px;padding:5px 7px;font-size:12.5px"><span style="color:#aaa">\u2013</span><input id="ap-f-dto" type="date" onchange="_apRegOnFilter()" value="'+apEsc(_apReg.dto)+'" style="border:1px solid #d8dce6;border-radius:6px;padding:5px 7px;font-size:12.5px"></div></div>'+
+    '<button class="btn" onclick="apRegClear()" style="margin-left:auto;align-self:flex-end">Clear filters</button>'+
+  '</div>';
+
+  el.innerHTML = '<div id="ap-appr-stats" style="margin:0 0 6px"></div>'+
+    '<div id="ap-appr-total" style="font-size:12.5px;color:#555;margin:4px 0 14px"></div>'+
+    filters +
+    '<div class="card" style="background:#fff;border:1px solid #EEE;border-radius:9px;overflow:hidden"><div id="ap-appr-table"></div></div>';
+  _apRegRender();
 }
 
 // ── Sign-off review screen ──────────────────────────────────────────
+// prev/next walks the current filtered register list
 function _apReviewOrdered(){
-  // same order/scope the viewer sees in the queue
-  var all=(db.apInvoices||[]).slice().sort(function(a,b){ return String(a.queuedAt||'').localeCompare(String(b.queuedAt||'')); });
-  var pool=all.filter(function(i){return i.status==='pending'||i.status==='hold';});
-  if(_apIsAcct()) return pool;
-  var meId=_currentUser?String(_currentUser.id):'';
-  return pool.filter(function(i){return String(i.approverId)===meId;});
+  return _apRegScopedBase().filter(_apRegPasses).sort(function(a,b){ return String(_apInvDateISO(b)).localeCompare(String(_apInvDateISO(a))); });
 }
 function apOpenReview(id){
   if(!hasRead('ap-approvals')) return;
@@ -38170,21 +38231,34 @@ function apRenderReview(){
      : '<div style="color:#b23636;font-size:12px">No coding lines found.</div>')+'</div>';
 
   // decision block
-  var canDecide=_apCanDecide(i);
-  var reassign = _apCanReassign()
-    ? '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#555;margin-bottom:10px"><span>Approver:</span><select onchange="apReassign(\''+i.id+'\',this.value,event)" style="padding:5px 8px;font-size:12px;border:1px solid #d8dce6;border-radius:6px">'+_apApproverOptions(i.approverId)+'</select></div>'
-    : '<div style="font-size:12px;color:#555;margin-bottom:10px">Approver: <strong>'+apEsc(apApproverName(i.approverId))+'</strong></div>';
-  var priorNote = (i.decisionNote && (i.status==='hold')) ? '<div style="font-size:12px;color:#6b5320;background:#fff8e8;border:1px solid #efe0b8;border-radius:6px;padding:8px 10px;margin-bottom:10px">On hold: '+apEsc(i.decisionNote)+'</div>' : '';
-  var actions = canDecide
-    ? '<textarea id="apr-note" class="note" placeholder="Note (required to reject or hold; optional to approve)\u2026" style="width:100%;border:1px solid #d8dce6;border-radius:7px;padding:8px 10px;font-size:13px;font-family:inherit;min-height:58px">'+apEsc(i.status==='hold'?(i.decisionNote||''):'')+'</textarea>'+
-      '<div style="font-size:11px;color:#888;margin:7px 0 10px">A rejection emails Accounting the invoice details and your reason.</div>'+
-      '<div style="display:flex;gap:9px;justify-content:flex-end;flex-wrap:wrap">'+
-        '<button class="btn" style="background:#7a6a3a;color:#fff;border-color:#7a6a3a" onclick="apHold(\''+i.id+'\')">On hold</button>'+
-        '<button class="btn" style="background:#b23636;color:#fff;border-color:#b23636" onclick="apReject(\''+i.id+'\')">Reject &amp; notify Accounting</button>'+
-        '<button class="btn" style="background:#3B6D11;color:#fff;border-color:#3B6D11" onclick="apApprove(\''+i.id+'\')">Approve for export \u2192</button>'+
-      '</div>'
-    : '<div style="font-size:12px;color:#888">This invoice is routed to '+apEsc(apApproverName(i.approverId))+'. Only that approver (or Accounting) can decide.</div>';
-  var decision='<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px;margin-bottom:30px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:9px">Decision</div>'+reassign+priorNote+actions+'</div>';
+  var decided = (i.status==='approved'||i.status==='exported'||i.status==='rejected');
+  var decision;
+  if(decided){
+    var label = i.status==='rejected' ? 'Rejected' : (i.status==='exported' ? 'Approved & exported' : 'Approved');
+    var when = i.approvedAt ? new Date(i.approvedAt).toLocaleString() : '';
+    decision = '<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px;margin-bottom:30px">'+
+      '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:9px">Decision</div>'+
+      '<div style="font-size:13px;margin-bottom:6px"><strong style="color:'+(i.status==='rejected'?'#b23636':'#3B6D11')+'">'+label+'</strong>'+(i.approvedBy?(' by '+apEsc(apApproverName(i.approvedBy))):'')+(when?(' \u00b7 '+apEsc(when)):'')+'</div>'+
+      '<div style="font-size:12px;color:#555">Approver of record: <strong>'+apEsc(apApproverName(i.approverId))+'</strong></div>'+
+      (i.decisionNote?('<div style="font-size:12px;color:#555;margin-top:8px;background:#f6f7fa;border-radius:6px;padding:8px 10px">Note: '+apEsc(i.decisionNote)+'</div>'):'')+
+    '</div>';
+  } else {
+    var canDecide=_apCanDecide(i);
+    var reassign = _apCanReassign()
+      ? '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#555;margin-bottom:10px"><span>Approver:</span><select onchange="apReassign(\''+i.id+'\',this.value,event)" style="padding:5px 8px;font-size:12px;border:1px solid #d8dce6;border-radius:6px">'+_apApproverOptions(i.approverId)+'</select></div>'
+      : '<div style="font-size:12px;color:#555;margin-bottom:10px">Approver: <strong>'+apEsc(apApproverName(i.approverId))+'</strong></div>';
+    var priorNote = (i.decisionNote && (i.status==='hold')) ? '<div style="font-size:12px;color:#6b5320;background:#fff8e8;border:1px solid #efe0b8;border-radius:6px;padding:8px 10px;margin-bottom:10px">On hold: '+apEsc(i.decisionNote)+'</div>' : '';
+    var actions = canDecide
+      ? '<textarea id="apr-note" class="note" placeholder="Note (required to reject or hold; optional to approve)\u2026" style="width:100%;border:1px solid #d8dce6;border-radius:7px;padding:8px 10px;font-size:13px;font-family:inherit;min-height:58px">'+apEsc(i.status==='hold'?(i.decisionNote||''):'')+'</textarea>'+
+        '<div style="font-size:11px;color:#888;margin:7px 0 10px">A rejection emails Accounting the invoice details and your reason.</div>'+
+        '<div style="display:flex;gap:9px;justify-content:flex-end;flex-wrap:wrap">'+
+          '<button class="btn" style="background:#7a6a3a;color:#fff;border-color:#7a6a3a" onclick="apHold(\''+i.id+'\')">On hold</button>'+
+          '<button class="btn" style="background:#b23636;color:#fff;border-color:#b23636" onclick="apReject(\''+i.id+'\')">Reject &amp; notify Accounting</button>'+
+          '<button class="btn" style="background:#3B6D11;color:#fff;border-color:#3B6D11" onclick="apApprove(\''+i.id+'\')">Approve for export \u2192</button>'+
+        '</div>'
+      : '<div style="font-size:12px;color:#888">This invoice is routed to '+apEsc(apApproverName(i.approverId))+'. Only that approver (or Accounting) can decide.</div>';
+    decision='<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px;margin-bottom:30px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:9px">Decision</div>'+reassign+priorNote+actions+'</div>';
+  }
 
   el.innerHTML = head + '<div style="display:flex;gap:16px;align-items:flex-start">'+pdfPane+'<div style="flex:1;min-width:0">'+hdr+dist+decision+'</div></div>';
   if(i.pdfPath) _apLoadPdfPane(i.id, i.pdfPath, 'apr-pdf-frame-wrap');
