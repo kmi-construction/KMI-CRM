@@ -37492,6 +37492,19 @@ function apCodeRemoveLine(ix){
   apRenderCode();
 }
 
+// Inbox order (newest first) — shared by the inbox and the coder's prev/next.
+function _apOrderedInvoices(){
+  return (db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
+}
+function apCodeNav(dir){
+  var ord = _apOrderedInvoices();
+  var pos = ord.findIndex(function(x){ return String(x.id)===String(_apCodeId); });
+  if(pos<0) return;
+  var t = pos + dir;
+  if(t<0 || t>=ord.length) return;
+  apOpenCode(ord[t].id);
+}
+
 function apOpenCode(id){
   if(!requireFull('ap-invoices','code AP invoices')) return;
   var i = (db.apInvoices||[]).find(function(x){return String(x.id)===String(id);});
@@ -37544,6 +37557,7 @@ function apOpenCode(id){
   }
   g('ap-inbox-view').style.display = 'none';
   g('ap-code').style.display = 'block';
+  var _bn=g('ap-banner'); if(_bn){ _bn.style.display='none'; _bn.innerHTML=''; }
   apRenderCode();
   try{ document.querySelector('.main') && (document.querySelector('.main').scrollTop=0); }catch(e){}
   window.scrollTo(0,0);
@@ -37624,9 +37638,18 @@ function apRenderCode(){
   var li = (i.extractedJson && Array.isArray(i.extractedJson.line_items)) ? i.extractedJson.line_items : [];
 
   // header
+  var _ord = _apOrderedInvoices();
+  var _pos = _ord.findIndex(function(x){ return String(x.id)===String(i.id); });
+  var _tot = _ord.length;
   var head = '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">'+
     '<button class="btn btn-sm" onclick="apCloseCode()">\u2190 Back to inbox</button>'+
-    '<div style="font-size:12px;color:#888">'+apStatusPill(i.status)+' &middot; from '+(i.source==='email'?'email':'upload')+' ('+apEsc(i.sourceFile)+')</div>'+
+    '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
+      '<span style="font-size:12px;color:#888">from '+(i.source==='email'?'email':'upload')+' ('+apEsc(i.sourceFile)+')</span>'+
+      '<span id="apc-status-pill">'+apStatusPill(i.status)+'</span>'+
+      '<span style="font-size:12px;color:#888">'+(_pos>=0?(_pos+1):'?')+' of '+_tot+'</span>'+
+      '<button class="btn btn-sm" onclick="apCodeNav(-1)" '+(_pos<=0?'disabled style="opacity:.4;cursor:not-allowed"':'title="Previous invoice"')+'>\u25c0</button>'+
+      '<button class="btn btn-sm" onclick="apCodeNav(1)" '+(_pos>=_tot-1?'disabled style="opacity:.4;cursor:not-allowed"':'title="Next invoice"')+'>\u25b6</button>'+
+    '</div>'+
   '</div>';
 
   // duplicate / multi warnings
@@ -37867,13 +37890,17 @@ async function apCodeSave(submit){
         if(ar && ar.error) throw new Error('alias \u2014 '+ar.error.message);
       }
     }catch(e){
-      apCloseCode();
+      var pillE=g('apc-status-pill'); if(pillE) pillE.innerHTML = apStatusPill(i.status);
       apSetBanner('error', 'Coding saved on this device, but the cloud sync failed and it will be lost on reload: '+apEsc(e&&e.message?e.message:String(e))+'. Send me this message and I\u2019ll fix it.');
+      try{ window.scrollTo(0,0); }catch(_e){}
       return;
     }
   }
-  apCloseCode();
-  apSetBanner('success', (submit?'Submitted for approval':'Saved coding')+' for '+apEsc(d.foundationVendorName||i.vendorName)+' \u00b7 '+apEsc(i.invoiceNo)+'.'+(aliasRec?' Vendor alias remembered.':''));
+  // Stay on the coding screen. Reflect the new status in place (no full
+  // re-render, so the PDF pane doesn't reload), and confirm via the banner.
+  var pill=g('apc-status-pill'); if(pill) pill.innerHTML = apStatusPill(i.status);
+  apSetBanner('success', (submit?'Submitted for approval':'Saved coding')+' for '+apEsc(apVendorDisplayName(i)||i.vendorName)+' \u00b7 '+apEsc(i.invoiceNo)+'.'+(aliasRec?' Vendor alias remembered.':''));
+  try{ window.scrollTo(0,0); }catch(_e){}
 }
 
 function importFoundationCustomers(rows) {
