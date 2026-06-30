@@ -37153,12 +37153,37 @@ function renderApInbox(){
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apMoney(i.total)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-size:11px;color:#888">'+src+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+stCell+'</td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;text-align:center"><button onclick="apDeleteInvoice(\''+i.id+'\',event)" title="Delete invoice" style="border:0;background:none;color:#b23636;cursor:pointer;font-size:15px;line-height:1">&#128465;</button></td>'+
     '</tr>';
   }).join('');
   el.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12.5px">'+
     '<thead><tr>'+
-    ['Vendor','Invoice #','Date','Job','Amount','Source','Status'].map(function(h){return '<th style="text-align:left;padding:7px 9px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h+'</th>';}).join('')+
+    ['Vendor','Invoice #','Date','Job','Amount','Source','Status',''].map(function(h){return '<th style="text-align:left;padding:7px 9px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h+'</th>';}).join('')+
     '</tr></thead><tbody>'+rows+'</tbody></table>';
+}
+
+// Delete an invoice (and its lines + log) from the inbox — local + cloud.
+function apDeleteInvoice(id, ev){
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+  if(!requireFull('ap-invoices','delete AP invoices')) return;
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  if(!confirm('Delete invoice '+(i.invoiceNo||'(no #)')+' from '+(i.foundationVendorName||i.vendorName||'this vendor')+'?\n\nThis removes its coding and history and cannot be undone.')) return;
+  var idStr=String(id);
+  db.apInvoices    = (db.apInvoices||[]).filter(function(x){return String(x.id)!==idStr;});
+  db.apInvoiceLines= (db.apInvoiceLines||[]).filter(function(l){return String(l.invoiceId)!==idStr;});
+  db.apInvoiceLog  = (db.apInvoiceLog||[]).filter(function(l){return String(l.invoiceId)!==idStr;});
+  saveDB();
+  if(supabaseClient){
+    (async function(){
+      try{
+        await supabaseClient.from('kmi_ap_invoice_lines').delete().eq('invoice_id', idStr);
+        await supabaseClient.from('kmi_ap_invoice_log').delete().eq('invoice_id', idStr);
+        await supabaseClient.from('kmi_ap_invoices').delete().eq('id', idStr);
+      }catch(e){ console.warn('ap delete sync exception:',e); }
+    })();
+  }
+  renderApInbox();
+  apSetBanner('success','Deleted invoice '+apEsc(i.invoiceNo||'')+'.');
 }
 
 // Extracted vendor name → { vendorId, foundationVendorNo, foundationVendorName }.
@@ -37353,6 +37378,32 @@ function _apGlOpts(sel){
   return opts;
 }
 
+// Seed split-distribution lines from the extracted line items, then add a
+// residual "Sales tax" line for whatever the items don't cover (tax/other),
+// so the seeded split sums to the invoice total out of the box. Each line
+// carries its own job number.
+function _apSeedLines(i){
+  var ex = (i.extractedJson && Array.isArray(i.extractedJson.line_items)) ? i.extractedJson.line_items : [];
+  var seed = ex.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, jobNo:i.jobNo||'', costCode:i.suggestedCostCode||'', costClass:i.suggestedCostClass||'', glNo:i.suggestedGlNo||'' }; });
+  var liSum = seed.reduce(function(s,l){ return s+(Number(l.amount)||0); }, 0);
+  var tot = Number(i.total)||0;
+  var resid = Math.round((tot - liSum)*100)/100;
+  if(resid > 0.01) seed.push({ description:'Sales tax', amount:resid, jobNo:i.jobNo||'', costCode:i.suggestedCostCode||'', costClass:i.suggestedCostClass||'', glNo:i.suggestedGlNo||'' });
+  if(!seed.length) seed.push({ description:'', amount:tot, jobNo:i.jobNo||'', costCode:'', costClass:'', glNo:'' });
+  return seed;
+}
+function apCodeAddLine(){
+  _apCodeSync();
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(_apCodeId);});
+  _apCodeDraft.lines.push({ description:'', amount:0, jobNo:(i?i.jobNo:'')||'', costCode:'', costClass:'', glNo:'' });
+  apRenderCode();
+}
+function apCodeRemoveLine(ix){
+  _apCodeSync();
+  _apCodeDraft.lines.splice(ix,1);
+  apRenderCode();
+}
+
 function apOpenCode(id){
   if(!requireFull('ap-invoices','code AP invoices')) return;
   var i = (db.apInvoices||[]).find(function(x){return String(x.id)===String(id);});
@@ -37374,8 +37425,8 @@ function apOpenCode(id){
       glNo: isSingleSaved ? (saved[0].glNo||'') : '',
       taxable: isSingleSaved ? !!saved[0].taxable : false,
       lines: isSingleSaved
-        ? exLines.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, costCode:'', costClass:'', glNo:'', taxable:false }; })
-        : saved.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, costCode:l.costCode||'', costClass:l.costClass||'', glNo:l.glNo||'', taxable:!!l.taxable }; }),
+        ? _apSeedLines(i)
+        : saved.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, jobNo:l.jobNo||'', costCode:l.costCode||'', costClass:l.costClass||'', glNo:l.glNo||'' }; }),
       foundationVendorNo: i.foundationVendorNo || '',
       foundationVendorName: i.foundationVendorName || '',
       vendorId: i.vendorId || null,
@@ -37393,7 +37444,7 @@ function apOpenCode(id){
       costClass: i.suggestedCostClass || '',
       glNo: i.suggestedGlNo || '',
       taxable: (Number(i.salesTax)||0) > 0,
-      lines: exLines.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, costCode:i.suggestedCostCode||'', costClass:i.suggestedCostClass||'', glNo:i.suggestedGlNo||'', taxable:false }; }),
+      lines: _apSeedLines(i),
       foundationVendorNo: i.foundationVendorNo || '',
       foundationVendorName: i.foundationVendorName || '',
       vendorId: i.vendorId || null,
@@ -37430,7 +37481,9 @@ function _apCodeSync(){
   // split lines
   if(d.splitMode){
     d.lines.forEach(function(ln, ix){
+      var ds=g('apl-desc-'+ix); if(ds) ln.description = ds.value;
       var a=g('apl-amt-'+ix); if(a) ln.amount = parseFloat(String(a.value).replace(/[^0-9.\-]/g,''))||0;
+      var j=g('apl-job-'+ix); if(j) ln.jobNo = j.value;
       var c=g('apl-code-'+ix); if(c) ln.costCode = c.value;
       var k=g('apl-class-'+ix); if(k) ln.costClass = k.value;
       var gl=g('apl-gl-'+ix); if(gl) ln.glNo = gl.value;
@@ -37555,20 +37608,27 @@ function apRenderCode(){
     }
   } else {
     var sum = 0;
-    var lrows = d.lines.map(function(ln,ix){
+    var lrows = (d.lines||[]).map(function(ln,ix){
       sum += Number(ln.amount)||0;
+      var jobCell = (d.distType==='job')
+        ? '<td style="padding:4px 6px"><select id="apl-job-'+ix+'" style="width:135px;padding:4px 6px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apJobOpts(ln.jobNo)+'</select></td>' : '';
       var codeCells = (d.distType==='job')
         ? '<td style="padding:4px 6px"><select id="apl-code-'+ix+'" style="width:110px;padding:4px 6px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apCodeOpts(ln.costCode)+'</select></td>'+
           '<td style="padding:4px 6px"><select id="apl-class-'+ix+'" style="width:90px;padding:4px 6px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apClassOpts(ln.costClass)+'</select></td>'
-        : '<td colspan="2" style="padding:4px 6px"><select id="apl-gl-'+ix+'" style="width:200px;padding:4px 6px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apGlOpts(ln.glNo)+'</select></td>';
-      return '<tr><td style="padding:4px 6px;font-size:12px">'+apEsc(ln.description)+'</td>'+
+        : '<td style="padding:4px 6px"><select id="apl-gl-'+ix+'" style="width:200px;padding:4px 6px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apGlOpts(ln.glNo)+'</select></td>';
+      return '<tr>'+
+        '<td style="padding:4px 6px"><input id="apl-desc-'+ix+'" value="'+apEsc(ln.description)+'" style="width:150px;padding:4px 6px;font-size:12px;border:1px solid #d8dce6;border-radius:5px"></td>'+
         '<td style="padding:4px 6px"><input id="apl-amt-'+ix+'" value="'+apEsc(ln.amount)+'" oninput="apCodeSumPreview()" style="width:90px;padding:4px 6px;font-size:12px;border:1px solid #d8dce6;border-radius:5px;text-align:right"></td>'+
-        codeCells+'</tr>';
+        jobCell + codeCells +
+        '<td style="padding:4px 6px;text-align:center"><button onclick="apCodeRemoveLine('+ix+')" title="Remove line" style="border:0;background:none;color:#b23636;cursor:pointer;font-size:16px;line-height:1">\u00d7</button></td>'+
+      '</tr>';
     }).join('');
     var tot = Number(i.total)||0;
+    var headers = (d.distType==='job') ? ['Description','Amount','Job','Code','Class',''] : ['Description','Amount','GL account',''];
     codingBody = '<table style="width:100%;border-collapse:collapse"><thead><tr>'+
-      ['Description','Amount',(d.distType==='job'?'Code':'GL'),(d.distType==='job'?'Class':'')].map(function(h){return h?'<th style="text-align:left;padding:5px 6px;background:#f6f7fa;font-size:10px;text-transform:uppercase;color:#555">'+h+'</th>':'<th style="background:#f6f7fa"></th>';}).join('')+
+      headers.map(function(h){return '<th style="text-align:left;padding:5px 6px;background:#f6f7fa;font-size:10px;text-transform:uppercase;color:#555">'+h+'</th>';}).join('')+
       '</tr></thead><tbody>'+lrows+'</tbody></table>'+
+      '<div style="margin-top:8px"><button class="btn btn-sm" onclick="apCodeAddLine()">+ Add line</button></div>'+
       '<div id="apc-sumline" style="font-size:12px;margin-top:8px;text-align:right;color:'+(Math.abs(sum-tot)<0.01?'#3B6D11':'#b23636')+'">Lines: '+apMoney(sum)+' / Total: '+apMoney(tot)+(Math.abs(sum-tot)<0.01?' \u2713':' — must match to submit')+'</div>';
   }
 
@@ -37605,7 +37665,7 @@ function _apReadHeader(i){
   i.subtotal=num('apc-sub'); i.salesTax=num('apc-taxamt'); i.freight=num('apc-freight'); i.total=num('apc-total');
 }
 
-function apCodeSave(submit){
+async function apCodeSave(submit){
   _apCodeSync();
   var d=_apCodeDraft;
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(_apCodeId);}); if(!i) return;
@@ -37625,13 +37685,13 @@ function apCodeSave(submit){
     }
   } else {
     var sum=0, bad=false;
-    d.lines.forEach(function(ln){
+    (d.lines||[]).forEach(function(ln){
       sum += Number(ln.amount)||0;
-      if(d.distType==='job'){ if(!ln.costCode||!ln.costClass) bad=true; lines.push({ description:ln.description, amount:Number(ln.amount)||0, distType:'job', jobNo:d.jobNo, costCode:ln.costCode, costClass:ln.costClass, glNo:'', taxable:!!ln.taxable }); }
-      else { if(!ln.glNo) bad=true; lines.push({ description:ln.description, amount:Number(ln.amount)||0, distType:'gl', jobNo:'', costCode:'', costClass:'', glNo:ln.glNo, taxable:!!ln.taxable }); }
+      if(d.distType==='job'){ if(!ln.jobNo||!ln.costCode||!ln.costClass) bad=true; lines.push({ description:ln.description, amount:Number(ln.amount)||0, distType:'job', jobNo:ln.jobNo, costCode:ln.costCode, costClass:ln.costClass, glNo:'', taxable:false }); }
+      else { if(!ln.glNo) bad=true; lines.push({ description:ln.description, amount:Number(ln.amount)||0, distType:'gl', jobNo:'', costCode:'', costClass:'', glNo:ln.glNo, taxable:false }); }
     });
-    if(d.distType==='job' && !d.jobNo){ alert('Select a job for the split distribution.'); return; }
-    if(bad){ alert('Every split line needs '+(d.distType==='job'?'a cost code and class':'a GL account')+'.'); return; }
+    if(!lines.length){ alert('Add at least one distribution line.'); return; }
+    if(bad){ alert('Every split line needs '+(d.distType==='job'?'a job, cost code, and class':'a GL account')+'.'); return; }
     if(Math.abs(sum-tot)>=0.01){
       if(submit){ alert('Split lines ('+apMoney(sum)+') must equal the invoice total ('+apMoney(tot)+') to submit.'); return; }
       if(!confirm('Split lines ('+apMoney(sum)+') don\u2019t equal the total ('+apMoney(tot)+'). Save anyway as a draft?')) return;
@@ -37646,28 +37706,39 @@ function apCodeSave(submit){
   // replace lines for this invoice
   var idStr = String(i.id);
   db.apInvoiceLines = (db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)!==idStr; });
-  var newLines = lines.map(function(ln,ix){ return { id:'apl-'+Date.now()+'-'+ix, invoiceId:i.id, lineNo:ix+1, description:ln.description, amount:ln.amount, distType:ln.distType, jobNo:ln.jobNo, costCode:ln.costCode, costClass:ln.costClass, glNo:ln.glNo, taxable:ln.taxable, notes:'' }; });
+  var stamp = Date.now();
+  var newLines = lines.map(function(ln,ix){ return { id:'apl-'+stamp+'-'+ix, invoiceId:i.id, lineNo:ix+1, description:ln.description, amount:ln.amount, distType:ln.distType, jobNo:ln.jobNo, costCode:ln.costCode, costClass:ln.costClass, glNo:ln.glNo, taxable:ln.taxable, notes:'' }; });
   newLines.forEach(function(l){ db.apInvoiceLines.push(l); });
   // alias memory
   var aliasRec = null;
   if(d.saveAlias && d.pickedViaSearch && i.vendorName){
     var nk=_normVendorName(i.vendorName);
     db.apVendorAliases = (db.apVendorAliases||[]).filter(function(a){ return a.aliasNorm!==nk; });
-    aliasRec = { id:'alias-'+Date.now(), aliasNorm:nk, aliasRaw:i.vendorName, foundationVendorNo:d.foundationVendorNo, foundationVendorName:d.foundationVendorName, createdBy:(_currentUser?_currentUser.email:'') };
+    aliasRec = { id:'alias-'+stamp, aliasNorm:nk, aliasRaw:i.vendorName, foundationVendorNo:d.foundationVendorNo, foundationVendorName:d.foundationVendorName, createdBy:(_currentUser?_currentUser.email:'') };
     db.apVendorAliases.push(aliasRec);
   }
   saveDB();
   apLog(i.id, submit?'submitted':'coded', (submit?'Submitted for approval':'Coded')+' \u2014 '+(d.splitMode?(newLines.length+' lines'):(d.distType==='job'?(d.costCode+'/'+d.costClass):('GL '+d.glNo)))+' \u2014 '+apMoney(tot));
-  // cloud
+  // cloud — AWAIT writes and surface any failure (silent line-insert failures
+  // were leaving coding unsaved on reload while the header status still saved).
   if(supabaseClient){
-    (async function(){
-      try{
-        await apPushInvoice(i);
-        await supabaseClient.from('kmi_ap_invoice_lines').delete().eq('invoice_id', i.id);
-        if(newLines.length){ var ins=await supabaseClient.from('kmi_ap_invoice_lines').insert(newLines.map(toSBApLine)); if(ins&&ins.error) console.warn('ap_invoice_lines insert:',ins.error.message); }
-        if(aliasRec){ var ar=await supabaseClient.from('kmi_ap_vendor_aliases').upsert(toSBApAlias(aliasRec)); if(ar&&ar.error) console.warn('ap_vendor_aliases upsert:',ar.error.message); }
-      }catch(e){ console.warn('ap coding sync exception:',e); }
-    })();
+    try{
+      await apPushInvoice(i);
+      var del = await supabaseClient.from('kmi_ap_invoice_lines').delete().eq('invoice_id', idStr);
+      if(del && del.error) throw new Error('line delete \u2014 '+del.error.message);
+      if(newLines.length){
+        var ins = await supabaseClient.from('kmi_ap_invoice_lines').insert(newLines.map(toSBApLine));
+        if(ins && ins.error) throw new Error('line insert \u2014 '+ins.error.message);
+      }
+      if(aliasRec){
+        var ar = await supabaseClient.from('kmi_ap_vendor_aliases').upsert(toSBApAlias(aliasRec));
+        if(ar && ar.error) throw new Error('alias \u2014 '+ar.error.message);
+      }
+    }catch(e){
+      apCloseCode();
+      apSetBanner('error', 'Coding saved on this device, but the cloud sync failed and it will be lost on reload: '+apEsc(e&&e.message?e.message:String(e))+'. Send me this message and I\u2019ll fix it.');
+      return;
+    }
   }
   apCloseCode();
   apSetBanner('success', (submit?'Submitted for approval':'Saved coding')+' for '+apEsc(d.foundationVendorName||i.vendorName)+' \u00b7 '+apEsc(i.invoiceNo)+'.'+(aliasRec?' Vendor alias remembered.':''));
