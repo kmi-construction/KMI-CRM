@@ -37273,7 +37273,7 @@ async function apHandleUpload(evt){
         var resp = await fetch(fnUrl,{ method:'POST', headers:{'Content-Type':'application/json','apikey':creds.key,'Authorization':'Bearer '+creds.key}, body:JSON.stringify({pdf_base64:b64}) });
         var data = await resp.json();
         if(resp.ok && data && data.ok){ ex = data.data || {}; }
-        else { readErr = (data && data.error) ? String(data.error) : ('reader returned status '+(resp?resp.status:'(none)')); }
+        else { readErr = (data && data.error) ? (String(data.error) + (data.detail ? ' \u2014 '+String(data.detail).slice(0,200) : '')) : ('reader returned status '+(resp?resp.status:'(none)')); }
       } catch(e){ readErr = 'network or timeout error'; }
     }
     var readFailed = !ex;
@@ -37482,6 +37482,11 @@ function apCloseCode(){
 // Read editable DOM values back into the draft before any re-render.
 function _apCodeSync(){
   var d = _apCodeDraft; if(!d) return;
+  // Capture header-field edits into the invoice record FIRST, so any re-render
+  // (vendor pick, toggle, add/remove line) preserves what was typed and keeps
+  // the total current for the split tie-out.
+  var inv = (db.apInvoices||[]).find(function(x){return String(x.id)===String(_apCodeId);});
+  if(inv && g('apc-invno')!=null) _apReadHeader(inv);
   function val(id){ var e=g(id); return e?e.value:undefined; }
   if(g('apc-job')!=null) d.jobNo = val('apc-job');
   if(g('apc-code')!=null) d.costCode = val('apc-code');
@@ -37587,7 +37592,7 @@ function apRenderCode(){
       f2('Terms','apc-terms',i.terms)+f2('PO #','apc-po',i.poNo)+f2('Job # (printed)','apc-jobno',i.jobNo)+
       f2('Subtotal','apc-sub',i.subtotal)+f2('Sales tax','apc-taxamt',i.salesTax)+f2('Freight','apc-freight',i.freight)+
     '</div>'+
-    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px"><div></div><div></div>'+f2('Total','apc-total',i.total)+'</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px"><div></div><div></div>'+f2('Total','apc-total',i.total,'oninput="apCodeSumPreview()"')+'</div>'+
   '</div>';
 
   // coding section
@@ -37666,7 +37671,8 @@ function apCodeSumPreview(){
   var d=_apCodeDraft; if(!d||!d.splitMode) return;
   var i = (db.apInvoices||[]).find(function(x){return String(x.id)===String(_apCodeId);}); if(!i) return;
   var sum=0; d.lines.forEach(function(ln,ix){ var a=g('apl-amt-'+ix); var v=a?(parseFloat(String(a.value).replace(/[^0-9.\-]/g,''))||0):(Number(ln.amount)||0); sum+=v; });
-  var tot=Number(i.total)||0; var el=g('apc-sumline');
+  var totEl=g('apc-total'); var tot = totEl ? (parseFloat(String(totEl.value).replace(/[^0-9.\-]/g,''))||0) : (Number(i.total)||0);
+  var el=g('apc-sumline');
   if(el){ el.style.color = Math.abs(sum-tot)<0.01?'#3B6D11':'#b23636'; el.innerHTML='Lines: '+apMoney(sum)+' / Total: '+apMoney(tot)+(Math.abs(sum-tot)<0.01?' \u2713':' — must match to submit'); }
 }
 
