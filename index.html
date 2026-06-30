@@ -37947,15 +37947,19 @@ function apApproverName(idOrEmail){
   var nm=((u.firstName||'')+' '+(u.lastName||'')).trim() || u.email || String(u.id);
   return nm + (u.role?(' ('+normalizeRole(u.role)+')'):'');
 }
-// Exactly one assigned PM on the job → auto-route; none or several → unassigned.
+// Exactly one person assigned to the job AS a PM (by project role) → auto-route;
+// none or several → unassigned. Project role wins over company title.
+var AP_PM_PROJECT_ROLES = ['Project Manager','Sr. Project Manager'];
 function apResolveJobPM(jobNo){
   if(!jobNo) return null;
   var proj=(db.projects||[]).find(function(p){ return String(p.number)===String(jobNo); });
   if(!proj || !Array.isArray(proj.kmiAssignments)) return null;
   var pms=[];
   proj.kmiAssignments.forEach(function(a){
-    var u=(db.users||[]).find(function(x){ return String(x.id)===String(a.userId); });
-    if(u && normalizeRole(u.role)==='Project Manager' && pms.indexOf(u)<0) pms.push(u);
+    if(AP_PM_PROJECT_ROLES.indexOf(String(a.role))>=0){
+      var u=(db.users||[]).find(function(x){ return String(x.id)===String(a.userId); });
+      if(u && pms.indexOf(u)<0) pms.push(u);
+    }
   });
   return pms.length===1 ? pms[0] : null;
 }
@@ -37983,9 +37987,13 @@ function _apDaysWaiting(i){
   return Math.floor((Date.now()-new Date(i.queuedAt).getTime())/86400000);
 }
 function _apApproverOptions(curId){
-  var pms=(db.users||[]).filter(function(u){ return normalizeRole(u.role)==='Project Manager'; });
+  var cands=(db.users||[]).filter(function(u){ return (u.status||'active')==='active' && normalizeRole(u.role)!=='Foreman'; })
+    .sort(function(a,b){ return (((a.firstName||'')+' '+(a.lastName||'')).trim()).localeCompare(((b.firstName||'')+' '+(b.lastName||'')).trim()); });
   var opts='<option value=""'+(!curId?' selected':'')+'>\u2014 unassigned \u2014</option>';
-  pms.forEach(function(u){ opts+='<option value="'+apEsc(String(u.id))+'"'+(String(u.id)===String(curId)?' selected':'')+'>'+apEsc(((u.firstName||'')+' '+(u.lastName||'')).trim()||u.email)+' (PM)</option>'; });
+  cands.forEach(function(u){
+    var nm=((u.firstName||'')+' '+(u.lastName||'')).trim()||u.email;
+    opts+='<option value="'+apEsc(String(u.id))+'"'+(String(u.id)===String(curId)?' selected':'')+'>'+apEsc(nm)+' ('+apEsc(normalizeRole(u.role)||'')+')</option>';
+  });
   return opts;
 }
 function apReassign(id, approverId, ev){
