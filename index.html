@@ -37491,6 +37491,14 @@ function apCodeRemoveLine(ix){
   _apCodeDraft.lines.splice(ix,1);
   apRenderCode();
 }
+function apCodeApplyJobAll(){
+  _apCodeSync();
+  var sel=g('apc-jobs-all'); if(!sel) return;
+  var job=sel.value;
+  if(!job){ alert('Pick a job to apply to all lines.'); return; }
+  (_apCodeDraft.lines||[]).forEach(function(ln){ ln.jobNo = job; });
+  apRenderCode();
+}
 
 // Inbox order (newest first) — shared by the inbox and the coder's prev/next.
 function _apOrderedInvoices(){
@@ -37744,7 +37752,11 @@ function apRenderCode(){
     }).join('');
     var tot = Number(i.total)||0;
     var headers = (d.distType==='job') ? ['Description','Amount','Job','Code','Class',''] : ['Description','Amount','GL account',''];
-    codingBody = '<table style="width:100%;border-collapse:collapse"><thead><tr>'+
+    var applyAll = (d.distType==='job') ? '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;flex-wrap:wrap">'+
+      '<span style="color:#666">Set all lines to job:</span>'+
+      '<select id="apc-jobs-all" style="padding:5px 8px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apJobOpts('')+'</select>'+
+      '<button class="btn btn-sm" onclick="apCodeApplyJobAll()">Apply to all</button></div>' : '';
+    codingBody = applyAll + '<table style="width:100%;border-collapse:collapse"><thead><tr>'+
       headers.map(function(h){return '<th style="text-align:left;padding:5px 6px;background:#f6f7fa;font-size:10px;text-transform:uppercase;color:#555">'+h+'</th>';}).join('')+
       '</tr></thead><tbody>'+lrows+'</tbody></table>'+
       '<div style="margin-top:8px"><button class="btn btn-sm" onclick="apCodeAddLine()">+ Add line</button></div>'+
@@ -43181,7 +43193,10 @@ async function pullFromSupabase() {
     try {
       var glRes = await supabaseClient.from('kmi_gl_accounts').select('*');
       if (glRes && !glRes.error) {
-        db.glAccounts = (glRes.data || []).map(fromSBGLAccount);
+        var glRows = (glRes.data || []).map(fromSBGLAccount);
+        // Guard: never clobber a populated local list with an empty cloud
+        // result (an RLS-blocked or transient empty select would wipe it).
+        if (glRows.length || !(Array.isArray(db.glAccounts) && db.glAccounts.length)) db.glAccounts = glRows;
       } else {
         if (glRes && glRes.error) console.warn('kmi_gl_accounts load error (table missing?):', glRes.error.message);
         if (!Array.isArray(db.glAccounts)) db.glAccounts = [];
