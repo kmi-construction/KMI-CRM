@@ -36778,11 +36778,14 @@ function _normVendorName(s) {
 // Does NOT replace the vendor table — app-only vendors are left untouched.
 function importFoundationVendors(rows) {
   var fnd = [];
+  var seenNo = {};
   var skipped = 0;
   rows.forEach(function(r){
     var no = (r.vendor_no || r.no || r['Vendor No'] || r['Vendor Number'] || '').trim();
     var nm = (r.name || r.vendor_name || r['Name'] || r['Vendor Name'] || '').trim();
     if (!no || !nm) { skipped++; return; }
+    if (seenNo[no]) { skipped++; return; }   // same vendor # twice in the file
+    seenNo[no] = true;
     fnd.push({ no: no, name: nm });
   });
   if (!fnd.length) {
@@ -36850,8 +36853,11 @@ function importFoundationVendors(rows) {
       return;
     }
     // No counterpart → create a new app vendor straight from Foundation.
+    // Deterministic id keyed off the Foundation # so re-imports update in
+    // place rather than inserting duplicates.
+    var fid = 'fnd-' + String(f.no).replace(/[^A-Za-z0-9_-]/g, '');
     var nv = {
-      id: String(Date.now() + created + linked + review),
+      id: fid,
       name: f.name,
       primaryContact:'', vendorType:'', email:'', phone:'',
       address:'', cityState:'', website:'', notes:'',
@@ -37011,10 +37017,13 @@ function vendorReconcileReject(id) {
   v.foundationVendorName = '';
   v.reconcileStatus = null;
   if (fNo) {
-    var dup = (db.vendors || []).some(function(x){ return String(x.foundationVendorNo) === String(fNo); });
+    var rfid = 'fnd-' + String(fNo).replace(/[^A-Za-z0-9_-]/g, '');
+    var dup = (db.vendors || []).some(function(x){
+      return String(x.foundationVendorNo) === String(fNo) || String(x.id) === rfid;
+    });
     if (!dup) {
       db.vendors.push({
-        id: String(Date.now()),
+        id: rfid,
         name: fName || ('Vendor ' + fNo),
         primaryContact:'', vendorType:'', email:'', phone:'',
         address:'', cityState:'', website:'', notes:'',
