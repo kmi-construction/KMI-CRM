@@ -36879,8 +36879,11 @@ function importFoundationVendors(rows) {
       try {
         var del = await supabaseClient.from('kmi_foundation_vendors').delete().neq('id', '___none___');
         if (del && del.error) console.warn('foundation_vendors delete error:', del.error.message);
-        var ins = await supabaseClient.from('kmi_foundation_vendors').insert(master.map(toSBFoundationVendor));
-        if (ins && ins.error) console.warn('foundation_vendors insert error:', ins.error.message);
+        var payload = master.map(toSBFoundationVendor);
+        for (var b = 0; b < payload.length; b += 500) {
+          var ins = await supabaseClient.from('kmi_foundation_vendors').insert(payload.slice(b, b + 500));
+          if (ins && ins.error) { console.warn('foundation_vendors insert error:', ins.error.message); break; }
+        }
         if (touched.length || removed) {
           var up = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
           if (up && up.error) console.warn('vendors upsert error:', up.error.message);
@@ -42509,32 +42512,30 @@ async function pullFromSupabase() {
       console.warn('kmi_gl_accounts load exception:', e);
       if (!Array.isArray(db.glAccounts)) db.glAccounts = [];
     }
-    // AP (Option B) — Foundation vendor master (separate fetch; non-fatal).
-    try {
-      var fvRes = await supabaseClient.from('kmi_foundation_vendors').select('*');
-      if (fvRes && !fvRes.error) db.foundationVendors = (fvRes.data || []).map(fromSBFoundationVendor);
-      else { if (fvRes && fvRes.error) console.warn('kmi_foundation_vendors load error (table missing?):', fvRes.error.message); if (!Array.isArray(db.foundationVendors)) db.foundationVendors = []; }
-    } catch (e) {
-      console.warn('kmi_foundation_vendors load exception:', e);
-      if (!Array.isArray(db.foundationVendors)) db.foundationVendors = [];
-    }
-    // AP Session 2 — invoices, lines, log (separate fetches; non-fatal if missing).
-    try {
-      var apInvRes = await supabaseClient.from('kmi_ap_invoices').select('*');
-      if (apInvRes && !apInvRes.error) db.apInvoices = (apInvRes.data || []).map(fromSBApInvoice);
-      else { if (apInvRes && apInvRes.error) console.warn('kmi_ap_invoices load error (table missing?):', apInvRes.error.message); if (!Array.isArray(db.apInvoices)) db.apInvoices = []; }
-      var apLineRes = await supabaseClient.from('kmi_ap_invoice_lines').select('*');
-      if (apLineRes && !apLineRes.error) db.apInvoiceLines = (apLineRes.data || []).map(fromSBApLine);
-      else { if (!Array.isArray(db.apInvoiceLines)) db.apInvoiceLines = []; }
-      var apLogRes = await supabaseClient.from('kmi_ap_invoice_log').select('*');
-      if (apLogRes && !apLogRes.error) db.apInvoiceLog = (apLogRes.data || []).map(fromSBApLog);
-      else { if (!Array.isArray(db.apInvoiceLog)) db.apInvoiceLog = []; }
-    } catch (e) {
-      console.warn('kmi_ap_* load exception:', e);
-      if (!Array.isArray(db.apInvoices)) db.apInvoices = [];
-      if (!Array.isArray(db.apInvoiceLines)) db.apInvoiceLines = [];
-      if (!Array.isArray(db.apInvoiceLog)) db.apInvoiceLog = [];
-    }
+    // AP (Option B) — paginated loads. PostgREST caps a select at 1000 rows;
+    // the Foundation master (~1,551) and the AP log will exceed that, so pull
+    // in 1000-row pages with .range() until exhausted.
+    var _selAll = async function(table, mapper){
+      var out = [], from = 0, page = 1000;
+      for(;;){
+        var r = await supabaseClient.from(table).select('*').range(from, from + page - 1);
+        if (r && r.error) throw r.error;
+        var rows = (r && r.data) || [];
+        for (var k = 0; k < rows.length; k++) out.push(mapper(rows[k]));
+        if (rows.length < page) break;
+        from += page;
+        if (from > 500000) break;  // safety stop
+      }
+      return out;
+    };
+    try { db.foundationVendors = await _selAll('kmi_foundation_vendors', fromSBFoundationVendor); }
+    catch (e) { console.warn('kmi_foundation_vendors load error (table missing?):', e && e.message); if (!Array.isArray(db.foundationVendors)) db.foundationVendors = []; }
+    try { db.apInvoices = await _selAll('kmi_ap_invoices', fromSBApInvoice); }
+    catch (e) { console.warn('kmi_ap_invoices load error (table missing?):', e && e.message); if (!Array.isArray(db.apInvoices)) db.apInvoices = []; }
+    try { db.apInvoiceLines = await _selAll('kmi_ap_invoice_lines', fromSBApLine); }
+    catch (e) { if (!Array.isArray(db.apInvoiceLines)) db.apInvoiceLines = []; }
+    try { db.apInvoiceLog = await _selAll('kmi_ap_invoice_log', fromSBApLog); }
+    catch (e) { if (!Array.isArray(db.apInvoiceLog)) db.apInvoiceLog = []; }
     // Merge pulled users with local auth state. After the password-sync migration,
     // the cloud is the source of truth for passwordHash/Salt/status/mustReset, but
     // we still fall back to local values for any row whose cloud columns are blank
