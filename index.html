@@ -1258,6 +1258,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="sb-group-hdr" onclick="toggleSbGroup('accounting')"><span>Accounting</span><span class="sb-chev">▾</span></div>
     <div class="sb-group-items">
       <div class="ni" onclick="nav('ap-invoices')"><span class="nico">▦</span>AP Invoices</div>
+      <div class="ni" onclick="nav('ap-approvals')"><span class="nico">✓</span>AP Approvals</div>
     </div>
   </div>
   <div class="sb-group" data-group="resources">
@@ -2197,6 +2198,14 @@ textarea{resize:vertical;min-height:72px}
     <div class="card" style="padding:0;overflow:hidden"><div id="ap-list"></div></div>
   </div>
   <div id="ap-code" style="display:none"></div>
+</div>
+
+<!-- AP APPROVALS (Session 3) -->
+<div class="pg" id="pg-ap-approvals">
+  <div class="ph"><div><h1>AP Approvals</h1><div class="sub">Review coded invoices, verify coding, and approve for export &mdash; or reject back to coding.</div><div class="stripe"></div></div></div>
+  <div id="ap-appr-banner" style="display:none"></div>
+  <div id="ap-appr-view"></div>
+  <div id="ap-appr-review" style="display:none"></div>
 </div>
 
 <!-- TEMPLATES -->
@@ -3546,6 +3555,7 @@ var PERMISSIONS = {
   'users':              ['full','none','none','none','none','none'],
   'templates':          ['full','read','none','none','none','none'],
   'ap-invoices':        ['full','none','none','full','none','none'],
+  'ap-approvals':       ['full','full','none','full','none','none'],
   'email-log':          ['full','none','none','none','none','none'],
   'email-settings':     ['full','none','none','none','none','none'],
   // Projects module: the project record itself + its workspace. view-project
@@ -3675,6 +3685,7 @@ var PAGE_ACTION_MAP = {
   'users':          'users',
   'templates':      'templates',
   'ap-invoices':    'ap-invoices',
+  'ap-approvals':   'ap-approvals',
   'budget':         'view_project_budget',
   'tm-tickets':     'view-tm-tickets',
   'new-tm-ticket':  'create-tm-ticket',
@@ -4895,6 +4906,7 @@ function nav(page) {
     'supabase-setup': renderSupabaseSetup,
     templates:        renderTemplates,
     'ap-invoices':    renderApInbox,
+    'ap-approvals':   renderApApprovals,
     projects:         renderProjects,
     'new-project':    initNewProject,
     budget:           renderBudget,
@@ -37437,6 +37449,7 @@ function apOpenDetail(id){
 // ════════════════════════════════════════════════════════════════════
 var _apCodeId = null;
 var _apCodeDraft = null;
+var _apReviewId = null;
 
 function _apActiveCodes(){ return (db.costCodes||[]).filter(function(c){ return c.active!==false; }).sort(function(a,b){ return String(a.code).localeCompare(String(b.code),undefined,{numeric:true}); }); }
 function _apActiveClasses(){ return (db.costClasses||[]).filter(function(c){ return c.active!==false; }).sort(function(a,b){ return String(a.classNo).localeCompare(String(b.classNo),undefined,{numeric:true}); }); }
@@ -37662,6 +37675,9 @@ function apRenderCode(){
 
   // duplicate / multi warnings
   var warn = '';
+  if(String(i.status)==='rejected' && i.decisionNote){
+    warn += '<div style="background:#fde4e4;border:1px solid #f3c9c9;border-left:3px solid #b23636;border-radius:7px;padding:10px 12px;font-size:12px;color:#8a2a2a;margin-bottom:12px"><strong>Rejected'+(i.approvedBy?(' by '+apEsc(apApproverName(i.approvedBy))):'')+':</strong> '+apEsc(i.decisionNote)+'<br><span style="color:#a05050">Recode as needed and re-submit to send it back for approval.</span></div>';
+  }
   if(i.readFailed || (i.extractedJson && i.extractedJson._readFailed)){
     warn += '<div style="background:#fff4dd;border:1px solid #efd9a8;border-left:3px solid #C8A84B;border-radius:7px;padding:10px 12px;font-size:12px;color:#6b5320;margin-bottom:12px">The reader couldn\u2019t read this PDF'+((i.extractedJson&&i.extractedJson._readError)?(' ('+apEsc(i.extractedJson._readError)+')'):'')+'. Enter the vendor, header, and coding by hand below \u2014 or delete it from the inbox and re-upload to try the reader again.</div>';
   }
@@ -37791,12 +37807,12 @@ function apRenderCode(){
 }
 
 // Generate a short-lived signed URL for the invoice PDF and show it in the pane.
-async function _apLoadPdfPane(invoiceId, path){
-  var el=g('apc-pdf-frame-wrap'); if(!el) return;
+async function _apLoadPdfPane(invoiceId, path, elId){
+  var el=g(elId||'apc-pdf-frame-wrap'); if(!el) return;
   if(!supabaseClient){ el.innerHTML='<div style="margin:auto;color:#cfd2d6;font-size:12px;padding:20px">Cloud not connected \u2014 can\u2019t load the PDF.</div>'; return; }
   try{
     var r=await supabaseClient.storage.from('ap-invoices').createSignedUrl(path, 3600);
-    if(String(_apCodeId)!==String(invoiceId)) return; // user navigated away
+    if(String(_apCodeId)!==String(invoiceId) && String(_apReviewId)!==String(invoiceId)) return; // navigated away
     var url = r && r.data && (r.data.signedUrl || r.data.signedURL);
     if(url){ el.innerHTML='<iframe src="'+url+'" style="width:100%;height:100%;border:0" title="Invoice PDF"></iframe>'; }
     else { el.innerHTML='<div style="margin:auto;color:#ffd0d0;font-size:12px;padding:20px">Couldn\u2019t load the PDF'+((r&&r.error&&r.error.message)?(': '+apEsc(r.error.message)):'')+'.</div>'; }
@@ -37869,6 +37885,12 @@ async function apCodeSave(submit){
     if(jset.length) i.jobNo = jset[0];
   }
   i.status = submit ? 'pending' : 'coded';
+  if(submit){
+    i.queuedAt = new Date().toISOString();           // 7-day reminder clock starts/resets here
+    var _pm = apResolveJobPM(i.jobNo);               // exactly-one assigned PM → auto-route; else unassigned
+    i.approverId = _pm ? String(_pm.id) : '';
+    i.approvedBy = ''; i.approvedAt = ''; i.decisionNote = ''; i.lastReminderAt = '';
+  }
   i.updatedAt = new Date().toISOString();
   // replace lines for this invoice
   var idStr = String(i.id);
@@ -37913,6 +37935,309 @@ async function apCodeSave(submit){
   var pill=g('apc-status-pill'); if(pill) pill.innerHTML = apStatusPill(i.status);
   apSetBanner('success', (submit?'Submitted for approval':'Saved coding')+' for '+apEsc(apVendorDisplayName(i)||i.vendorName)+' \u00b7 '+apEsc(i.invoiceNo)+'.'+(aliasRec?' Vendor alias remembered.':''));
   try{ window.scrollTo(0,0); }catch(_e){}
+}
+
+// ════════════════════════════════════════════════════════════════════
+// AP APPROVALS (Session 3) — queue, routing, sign-off, decisions, email.
+// ════════════════════════════════════════════════════════════════════
+function apApproverName(idOrEmail){
+  if(!idOrEmail) return 'Unassigned';
+  var u=(db.users||[]).find(function(x){ return String(x.id)===String(idOrEmail) || String(x.email||'').toLowerCase()===String(idOrEmail).toLowerCase(); });
+  if(!u) return String(idOrEmail);
+  var nm=((u.firstName||'')+' '+(u.lastName||'')).trim() || u.email || String(u.id);
+  return nm + (u.role?(' ('+normalizeRole(u.role)+')'):'');
+}
+// Exactly one assigned PM on the job → auto-route; none or several → unassigned.
+function apResolveJobPM(jobNo){
+  if(!jobNo) return null;
+  var proj=(db.projects||[]).find(function(p){ return String(p.number)===String(jobNo); });
+  if(!proj || !Array.isArray(proj.kmiAssignments)) return null;
+  var pms=[];
+  proj.kmiAssignments.forEach(function(a){
+    var u=(db.users||[]).find(function(x){ return String(x.id)===String(a.userId); });
+    if(u && normalizeRole(u.role)==='Project Manager' && pms.indexOf(u)<0) pms.push(u);
+  });
+  return pms.length===1 ? pms[0] : null;
+}
+function apAccountingUsers(){ return (db.users||[]).filter(function(u){ var r=normalizeRole(u.role); return r==='Accounting'||r==='Admin'; }); }
+function _apCanReassign(){ var r=normalizeRole(_currentUser&&_currentUser.role); return r==='Admin'||r==='Accounting'; }
+function _apIsAcct(){ var r=normalizeRole(_currentUser&&_currentUser.role); return r==='Admin'||r==='Accounting'; }
+function _apCanDecide(i){ return _apIsAcct() || (_currentUser && String(i.approverId)===String(_currentUser.id)); }
+
+// Short coding summary for the queue list, derived from the saved lines.
+function _apCodingSummary(i){
+  var lines=(db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)===String(i.id); });
+  if(!lines.length) return '<span style="color:#aaa">\u2014</span>';
+  if(lines.every(function(l){return l.distType==='gl';})){
+    var gls=[]; lines.forEach(function(l){ if(l.glNo&&gls.indexOf(l.glNo)<0) gls.push(l.glNo); });
+    return 'GL '+apEsc(gls.join(', '));
+  }
+  var jobLines=lines.filter(function(l){return l.distType==='job';});
+  var js=[]; jobLines.forEach(function(l){ if(l.jobNo&&js.indexOf(l.jobNo)<0) js.push(l.jobNo); });
+  if(js.length>1) return 'Split &middot; '+js.length+' jobs';
+  var first=jobLines[0]||lines[0];
+  return apEsc((first.costCode||'')+(first.costClass?(' / '+first.costClass):''))+(lines.length>1?(' &middot; +'+(lines.length-1)):'');
+}
+function _apDaysWaiting(i){
+  if(!i.queuedAt) return null;
+  return Math.floor((Date.now()-new Date(i.queuedAt).getTime())/86400000);
+}
+function _apApproverOptions(curId){
+  var pms=(db.users||[]).filter(function(u){ return normalizeRole(u.role)==='Project Manager'; });
+  var opts='<option value=""'+(!curId?' selected':'')+'>\u2014 unassigned \u2014</option>';
+  pms.forEach(function(u){ opts+='<option value="'+apEsc(String(u.id))+'"'+(String(u.id)===String(curId)?' selected':'')+'>'+apEsc(((u.firstName||'')+' '+(u.lastName||'')).trim()||u.email)+' (PM)</option>'; });
+  return opts;
+}
+function apReassign(id, approverId, ev){
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+  if(!_apCanReassign()) return;
+  var i=(db.apInvoices||[]).find(function(x){ return String(x.id)===String(id); }); if(!i) return;
+  i.approverId = approverId ? String(approverId) : '';
+  i.updatedAt = new Date().toISOString();
+  saveDB();
+  apLog(i.id,'reassigned','Approver set to '+(approverId?apApproverName(approverId):'Unassigned'));
+  if(supabaseClient){ apPushInvoice(i); }
+  if(_apReviewId && String(_apReviewId)===String(id)) apRenderReview(); else renderApApprovals();
+}
+
+function apSetApprBanner(kind, html){
+  var el=g('ap-appr-banner'); if(!el) return;
+  var bg,fg,bd;
+  if(kind==='error'){bg='#FDEBEB';fg='#A32D2D';bd='#E24B4A';}
+  else if(kind==='success'){bg='#EAF3DE';fg='#3B6D11';bd='#7A9F4A';}
+  else {bg='#F8F6E6';fg='#9A7A2E';bd='#C8A84B';}
+  el.style.cssText='display:block;background:'+bg+';color:'+fg+';border:1px solid '+bd+';border-radius:6px;padding:11px 15px;margin:0 0 14px;font-size:13px;line-height:1.5';
+  el.innerHTML=html;
+}
+
+function _apQueueRow(i, withReassign){
+  var days=_apDaysWaiting(i);
+  var daysTxt = (i.status==='pending' && days!=null) ? (days>=7?('<span style="color:#b23636;font-weight:600">'+days+'d</span>'):(days+'d')) : '\u2014';
+  var apprCell = withReassign
+    ? '<td onclick="event.stopPropagation()"><select onchange="apReassign(\''+i.id+'\',this.value,event)" style="padding:4px 7px;font-size:12px;border:1px solid #d8dce6;border-radius:5px">'+_apApproverOptions(i.approverId)+'</select></td>'
+    : '<td>'+apEsc(apApproverName(i.approverId))+'</td>';
+  return '<tr style="cursor:pointer" onclick="apOpenReview(\''+i.id+'\')">'+
+    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4"><strong>'+apEsc(apVendorDisplayName(i)||i.vendorName||'(unknown)')+'</strong></td>'+
+    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
+    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4">'+apInvoiceJobCell(i)+'</td>'+
+    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apMoney(i.total)+'</td>'+
+    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4;font-size:11.5px;color:#666">'+_apCodingSummary(i)+'</td>'+
+    apprCell.replace('<td','<td style="padding:9px 12px;border-bottom:1px solid #eef0f4"')+
+    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4">'+daysTxt+'</td>'+
+    '<td style="padding:9px 12px;border-bottom:1px solid #eef0f4">'+apStatusPill(i.status)+'</td>'+
+  '</tr>';
+}
+function _apQueueTable(list, withReassign){
+  var heads=['Vendor','Invoice #','Job','Amount','Coding','Approver','Waiting','Status'];
+  return '<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'+
+    heads.map(function(h){return '<th style="text-align:left;padding:8px 12px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h+'</th>';}).join('')+
+    '</tr></thead><tbody>'+list.map(function(i){return _apQueueRow(i, withReassign);}).join('')+'</tbody></table>';
+}
+function _apSection(title, list, withReassign, headBg){
+  if(!list.length) return '';
+  return '<div class="card" style="background:#fff;border:1px solid #EEE;border-radius:9px;overflow:hidden;margin-bottom:18px">'+
+    '<div style="padding:9px 14px;background:'+(headBg||'var(--kmi)')+';color:#fff;font-size:12px;font-weight:600;display:flex;justify-content:space-between;align-items:center"><span>'+title+'</span><span style="background:rgba(255,255,255,.16);border-radius:10px;padding:1px 9px;font-size:11px">'+list.length+'</span></div>'+
+    _apQueueTable(list, withReassign)+'</div>';
+}
+
+function renderApApprovals(){
+  if(!hasRead('ap-approvals')) return;
+  var el=g('ap-appr-view'); if(!el) return;
+  g('ap-appr-review').style.display='none';
+  el.style.display='block';
+  var all=(db.apInvoices||[]).slice().sort(function(a,b){ return String(a.queuedAt||'').localeCompare(String(b.queuedAt||'')); });
+  var pending=all.filter(function(i){return i.status==='pending';});
+  var held=all.filter(function(i){return i.status==='hold';});
+  var unassigned=pending.filter(function(i){return !i.approverId;});
+  var acct=_apIsAcct();
+  var meId=_currentUser?String(_currentUser.id):'';
+  var overdue=pending.filter(function(i){ var d=_apDaysWaiting(i); return d!=null && d>=7; });
+  var pend$=pending.reduce(function(t,i){return t+(Number(i.total)||0);},0);
+
+  // KPIs
+  var kpis=[
+    { n: acct? pending.length : pending.filter(function(i){return String(i.approverId)===meId;}).length, l: acct?'Pending':'Awaiting me' },
+    { n: unassigned.length, l:'Unassigned' },
+    { n: held.length, l:'On hold' },
+    { n: overdue.length, l:'Overdue (7d+)' }
+  ];
+  var kpiHtml='<div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">'+kpis.map(function(k){
+    return '<div style="background:#fff;border:.5px solid #e3e6ee;border-radius:9px;padding:12px 16px;min-width:120px"><div style="font-size:22px;font-weight:700;color:var(--kmi)">'+k.n+'</div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+k.l+'</div></div>';
+  }).join('')+'</div>';
+
+  var body='';
+  if(acct){
+    body += _apSection('Unassigned &mdash; no single PM on the job (route these)', unassigned, true, 'var(--acd)');
+    body += _apSection('Pending approval', pending.filter(function(i){return !!i.approverId;}), true);
+    body += _apSection('On hold', held, true);
+    if(!pending.length && !held.length) body='<div style="padding:26px;text-align:center;color:#888;font-size:13px">Nothing awaiting approval.</div>';
+  } else {
+    var mine=pending.filter(function(i){return String(i.approverId)===meId;});
+    var mineHold=held.filter(function(i){return String(i.approverId)===meId;});
+    body += _apSection('Awaiting your approval', mine, false);
+    body += _apSection('On hold', mineHold, false);
+    if(!mine.length && !mineHold.length) body='<div style="padding:26px;text-align:center;color:#888;font-size:13px">Nothing is waiting on you right now.</div>';
+  }
+  el.innerHTML = kpiHtml + body;
+}
+
+// ── Sign-off review screen ──────────────────────────────────────────
+function _apReviewOrdered(){
+  // same order/scope the viewer sees in the queue
+  var all=(db.apInvoices||[]).slice().sort(function(a,b){ return String(a.queuedAt||'').localeCompare(String(b.queuedAt||'')); });
+  var pool=all.filter(function(i){return i.status==='pending'||i.status==='hold';});
+  if(_apIsAcct()) return pool;
+  var meId=_currentUser?String(_currentUser.id):'';
+  return pool.filter(function(i){return String(i.approverId)===meId;});
+}
+function apOpenReview(id){
+  if(!hasRead('ap-approvals')) return;
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  _apReviewId=id;
+  g('ap-appr-view').style.display='none';
+  g('ap-appr-review').style.display='block';
+  var bn=g('ap-appr-banner'); if(bn){ bn.style.display='none'; bn.innerHTML=''; }
+  apRenderReview();
+  try{ window.scrollTo(0,0); }catch(e){}
+}
+function apCloseReview(){
+  _apReviewId=null;
+  g('ap-appr-review').style.display='none';
+  g('ap-appr-review').innerHTML='';
+  renderApApprovals();
+}
+function apReviewNav(dir){
+  var ord=_apReviewOrdered();
+  var pos=ord.findIndex(function(x){return String(x.id)===String(_apReviewId);});
+  if(pos<0) return;
+  var t=pos+dir; if(t<0||t>=ord.length) return;
+  apOpenReview(ord[t].id);
+}
+function apRenderReview(){
+  var el=g('ap-appr-review'); if(!el) return;
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(_apReviewId);});
+  if(!i){ apCloseReview(); return; }
+  var ord=_apReviewOrdered();
+  var pos=ord.findIndex(function(x){return String(x.id)===String(i.id);});
+  var lines=(db.apInvoiceLines||[]).filter(function(l){return String(l.invoiceId)===String(i.id);}).sort(function(a,b){return (Number(a.lineNo)||0)-(Number(b.lineNo)||0);});
+  var lineSum=lines.reduce(function(t,l){return t+(Number(l.amount)||0);},0);
+  var tot=Number(i.total)||0;
+  var isJob=lines.length && lines.some(function(l){return l.distType==='job';});
+
+  var head='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px">'+
+    '<button class="btn btn-sm" onclick="apCloseReview()">\u2190 Back to queue</button>'+
+    '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+apStatusPill(i.status)+
+      '<span style="font-size:12px;color:#888">'+(pos>=0?(pos+1):'?')+' of '+ord.length+'</span>'+
+      '<button class="btn btn-sm" onclick="apReviewNav(-1)" '+(pos<=0?'disabled style="opacity:.4;cursor:not-allowed"':'')+'>\u25c0</button>'+
+      '<button class="btn btn-sm" onclick="apReviewNav(1)" '+(pos>=ord.length-1?'disabled style="opacity:.4;cursor:not-allowed"':'')+'>\u25b6</button>'+
+    '</div></div>';
+
+  var pdfInner=i.pdfPath
+    ? '<div id="apr-pdf-frame-wrap" style="flex:1;display:flex"><div style="margin:auto;color:#cfd2d6;font-size:12px">Loading PDF\u2026</div></div>'
+    : '<div id="apr-pdf-frame-wrap" style="flex:1;display:flex"><div style="margin:auto;text-align:center;color:#999;font-size:12px;padding:20px">No PDF stored for this invoice.</div></div>';
+  var pdfPane='<div style="flex:0 0 46%;position:sticky;top:12px;align-self:flex-start;height:calc(100vh - 150px);min-height:440px;display:flex;flex-direction:column;background:#525659;border:1px solid #d8dce6;border-radius:9px;overflow:hidden">'+
+    '<div style="padding:6px 10px;background:#3c3f42;color:#cfd2d6;font-size:11px;display:flex;justify-content:space-between"><span>Source PDF</span>'+(i.pdfPath?'<button onclick="apOpenPdfNewTab(\''+i.id+'\')" style="border:0;background:none;color:#9fd0ff;cursor:pointer;font-size:11px">Open in new tab \u2197</button>':'')+'</div>'+pdfInner+'</div>';
+
+  // header summary
+  function kv(l,v){ return '<div><div style="font-size:10px;text-transform:uppercase;color:#9aa0b4;letter-spacing:.4px">'+l+'</div>'+apEsc(v==null||v===''?'\u2014':v)+'</div>'; }
+  var hdr='<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px;margin-bottom:14px">'+
+    '<div style="font-weight:700;font-size:15px;color:var(--kmi)">'+apEsc(apVendorDisplayName(i)||i.vendorName)+(i.foundationVendorNo?(' <span style="background:#e7f3e0;color:#3B6D11;font-size:10px;font-weight:700;padding:1px 7px;border-radius:9px">'+apEsc(i.foundationVendorNo)+'</span>'):'')+'</div>'+
+    '<div style="font-size:11px;color:#888;margin:2px 0 11px">coded by '+apEsc(apApproverName(i.createdBy)||i.createdBy)+(i.queuedAt?(' \u00b7 submitted '+apEsc(new Date(i.queuedAt).toLocaleDateString())):'')+'</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 14px;font-size:12.5px">'+
+      kv('Invoice #',i.invoiceNo)+kv('Invoice date',i.invoiceDate)+kv('Terms',i.terms)+
+      kv('PO #',i.poNo)+kv('Subtotal',apMoney(i.subtotal))+kv('Tax',apMoney(i.salesTax))+
+    '</div></div>';
+
+  // coding distribution
+  var distHeads = isJob ? ['Description','Job','Cost code','Class','Amount'] : ['Description','GL account','Amount'];
+  var distRows = lines.map(function(l){
+    if(isJob) return '<tr><td style="padding:5px 8px;border-bottom:1px solid #eef0f4">'+apEsc(l.description)+'</td><td style="padding:5px 8px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(l.jobNo)+'</td><td style="padding:5px 8px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(l.costCode)+'</td><td style="padding:5px 8px;border-bottom:1px solid #eef0f4">'+apEsc(l.costClass)+'</td><td style="padding:5px 8px;border-bottom:1px solid #eef0f4;text-align:right;font-family:ui-monospace,monospace">'+apMoney(l.amount)+'</td></tr>';
+    return '<tr><td style="padding:5px 8px;border-bottom:1px solid #eef0f4">'+apEsc(l.description)+'</td><td style="padding:5px 8px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(l.glNo)+'</td><td style="padding:5px 8px;border-bottom:1px solid #eef0f4;text-align:right;font-family:ui-monospace,monospace">'+apMoney(l.amount)+'</td></tr>';
+  }).join('');
+  var tieOk=Math.abs(lineSum-tot)<0.01;
+  var dist='<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px;margin-bottom:14px">'+
+    '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:9px">Coding distribution \u2014 verify before approving</div>'+
+    (lines.length? ('<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+distHeads.map(function(h){return '<th style="text-align:'+(h==='Amount'?'right':'left')+';padding:5px 8px;background:#f6f7fa;font-size:10px;text-transform:uppercase;color:#555">'+h+'</th>';}).join('')+'</tr></thead><tbody>'+distRows+'</tbody></table>'+
+      '<div style="text-align:right;font-size:12px;margin-top:7px;color:'+(tieOk?'#3B6D11':'#b23636')+'">Lines '+apMoney(lineSum)+' / Total '+apMoney(tot)+(tieOk?' \u2713':' \u2014 does not tie out')+'</div>')
+     : '<div style="color:#b23636;font-size:12px">No coding lines found.</div>')+'</div>';
+
+  // decision block
+  var canDecide=_apCanDecide(i);
+  var reassign = _apCanReassign()
+    ? '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#555;margin-bottom:10px"><span>Approver:</span><select onchange="apReassign(\''+i.id+'\',this.value,event)" style="padding:5px 8px;font-size:12px;border:1px solid #d8dce6;border-radius:6px">'+_apApproverOptions(i.approverId)+'</select></div>'
+    : '<div style="font-size:12px;color:#555;margin-bottom:10px">Approver: <strong>'+apEsc(apApproverName(i.approverId))+'</strong></div>';
+  var priorNote = (i.decisionNote && (i.status==='hold')) ? '<div style="font-size:12px;color:#6b5320;background:#fff8e8;border:1px solid #efe0b8;border-radius:6px;padding:8px 10px;margin-bottom:10px">On hold: '+apEsc(i.decisionNote)+'</div>' : '';
+  var actions = canDecide
+    ? '<textarea id="apr-note" class="note" placeholder="Note (required to reject or hold; optional to approve)\u2026" style="width:100%;border:1px solid #d8dce6;border-radius:7px;padding:8px 10px;font-size:13px;font-family:inherit;min-height:58px">'+apEsc(i.status==='hold'?(i.decisionNote||''):'')+'</textarea>'+
+      '<div style="font-size:11px;color:#888;margin:7px 0 10px">A rejection emails Accounting the invoice details and your reason.</div>'+
+      '<div style="display:flex;gap:9px;justify-content:flex-end;flex-wrap:wrap">'+
+        '<button class="btn" style="background:#7a6a3a;color:#fff;border-color:#7a6a3a" onclick="apHold(\''+i.id+'\')">On hold</button>'+
+        '<button class="btn" style="background:#b23636;color:#fff;border-color:#b23636" onclick="apReject(\''+i.id+'\')">Reject &amp; notify Accounting</button>'+
+        '<button class="btn" style="background:#3B6D11;color:#fff;border-color:#3B6D11" onclick="apApprove(\''+i.id+'\')">Approve for export \u2192</button>'+
+      '</div>'
+    : '<div style="font-size:12px;color:#888">This invoice is routed to '+apEsc(apApproverName(i.approverId))+'. Only that approver (or Accounting) can decide.</div>';
+  var decision='<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px;margin-bottom:30px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:9px">Decision</div>'+reassign+priorNote+actions+'</div>';
+
+  el.innerHTML = head + '<div style="display:flex;gap:16px;align-items:flex-start">'+pdfPane+'<div style="flex:1;min-width:0">'+hdr+dist+decision+'</div></div>';
+  if(i.pdfPath) _apLoadPdfPane(i.id, i.pdfPath, 'apr-pdf-frame-wrap');
+}
+
+function apApprove(id){
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can approve this.'); return; }
+  if(Math.abs(((db.apInvoiceLines||[]).filter(function(l){return String(l.invoiceId)===String(i.id);}).reduce(function(t,l){return t+(Number(l.amount)||0);},0))-(Number(i.total)||0))>=0.01){
+    if(!confirm('The coding lines don\u2019t tie out to the invoice total. Approve anyway?')) return;
+  }
+  var note=(g('apr-note')&&g('apr-note').value.trim())||'';
+  i.status='approved'; i.approvedBy=(_currentUser?String(_currentUser.id):''); i.approvedAt=new Date().toISOString(); i.decisionNote=note; i.updatedAt=i.approvedAt;
+  saveDB();
+  apLog(i.id,'approved','Approved for export'+(note?(' \u2014 '+note):''));
+  if(supabaseClient) apPushInvoice(i);
+  apCloseReview();
+  apSetApprBanner('success','Approved '+apEsc(apVendorDisplayName(i)||i.vendorName)+' \u00b7 '+apEsc(i.invoiceNo)+' \u2014 ready for export.');
+}
+function apHold(id){
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can hold this.'); return; }
+  var note=(g('apr-note')&&g('apr-note').value.trim())||'';
+  if(!note){ alert('Add a note explaining why it\u2019s on hold.'); return; }
+  i.status='hold'; i.decisionNote=note; i.updatedAt=new Date().toISOString();
+  saveDB();
+  apLog(i.id,'hold','Placed on hold \u2014 '+note);
+  if(supabaseClient) apPushInvoice(i);
+  apCloseReview();
+  apSetApprBanner('info','Placed '+apEsc(i.invoiceNo)+' on hold.');
+}
+async function apReject(id){
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can reject this.'); return; }
+  var note=(g('apr-note')&&g('apr-note').value.trim())||'';
+  if(!note){ alert('A rejection reason is required (it\u2019s emailed to Accounting and shown to the coder).'); return; }
+  i.status='rejected'; i.approvedBy=(_currentUser?String(_currentUser.id):''); i.approvedAt=new Date().toISOString();
+  i.decisionNote=note; i.queuedAt=''; i.lastReminderAt='';   // clock stops; restarts on resubmit
+  i.updatedAt=i.approvedAt;
+  saveDB();
+  apLog(i.id,'rejected','Rejected \u2014 '+note);
+  if(supabaseClient) apPushInvoice(i);
+  apCloseReview();
+  apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+' \u2014 returned to coding. Notifying Accounting\u2026');
+  // email Accounting (one message per recipient — Resend fan-out)
+  try{
+    var rcpts=apAccountingUsers().filter(function(u){return u.email;});
+    var subj='AP invoice rejected: '+(apVendorDisplayName(i)||i.vendorName)+' \u00b7 '+(i.invoiceNo||'');
+    var body='An AP invoice was rejected in approval and returned to the coding queue.\n\n'+
+      'Vendor: '+(apVendorDisplayName(i)||i.vendorName)+'\n'+
+      'Invoice #: '+(i.invoiceNo||'')+'\n'+
+      'Amount: '+apMoney(i.total)+'\n'+
+      'Job: '+(i.jobNo||'(overhead)')+'\n'+
+      'Rejected by: '+apApproverName(i.approvedBy)+'\n\n'+
+      'Reason: '+note+'\n\n'+
+      'It is back in AP Invoices for recoding and re-submission.';
+    for(var k=0;k<rcpts.length;k++){
+      await sendEmail({ to:rcpts[k].email, subject:subj, text:body, flowType:'ap_rejected', sentBy:(_currentUser?_currentUser.id:null), sentByEmail:(_currentUser?_currentUser.email:null), relatedEntityType:'ap_invoice', relatedEntityId:String(i.id) });
+    }
+    apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+' \u2014 returned to coding. Accounting notified ('+rcpts.length+').');
+  }catch(e){ console.warn('reject email:',e); apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+', but the Accounting email failed to send.'); }
 }
 
 function importFoundationCustomers(rows) {
@@ -42784,6 +43109,8 @@ function toSBApInvoice(r) {
     is_duplicate:!!r.isDuplicate, dup_of:r.dupOf||null,
     multi_invoice_flag:!!r.multiInvoiceFlag, notes:r.notes||'',
     pdf_path:r.pdfPath||null,
+    approver_id:r.approverId||'', approved_by:r.approvedBy||'', approved_at:r.approvedAt||null,
+    decision_note:r.decisionNote||'', queued_at:r.queuedAt||null, last_reminder_at:r.lastReminderAt||null,
     created_by:r.createdBy||'', updated_at:new Date().toISOString()
   };
 }
@@ -42802,6 +43129,8 @@ function fromSBApInvoice(r) {
     isDuplicate:!!r.is_duplicate, dupOf:r.dup_of||null,
     multiInvoiceFlag:!!r.multi_invoice_flag, notes:r.notes||'',
     pdfPath:r.pdf_path||'',
+    approverId:r.approver_id||'', approvedBy:r.approved_by||'', approvedAt:r.approved_at||'',
+    decisionNote:r.decision_note||'', queuedAt:r.queued_at||'', lastReminderAt:r.last_reminder_at||'',
     createdBy:r.created_by||'', createdAt:r.created_at||''
   };
 }
