@@ -1254,6 +1254,12 @@ textarea{resize:vertical;min-height:72px}
       <div class="ni" onclick="nav('submittals')"><span class="nico">▤</span>Submittals</div>
     </div>
   </div>
+  <div class="sb-group" data-group="accounting">
+    <div class="sb-group-hdr" onclick="toggleSbGroup('accounting')"><span>Accounting</span><span class="sb-chev">▾</span></div>
+    <div class="sb-group-items">
+      <div class="ni" onclick="nav('ap-invoices')"><span class="nico">▦</span>AP Invoices</div>
+    </div>
+  </div>
   <div class="sb-group" data-group="resources">
     <div class="sb-group-hdr" onclick="toggleSbGroup('resources')"><span>Resources</span><span class="sb-chev">▾</span></div>
     <div class="sb-group-items">
@@ -2170,6 +2176,26 @@ textarea{resize:vertical;min-height:72px}
   </div>
 </div>
 
+<!-- AP INVOICES (Session 2) -->
+<div class="pg" id="pg-ap-invoices">
+  <div class="ph"><div><h1>AP Invoices</h1><div class="sub">Receive &rarr; Code &rarr; Approve &rarr; Export. Upload invoices and let the reader code them.</div><div class="stripe"></div></div></div>
+  <div id="ap-banner" style="display:none"></div>
+  <div id="ap-kpis" style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap"></div>
+  <div style="display:flex;gap:14px;margin-bottom:18px;flex-wrap:wrap">
+    <label id="ap-drop" style="flex:1;min-width:260px;border:2px dashed #c5cbdb;border-radius:9px;padding:22px;text-align:center;color:#7a82a0;background:#fafbfd;cursor:pointer">
+      &#11014; &nbsp;Drag invoices here or <strong>browse</strong> — single or batch PDF. The reader extracts each on upload.
+      <input type="file" accept="application/pdf,.pdf" multiple style="display:none" onchange="apHandleUpload(event)">
+    </label>
+    <div style="flex:1;min-width:260px;background:#f6f7fa;border:1px solid #e3e6ee;border-radius:9px;padding:16px">
+      <div style="font-weight:600;margin-bottom:4px">&#128231; Email-to-inbox</div>
+      <div style="font-size:11px;color:#888">Forward invoices to:</div>
+      <div style="font-family:ui-monospace,monospace;background:#fff;border:1px solid #e3e6ee;border-radius:6px;padding:7px 9px;margin-top:5px">ap@kmi.build</div>
+      <div style="font-size:11px;color:#9A7A2E;margin-top:6px">Inbound auto-intake arrives in Session 5 — for now, upload above.</div>
+    </div>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden"><div id="ap-list"></div></div>
+</div>
+
 <!-- TEMPLATES -->
 <div class="pg" id="pg-templates">
   <div class="ph"><div><h1>Templates</h1><div class="sub">Manage clarifications, exclusions, and cost templates</div><div class="stripe"></div></div></div>
@@ -2321,7 +2347,7 @@ textarea{resize:vertical;min-height:72px}
       <div style="background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
         <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:6px">Vendor master</div>
         <div style="font-size:11px;color:#888;margin-bottom:8px;min-height:30px">
-          Required: <code>vendor_no</code>, <code>name</code>. Reconciles to existing app vendors (links, doesn&rsquo;t replace).
+          Required: <code>vendor_no</code>, <code>name</code>. Imports the full Foundation payee master and links matching app vendors.
         </div>
         <div id="t-fnd-vendor-status" style="font-size:11px;color:#555;margin-bottom:8px"></div>
         <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
@@ -3174,6 +3200,7 @@ var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,
 var DB_DEFAULTS = {
   customers: [], pms: [], users: [], opportunities: [], proposals: [], projects: [], activity: [],
   vendors: [], vendorContacts: [],
+  apInvoices: [], apInvoiceLines: [], apInvoiceLog: [],   // AP module (Session 2)
   // Product Library (Round 1) — manufacturers, their products, and the
   // documents (product data, test reports, etc.) attached to each product.
   // Documents live in Supabase Storage bucket 'kmi-product-library';
@@ -3245,6 +3272,7 @@ var DB_DEFAULTS = {
   costCodes:           [],   // { id, code, description, isBudgetable, active }
   costClasses:         [],   // { id, classNo, description, active }
   glAccounts:          [],   // { id, glNo, description, accountType, active }  (Foundation GL master — AP S1)
+  foundationVendors:   [],   // { id, vendorNo, name, active }  (Foundation payee master — AP B)
   customersFoundation: [],   // { id, customerNo, name, sortName, address1, address2, city, state, zip, active }
   budgetTemplate:      [],   // { id, sortOrder, description, costCode, costClass, sourceType, sourceKey, defaultAmount }
   projectBudgets:      [],   // { id, projectId, version, createdAt, createdBy, sourcePdfPath, taxRate, lines, totals, notes }
@@ -3503,6 +3531,7 @@ var PERMISSIONS = {
   'analytics':          ['full','read','read','read','none','none'],
   'users':              ['full','none','none','none','none','none'],
   'templates':          ['full','read','none','none','none','none'],
+  'ap-invoices':        ['full','none','none','full','none','none'],
   'email-log':          ['full','none','none','none','none','none'],
   'email-settings':     ['full','none','none','none','none','none'],
   // Projects module: the project record itself + its workspace. view-project
@@ -3631,6 +3660,7 @@ var PAGE_ACTION_MAP = {
   'analytics':      'analytics',
   'users':          'users',
   'templates':      'templates',
+  'ap-invoices':    'ap-invoices',
   'budget':         'view_project_budget',
   'tm-tickets':     'view-tm-tickets',
   'new-tm-ticket':  'create-tm-ticket',
@@ -4850,6 +4880,7 @@ function nav(page) {
     import:           renderImport,
     'supabase-setup': renderSupabaseSetup,
     templates:        renderTemplates,
+    'ap-invoices':    renderApInbox,
     projects:         renderProjects,
     'new-project':    initNewProject,
     budget:           renderBudget,
@@ -36142,11 +36173,12 @@ function renderFoundationMasterStatus() {
   }
   var vnEl = g('t-fnd-vendor-status');
   if (vnEl) {
+    var fvCount = (db.foundationVendors || []).length;
     var linked = (db.vendors || []).filter(function(v){ return v.reconcileStatus === 'linked'; }).length;
     var review = (db.vendors || []).filter(function(v){ return v.reconcileStatus === 'review'; }).length;
-    vnEl.innerHTML = (linked || review)
-      ? '<span style="color:#3B6D11">&#10003; ' + linked + ' linked</span>' + (review ? ' <span style="color:#7A5C00">&middot; ' + review + ' to review</span>' : '')
-      : '<span style="color:#A32D2D">No vendors linked — upload required</span>';
+    vnEl.innerHTML = fvCount
+      ? '<span style="color:#3B6D11">&#10003; ' + fvCount.toLocaleString() + ' payees</span>' + (linked ? ' <span style="color:#888">&middot; ' + linked + ' linked</span>' : '') + (review ? ' <span style="color:#7A5C00">&middot; ' + review + ' to review</span>' : '')
+      : '<span style="color:#A32D2D">No payees — upload required</span>';
   }
   renderVendorReconcile();
 }
@@ -36772,10 +36804,9 @@ function _normVendorName(s) {
   return t.replace(/\s+/g, ' ').trim();
 }
 
-// Reconciles a Foundation vendor export against existing app vendors.
-// Links exact name matches, flags near matches for review, and creates
-// new linked app vendors for Foundation vendors with no counterpart.
-// Does NOT replace the vendor table — app-only vendors are left untouched.
+// Imports the full Foundation payee master into kmi_foundation_vendors and
+// LINKS matching app vendors (sets foundation_vendor_no on kmi_vendors).
+// Does NOT create app vendors — the master is a separate lookup table.
 function importFoundationVendors(rows) {
   var fnd = [];
   var seenNo = {};
@@ -36793,109 +36824,73 @@ function importFoundationVendors(rows) {
     return;
   }
 
-  // Index existing app vendors by normalized name.
-  var byNorm = {};
-  (db.vendors || []).forEach(function(v){
-    var k = _normVendorName(v.name);
-    if (k && !(k in byNorm)) byNorm[k] = v;
-  });
-  // Index by already-linked Foundation # so re-imports are stable.
-  var byFnd = {};
-  (db.vendors || []).forEach(function(v){
-    if (v.foundationVendorNo) byFnd[String(v.foundationVendorNo)] = v;
+  // Build the Foundation master (deterministic id keyed off the vendor #).
+  var master = fnd.map(function(f){
+    return { id: 'fv-' + String(f.no).replace(/[^A-Za-z0-9_-]/g, ''), vendorNo: f.no, name: f.name, active: true };
   });
 
-  var linked = 0, review = 0, created = 0, alreadyLinked = 0;
-  var touched = [];   // app vendor records changed/created this run
-
+  // Reconcile links onto existing app vendors (no creation). Index unlinked
+  // app vendors by normalized name; link exact matches, flag near matches.
+  var linked = 0, review = 0, already = 0;
+  var byFndExisting = {};
+  (db.vendors || []).forEach(function(v){ if (v.foundationVendorNo) byFndExisting[String(v.foundationVendorNo)] = v; });
+  var touched = [];
   fnd.forEach(function(f){
-    var existing = byFnd[String(f.no)];
-    if (existing) {
-      // Already tied to this Foundation #; refresh the stored name only.
-      if (existing.foundationVendorName !== f.name) {
-        existing.foundationVendorName = f.name;
-        touched.push(existing);
-      }
-      alreadyLinked++;
-      return;
-    }
+    if (byFndExisting[String(f.no)]) { already++; return; }
     var nk = _normVendorName(f.name);
-    var match = byNorm[nk];
-    if (match && !match.foundationVendorNo) {
-      // Exact normalized match on an unlinked app vendor → auto-link.
-      match.foundationVendorNo = f.no;
-      match.foundationVendorName = f.name;
-      match.reconcileStatus = 'linked';
-      byFnd[String(f.no)] = match;
-      touched.push(match);
-      linked++;
-      return;
+    var exact = (db.vendors || []).filter(function(v){ return !v.foundationVendorNo && _normVendorName(v.name) === nk; })[0];
+    if (exact) {
+      exact.foundationVendorNo = f.no; exact.foundationVendorName = f.name; exact.reconcileStatus = 'linked';
+      byFndExisting[String(f.no)] = exact; touched.push(exact); linked++; return;
     }
-    // Near match: an unlinked app vendor whose name contains / is contained
-    // by the Foundation name (token-level). Flag for human confirmation.
-    var near = null;
-    if (!match) {
-      (db.vendors || []).some(function(v){
-        if (v.foundationVendorNo) return false;
-        var vk = _normVendorName(v.name);
-        if (!vk || !nk) return false;
-        if (vk.indexOf(nk) === 0 || nk.indexOf(vk) === 0) { near = v; return true; }
-        return false;
-      });
-    }
+    var near = (db.vendors || []).filter(function(v){
+      if (v.foundationVendorNo) return false;
+      var vk = _normVendorName(v.name);
+      return vk && nk && (vk.indexOf(nk) === 0 || nk.indexOf(vk) === 0);
+    })[0];
     if (near) {
-      near.foundationVendorNo = f.no;
-      near.foundationVendorName = f.name;
-      near.reconcileStatus = 'review';
-      byFnd[String(f.no)] = near;
-      touched.push(near);
-      review++;
-      return;
+      near.foundationVendorNo = f.no; near.foundationVendorName = f.name; near.reconcileStatus = 'review';
+      byFndExisting[String(f.no)] = near; touched.push(near); review++;
     }
-    // No counterpart → create a new app vendor straight from Foundation.
-    // Deterministic id keyed off the Foundation # so re-imports update in
-    // place rather than inserting duplicates.
-    var fid = 'fnd-' + String(f.no).replace(/[^A-Za-z0-9_-]/g, '');
-    var nv = {
-      id: fid,
-      name: f.name,
-      primaryContact:'', vendorType:'', email:'', phone:'',
-      address:'', cityState:'', website:'', notes:'',
-      foundationVendorNo: f.no,
-      foundationVendorName: f.name,
-      reconcileStatus: 'linked'
-    };
-    db.vendors.push(nv);
-    byFnd[String(f.no)] = nv;
-    touched.push(nv);
-    created++;
   });
 
-  if (!confirm('Reconcile ' + fnd.length + ' Foundation vendor' + (fnd.length === 1 ? '' : 's') + '?\n\n' +
-               '\u2022 ' + linked + ' auto-linked (exact match)\n' +
-               '\u2022 ' + review + ' need review (near match)\n' +
-               '\u2022 ' + created + ' new vendors created (no match)\n' +
-               '\u2022 ' + alreadyLinked + ' already linked\n' +
+  // Clean up artifacts from the earlier "create app vendor" approach
+  // (rows whose id was generated as 'fnd-...'). They belong in the master now.
+  var before = (db.vendors || []).length;
+  db.vendors = (db.vendors || []).filter(function(v){ return String(v.id).indexOf('fnd-') !== 0; });
+  var removed = before - db.vendors.length;
+
+  if (!confirm('Import ' + master.length + ' Foundation payee' + (master.length === 1 ? '' : 's') + ' into the master?\n\n' +
+               '\u2022 ' + linked + ' app vendors auto-linked (exact match)\n' +
+               '\u2022 ' + review + ' app vendors flagged for review (near match)\n' +
+               '\u2022 ' + already + ' already linked\n' +
+               (removed ? '\u2022 ' + removed + ' stale auto-created rows removed from your vendor list\n' : '') +
                (skipped ? '\u2022 ' + skipped + ' skipped (missing #/name)\n' : '') +
-               '\nApp-only vendors are left untouched. Near matches stay editable below.')) {
-    // Roll back in-memory changes by reloading from storage.
+               '\nYour curated vendor list is otherwise untouched.')) {
     loadDB();
     renderFoundationMasterStatus();
     return;
   }
 
+  db.foundationVendors = master;
   saveDB();
   if (supabaseClient) {
     (async function(){
       try {
-        var up = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
-        if (up && up.error) console.warn('vendors upsert error:', up.error.message);
-      } catch (e) { console.warn('vendors sync exception:', e); }
+        var del = await supabaseClient.from('kmi_foundation_vendors').delete().neq('id', '___none___');
+        if (del && del.error) console.warn('foundation_vendors delete error:', del.error.message);
+        var ins = await supabaseClient.from('kmi_foundation_vendors').insert(master.map(toSBFoundationVendor));
+        if (ins && ins.error) console.warn('foundation_vendors insert error:', ins.error.message);
+        if (touched.length || removed) {
+          var up = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
+          if (up && up.error) console.warn('vendors upsert error:', up.error.message);
+        }
+      } catch (e) { console.warn('foundation_vendors sync exception:', e); }
     })();
   }
   renderFoundationMasterStatus();
-  alert('\u2714 Reconciled ' + fnd.length + ' Foundation vendor' + (fnd.length === 1 ? '' : 's') + '.\n\n' +
-        linked + ' linked, ' + review + ' to review, ' + created + ' created.');
+  alert('\u2714 Imported ' + master.length + ' Foundation payee' + (master.length === 1 ? '' : 's') + ' into the master.\n\n' +
+        linked + ' app vendors linked, ' + review + ' flagged for review.');
 }
 
 // Reconciliation panel — lists linked + review vendors on the sync screen.
@@ -36908,8 +36903,10 @@ function renderVendorReconcile() {
     return v.foundationVendorNo || v.reconcileStatus === 'review';
   });
   if (!all.length) {
+    var mc0 = (db.foundationVendors || []).length;
     el.innerHTML = '<div style="font-size:12px;color:#888;padding:8px 0">' +
-      'No Foundation vendors linked yet. Import a vendor CSV above to reconcile.</div>';
+      (mc0 ? (mc0.toLocaleString() + ' Foundation payees loaded. No app vendors matched them yet — that\u2019s fine; AP matches invoices straight against the master.')
+           : 'No Foundation payees imported yet. Import a vendor CSV above.') + '</div>';
     return;
   }
   var reviews = all.filter(function(v){ return v.reconcileStatus === 'review'; });
@@ -36948,7 +36945,8 @@ function renderVendorReconcile() {
   }
 
   var head = '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' +
-    '<div style="font-size:12px;color:#555"><strong style="color:#3B6D11">' + linked.length + '</strong> linked' +
+    '<div style="font-size:12px;color:#555"><strong>' + ((db.foundationVendors||[]).length).toLocaleString() + '</strong> payees in master &middot; ' +
+      '<strong style="color:#3B6D11">' + linked.length + '</strong> app vendors linked' +
       (reviews.length ? ' &middot; <strong style="color:#7A5C00">' + reviews.length + '</strong> to review' : '') + '</div>' +
     '<input id="t-fnd-vendor-recon-search" oninput="vendorReconcileFilter(this.value)" placeholder="Search linked vendors\u2026" ' +
       'value="' + escapeHtml(window._vendorReconSearch || '') + '" ' +
@@ -37004,34 +37002,236 @@ function vendorReconcileConfirm(id) {
   _vendorReconcilePersist();
 }
 
-// Rejects a tentative/confirmed link: clears the Foundation fields off the
-// app vendor and re-creates the Foundation vendor as its own linked record
-// so it isn't lost.
+// Unlinks an app vendor from its Foundation payee. The payee stays in the
+// master table (kmi_foundation_vendors) — only the app-vendor link is cleared.
 function vendorReconcileReject(id) {
   var v = (db.vendors || []).find(function(x){ return String(x.id) === String(id); });
   if (!v) return;
-  if (!confirm('Unlink "' + (v.foundationVendorName || v.name) + '" from app vendor "' + v.name + '"?\n\n' +
-               'The Foundation vendor will be kept as its own record.')) return;
-  var fNo = v.foundationVendorNo, fName = v.foundationVendorName;
+  if (!confirm('Unlink app vendor "' + v.name + '" from Foundation payee "' + (v.foundationVendorName || v.foundationVendorNo) + '"?\n\n' +
+               'The Foundation payee stays in the master list.')) return;
   v.foundationVendorNo = '';
   v.foundationVendorName = '';
   v.reconcileStatus = null;
-  if (fNo) {
-    var rfid = 'fnd-' + String(fNo).replace(/[^A-Za-z0-9_-]/g, '');
-    var dup = (db.vendors || []).some(function(x){
-      return String(x.foundationVendorNo) === String(fNo) || String(x.id) === rfid;
-    });
-    if (!dup) {
-      db.vendors.push({
-        id: rfid,
-        name: fName || ('Vendor ' + fNo),
-        primaryContact:'', vendorType:'', email:'', phone:'',
-        address:'', cityState:'', website:'', notes:'',
-        foundationVendorNo: fNo, foundationVendorName: fName, reconcileStatus: 'linked'
-      });
-    }
-  }
   _vendorReconcilePersist();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// AP INVOICES — intake + inbox (Session 2, Chunk A)
+// ════════════════════════════════════════════════════════════════════
+var AP_STATUS = {
+  received: { label:'Received', bg:'#eef0f4', fg:'#555' },
+  coded:    { label:'Coded',    bg:'#e7eefc', fg:'#1f4e79' },
+  pending:  { label:'Pending',  bg:'#fdf4e0', fg:'#7A5C00' },
+  approved: { label:'Approved', bg:'#e7f3e0', fg:'#3B6D11' },
+  exported: { label:'Exported', bg:'#e9e6f5', fg:'#5a4a9a' },
+  rejected: { label:'Rejected', bg:'#fde4e4', fg:'#b23636' },
+  hold:     { label:'On hold',  bg:'#f0f0f0', fg:'#777' }
+};
+function apStatusPill(st){
+  var s = AP_STATUS[st] || AP_STATUS.received;
+  return '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:'+s.bg+';color:'+s.fg+'">'+s.label+'</span>';
+}
+function apMoney(n){ n = Number(n)||0; return '$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function apEsc(s){ return escapeHtml(String(s==null?'':s)); }
+
+function apSetBanner(kind, html){
+  var el = g('ap-banner'); if(!el) return;
+  var bg,fg,bd;
+  if(kind==='error'){bg='#FDEBEB';fg='#A32D2D';bd='#E24B4A';}
+  else if(kind==='success'){bg='#EAF3DE';fg='#3B6D11';bd='#7A9F4A';}
+  else {bg='#F8F6E6';fg='#9A7A2E';bd='#C8A84B';}
+  el.style.cssText='display:block;background:'+bg+';color:'+fg+';border:1px solid '+bd+';border-radius:6px;padding:11px 15px;margin:0 0 14px;font-size:13px;line-height:1.5';
+  el.innerHTML = html;
+}
+
+function renderApInbox(){
+  if (!hasRead('ap-invoices')) return;
+  var inv = (db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
+  var byStatus = {};
+  inv.forEach(function(i){ byStatus[i.status]=(byStatus[i.status]||0)+1; });
+  var sumExportable = inv.filter(function(i){return i.status==='approved';}).reduce(function(t,i){return t+(Number(i.total)||0);},0);
+  var kpis = [
+    { n: byStatus.received||0, l:'To code' },
+    { n: byStatus.pending||0,  l:'Pending approval' },
+    { n: byStatus.approved||0, l:'Approved' },
+    { n: apMoney(sumExportable), l:'Approved $' }
+  ];
+  var kpiEl = g('ap-kpis');
+  if (kpiEl) kpiEl.innerHTML = kpis.map(function(k){
+    return '<div style="background:#fff;border:.5px solid #e3e6ee;border-radius:9px;padding:12px 16px;min-width:120px">'+
+      '<div style="font-size:22px;font-weight:700;color:var(--kmi)">'+k.n+'</div>'+
+      '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+k.l+'</div></div>';
+  }).join('');
+  var el = g('ap-list'); if(!el) return;
+  if (!inv.length){
+    el.innerHTML = '<div style="padding:26px;text-align:center;color:#888;font-size:13px">No invoices yet. Upload a PDF above to get started.</div>';
+    return;
+  }
+  var rows = inv.map(function(i){
+    var dup = i.isDuplicate ? ' style="background:#fdf6f6;cursor:pointer"' : ' style="cursor:pointer"';
+    var stCell = i.isDuplicate ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(i.status);
+    var src = i.source==='email' ? '&#128231; email' : '&#11014; upload';
+    return '<tr'+dup+' onclick="apOpenDetail(\''+i.id+'\')">'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4"><strong>'+apEsc(i.vendorName||'(unknown vendor)')+'</strong></td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+apEsc(i.invoiceDate)+'</td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+(i.jobNo?apEsc(i.jobNo):'<span style="color:#aaa">Overhead</span>')+'</td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apMoney(i.total)+'</td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-size:11px;color:#888">'+src+'</td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+stCell+'</td>'+
+    '</tr>';
+  }).join('');
+  el.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12.5px">'+
+    '<thead><tr>'+
+    ['Vendor','Invoice #','Date','Job','Amount','Source','Status'].map(function(h){return '<th style="text-align:left;padding:7px 9px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h+'</th>';}).join('')+
+    '</tr></thead><tbody>'+rows+'</tbody></table>';
+}
+
+// Extracted vendor name → { vendorId, foundationVendorNo, foundationVendorName }.
+// Matches the Foundation payee master first (gives the export #), then an app
+// vendor for context (preferring one already linked to that Foundation #).
+function apResolveVendor(name){
+  var res = { vendorId:null, foundationVendorNo:'', foundationVendorName:'' };
+  if(!name) return res;
+  var nk = _normVendorName(name);
+  var fvs = db.foundationVendors || [];
+  var fv = fvs.find(function(f){ return _normVendorName(f.name) === nk; });
+  if(!fv) fv = fvs.find(function(f){ var k=_normVendorName(f.name); return k && nk && (k.indexOf(nk)===0 || nk.indexOf(k)===0); });
+  if(fv){ res.foundationVendorNo = fv.vendorNo; res.foundationVendorName = fv.name; }
+  var vs = db.vendors || [];
+  var av = null;
+  if(res.foundationVendorNo) av = vs.find(function(v){ return String(v.foundationVendorNo) === String(res.foundationVendorNo); });
+  if(!av) av = vs.find(function(v){ return _normVendorName(v.name) === nk; });
+  if(av){
+    res.vendorId = av.id;
+    if(!res.foundationVendorNo && av.foundationVendorNo){ res.foundationVendorNo = av.foundationVendorNo; res.foundationVendorName = av.foundationVendorName || ''; }
+  }
+  return res;
+}
+
+// Vendor-learned coding suggestion from prior coded lines (matures over time).
+function apSuggestCoding(vendorId){
+  var out = { distType:'job', costCode:'', costClass:'', glNo:'' };
+  if(!vendorId) return out;
+  var invIds = {};
+  (db.apInvoices||[]).forEach(function(i){ if(String(i.vendorId)===String(vendorId)) invIds[String(i.id)]=1; });
+  var lines = (db.apInvoiceLines||[]).filter(function(l){ return invIds[String(l.invoiceId)]; });
+  if(!lines.length) return out;
+  function mode(arr){ var c={},best=null,bn=0; arr.forEach(function(v){ if(!v) return; c[v]=(c[v]||0)+1; if(c[v]>bn){bn=c[v];best=v;} }); return best; }
+  var jobLines = lines.filter(function(l){return l.distType!=='gl';});
+  var glLines  = lines.filter(function(l){return l.distType==='gl';});
+  if(jobLines.length>=glLines.length){
+    out.distType='job'; out.costCode=mode(jobLines.map(function(l){return l.costCode;}))||''; out.costClass=mode(jobLines.map(function(l){return l.costClass;}))||'';
+  } else {
+    out.distType='gl'; out.glNo=mode(glLines.map(function(l){return l.glNo;}))||'';
+  }
+  return out;
+}
+
+// Duplicate detection: same vendor (Foundation # or app id) + invoice #.
+function apDupOf(rec){
+  var key = (rec.foundationVendorNo||rec.vendorId||'');
+  var match = (db.apInvoices||[]).find(function(i){
+    if(String(i.id)===String(rec.id)) return false;
+    var ik = (i.foundationVendorNo||i.vendorId||'');
+    return ik && key && String(ik)===String(key) &&
+           String(i.invoiceNo||'').trim() &&
+           String(i.invoiceNo).trim().toLowerCase()===String(rec.invoiceNo||'').trim().toLowerCase();
+  });
+  return match ? match.id : null;
+}
+
+async function apHandleUpload(evt){
+  if(!requireFull('ap-invoices','upload AP invoices')){ evt.target.value=''; return; }
+  var files = evt.target.files ? Array.prototype.slice.call(evt.target.files) : [];
+  evt.target.value='';
+  if(!files.length) return;
+  var creds = getSBCreds();
+  if((!creds||!creds.url||!creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) creds={url:DEFAULT_SB_URL,key:DEFAULT_SB_KEY};
+  if(!creds||!creds.url||!creds.key){ apSetBanner('error','Supabase not configured — cannot reach the extraction service.'); return; }
+  var fnUrl = normalizeSBUrl(creds.url) + '/functions/v1/extract-invoice';
+  var ok=0, fail=0, dups=0;
+  for(var fi=0; fi<files.length; fi++){
+    var file=files[fi];
+    apSetBanner('info','Reading '+(fi+1)+' of '+files.length+': '+apEsc(file.name)+'\u2026 (10\u201330s each)');
+    var b64;
+    try { b64 = await bgFileToBase64(file); } catch(e){ fail++; continue; }
+    var resp,data;
+    try {
+      resp = await fetch(fnUrl,{ method:'POST', headers:{'Content-Type':'application/json','apikey':creds.key,'Authorization':'Bearer '+creds.key}, body:JSON.stringify({pdf_base64:b64}) });
+      data = await resp.json();
+    } catch(e){ fail++; continue; }
+    if(!resp.ok || !data || !data.ok){ fail++; continue; }
+    var ex = data.data || {};
+    var rv = apResolveVendor(ex.vendor_name);
+    var sug = apSuggestCoding(rv.vendorId);
+    var id = 'ap-'+Date.now()+'-'+fi;
+    var rec = {
+      id:id, vendorId:rv.vendorId, foundationVendorNo:rv.foundationVendorNo||'',
+      vendorName:ex.vendor_name||'', invoiceNo:ex.invoice_no||'', invoiceDate:ex.invoice_date||'',
+      dueDate:ex.due_date||'', terms:ex.terms||'', poNo:ex.po_no||'', jobNo:ex.job_no||'',
+      subtotal:Number(ex.subtotal)||0, salesTax:Number(ex.sales_tax)||0, freight:Number(ex.freight)||0, total:Number(ex.total)||0,
+      status:'received', source:'upload', sourceFile:file.name, extractedJson:ex,
+      distType:sug.distType, suggestedCostCode:sug.costCode, suggestedCostClass:sug.costClass, suggestedGlNo:sug.glNo,
+      isDuplicate:false, dupOf:null, multiInvoiceFlag:!!ex.multiple_invoices_detected,
+      notes:'', createdBy:(_currentUser?_currentUser.email:''), createdAt:new Date().toISOString()
+    };
+    var dupId = apDupOf(rec);
+    if(dupId){ rec.isDuplicate=true; rec.dupOf=dupId; dups++; }
+    db.apInvoices.push(rec);
+    apLog(id,'received','Uploaded '+file.name+(rec.isDuplicate?' \u2014 flagged duplicate':''));
+    await apPushInvoice(rec);
+    ok++;
+  }
+  saveDB();
+  renderApInbox();
+  var msg = ok+' invoice'+(ok===1?'':'s')+' read'+(dups?(', '+dups+' flagged as duplicate'+(dups===1?'':'s')):'')+(fail?(', '+fail+' failed'):'')+'.';
+  apSetBanner(fail?'error':'success', msg);
+}
+
+function apLog(invoiceId, action, detail){
+  var entry = { id:'aplog-'+Date.now()+'-'+Math.floor(Math.random()*1000), invoiceId:invoiceId, actor:(_currentUser?_currentUser.email:''), action:action, detail:detail||'' };
+  db.apInvoiceLog.push(entry);
+  if(supabaseClient){ (async function(){ try{ var r=await supabaseClient.from('kmi_ap_invoice_log').insert(toSBApLog(entry)); if(r&&r.error) console.warn('ap_log insert:',r.error.message);}catch(e){console.warn('ap_log exception:',e);} })(); }
+}
+
+async function apPushInvoice(rec){
+  if(!supabaseClient) return;
+  try { var r = await supabaseClient.from('kmi_ap_invoices').upsert(toSBApInvoice(rec)); if(r&&r.error) console.warn('ap_invoices upsert:',r.error.message); }
+  catch(e){ console.warn('ap_invoices exception:',e); }
+}
+
+function apOpenDetail(id){
+  var i = (db.apInvoices||[]).find(function(x){return String(x.id)===String(id);});
+  if(!i) return;
+  var dupNote = i.isDuplicate ? '<div style="background:#fdeaea;border:1px solid #f3c9c9;border-left:3px solid #d65b5b;border-radius:7px;padding:10px 12px;font-size:12px;color:#9a3030;margin-bottom:12px">Possible duplicate of an invoice already in the system (same vendor + invoice #). Coding will be blocked until dismissed (coding screen, next chunk).</div>' : '';
+  var multiNote = i.multiInvoiceFlag ? '<div style="background:#fff8e8;border:1px solid #efe0b8;border-left:3px solid var(--ac);border-radius:7px;padding:9px 12px;font-size:11.5px;color:#6b5a22;margin-bottom:12px">The reader flagged that this PDF may contain more than one invoice \u2014 verify before coding.</div>' : '';
+  var li = (i.extractedJson && Array.isArray(i.extractedJson.line_items)) ? i.extractedJson.line_items : [];
+  var liRows = li.length ? li.map(function(l){ return '<tr><td style="padding:5px 8px;border-bottom:1px solid #eef0f4">'+apEsc(l.description)+'</td><td style="padding:5px 8px;border-bottom:1px solid #eef0f4;text-align:right;font-family:ui-monospace,monospace">'+apMoney(l.amount)+'</td></tr>'; }).join('') : '<tr><td colspan="2" style="padding:8px;color:#999">No line items extracted.</td></tr>';
+  var vlabel = apEsc(i.vendorName) + (i.foundationVendorNo ? ' <span style="background:#e7f3e0;color:#3B6D11;font-size:10px;font-weight:700;padding:1px 7px;border-radius:9px">'+apEsc(i.foundationVendorNo)+'</span>' : (i.vendorId? '' : ' <span style="color:#b23636;font-size:11px">\u2014 no vendor match \u2014</span>'));
+  var sug = (i.suggestedCostCode||i.suggestedGlNo) ? ('<div style="font-size:11px;color:#3B6D11;margin-top:4px">\u2605 suggested: '+(i.distType==='gl'?('GL '+apEsc(i.suggestedGlNo)):(apEsc(i.suggestedCostCode)+' / '+apEsc(i.suggestedCostClass)))+'</div>') : '<div style="font-size:11px;color:#999;margin-top:4px">No prior coding history for this vendor yet.</div>';
+  function fld(lab,val){ return '<div style="margin-bottom:8px"><div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600">'+lab+'</div><div>'+(val?apEsc(val):'<span style="color:#bbb">\u2014</span>')+'</div></div>'; }
+  var html = '<div style="max-width:560px">'+
+    '<div style="font-weight:700;font-size:16px;margin-bottom:2px">'+vlabel+'</div>'+
+    '<div style="color:#888;font-size:12px;margin-bottom:14px">Invoice '+apEsc(i.invoiceNo)+' \u00b7 '+apStatusPill(i.status)+' \u00b7 from '+(i.source==='email'?'email':'upload')+' ('+apEsc(i.sourceFile)+')</div>'+
+    dupNote + multiNote +
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px">'+
+      fld('Invoice date',i.invoiceDate)+fld('Due date',i.dueDate)+fld('Terms',i.terms)+
+      fld('PO #',i.poNo)+fld('Job #',i.jobNo)+fld('Total',apMoney(i.total))+
+    '</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px;font-size:12px;color:#666;margin-bottom:6px">'+
+      '<div>Subtotal: '+apMoney(i.subtotal)+'</div><div>Tax: '+apMoney(i.salesTax)+'</div><div>Freight: '+apMoney(i.freight)+'</div></div>'+
+    '<div style="margin:10px 0 4px;font-weight:600;font-size:12px">Extracted line items</div>'+
+    '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th style="text-align:left;padding:5px 8px;background:#f6f7fa;font-size:10px;text-transform:uppercase;color:#555">Description</th><th style="text-align:right;padding:5px 8px;background:#f6f7fa;font-size:10px;text-transform:uppercase;color:#555">Amount</th></tr></thead><tbody>'+liRows+'</tbody></table>'+
+    '<div style="margin-top:12px;padding:10px 12px;background:#f6f7fa;border-radius:7px">'+
+      '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Proposed coding</div>'+sug+
+    '</div>'+
+    '<div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">'+
+      '<button class="btn" onclick="closeModal()">Close</button>'+
+      '<button class="btn btn-p" disabled title="Coding screen arrives in the next chunk" style="opacity:.5;cursor:not-allowed">Code invoice \u2192</button>'+
+    '</div>'+
+  '</div>';
+  showModal(html);
 }
 
 function importFoundationCustomers(rows) {
@@ -41881,6 +42081,69 @@ function fromSBGLAccount(r) {
     accountType:r.account_type||'', active:r.active!==false
   };
 }
+function toSBFoundationVendor(r) {
+  return { id:String(r.id), vendor_no:r.vendorNo||'', name:r.name||'', active:r.active!==false };
+}
+function fromSBFoundationVendor(r) {
+  return { id:r.id, vendorNo:r.vendor_no||'', name:r.name||'', active:r.active!==false };
+}
+// ── AP invoice mappers (Session 2) ──────────────────────────────────
+function toSBApInvoice(r) {
+  return {
+    id:String(r.id), vendor_id:r.vendorId||null,
+    foundation_vendor_no:r.foundationVendorNo||'', vendor_name:r.vendorName||'',
+    invoice_no:r.invoiceNo||'', invoice_date:r.invoiceDate||'', due_date:r.dueDate||'',
+    terms:r.terms||'', po_no:r.poNo||'', job_no:r.jobNo||'',
+    subtotal:(r.subtotal!=null?r.subtotal:0), sales_tax:(r.salesTax!=null?r.salesTax:0),
+    freight:(r.freight!=null?r.freight:0), total:(r.total!=null?r.total:0),
+    status:r.status||'received', source:r.source||'', source_file:r.sourceFile||'',
+    extracted_json:r.extractedJson||null, dist_type:r.distType||'job',
+    suggested_cost_code:r.suggestedCostCode||'', suggested_cost_class:r.suggestedCostClass||'',
+    suggested_gl_no:r.suggestedGlNo||'',
+    is_duplicate:!!r.isDuplicate, dup_of:r.dupOf||null,
+    multi_invoice_flag:!!r.multiInvoiceFlag, notes:r.notes||'',
+    created_by:r.createdBy||'', updated_at:new Date().toISOString()
+  };
+}
+function fromSBApInvoice(r) {
+  return {
+    id:r.id, vendorId:r.vendor_id||null,
+    foundationVendorNo:r.foundation_vendor_no||'', vendorName:r.vendor_name||'',
+    invoiceNo:r.invoice_no||'', invoiceDate:r.invoice_date||'', dueDate:r.due_date||'',
+    terms:r.terms||'', poNo:r.po_no||'', jobNo:r.job_no||'',
+    subtotal:(r.subtotal!=null?Number(r.subtotal):0), salesTax:(r.sales_tax!=null?Number(r.sales_tax):0),
+    freight:(r.freight!=null?Number(r.freight):0), total:(r.total!=null?Number(r.total):0),
+    status:r.status||'received', source:r.source||'', sourceFile:r.source_file||'',
+    extractedJson:r.extracted_json||null, distType:r.dist_type||'job',
+    suggestedCostCode:r.suggested_cost_code||'', suggestedCostClass:r.suggested_cost_class||'',
+    suggestedGlNo:r.suggested_gl_no||'',
+    isDuplicate:!!r.is_duplicate, dupOf:r.dup_of||null,
+    multiInvoiceFlag:!!r.multi_invoice_flag, notes:r.notes||'',
+    createdBy:r.created_by||'', createdAt:r.created_at||''
+  };
+}
+function toSBApLine(r) {
+  return {
+    id:String(r.id), invoice_id:r.invoiceId||null, line_no:(r.lineNo!=null?r.lineNo:0),
+    description:r.description||'', amount:(r.amount!=null?r.amount:0), dist_type:r.distType||'job',
+    job_no:r.jobNo||'', cost_code:r.costCode||'', cost_class:r.costClass||'', gl_no:r.glNo||'',
+    taxable:!!r.taxable, notes:r.notes||''
+  };
+}
+function fromSBApLine(r) {
+  return {
+    id:r.id, invoiceId:r.invoice_id||null, lineNo:(r.line_no!=null?Number(r.line_no):0),
+    description:r.description||'', amount:(r.amount!=null?Number(r.amount):0), distType:r.dist_type||'job',
+    jobNo:r.job_no||'', costCode:r.cost_code||'', costClass:r.cost_class||'', glNo:r.gl_no||'',
+    taxable:!!r.taxable, notes:r.notes||''
+  };
+}
+function toSBApLog(r) {
+  return { id:String(r.id), invoice_id:r.invoiceId||null, actor:r.actor||'', action:r.action||'', detail:r.detail||'' };
+}
+function fromSBApLog(r) {
+  return { id:r.id, invoiceId:r.invoice_id||null, ts:r.ts||'', actor:r.actor||'', action:r.action||'', detail:r.detail||'' };
+}
 function toSBCustFnd(r) {
   return {
     id:r.id, customer_no:r.customerNo||'', name:r.name||'',
@@ -42073,6 +42336,23 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_rfq_responses').upsert(db.rfqResponses.map(toSBRfqResponse));
       if (r && r.error) errs.push('rfq_responses: ' + r.error.message);
     }
+    // AP invoices (Session 2) — non-fatal if tables missing (ap_s2 migration).
+    if ((db.foundationVendors || []).length) {
+      var r = await supabaseClient.from('kmi_foundation_vendors').upsert(db.foundationVendors.map(toSBFoundationVendor));
+      if (r && r.error) errs.push('foundation_vendors: ' + r.error.message);
+    }
+    if ((db.apInvoices || []).length) {
+      var r = await supabaseClient.from('kmi_ap_invoices').upsert(db.apInvoices.map(toSBApInvoice));
+      if (r && r.error) errs.push('ap_invoices: ' + r.error.message);
+    }
+    if ((db.apInvoiceLines || []).length) {
+      var r = await supabaseClient.from('kmi_ap_invoice_lines').upsert(db.apInvoiceLines.map(toSBApLine));
+      if (r && r.error) errs.push('ap_invoice_lines: ' + r.error.message);
+    }
+    if ((db.apInvoiceLog || []).length) {
+      var r = await supabaseClient.from('kmi_ap_invoice_log').upsert(db.apInvoiceLog.map(toSBApLog));
+      if (r && r.error) errs.push('ap_invoice_log: ' + r.error.message);
+    }
     // Foundation master data — cost codes / classes / customers (Chunk 1).
     // These are populated by CSV import on the Templates page; if local is
     // empty we don't push (avoids wiping a populated cloud copy on a fresh
@@ -42228,6 +42508,32 @@ async function pullFromSupabase() {
     } catch (e) {
       console.warn('kmi_gl_accounts load exception:', e);
       if (!Array.isArray(db.glAccounts)) db.glAccounts = [];
+    }
+    // AP (Option B) — Foundation vendor master (separate fetch; non-fatal).
+    try {
+      var fvRes = await supabaseClient.from('kmi_foundation_vendors').select('*');
+      if (fvRes && !fvRes.error) db.foundationVendors = (fvRes.data || []).map(fromSBFoundationVendor);
+      else { if (fvRes && fvRes.error) console.warn('kmi_foundation_vendors load error (table missing?):', fvRes.error.message); if (!Array.isArray(db.foundationVendors)) db.foundationVendors = []; }
+    } catch (e) {
+      console.warn('kmi_foundation_vendors load exception:', e);
+      if (!Array.isArray(db.foundationVendors)) db.foundationVendors = [];
+    }
+    // AP Session 2 — invoices, lines, log (separate fetches; non-fatal if missing).
+    try {
+      var apInvRes = await supabaseClient.from('kmi_ap_invoices').select('*');
+      if (apInvRes && !apInvRes.error) db.apInvoices = (apInvRes.data || []).map(fromSBApInvoice);
+      else { if (apInvRes && apInvRes.error) console.warn('kmi_ap_invoices load error (table missing?):', apInvRes.error.message); if (!Array.isArray(db.apInvoices)) db.apInvoices = []; }
+      var apLineRes = await supabaseClient.from('kmi_ap_invoice_lines').select('*');
+      if (apLineRes && !apLineRes.error) db.apInvoiceLines = (apLineRes.data || []).map(fromSBApLine);
+      else { if (!Array.isArray(db.apInvoiceLines)) db.apInvoiceLines = []; }
+      var apLogRes = await supabaseClient.from('kmi_ap_invoice_log').select('*');
+      if (apLogRes && !apLogRes.error) db.apInvoiceLog = (apLogRes.data || []).map(fromSBApLog);
+      else { if (!Array.isArray(db.apInvoiceLog)) db.apInvoiceLog = []; }
+    } catch (e) {
+      console.warn('kmi_ap_* load exception:', e);
+      if (!Array.isArray(db.apInvoices)) db.apInvoices = [];
+      if (!Array.isArray(db.apInvoiceLines)) db.apInvoiceLines = [];
+      if (!Array.isArray(db.apInvoiceLog)) db.apInvoiceLog = [];
     }
     // Merge pulled users with local auth state. After the password-sync migration,
     // the cloud is the source of truth for passwordHash/Salt/status/mustReset, but
