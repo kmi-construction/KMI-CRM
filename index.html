@@ -37359,23 +37359,50 @@ function apOpenCode(id){
   if(!i) return;
   _apCodeId = id;
   var exLines = (i.extractedJson && Array.isArray(i.extractedJson.line_items)) ? i.extractedJson.line_items : [];
-  _apCodeDraft = {
-    splitMode: 0,
-    distType: i.distType || 'job',
-    jobNo: i.jobNo || '',
-    costCode: i.suggestedCostCode || '',
-    costClass: i.suggestedCostClass || '',
-    glNo: i.suggestedGlNo || '',
-    taxable: (Number(i.salesTax)||0) > 0,
-    lines: exLines.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, costCode:i.suggestedCostCode||'', costClass:i.suggestedCostClass||'', glNo:i.suggestedGlNo||'', taxable:false }; }),
-    foundationVendorNo: i.foundationVendorNo || '',
-    foundationVendorName: i.foundationVendorName || '',
-    vendorId: i.vendorId || null,
-    pickedViaSearch: false,
-    saveAlias: false,
-    dupDismissed: !i.isDuplicate,
-    vendorSearch: ''
-  };
+  // If this invoice was already coded, hydrate from the saved distribution
+  // lines so reopening shows what was saved (not the original suggestions).
+  var saved = (db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)===String(id); })
+                .sort(function(a,b){ return (Number(a.lineNo)||0)-(Number(b.lineNo)||0); });
+  var isSingleSaved = saved.length===1 && saved[0].description==='(invoice total)';
+  if(saved.length){
+    _apCodeDraft = {
+      splitMode: isSingleSaved ? 0 : 1,
+      distType: saved[0].distType || i.distType || 'job',
+      jobNo: saved[0].jobNo || i.jobNo || '',
+      costCode: isSingleSaved ? (saved[0].costCode||'') : '',
+      costClass: isSingleSaved ? (saved[0].costClass||'') : '',
+      glNo: isSingleSaved ? (saved[0].glNo||'') : '',
+      taxable: isSingleSaved ? !!saved[0].taxable : false,
+      lines: isSingleSaved
+        ? exLines.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, costCode:'', costClass:'', glNo:'', taxable:false }; })
+        : saved.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, costCode:l.costCode||'', costClass:l.costClass||'', glNo:l.glNo||'', taxable:!!l.taxable }; }),
+      foundationVendorNo: i.foundationVendorNo || '',
+      foundationVendorName: i.foundationVendorName || '',
+      vendorId: i.vendorId || null,
+      pickedViaSearch: false,
+      saveAlias: false,
+      dupDismissed: true,
+      vendorSearch: ''
+    };
+  } else {
+    _apCodeDraft = {
+      splitMode: 0,
+      distType: i.distType || 'job',
+      jobNo: i.jobNo || '',
+      costCode: i.suggestedCostCode || '',
+      costClass: i.suggestedCostClass || '',
+      glNo: i.suggestedGlNo || '',
+      taxable: (Number(i.salesTax)||0) > 0,
+      lines: exLines.map(function(l){ return { description:l.description||'', amount:Number(l.amount)||0, costCode:i.suggestedCostCode||'', costClass:i.suggestedCostClass||'', glNo:i.suggestedGlNo||'', taxable:false }; }),
+      foundationVendorNo: i.foundationVendorNo || '',
+      foundationVendorName: i.foundationVendorName || '',
+      vendorId: i.vendorId || null,
+      pickedViaSearch: false,
+      saveAlias: false,
+      dupDismissed: !i.isDuplicate,
+      vendorSearch: ''
+    };
+  }
   g('ap-inbox-view').style.display = 'none';
   g('ap-code').style.display = 'block';
   apRenderCode();
