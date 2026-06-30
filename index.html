@@ -37142,11 +37142,14 @@ function renderApInbox(){
     return;
   }
   var rows = inv.map(function(i){
+    var rf = i.readFailed || (i.extractedJson && i.extractedJson._readFailed);
     var dup = i.isDuplicate ? ' style="background:#fdf6f6;cursor:pointer"' : ' style="cursor:pointer"';
-    var stCell = i.isDuplicate ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(i.status);
+    var stCell = rf ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fff1d6;color:#9A6A00">Read failed</span>'
+                    : (i.isDuplicate ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(i.status));
     var src = i.source==='email' ? '&#128231; email' : '&#11014; upload';
+    var vCell = rf ? '<span style="color:#9A6A00">(could not read — code manually)</span>' : ('<strong>'+apEsc(i.vendorName||'(unknown vendor)')+'</strong>');
     return '<tr'+dup+' onclick="apOpenCode(\''+i.id+'\')">'+
-      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4"><strong>'+apEsc(i.vendorName||'(unknown vendor)')+'</strong></td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+vCell+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+apEsc(i.invoiceDate)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+(i.jobNo?apEsc(i.jobNo):'<span style="color:#aaa">Overhead</span>')+'</td>'+
@@ -37263,18 +37266,22 @@ async function apHandleUpload(evt){
   for(var fi=0; fi<files.length; fi++){
     var file=files[fi];
     apSetBanner('info','Reading '+(fi+1)+' of '+files.length+': '+apEsc(file.name)+'\u2026 (10\u201330s each)');
-    var b64;
-    try { b64 = await bgFileToBase64(file); } catch(e){ fail++; continue; }
-    var resp,data;
-    try {
-      resp = await fetch(fnUrl,{ method:'POST', headers:{'Content-Type':'application/json','apikey':creds.key,'Authorization':'Bearer '+creds.key}, body:JSON.stringify({pdf_base64:b64}) });
-      data = await resp.json();
-    } catch(e){ fail++; continue; }
-    if(!resp.ok || !data || !data.ok){ fail++; continue; }
-    var ex = data.data || {};
+    var b64=null, ex=null, readErr='';
+    try { b64 = await bgFileToBase64(file); } catch(e){ readErr='could not read the file'; }
+    if(b64){
+      try {
+        var resp = await fetch(fnUrl,{ method:'POST', headers:{'Content-Type':'application/json','apikey':creds.key,'Authorization':'Bearer '+creds.key}, body:JSON.stringify({pdf_base64:b64}) });
+        var data = await resp.json();
+        if(resp.ok && data && data.ok){ ex = data.data || {}; }
+        else { readErr = (data && data.error) ? String(data.error) : ('reader returned status '+(resp?resp.status:'(none)')); }
+      } catch(e){ readErr = 'network or timeout error'; }
+    }
+    var readFailed = !ex;
+    if(readFailed) ex = {};
     var rv = apResolveVendor(ex.vendor_name);
     var sug = apSuggestCoding(rv.vendorId);
     var id = 'ap-'+Date.now()+'-'+fi;
+    if(readFailed){ ex._readFailed = true; ex._readError = readErr; }
     var rec = {
       id:id, vendorId:rv.vendorId, foundationVendorNo:rv.foundationVendorNo||'',
       vendorName:ex.vendor_name||'', invoiceNo:ex.invoice_no||'', invoiceDate:ex.invoice_date||'',
@@ -37283,18 +37290,21 @@ async function apHandleUpload(evt){
       status:'received', source:'upload', sourceFile:file.name, extractedJson:ex,
       distType:sug.distType, suggestedCostCode:sug.costCode, suggestedCostClass:sug.costClass, suggestedGlNo:sug.glNo,
       isDuplicate:false, dupOf:null, multiInvoiceFlag:!!ex.multiple_invoices_detected,
+      readFailed:readFailed,
       notes:'', createdBy:(_currentUser?_currentUser.email:''), createdAt:new Date().toISOString()
     };
-    var dupId = apDupOf(rec);
-    if(dupId){ rec.isDuplicate=true; rec.dupOf=dupId; dups++; }
+    if(!readFailed){
+      var dupId = apDupOf(rec);
+      if(dupId){ rec.isDuplicate=true; rec.dupOf=dupId; dups++; }
+    }
     db.apInvoices.push(rec);
-    apLog(id,'received','Uploaded '+file.name+(rec.isDuplicate?' \u2014 flagged duplicate':''));
+    apLog(id, readFailed?'read-failed':'received', readFailed?('Upload '+file.name+' \u2014 could not read ('+readErr+'); enter manually'):('Uploaded '+file.name+(rec.isDuplicate?' \u2014 flagged duplicate':'')));
     await apPushInvoice(rec);
-    ok++;
+    if(readFailed) fail++; else ok++;
   }
   saveDB();
   renderApInbox();
-  var msg = ok+' invoice'+(ok===1?'':'s')+' read'+(dups?(', '+dups+' flagged as duplicate'+(dups===1?'':'s')):'')+(fail?(', '+fail+' failed'):'')+'.';
+  var msg = ok+' invoice'+(ok===1?'':'s')+' read'+(dups?(', '+dups+' flagged as duplicate'+(dups===1?'':'s')):'')+(fail?(', '+fail+' couldn\u2019t be read \u2014 added for manual entry'):'')+'.';
   apSetBanner(fail?'error':'success', msg);
 }
 
@@ -37538,6 +37548,9 @@ function apRenderCode(){
 
   // duplicate / multi warnings
   var warn = '';
+  if(i.readFailed || (i.extractedJson && i.extractedJson._readFailed)){
+    warn += '<div style="background:#fff4dd;border:1px solid #efd9a8;border-left:3px solid #C8A84B;border-radius:7px;padding:10px 12px;font-size:12px;color:#6b5320;margin-bottom:12px">The reader couldn\u2019t read this PDF'+((i.extractedJson&&i.extractedJson._readError)?(' ('+apEsc(i.extractedJson._readError)+')'):'')+'. Enter the vendor, header, and coding by hand below \u2014 or delete it from the inbox and re-upload to try the reader again.</div>';
+  }
   if(i.isDuplicate && !d.dupDismissed){
     warn += '<div style="background:#fdeaea;border:1px solid #f3c9c9;border-left:3px solid #d65b5b;border-radius:7px;padding:10px 12px;font-size:12px;color:#9a3030;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:10px">'+
       '<span>Possible duplicate (same vendor + invoice #). Coding is blocked until you confirm this isn\u2019t a duplicate.</span>'+
