@@ -2363,6 +2363,16 @@ textarea{resize:vertical;min-height:72px}
       </div>
       <div id="t-fnd-vendor-reconcile"></div>
     </div>
+    <!-- Foundation payee master browser (searchable) -->
+    <div style="margin-top:14px;background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
+      <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:4px">Foundation payee master</div>
+      <div style="font-size:11px;color:#888;margin-bottom:10px">
+        Search the full Foundation payee list by name or vendor #, including payees not linked to an app vendor.
+      </div>
+      <input id="t-fnd-master-search" oninput="foundationMasterSearch(this.value)" placeholder="Search payees by name or #\u2026"
+             style="width:100%;max-width:340px;padding:6px 10px;border:1px solid #d8dce6;border-radius:6px;font-size:12px;margin-bottom:10px">
+      <div id="t-fnd-master-list"></div>
+    </div>
   </div>
 
   <!-- ── BPR Classification → Cost Code Map (Round 4.1) ───────────────── -->
@@ -36181,6 +36191,7 @@ function renderFoundationMasterStatus() {
       : '<span style="color:#A32D2D">No payees — upload required</span>';
   }
   renderVendorReconcile();
+  renderFoundationMasterBrowser();
 }
 
 // ── BPR Classification → Cost Code Map (Round 4.1) ───────────────────
@@ -36982,6 +36993,62 @@ function vendorReconcileFilter(val) {
   window._vendorReconSearch = val;
   renderVendorReconcile();
   var s = g('t-fnd-vendor-recon-search');
+  if (s) { s.focus(); try { s.setSelectionRange(s.value.length, s.value.length); } catch (e) {} }
+}
+
+// Searchable browser over the full Foundation payee master (incl. unlinked).
+function renderFoundationMasterBrowser() {
+  var el = g('t-fnd-master-list');
+  if (!el) return;
+  var all = db.foundationVendors || [];
+  if (!all.length) {
+    el.innerHTML = '<div style="font-size:12px;color:#888">No payees imported yet.</div>';
+    return;
+  }
+  // app vendors linked, indexed by Foundation #
+  var linkByNo = {};
+  (db.vendors || []).forEach(function(v){ if (v.foundationVendorNo) linkByNo[String(v.foundationVendorNo)] = v; });
+  var q = String(window._fndMasterSearch || '').toLowerCase().trim();
+  if (!q) {
+    el.innerHTML = '<div style="font-size:12px;color:#888">' + all.length.toLocaleString() + ' payees in master. Type above to search by name or #.</div>';
+    return;
+  }
+  var hits = all.filter(function(f){
+    return String(f.name || '').toLowerCase().indexOf(q) >= 0 || String(f.vendorNo || '').toLowerCase().indexOf(q) >= 0;
+  });
+  hits.sort(function(a, b){ return String(a.name).localeCompare(String(b.name)); });
+  var CAP = 60;
+  var shown = hits.slice(0, CAP);
+  if (!hits.length) {
+    el.innerHTML = '<div style="font-size:12px;color:#A32D2D">No payees match \u201c' + escapeHtml(q) + '\u201d.</div>';
+    return;
+  }
+  var rows = shown.map(function(f){
+    var lk = linkByNo[String(f.vendorNo)];
+    var linkCell = lk
+      ? '<span style="color:#3B6D11">&#10003; ' + escapeHtml(lk.name) + '</span>'
+      : '<span style="color:#aaa">\u2014</span>';
+    return '<tr>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4">' + escapeHtml(f.name || '') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">' + escapeHtml(f.vendorNo || '') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #eef0f4">' + linkCell + '</td>' +
+    '</tr>';
+  }).join('');
+  el.innerHTML =
+    '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
+      '<thead><tr style="background:#F6F7FA">' +
+      '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Payee name</th>' +
+      '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Vendor #</th>' +
+      '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e6ee">Linked app vendor</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<div style="font-size:11px;color:#888;margin-top:6px">' +
+      hits.length + ' match' + (hits.length === 1 ? '' : 'es') + (hits.length > CAP ? ' (showing first ' + CAP + ')' : '') + '.</div>';
+}
+
+function foundationMasterSearch(val) {
+  window._fndMasterSearch = val;
+  renderFoundationMasterBrowser();
+  var s = g('t-fnd-master-search');
   if (s) { s.focus(); try { s.setSelectionRange(s.value.length, s.value.length); } catch (e) {} }
 }
 
