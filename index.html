@@ -37207,6 +37207,7 @@ function apDeleteInvoice(id, ev){
   if(supabaseClient){
     (async function(){
       try{
+        if(i.pdfPath){ await supabaseClient.storage.from('ap-invoices').remove([i.pdfPath]); }
         await supabaseClient.from('kmi_ap_invoice_lines').delete().eq('invoice_id', idStr);
         await supabaseClient.from('kmi_ap_invoice_log').delete().eq('invoice_id', idStr);
         await supabaseClient.from('kmi_ap_invoices').delete().eq('id', idStr);
@@ -37292,7 +37293,7 @@ function _abToBase64(bytes){
   }
   return btoa(bin);
 }
-function apFileToCleanPdfBase64(file){
+function apFileToCleanPdfBytes(file){
   return new Promise(function(resolve, reject){
     var r = new FileReader();
     r.onload = function(){
@@ -37309,13 +37310,15 @@ function apFileToCleanPdfBase64(file){
         for (var j = bytes.length - 5; j >= start; j--) {
           if (bytes[j]===0x25 && bytes[j+1]===0x25 && bytes[j+2]===0x45 && bytes[j+3]===0x4F && bytes[j+4]===0x46) { end = j + 5; break; }
         }
-        var clean = (start > 0 || end < bytes.length) ? bytes.subarray(start, end) : bytes;
-        resolve(_abToBase64(clean));
+        resolve((start > 0 || end < bytes.length) ? bytes.slice(start, end) : bytes);
       } catch(e){ reject(e); }
     };
     r.onerror = function(){ reject(new Error('FileReader error')); };
     r.readAsArrayBuffer(file);
   });
+}
+function apFileToCleanPdfBase64(file){
+  return apFileToCleanPdfBytes(file).then(function(bytes){ return _abToBase64(bytes); });
 }
 
 async function apHandleUpload(evt){
@@ -37331,8 +37334,8 @@ async function apHandleUpload(evt){
   for(var fi=0; fi<files.length; fi++){
     var file=files[fi];
     apSetBanner('info','Reading '+(fi+1)+' of '+files.length+': '+apEsc(file.name)+'\u2026 (10\u201330s each)');
-    var b64=null, ex=null, readErr='';
-    try { b64 = await apFileToCleanPdfBase64(file); } catch(e){ readErr='could not read the file'; }
+    var bytes=null, b64=null, ex=null, readErr='';
+    try { bytes = await apFileToCleanPdfBytes(file); b64 = _abToBase64(bytes); } catch(e){ readErr='could not read the file'; }
     if(b64){
       try {
         var resp = await fetch(fnUrl,{ method:'POST', headers:{'Content-Type':'application/json','apikey':creds.key,'Authorization':'Bearer '+creds.key}, body:JSON.stringify({pdf_base64:b64}) });
@@ -37355,9 +37358,19 @@ async function apHandleUpload(evt){
       status:'received', source:'upload', sourceFile:file.name, extractedJson:ex,
       distType:sug.distType, suggestedCostCode:sug.costCode, suggestedCostClass:sug.costClass, suggestedGlNo:sug.glNo,
       isDuplicate:false, dupOf:null, multiInvoiceFlag:!!ex.multiple_invoices_detected,
-      readFailed:readFailed,
+      readFailed:readFailed, pdfPath:'',
       notes:'', createdBy:(_currentUser?_currentUser.email:''), createdAt:new Date().toISOString()
     };
+    // store the (cleaned) PDF in Supabase Storage so the coder can show it —
+    // even when the read failed, so it can be coded by hand against the PDF.
+    if(bytes && supabaseClient){
+      try {
+        var path = 'invoices/'+id+'.pdf';
+        var up = await supabaseClient.storage.from('ap-invoices').upload(path, new Blob([bytes],{type:'application/pdf'}), {contentType:'application/pdf', upsert:true});
+        if(up && up.error) console.warn('pdf upload:', up.error.message);
+        else rec.pdfPath = path;
+      } catch(e){ console.warn('pdf upload exception:', e); }
+    }
     if(!readFailed){
       var dupId = apDupOf(rec);
       if(dupId){ rec.isDuplicate=true; rec.dupOf=dupId; dups++; }
@@ -37727,8 +37740,36 @@ function apRenderCode(){
     '<button class="btn" onclick="apCodeSave(false)">Save coding</button>'+
     '<button class="btn btn-p" onclick="apCodeSave(true)">Submit for approval \u2192</button></div>';
 
-  el.innerHTML = head + warn + vendorSection + hdr + coding + routeNote + actions;
+  // Split view: source PDF on the left (sticky), coding form on the right.
+  var pdfInner = i.pdfPath
+    ? '<div id="apc-pdf-frame-wrap" style="flex:1;min-height:0;display:flex;align-items:stretch"><div style="margin:auto;color:#888;font-size:12px">Loading PDF\u2026</div></div>'
+    : '<div id="apc-pdf-frame-wrap" style="flex:1;min-height:0;display:flex"><div style="margin:auto;text-align:center;color:#999;font-size:12px;padding:20px">No PDF stored for this invoice.<br>(Uploaded before PDF storage was added, or the upload failed.)</div></div>';
+  var pdfPane = '<div style="flex:0 0 46%;position:sticky;top:12px;align-self:flex-start;height:calc(100vh - 150px);min-height:420px;display:flex;flex-direction:column;background:#525659;border:1px solid #d8dce6;border-radius:9px;overflow:hidden">'+
+    '<div style="padding:6px 10px;background:#3c3f42;color:#cfd2d6;font-size:11px;display:flex;justify-content:space-between;align-items:center">'+
+      '<span>Source PDF</span>'+(i.pdfPath?'<button onclick="apOpenPdfNewTab(\''+i.id+'\')" style="border:0;background:none;color:#9fd0ff;cursor:pointer;font-size:11px">Open in new tab \u2197</button>':'')+
+    '</div>'+ pdfInner +'</div>';
+  var formPane = '<div style="flex:1;min-width:0">'+ warn + vendorSection + hdr + coding + routeNote + actions +'</div>';
+
+  el.innerHTML = head + '<div style="display:flex;gap:16px;align-items:flex-start">'+ pdfPane + formPane +'</div>';
   if(!d.foundationVendorNo) _apRenderVendorResults();
+  if(i.pdfPath) _apLoadPdfPane(i.id, i.pdfPath);
+}
+
+// Generate a short-lived signed URL for the invoice PDF and show it in the pane.
+async function _apLoadPdfPane(invoiceId, path){
+  var el=g('apc-pdf-frame-wrap'); if(!el) return;
+  if(!supabaseClient){ el.innerHTML='<div style="margin:auto;color:#cfd2d6;font-size:12px;padding:20px">Cloud not connected \u2014 can\u2019t load the PDF.</div>'; return; }
+  try{
+    var r=await supabaseClient.storage.from('ap-invoices').createSignedUrl(path, 3600);
+    if(String(_apCodeId)!==String(invoiceId)) return; // user navigated away
+    var url = r && r.data && (r.data.signedUrl || r.data.signedURL);
+    if(url){ el.innerHTML='<iframe src="'+url+'" style="width:100%;height:100%;border:0" title="Invoice PDF"></iframe>'; }
+    else { el.innerHTML='<div style="margin:auto;color:#ffd0d0;font-size:12px;padding:20px">Couldn\u2019t load the PDF'+((r&&r.error&&r.error.message)?(': '+apEsc(r.error.message)):'')+'.</div>'; }
+  }catch(e){ el.innerHTML='<div style="margin:auto;color:#ffd0d0;font-size:12px;padding:20px">Error loading PDF: '+apEsc(e&&e.message?e.message:String(e))+'</div>'; }
+}
+async function apOpenPdfNewTab(invoiceId){
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(invoiceId);}); if(!i||!i.pdfPath||!supabaseClient) return;
+  try{ var r=await supabaseClient.storage.from('ap-invoices').createSignedUrl(i.pdfPath, 3600); var url=r&&r.data&&(r.data.signedUrl||r.data.signedURL); if(url) window.open(url,'_blank'); }catch(e){ console.warn('open pdf:',e); }
 }
 
 // live split-sum recolor without full re-render
@@ -42703,6 +42744,7 @@ function toSBApInvoice(r) {
     suggested_gl_no:r.suggestedGlNo||'',
     is_duplicate:!!r.isDuplicate, dup_of:r.dupOf||null,
     multi_invoice_flag:!!r.multiInvoiceFlag, notes:r.notes||'',
+    pdf_path:r.pdfPath||null,
     created_by:r.createdBy||'', updated_at:new Date().toISOString()
   };
 }
@@ -42720,6 +42762,7 @@ function fromSBApInvoice(r) {
     suggestedGlNo:r.suggested_gl_no||'',
     isDuplicate:!!r.is_duplicate, dupOf:r.dup_of||null,
     multiInvoiceFlag:!!r.multi_invoice_flag, notes:r.notes||'',
+    pdfPath:r.pdf_path||'',
     createdBy:r.created_by||'', createdAt:r.created_at||''
   };
 }
