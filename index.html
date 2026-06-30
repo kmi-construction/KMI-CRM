@@ -37118,6 +37118,32 @@ function apSetBanner(kind, html){
   el.innerHTML = html;
 }
 
+// Display name for an invoice's vendor — prefer the canonical Foundation payee
+// name (looked up by the persisted foundation #, so it survives reloads even
+// though we don't store the name column), then any stored name, then extracted.
+function apVendorDisplayName(i){
+  if(i.foundationVendorNo){
+    var f=(db.foundationVendors||[]).find(function(x){ return String(x.vendorNo)===String(i.foundationVendorNo); });
+    if(f && f.name) return f.name;
+  }
+  return i.foundationVendorName || i.vendorName || '';
+}
+
+// Inbox "Job" cell — reflects the coded distribution once an invoice is coded:
+// the single job, "Multiple (n)" for a split spanning jobs, or "Overhead" for GL.
+function apInvoiceJobCell(i){
+  var coded = String(i.status||'received') !== 'received';
+  var lines = coded ? (db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)===String(i.id); }) : [];
+  if(lines.length){
+    var jobLines = lines.filter(function(l){ return l.distType==='job' && l.jobNo; });
+    if(!jobLines.length) return '<span style="color:#aaa">Overhead</span>';
+    var js=[]; jobLines.forEach(function(l){ if(js.indexOf(l.jobNo)<0) js.push(l.jobNo); });
+    if(js.length===1) return apEsc(js[0]);
+    return '<span title="'+apEsc(js.join(', '))+'">Multiple ('+js.length+')</span>';
+  }
+  return i.jobNo ? apEsc(i.jobNo) : '<span style="color:#aaa">\u2014</span>';
+}
+
 function renderApInbox(){
   if (!hasRead('ap-invoices')) return;
   var inv = (db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
@@ -37142,17 +37168,19 @@ function renderApInbox(){
     return;
   }
   var rows = inv.map(function(i){
-    var rf = i.readFailed || (i.extractedJson && i.extractedJson._readFailed);
-    var dup = i.isDuplicate ? ' style="background:#fdf6f6;cursor:pointer"' : ' style="cursor:pointer"';
+    var coded = String(i.status||'received') !== 'received';
+    var rf = (i.readFailed || (i.extractedJson && i.extractedJson._readFailed)) && !coded;
+    var dup = (i.isDuplicate && !coded) ? ' style="background:#fdf6f6;cursor:pointer"' : ' style="cursor:pointer"';
     var stCell = rf ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fff1d6;color:#9A6A00">Read failed</span>'
-                    : (i.isDuplicate ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(i.status));
+                    : ((i.isDuplicate && !coded) ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(i.status));
     var src = i.source==='email' ? '&#128231; email' : '&#11014; upload';
-    var vCell = rf ? '<span style="color:#9A6A00">(could not read — code manually)</span>' : ('<strong>'+apEsc(i.vendorName||'(unknown vendor)')+'</strong>');
+    var vName = apVendorDisplayName(i);
+    var vCell = rf ? '<span style="color:#9A6A00">(could not read — code manually)</span>' : ('<strong>'+apEsc(vName||'(unknown vendor)')+'</strong>');
     return '<tr'+dup+' onclick="apOpenCode(\''+i.id+'\')">'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+vCell+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+apEsc(i.invoiceDate)+'</td>'+
-      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+(i.jobNo?apEsc(i.jobNo):'<span style="color:#aaa">Overhead</span>')+'</td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+apInvoiceJobCell(i)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apMoney(i.total)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-size:11px;color:#888">'+src+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+stCell+'</td>'+
@@ -37320,7 +37348,7 @@ async function apHandleUpload(evt){
     var id = 'ap-'+Date.now()+'-'+fi;
     if(readFailed){ ex._readFailed = true; ex._readError = readErr; }
     var rec = {
-      id:id, vendorId:rv.vendorId, foundationVendorNo:rv.foundationVendorNo||'',
+      id:id, vendorId:rv.vendorId, foundationVendorNo:rv.foundationVendorNo||'', foundationVendorName:rv.foundationVendorName||'',
       vendorName:ex.vendor_name||'', invoiceNo:ex.invoice_no||'', invoiceDate:ex.invoice_date||'',
       dueDate:ex.due_date||'', terms:ex.terms||'', poNo:ex.po_no||'', jobNo:ex.job_no||'',
       subtotal:Number(ex.subtotal)||0, salesTax:Number(ex.sales_tax)||0, freight:Number(ex.freight)||0, total:Number(ex.total)||0,
@@ -37757,6 +37785,13 @@ async function apCodeSave(submit){
   i.foundationVendorNo = d.foundationVendorNo;
   i.foundationVendorName = d.foundationVendorName;
   i.distType = d.distType;
+  // Reflect the coded job on the header: GL → overhead (blank); otherwise the
+  // (first) coded job. The inbox derives single/Multiple/Overhead from the lines.
+  if(d.distType==='gl'){ i.jobNo=''; }
+  else {
+    var jset=[]; lines.forEach(function(ln){ if(ln.distType==='job' && ln.jobNo && jset.indexOf(ln.jobNo)<0) jset.push(ln.jobNo); });
+    if(jset.length) i.jobNo = jset[0];
+  }
   i.status = submit ? 'pending' : 'coded';
   i.updatedAt = new Date().toISOString();
   // replace lines for this invoice
