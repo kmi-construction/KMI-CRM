@@ -38264,6 +38264,14 @@ function apRenderReview(){
   if(i.pdfPath) _apLoadPdfPane(i.id, i.pdfPath, 'apr-pdf-frame-wrap');
 }
 
+// next invoice in the current filtered review list (captured before a decision
+// changes this invoice's status and drops it from the list)
+function _apReviewNextId(){
+  var ord=_apReviewOrdered();
+  var pos=ord.findIndex(function(x){return String(x.id)===String(_apReviewId);});
+  if(pos<0) return null;
+  return (pos+1<ord.length)?ord[pos+1].id:null;
+}
 function apApprove(id){
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
   if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can approve this.'); return; }
@@ -38271,37 +38279,40 @@ function apApprove(id){
     if(!confirm('The coding lines don\u2019t tie out to the invoice total. Approve anyway?')) return;
   }
   var note=(g('apr-note')&&g('apr-note').value.trim())||'';
+  var nextId=_apReviewNextId();
   i.status='approved'; i.approvedBy=(_currentUser?String(_currentUser.id):''); i.approvedAt=new Date().toISOString(); i.decisionNote=note; i.updatedAt=i.approvedAt;
   saveDB();
   apLog(i.id,'approved','Approved for export'+(note?(' \u2014 '+note):''));
   if(supabaseClient) apPushInvoice(i);
-  apCloseReview();
-  apSetApprBanner('success','Approved '+apEsc(apVendorDisplayName(i)||i.vendorName)+' \u00b7 '+apEsc(i.invoiceNo)+' \u2014 ready for export.');
+  if(nextId) apOpenReview(nextId); else apCloseReview();
+  apSetApprBanner('success','Approved '+apEsc(apVendorDisplayName(i)||i.vendorName)+' \u00b7 '+apEsc(i.invoiceNo)+'.'+(nextId?' Next invoice loaded.':' Nothing left to review.'));
 }
 function apHold(id){
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
   if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can hold this.'); return; }
   var note=(g('apr-note')&&g('apr-note').value.trim())||'';
   if(!note){ alert('Add a note explaining why it\u2019s on hold.'); return; }
+  var nextId=_apReviewNextId();
   i.status='hold'; i.decisionNote=note; i.updatedAt=new Date().toISOString();
   saveDB();
   apLog(i.id,'hold','Placed on hold \u2014 '+note);
   if(supabaseClient) apPushInvoice(i);
-  apCloseReview();
-  apSetApprBanner('info','Placed '+apEsc(i.invoiceNo)+' on hold.');
+  if(nextId) apOpenReview(nextId); else apCloseReview();
+  apSetApprBanner('info','Placed '+apEsc(i.invoiceNo)+' on hold.'+(nextId?' Next invoice loaded.':''));
 }
 async function apReject(id){
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
   if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can reject this.'); return; }
   var note=(g('apr-note')&&g('apr-note').value.trim())||'';
   if(!note){ alert('A rejection reason is required (it\u2019s emailed to Accounting and shown to the coder).'); return; }
+  var nextId=_apReviewNextId();
   i.status='rejected'; i.approvedBy=(_currentUser?String(_currentUser.id):''); i.approvedAt=new Date().toISOString();
   i.decisionNote=note; i.queuedAt=''; i.lastReminderAt='';   // clock stops; restarts on resubmit
   i.updatedAt=i.approvedAt;
   saveDB();
   apLog(i.id,'rejected','Rejected \u2014 '+note);
   if(supabaseClient) apPushInvoice(i);
-  apCloseReview();
+  if(nextId) apOpenReview(nextId); else apCloseReview();
   apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+' \u2014 returned to coding. Notifying Accounting\u2026');
   // email Accounting (one message per recipient — Resend fan-out)
   try{
@@ -38318,7 +38329,7 @@ async function apReject(id){
     for(var k=0;k<rcpts.length;k++){
       await sendEmail({ to:rcpts[k].email, subject:subj, text:body, flowType:'ap_rejected', sentBy:(_currentUser?_currentUser.id:null), sentByEmail:(_currentUser?_currentUser.email:null), relatedEntityType:'ap_invoice', relatedEntityId:String(i.id) });
     }
-    apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+' \u2014 returned to coding. Accounting notified ('+rcpts.length+').');
+    apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+' \u2014 returned to coding. Accounting notified ('+rcpts.length+').'+(nextId?' Next invoice loaded.':''));
   }catch(e){ console.warn('reject email:',e); apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+', but the Accounting email failed to send.'); }
 }
 
