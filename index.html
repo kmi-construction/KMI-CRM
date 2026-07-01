@@ -2953,7 +2953,7 @@ textarea{resize:vertical;min-height:72px}
   <div class="card" style="padding:0;overflow:hidden">
     <table>
       <thead><tr>
-        <th>Status</th><th>Response</th><th>Project</th><th>KMI #</th><th>Spec Section</th><th>Item</th><th>Package</th><th>Product</th><th>Due</th><th>Sent</th><th>Returned</th><th>Actions</th>
+        <th class="sortable" onclick="sortSub('status')">Status</th><th class="sortable" onclick="sortSub('response')">Response</th><th class="sortable" onclick="sortSub('project')">Project</th><th class="sortable" onclick="sortSub('kmiNo')">KMI #</th><th class="sortable" onclick="sortSub('csi')">Spec Section</th><th class="sortable" onclick="sortSub('item')">Item</th><th class="sortable" onclick="sortSub('package')">Package</th><th class="sortable" onclick="sortSub('product')">Product</th><th class="sortable" onclick="sortSub('due')">Due</th><th class="sortable" onclick="sortSub('sent')">Sent</th><th class="sortable" onclick="sortSub('returned')">Returned</th><th>Actions</th>
       </tr></thead>
       <tbody id="sb-tbody"></tbody>
     </table>
@@ -3015,7 +3015,7 @@ textarea{resize:vertical;min-height:72px}
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
       <button class="btn" onclick="_subExitForm()">Cancel</button>
-      <button class="btn" onclick="showSubmittalPackageCompile(_editSubmittalId)" id="esb-compile-btn" style="display:none">📄 Compile package</button>
+      <button class="btn" onclick="showSubmittalPackageCompile(_editSubmittalId)" id="esb-compile-btn" style="display:none">📄 Compile</button>
       <button class="btn btn-p" onclick="saveSubmittal()" id="esb-save-btn">Save submittal</button>
       <button class="btn" onclick="deleteSubmittal()" id="esb-del-btn" style="color:#A32D2D;display:none">Delete</button>
     </div>
@@ -9403,20 +9403,26 @@ function renderSubmittals() {
     return true;
   });
 
-  // Sort: overdue first, then by due date asc, then by KMI #
-  rows.sort(function(a, b){
-    var oa = _isOverdue(a.dueDate) ? 0 : 1;
-    var ob = _isOverdue(b.dueDate) ? 0 : 1;
-    if (oa !== ob) return oa - ob;
-    var da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
-    var dbb = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
-    if (da !== dbb) return da - dbb;
-    return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
-  });
+  // Sort: user-chosen column (click headers) if set, else default
+  // overdue-first, then due asc, then KMI #.
+  if (_sbSort) {
+    rows = _sortSubmittalRows(rows, _sbSort);
+  } else {
+    rows.sort(function(a, b){
+      var oa = _isOverdue(a.dueDate) ? 0 : 1;
+      var ob = _isOverdue(b.dueDate) ? 0 : 1;
+      if (oa !== ob) return oa - ob;
+      var da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+      var dbb = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+      if (da !== dbb) return da - dbb;
+      return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
+    });
+  }
 
   var canEdit = canAccess('edit-submittals') === 'full';
   var tbody = g('sb-tbody');
   if (!tbody) return;
+  updateSubSortIndicators();
   if (!rows.length) {
     tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:30px;color:#aaa;font-size:13px">' +
       ((db.submittals || []).length === 0
@@ -9469,6 +9475,67 @@ function renderSubmittals() {
 // ════════════════════════════════════════════════════════════════════
 // EDIT PAGE
 // ════════════════════════════════════════════════════════════════════
+
+// ── Submittal column sorting (shared by the global page and the
+// per-project block). _sbSort drives the global page; the project block
+// keeps its own _psbSort. null on the global page = default sort.
+var _sbSort = null;
+function getSubSortValue(s, col) {
+  switch (col) {
+    case 'status':   return s.status || 'draft';
+    case 'response': return s.response || '';
+    case 'project':  return getProjectName(s.projectId) || '';
+    case 'kmiNo':    return s.kmiSubmittalNo || '';
+    case 'csi':      return s.csiSection || '';
+    case 'item':     return s.itemName || '';
+    case 'package':  return s.packageName || '';
+    case 'product':  {
+      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+      if (s.isCustom) return 'zzz_custom';
+      if (!pids.length) return '';
+      var p0 = getProduct(pids[0]);
+      return p0 ? (p0.name || '') : '';
+    }
+    case 'due':      return s.dueDate || '';
+    case 'sent':     return s.sentDate || '';
+    case 'returned': return s.responseDate || '';
+    default:         return '';
+  }
+}
+function _sortSubmittalRows(arr, st) {
+  if (!st) return arr;
+  var col = st.col, dir = st.dir, sorted = arr.slice();
+  sorted.sort(function(a, b) {
+    var va = getSubSortValue(a, col), vb = getSubSortValue(b, col);
+    var aEmpty = va === null || va === undefined || va === '';
+    var bEmpty = vb === null || vb === undefined || vb === '';
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1;   // blanks sink to the bottom regardless of direction
+    if (bEmpty) return -1;
+    var cmp;
+    if (typeof va === 'number' && typeof vb === 'number') cmp = va - vb;
+    else cmp = String(va).toLowerCase().localeCompare(String(vb).toLowerCase());
+    return dir === 'asc' ? cmp : -cmp;
+  });
+  return sorted;
+}
+function sortSub(col) {
+  if (_sbSort && _sbSort.col === col) _sbSort.dir = _sbSort.dir === 'asc' ? 'desc' : 'asc';
+  else _sbSort = { col: col, dir: 'asc' };
+  renderSubmittals();
+}
+function updateSubSortIndicators() {
+  var tb = g('sb-tbody');
+  var tbl = tb ? tb.closest('table') : null;
+  if (!tbl) return;
+  tbl.querySelectorAll('thead th.sortable').forEach(function(th) {
+    th.classList.remove('asc', 'desc');
+    if (!_sbSort) return;
+    var oc = th.getAttribute('onclick') || '';
+    var m = oc.match(/sortSub\('([^']+)'\)/);
+    if (m && m[1] === _sbSort.col) th.classList.add(_sbSort.dir);
+  });
+}
 
 function initNewSubmittal() {
   if (!requireFull('edit-submittals', 'add submittals')) return;
@@ -10505,7 +10572,7 @@ function _detectImportColumn(headers, patterns) {
   return -1;
 }
 
-function showSubmittalImport() {
+function showSubmittalImport(presetProjectId) {
   if (!requireFull('edit-submittals', 'import submittals')) return;
   if (typeof XLSX === 'undefined') {
     alert('Excel parser is still loading. Wait a moment and try again.');
@@ -10515,18 +10582,22 @@ function showSubmittalImport() {
     alert('You need at least one project before importing submittals. Add a project first, then come back.');
     return;
   }
+  var _preset = (presetProjectId !== undefined && presetProjectId !== null && String(presetProjectId) !== '');
   _importParsedRows = [];
-  _importTargetProjectId = null;
+  _importTargetProjectId = _preset ? presetProjectId : null;
   var projOpts = (db.projects || []).slice().sort(function(a,b){
     return String(a.name || '').localeCompare(String(b.name || ''));
   }).map(function(p){
-    return '<option value="' + subEsc(p.id) + '">' + subEsc(p.name || ('Project ' + p.id)) + '</option>';
+    var sel = (_preset && String(p.id) === String(presetProjectId)) ? ' selected' : '';
+    return '<option value="' + subEsc(p.id) + '"' + sel + '>' + subEsc(p.name || ('Project ' + p.id)) + '</option>';
   }).join('');
   var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Import submittals from Excel</div>' +
     '<div class="msb">Pick the destination project, then upload your XLSX file</div>' +
     '<div class="fg">' +
-      '<div class="fgr full"><label>Destination project *</label><select id="imp-proj"><option value="">— Select —</option>' + projOpts + '</select></div>' +
+      '<div class="fgr full"><label>Destination project *</label><select id="imp-proj"' + (_preset ? ' disabled' : '') + '>' + (_preset ? '' : '<option value="">— Select —</option>') + projOpts + '</select>' +
+        (_preset ? '<div style="font-size:10px;color:#888;margin-top:3px">Locked to this project. Imported submittals will be added here.</div>' : '') +
+      '</div>' +
       '<div class="fgr full"><label>XLSX file</label>' +
         '<input type="file" id="imp-file" accept=".xlsx,.xls" onchange="onSubmittalImportFile(event)">' +
       '</div>' +
@@ -12016,18 +12087,10 @@ function showSubmittalPackageCompile(submittalId) {
 
   var anchor = getSubmittal(submittalId);
   if (!anchor) { alert('Submittal not found.'); return; }
-  if (!anchor.packageName) {
-    alert('This submittal has no package name yet. Add a package name (e.g. "CMU Test Reports") on the submittal, save, then compile.');
-    return;
-  }
 
-  // Gather every submittal in the same package on the same project
-  var pkgItems = (db.submittals || []).filter(function(s){
-    return String(s.projectId) === String(anchor.projectId) &&
-           (s.packageName || '') === anchor.packageName;
-  }).sort(function(a, b){
-    return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
-  });
+  // Per-submittal compile: the transmittal covers only this one submittal.
+  // Package is organizational only and is no longer required to compile.
+  var pkgItems = [anchor];
 
   // Project + customer lookup
   var proj = (db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {};
@@ -12104,7 +12167,7 @@ function showSubmittalPackageCompile(submittalId) {
 
   // Title — "Transmittal #N - Submittal #KMI Item Name". The transmittal
   // counter defaults to 1; the user can edit before generating.
-  var defaultTitleSubmittal = (anchor.kmiSubmittalNo ? '#' + anchor.kmiSubmittalNo + ' ' : '') + (anchor.packageName || anchor.itemName || '');
+  var defaultTitleSubmittal = (anchor.kmiSubmittalNo ? '#' + anchor.kmiSubmittalNo + ' ' : '') + (anchor.itemName || anchor.packageName || '');
 
   // Default cover comments — templated using project/package context.
   // The signature block uses the current user's profile; user can edit
@@ -12112,7 +12175,7 @@ function showSubmittalPackageCompile(submittalId) {
   var userTitle = _userTitle(u);
   var defaultComments =
     'Hello,\n\n' +
-    'Attached is the ' + (anchor.packageName || 'submittal') +
+    'Attached is the ' + (anchor.itemName || anchor.packageName || 'submittal') +
     ' submittal for the ' + (proj.name || 'project') + ' project. ' +
     'Please review and provide your response. Reach out with any questions.\n\n' +
     'Thank you,\n' +
@@ -12124,28 +12187,19 @@ function showSubmittalPackageCompile(submittalId) {
   // Today's date (yyyy-mm-dd) for the date inputs
   var todayIso = (new Date()).toISOString().slice(0, 10);
 
-  // Build the items list with checkboxes (per-submittal include/exclude).
-  // The cover sheet's items table will be per-document; this list lets
-  // the PC choose which submittals' docs are pulled into the package.
-  var itemRows = pkgItems.map(function(s){
-    var docs = _gatherCompileDocsForSubmittal(s);
-    var docCount = docs.length;
-    var label = (s.kmiSubmittalNo || ('#' + s.id)) + ' — ' + (s.itemName || '(no name)');
-    if (!s.isCustom) {
-      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
-      if (pids.length > 1) {
-        var names = pids.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ('#' + pid); });
-        label += ' [' + names.join(', ') + ']';
-      }
-    }
-    var note = docCount === 0
-      ? '<span style="color:#9A7A2E;font-size:11px;margin-left:8px">⚠ no documents</span>'
-      : '<span style="color:#888;font-size:11px;margin-left:8px">' + docCount + ' doc' + (docCount === 1 ? '' : 's') + '</span>';
-    return '<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:0.5px solid #eee;cursor:pointer">' +
-      '<input type="checkbox" class="cmp-item" data-id="' + subEsc(s.id) + '" ' + (docCount > 0 ? 'checked' : '') + '>' +
-      '<span style="font-size:12px">' + subEsc(label) + note + '</span>' +
-    '</label>';
-  }).join('');
+  // Read-only summary of the documents that will be pulled into this
+  // submittal's transmittal. Compile is per-submittal, so there is no
+  // include/exclude checklist — every document on this submittal is used.
+  var _anchorDocs = _gatherCompileDocsForSubmittal(anchor);
+  var itemRows = _anchorDocs.length
+    ? _anchorDocs.map(function(entry){
+        var nm = (entry.productName && entry.productName.length) ? entry.productName : (entry.fileName || '—');
+        return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:0.5px solid #eee">' +
+          '<span style="font-size:12px">' + subEsc(nm) + '</span>' +
+          '<span style="color:#888;font-size:11px">' + subEsc(entry.format || 'file') + '</span>' +
+        '</div>';
+      }).join('')
+    : '<div style="padding:8px;color:#9A7A2E;font-size:12px">⚠ No documents are attached to this submittal.</div>';
 
   // Project contact dropdown options
   var contactOpts = '<option value="">— Pick a recipient —</option>' +
@@ -12168,7 +12222,7 @@ function showSubmittalPackageCompile(submittalId) {
 
   var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Compile transmittal</div>' +
-    '<div class="msb">Generates a Procore-style transmittal cover + every checked item\'s documents in one PDF</div>' +
+    '<div class="msb">Generates a Procore-style transmittal cover + this submittal\'s documents in one PDF</div>' +
 
     '<div class="fg">' +
       // Title / transmittal #
@@ -12209,11 +12263,11 @@ function showSubmittalPackageCompile(submittalId) {
       '</div>' +
     '</div>' +
 
-    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Submittal items in this package (' + pkgItems.length + ')</div>' +
+    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Documents on this submittal (' + _anchorDocs.length + ')</div>' +
       '<div style="border:0.5px solid #ddd;border-radius:4px;max-height:200px;overflow-y:auto">' +
         itemRows +
       '</div>' +
-      '<div style="font-size:11px;color:#888;margin-top:6px">Each <em>document</em> on a checked submittal becomes its own row in the Transmittal Items table on the cover.</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:6px">Each <em>document</em> becomes its own row in the Transmittal Items table on the cover.</div>' +
     '</div>' +
 
     '<div id="cmp-status" style="margin-top:10px;font-size:12px;color:#888;min-height:18px"></div>' +
@@ -12487,13 +12541,12 @@ async function compileSubmittalPackage() {
   var btn = g('cmp-go-btn');
   var status = g('cmp-status');
 
-  // Checked items
-  var checks = document.querySelectorAll('.cmp-item:checked');
-  if (!checks || !checks.length) {
-    if (status) status.innerHTML = '<span style="color:#A32D2D">Pick at least one item to include.</span>';
+  // Per-submittal compile: include the scoped submittal(s) directly.
+  var includedIds = (_compileSubmittalIds || []).map(String);
+  if (!includedIds.length) {
+    if (status) status.innerHTML = '<span style="color:#A32D2D">No submittal to compile.</span>';
     return;
   }
-  var includedIds = Array.prototype.map.call(checks, function(c){ return c.getAttribute('data-id'); });
 
   // Read every dialog field
   var transNo       = (g('cmp-trans-no').value     || '').trim();
@@ -12694,7 +12747,7 @@ async function compileSubmittalPackage() {
         .trim();
     }
     var _subNo = anchor ? _safeForCompileFilename(anchor.kmiSubmittalNo) : '';
-    var _pkgNm = anchor ? _safeForCompileFilename(anchor.packageName)    : '';
+    var _pkgNm = anchor ? _safeForCompileFilename(anchor.itemName || anchor.packageName) : '';
     var fname;
     if (_subNo && _pkgNm)      fname = _subNo + ' - ' + _pkgNm + '.pdf';
     else if (_subNo)           fname = _subNo + '.pdf';
@@ -12752,103 +12805,227 @@ async function compileSubmittalPackage() {
 // project, suitable for embedding inside the Project Detail page. Empty
 // state encourages the user to add or import.
 
+// Per-project submittals: sort + filter state. Reset when the viewed
+// project changes so one project's search box doesn't bleed into another.
+var _psbSort = { col: 'due', dir: 'asc' };
+var _psbFilter = { q: '', status: '', pkg: '', sent: '', due: '' };
+var _psbProjectId = null;
+var _psbLastProjectId = null;
+
+function _psbOpt(values, labels, cur) {
+  return values.map(function(v, i){
+    return '<option value="' + subEsc(v) + '"' + (String(v) === String(cur) ? ' selected' : '') + '>' + subEsc(labels[i]) + '</option>';
+  }).join('');
+}
+
 function renderProjectSubmittalsBlock(projectId) {
   if (!projectId) return '';
-  var rows = (db.submittals || []).filter(function(s){
-    return String(s.projectId) === String(projectId);
-  });
-  // Sort same as the global page: overdue first, then due asc
-  rows.sort(function(a, b){
-    var oa = _isOverdue(a.dueDate) ? 0 : 1;
-    var ob = _isOverdue(b.dueDate) ? 0 : 1;
-    if (oa !== ob) return oa - ob;
-    var da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
-    var dbb = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
-    return da - dbb;
-  });
-
-  var canEdit = canAccess('edit-submittals') === 'full';
   var canView = canAccess('view-submittals') !== 'none';
   if (!canView) return '';
+  var canEdit = canAccess('edit-submittals') === 'full';
+
+  // Reset filters/sort when switching to a different project.
+  if (String(_psbLastProjectId) !== String(projectId)) {
+    _psbFilter = { q: '', status: '', pkg: '', sent: '', due: '' };
+    _psbSort = { col: 'due', dir: 'asc' };
+    _psbLastProjectId = projectId;
+  }
+  _psbProjectId = projectId;
+
+  var allRows = (db.submittals || []).filter(function(s){
+    return String(s.projectId) === String(projectId);
+  });
 
   var addBtn = canEdit
     ? '<button class="btn btn-sm btn-p" onclick="initNewSubmittalForProject(' + projectId + ')">+ Add submittal</button>'
     : '';
+  var importBtn = canEdit
+    ? '<button class="btn btn-sm" onclick="showSubmittalImport(' + projectId + ')">↑ Import XLSX</button>'
+    : '';
 
-  if (!rows.length) {
+  if (!allRows.length) {
     return '<div class="card">' +
-      '<div class="ch"><span class="ct">Submittals</span>' + addBtn + '</div>' +
+      '<div class="ch"><span class="ct">Submittals</span><span style="display:flex;gap:6px">' + importBtn + addBtn + '</span></div>' +
       '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center">' +
         'No submittals on this project yet.' +
         (canEdit ? ' <a href="javascript:void(0)" onclick="goToSubmittalsForProject(' + projectId + ')" style="color:var(--kmi)">View all submittals</a>' : '') +
       '</div></div>';
   }
 
-  // Group by package for visual clarity
-  var byPkg = {};
-  rows.forEach(function(s){
-    var k = s.packageName || '(no package)';
-    if (!byPkg[k]) byPkg[k] = [];
-    byPkg[k].push(s);
+  // Filter option sets derived from this project's data
+  var statSet = {}, pkgSet = {};
+  allRows.forEach(function(s){
+    statSet[s.status || 'draft'] = true;
+    if (s.packageName) pkgSet[s.packageName] = true;
   });
+  var statusOptions = '<option value="">All statuses</option>' + Object.keys(statSet).sort().map(function(st){
+    return '<option value="' + subEsc(st) + '"' + (_psbFilter.status === st ? ' selected' : '') + '>' + subEsc(st) + '</option>';
+  }).join('');
+  var pkgOptions = '<option value="">All packages</option>' + Object.keys(pkgSet).sort().map(function(pk){
+    return '<option value="' + subEsc(pk) + '"' + (_psbFilter.pkg === pk ? ' selected' : '') + '>' + subEsc(pk) + '</option>';
+  }).join('');
 
-  var body = '';
-  Object.keys(byPkg).sort().forEach(function(pkg){
-    // First submittal in the package — used to scope the Compile action
-    var firstId = byPkg[pkg][0] && byPkg[pkg][0].id;
-    var compileBtnHtml = (canEdit && firstId)
-      ? ' <button class="btn btn-sm" style="float:right;margin-top:-3px;font-size:10px;padding:2px 8px" onclick="event.stopPropagation();showSubmittalPackageCompile(' + firstId + ')">📄 Compile</button>'
-      : '';
-    body += '<tr style="background:#fafafa"><td colspan="7" style="padding:6px 8px;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">' +
-      subEsc(pkg) + ' <span style="color:#aaa;font-weight:400;text-transform:none">(' + byPkg[pkg].length + ')</span>' +
-      compileBtnHtml +
-      '</td></tr>';
-    byPkg[pkg].forEach(function(s){
-      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
-      var prodCell;
-      if (s.isCustom) {
-        prodCell = '<span style="color:#888;font-style:italic">Custom</span>';
-      } else if (!pids.length) {
-        prodCell = '<span style="color:#A32D2D">Missing product</span>';
-      } else {
-        var firstP = getProduct(pids[0]);
-        var firstName = firstP ? firstP.name : ('#' + pids[0]);
-        prodCell = subEsc(firstName) + (pids.length > 1
-          ? ' <span style="color:#888;font-size:11px">(+' + (pids.length - 1) + ')</span>'
-          : '');
-      }
-      var dueCell = s.dueDate || '—';
-      if (_isOverdue(s.dueDate) && s.status !== 'closed') {
-        dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
-      }
-      body += '<tr style="cursor:pointer" onclick="subEditForProject(' + s.id + ', ' + projectId + ')">' +
-        '<td style="padding:5px 8px">' + subStatusBadge(s.status || 'draft') + '</td>' +
-        '<td style="padding:5px 8px">' + subResponseBadge(s.response || '') + '</td>' +
-        '<td style="padding:5px 8px;font-family:monospace;font-size:11px">' + subEsc(s.kmiSubmittalNo || '—') + '</td>' +
-        '<td style="padding:5px 8px;font-weight:600;font-size:12px">' + subEsc(s.itemName || '') + '</td>' +
-        '<td style="padding:5px 8px;font-size:12px">' + prodCell + '</td>' +
-        '<td style="padding:5px 8px;font-size:12px">' + dueCell + '</td>' +
-        '<td style="padding:5px 8px;font-size:12px">' + subEsc(s.responseDate || '') +
-          ((s.responseDocuments && s.responseDocuments.length)
-            ? ' <span title="' + s.responseDocuments.length + ' response document' + (s.responseDocuments.length === 1 ? '' : 's') + ' attached" style="color:#888;font-size:11px">📎' + (s.responseDocuments.length > 1 ? s.responseDocuments.length : '') + '</span>'
-            : '') +
-        '</td>' +
-      '</tr>';
-    });
-  });
+  var filterBar =
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 10px;border-bottom:0.5px solid #eee">' +
+      '<input id="psb-q" placeholder="Search item, KMI #, product\u2026" value="' + subEsc(_psbFilter.q) + '" oninput="psbApplyFilters()" style="flex:1;min-width:150px;font-size:12px;padding:4px 8px">' +
+      '<select id="psb-status" onchange="psbApplyFilters()" style="font-size:12px">' + statusOptions + '</select>' +
+      '<select id="psb-pkg" onchange="psbApplyFilters()" style="font-size:12px">' + pkgOptions + '</select>' +
+      '<select id="psb-sent" onchange="psbApplyFilters()" style="font-size:12px">' + _psbOpt(['','sent','not'], ['Sent: any','Sent','Not sent'], _psbFilter.sent) + '</select>' +
+      '<select id="psb-due" onchange="psbApplyFilters()" style="font-size:12px">' + _psbOpt(['','overdue','nodate'], ['Due: any','Overdue','No date'], _psbFilter.due) + '</select>' +
+    '</div>';
 
-  return '<div class="card">' +
-    '<div class="ch"><span class="ct">Submittals (' + rows.length + ')</span>' + addBtn + '</div>' +
-    '<table style="width:100%;font-size:12px"><thead><tr>' +
-      '<th style="padding:6px 8px;text-align:left;width:90px">Status</th>' +
-      '<th style="padding:6px 8px;text-align:left;width:130px">Response</th>' +
-      '<th style="padding:6px 8px;text-align:left;width:110px">KMI #</th>' +
-      '<th style="padding:6px 8px;text-align:left">Item</th>' +
-      '<th style="padding:6px 8px;text-align:left">Product</th>' +
-      '<th style="padding:6px 8px;text-align:left;width:90px">Due</th>' +
-      '<th style="padding:6px 8px;text-align:left;width:90px">Returned</th>' +
-    '</tr></thead><tbody>' + body + '</tbody></table>' +
+  var filteredCount = _psbFilteredSorted(projectId).length;
+
+  // Kick sort-arrow indicators once the string has been inserted.
+  setTimeout(updatePsbSortIndicators, 0);
+
+  return '<div class="card" style="padding:0;overflow:hidden">' +
+    '<div class="ch" style="padding:10px 12px"><span class="ct">Submittals <span id="psb-count">(' + filteredCount + ')</span></span>' +
+      '<span style="display:flex;gap:6px">' + importBtn + addBtn + '</span></div>' +
+    filterBar +
+    '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;min-width:820px"><thead><tr>' +
+      '<th class="sortable" onclick="sortPsb(\'status\')" style="padding:6px 8px;text-align:left;width:80px">Status</th>' +
+      '<th class="sortable" onclick="sortPsb(\'response\')" style="padding:6px 8px;text-align:left;width:120px">Response</th>' +
+      '<th class="sortable" onclick="sortPsb(\'kmiNo\')" style="padding:6px 8px;text-align:left;width:100px">KMI #</th>' +
+      '<th class="sortable" onclick="sortPsb(\'csi\')" style="padding:6px 8px;text-align:left;width:80px">CSI</th>' +
+      '<th class="sortable" onclick="sortPsb(\'item\')" style="padding:6px 8px;text-align:left">Item</th>' +
+      '<th class="sortable" onclick="sortPsb(\'package\')" style="padding:6px 8px;text-align:left">Package</th>' +
+      '<th class="sortable" onclick="sortPsb(\'product\')" style="padding:6px 8px;text-align:left">Product</th>' +
+      '<th class="sortable" onclick="sortPsb(\'due\')" style="padding:6px 8px;text-align:left;width:85px">Due</th>' +
+      '<th class="sortable" onclick="sortPsb(\'sent\')" style="padding:6px 8px;text-align:left;width:95px">Sent</th>' +
+      '<th class="sortable" onclick="sortPsb(\'returned\')" style="padding:6px 8px;text-align:left;width:85px">Returned</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:70px">Actions</th>' +
+    '</tr></thead><tbody id="psb-tbody">' + _psbRowsHtml(projectId) + '</tbody></table></div>' +
   '</div>';
+}
+
+// Apply current filters + sort to a project's submittals; returns the array.
+function _psbFilteredSorted(projectId) {
+  var f = _psbFilter;
+  var rows = (db.submittals || []).filter(function(s){
+    if (String(s.projectId) !== String(projectId)) return false;
+    if (f.status && (s.status || 'draft') !== f.status) return false;
+    if (f.pkg && (s.packageName || '') !== f.pkg) return false;
+    if (f.sent === 'sent' && !s.sentDate) return false;
+    if (f.sent === 'not' && s.sentDate) return false;
+    if (f.due === 'overdue' && !(_isOverdue(s.dueDate) && (s.status || 'draft') !== 'closed')) return false;
+    if (f.due === 'nodate' && s.dueDate) return false;
+    if (f.q) {
+      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+      var prodNames = pids.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ''; }).join(' ');
+      var hay = ((s.itemName || '') + ' ' + (s.kmiSubmittalNo || '') + ' ' + (s.packageName || '') + ' ' + (s.csiSection || '') + ' ' + prodNames).toLowerCase();
+      if (hay.indexOf(f.q.toLowerCase()) === -1) return false;
+    }
+    return true;
+  });
+  return _sortSubmittalRows(rows, _psbSort);
+}
+
+function _psbRowsHtml(projectId) {
+  var rows = _psbFilteredSorted(projectId);
+  var canEdit = canAccess('edit-submittals') === 'full';
+  if (!rows.length) {
+    return '<tr><td colspan="11" style="text-align:center;padding:20px;color:#aaa;font-size:12px">No submittals match the current filters.</td></tr>';
+  }
+  return rows.map(function(s){
+    var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+    var prodCell;
+    if (s.isCustom) {
+      prodCell = '<span style="color:#888;font-style:italic">Custom</span>';
+    } else if (!pids.length) {
+      prodCell = '<span style="color:#A32D2D">Missing product</span>';
+    } else {
+      var firstP = getProduct(pids[0]);
+      var firstName = firstP ? firstP.name : ('#' + pids[0]);
+      prodCell = subEsc(firstName) + (pids.length > 1
+        ? ' <span style="color:#888;font-size:11px">(+' + (pids.length - 1) + ')</span>'
+        : '');
+    }
+    var dueCell = s.dueDate || '—';
+    if (_isOverdue(s.dueDate) && (s.status || 'draft') !== 'closed') {
+      dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
+    }
+    var sentCell = s.sentDate
+      ? '<span style="font-family:monospace;font-size:11px">' + subEsc(s.sentDate) + '</span>'
+      : '<span style="display:inline-flex;gap:6px;align-items:center;white-space:nowrap">' +
+          '<span style="background:#FCEBEB;color:#A32D2D;padding:1px 7px;border-radius:20px;font-size:11px">Not sent</span>' +
+          (canEdit ? '<a href="javascript:void(0)" onclick="event.stopPropagation();psbMarkSent(\'' + s.id + '\')" style="font-size:11px;color:var(--kmi)">Mark sent</a>' : '') +
+        '</span>';
+    var returnedCell = subEsc(s.responseDate || '—') +
+      ((s.responseDocuments && s.responseDocuments.length)
+        ? ' <span title="' + s.responseDocuments.length + ' response document' + (s.responseDocuments.length === 1 ? '' : 's') + ' attached" style="color:#888;font-size:11px">📎' + (s.responseDocuments.length > 1 ? s.responseDocuments.length : '') + '</span>'
+        : '');
+    var compileBtn = canEdit
+      ? ' <button class="btn btn-sm" style="font-size:10px;padding:2px 6px" title="Compile this submittal" onclick="event.stopPropagation();showSubmittalPackageCompile(' + s.id + ')">📄</button>'
+      : '';
+    return '<tr style="cursor:pointer" onclick="subEditForProject(' + s.id + ', ' + projectId + ')">' +
+      '<td style="padding:5px 8px">' + subStatusBadge(s.status || 'draft') + '</td>' +
+      '<td style="padding:5px 8px">' + subResponseBadge(s.response || '') + '</td>' +
+      '<td style="padding:5px 8px;font-family:monospace;font-size:11px">' + subEsc(s.kmiSubmittalNo || '—') + '</td>' +
+      '<td style="padding:5px 8px;font-size:11px">' + subEsc(_csiPrefix(s.csiSection) || s.csiSection || '—') + '</td>' +
+      '<td style="padding:5px 8px;font-weight:600;font-size:12px">' + subEsc(s.itemName || '') + '</td>' +
+      '<td style="padding:5px 8px;font-size:12px">' + subEsc(s.packageName || '') + '</td>' +
+      '<td style="padding:5px 8px;font-size:12px">' + prodCell + '</td>' +
+      '<td style="padding:5px 8px;font-size:12px">' + dueCell + '</td>' +
+      '<td style="padding:5px 8px">' + sentCell + '</td>' +
+      '<td style="padding:5px 8px;font-size:12px">' + returnedCell + '</td>' +
+      '<td style="padding:5px 8px" onclick="event.stopPropagation()">' +
+        '<button class="btn btn-sm" style="font-size:10px;padding:2px 6px" onclick="subEditForProject(' + s.id + ', ' + projectId + ')">' + (canEdit ? '✎' : 'View') + '</button>' + compileBtn +
+      '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function psbRefresh() {
+  var tb = g('psb-tbody');
+  if (!tb) return;
+  tb.innerHTML = _psbRowsHtml(_psbProjectId);
+  var cnt = g('psb-count');
+  if (cnt) cnt.textContent = '(' + _psbFilteredSorted(_psbProjectId).length + ')';
+  updatePsbSortIndicators();
+}
+
+function psbApplyFilters() {
+  _psbFilter.q      = (g('psb-q')      || {}).value || '';
+  _psbFilter.status = (g('psb-status') || {}).value || '';
+  _psbFilter.pkg    = (g('psb-pkg')    || {}).value || '';
+  _psbFilter.sent   = (g('psb-sent')   || {}).value || '';
+  _psbFilter.due    = (g('psb-due')    || {}).value || '';
+  psbRefresh();
+}
+
+function sortPsb(col) {
+  if (_psbSort && _psbSort.col === col) _psbSort.dir = _psbSort.dir === 'asc' ? 'desc' : 'asc';
+  else _psbSort = { col: col, dir: 'asc' };
+  psbRefresh();
+}
+
+function updatePsbSortIndicators() {
+  var tb = g('psb-tbody');
+  var tbl = tb ? tb.closest('table') : null;
+  if (!tbl) return;
+  tbl.querySelectorAll('thead th.sortable').forEach(function(th){
+    th.classList.remove('asc', 'desc');
+    var oc = th.getAttribute('onclick') || '';
+    var m = oc.match(/sortPsb\('([^']+)'\)/);
+    if (m && _psbSort && m[1] === _psbSort.col) th.classList.add(_psbSort.dir);
+  });
+}
+
+function psbMarkSent(id) {
+  if (!requireFull('edit-submittals', 'update submittals')) return;
+  var s = getSubmittal(id);
+  if (!s) return;
+  s.sentDate = (new Date()).toISOString().slice(0, 10);
+  if ((s.status || 'draft') === 'draft') s.status = 'sent';
+  saveDB();
+  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+    supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(s)).then(function(rr){
+      if (rr && rr.error) console.warn('kmi_submittals sentDate upsert error:', rr.error.message);
+    }).catch(function(rr){ console.warn('kmi_submittals sentDate upsert exception:', rr); });
+  }
+  psbRefresh();
+  if (typeof showToast === 'function') showToast('Marked sent');
 }
 
 function initNewSubmittalForProject(projectId) {
