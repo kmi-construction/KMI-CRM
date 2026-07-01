@@ -13906,19 +13906,26 @@ async function _fetchUploadedFileBytes(uploadedFile) {
   return await resp.arrayBuffer();
 }
 
-// Calculate fit-to-page dimensions preserving aspect ratio.
-// Returns {x, y, w, h} in PDF points for letter-size (612x792).
-function _fitToLetterPage(srcW, srcH) {
-  var PAGE_W = 612, PAGE_H = 792;
+// Choose a letter page in the orientation that matches the source aspect
+// (landscape source -> landscape letter, portrait -> portrait) and return
+// the page dimensions plus a centered, aspect-preserving fit rect. All
+// values in PDF points. Used for image source pages; PDF source pages get
+// their exact native size elsewhere.
+function _orientedLetterFit(srcW, srcH) {
+  var LONG = 792, SHORT = 612;
+  var landscape = srcW > srcH;
+  var PAGE_W = landscape ? LONG : SHORT;
+  var PAGE_H = landscape ? SHORT : LONG;
   var pageRatio = PAGE_W / PAGE_H;
-  var imgRatio  = srcW / srcH;
-  if (imgRatio > pageRatio) {
-    var w1 = PAGE_W, h1 = w1 / imgRatio;
-    return { x: 0, y: (PAGE_H - h1) / 2, w: w1, h: h1 };
-  } else {
-    var h2 = PAGE_H, w2 = h2 * imgRatio;
-    return { x: (PAGE_W - w2) / 2, y: 0, w: w2, h: h2 };
-  }
+  var imgRatio  = (srcH > 0) ? (srcW / srcH) : pageRatio;
+  var w, h;
+  if (imgRatio > pageRatio) { w = PAGE_W; h = w / imgRatio; }
+  else                      { h = PAGE_H; w = h * imgRatio; }
+  return {
+    pageW: PAGE_W, pageH: PAGE_H,
+    orientation: landscape ? 'landscape' : 'portrait',
+    x: (PAGE_W - w) / 2, y: (PAGE_H - h) / 2, w: w, h: h
+  };
 }
 
 // Append every page of a PDF (given as ArrayBuffer) onto a jsPDF doc as
@@ -13928,6 +13935,12 @@ async function _appendPdfBytesToJsPdf(doc, arrayBuffer) {
   var pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   for (var i = 1; i <= pdf.numPages; i++) {
     var page = await pdf.getPage(i);
+    // True page size in PDF points (72dpi). pdf.js has already applied the
+    // page's /Rotate, so these are the displayed dimensions.
+    var base = page.getViewport({ scale: 1.0 });
+    var pageWpt = base.width, pageHpt = base.height;
+    // Raster at higher scale for line-drawing sharpness; the raster
+    // resolution is independent of the output page size in points.
     var viewport = page.getViewport({ scale: 2.0 });
     var canvas = document.createElement('canvas');
     canvas.width  = viewport.width;
@@ -13935,9 +13948,15 @@ async function _appendPdfBytesToJsPdf(doc, arrayBuffer) {
     var ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport: viewport }).promise;
     var imgData = canvas.toDataURL('image/jpeg', 0.85);
-    var fit = _fitToLetterPage(viewport.width, viewport.height);
-    doc.addPage();
-    doc.addImage(imgData, 'JPEG', fit.x, fit.y, fit.w, fit.h);
+    // New page matches the source page's native size + orientation exactly,
+    // and the raster fills it edge to edge (aspect is identical, so no
+    // distortion). Read the page size back from jsPDF so addImage always
+    // fills whatever page was actually created.
+    var orient = pageWpt > pageHpt ? 'landscape' : 'portrait';
+    doc.addPage([pageWpt, pageHpt], orient);
+    var pw = doc.internal.pageSize.getWidth();
+    var ph = doc.internal.pageSize.getHeight();
+    doc.addImage(imgData, 'JPEG', 0, 0, pw, ph);
   }
   return pdf.numPages;
 }
@@ -13964,8 +13983,8 @@ async function _appendImageBytesToJsPdf(doc, arrayBuffer, contentType) {
     im.src = dataUrl;
   });
 
-  var fit = _fitToLetterPage(img.width, img.height);
-  doc.addPage();
+  var fit = _orientedLetterFit(img.width, img.height);
+  doc.addPage([fit.pageW, fit.pageH], fit.orientation);
   doc.addImage(dataUrl, format, fit.x, fit.y, fit.w, fit.h);
   return 1;
 }
