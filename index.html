@@ -1394,12 +1394,12 @@ textarea{resize:vertical;min-height:72px}
   <div id="m-proc-body"></div>
 </div>
 
-<!-- Mobile: weekly production entry (field crews). Card-based, camera-first.
+<!-- Mobile: daily production entry (field crews). Card-based, camera-first.
      Reuses db.prodWeekly + the Phase 1 data layer. Foremen can add custom
-     line items (which notify the PM) and a free-form week note. -->
+     line items (which notify the PM) and a free-form day note. -->
 <div class="pg mob-only" id="pg-m-weekly">
   <div class="ph" style="margin-bottom:10px">
-    <div><h1 id="m-weekly-heading" style="font-size:17px">Weekly Production</h1></div>
+    <div><h1 id="m-weekly-heading" style="font-size:17px">Daily Production</h1></div>
     <button class="btn btn-sm" onclick="nav('m-project-detail')">← Back</button>
   </div>
   <div id="m-weekly-body"></div>
@@ -5036,7 +5036,7 @@ function mobSetHeaderTitle(page) {
     'm-submittals':     'Submittals',
     'm-submittal-detail': 'Submittal',
     'm-procurement':    'Procurement',
-    'm-weekly':         'Weekly Production',
+    'm-weekly':         'Daily Production',
     'm-desktop-only':   'Desktop only',
     'supabase-setup':   'Supabase'
   };
@@ -5282,7 +5282,7 @@ function renderMobileProjectDetail() {
       '<div class="mob-proj-hero-actions">' +
         '<button class="btn" onclick="mobOpenSubmittalsForProject(' + p.id + ')">▤ Submittals (' + subCt + ')</button>' +
         '<button class="btn" onclick="mobOpenProcurementForProject(' + p.id + ')">📋 Procurement (' + procCt + ')</button>' +
-        '<button class="btn" onclick="mobOpenWeeklyForProject(' + p.id + ')">📊 Weekly production</button>' +
+        '<button class="btn" onclick="mobOpenWeeklyForProject(' + p.id + ')">📊 Daily production</button>' +
       '</div>' +
     '</div>' +
     '<div class="mob-section-hdr">KMI Team <span class="mob-section-hdr-count">' + kmi.length + '</span></div>' +
@@ -39296,7 +39296,7 @@ function renderProjectProduction() {
   host.innerHTML =
     '<div style="display:flex;gap:4px;border-bottom:1px solid #e5e5e5;margin-bottom:18px">' +
       _pst('estimate', 'Estimate') +
-      _pst('weekly', 'Weekly Entry') +
+      _pst('weekly', 'Daily Entry') +
       _pst('tracking', 'Tracking') +
     '</div>' +
     '<div id="nprj-prod-subcontent"></div>';
@@ -39866,21 +39866,22 @@ async function prodSaveEstimate() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// WEEKLY DATA ENTRY — Production sub-tab (Productivity Phase 1a)
-// Rows = the estimate's line items. Per week: units installed (production
+// DAILY DATA ENTRY — Production sub-tab (Productivity Phase 1a)
+// Rows = the estimate's line items. Per day: units installed (production
 // lines only) + Foreman/Mason/Laborer hours (all lines). Stored one row
-// per project+week in db.prodWeekly / kmi_prod_weekly. JTD units roll up
-// across weeks. Wage/dollars are not part of data entry.
+// per project+day in db.prodWeekly / kmi_prod_weekly (the week_ending
+// column now holds a single day). JTD units roll up across all days.
+// Wage/dollars are not part of data entry.
 // ════════════════════════════════════════════════════════════════════
-var _prodWeekEnding = null;   // 'YYYY-MM-DD' currently-shown week
+var _prodWeekEnding = null;   // 'YYYY-MM-DD' currently-shown day
 var _prodWeekModel = null;    // { weekEnding, entries:{ lineId:{u,f,m,l} } }
 function _prodDateStr(d) {
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 function _prodDefaultWeekEnding() {
-  var d = new Date(); var delta = 5 - d.getDay(); // Friday = 5
-  d.setDate(d.getDate() + delta);
-  return _prodDateStr(d);
+  // Daily entry: default to today. (Function/var names kept for call-site
+  // stability; the stored date is now a single day, not a Friday week-ending.)
+  return _prodDateStr(new Date());
 }
 function _prodAddDays(ws, n) {
   var d = new Date(ws + 'T00:00:00'); d.setDate(d.getDate() + n); return _prodDateStr(d);
@@ -39920,14 +39921,14 @@ function renderProdWeeklyView() {
 
   var bar = '<div class="card"><div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">' +
       '<div style="display:flex;align-items:center;gap:8px">' +
-        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,-7) + '\')">\u2039</button>' +
-        '<div style="font-size:15px;font-weight:600;min-width:200px;text-align:center">Week ending ' + _prodWeekLabel(_prodWeekEnding) + '</div>' +
-        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,7) + '\')">\u203a</button>' +
+        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,-1) + '\')">\u2039</button>' +
+        '<div style="font-size:15px;font-weight:600;min-width:200px;text-align:center">' + _prodWeekLabel(_prodWeekEnding) + '</div>' +
+        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,1) + '\')">\u203a</button>' +
       '</div>' +
       '<input type="date" value="' + _prodWeekEnding + '" onchange="prodWkGo(this.value)" style="padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-family:inherit">' +
       '<div style="flex:1"></div>' +
       '<button class="btn btn-pdf btn-sm" onclick="prodWkOpenUpload()">\u2913 Smart upload</button>' +
-      '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save week</button>' +
+      '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save day</button>' +
     '</div></div>';
 
   function sec(label){ return '<tr><td colspan="7" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">' + label + '</td></tr>'; }
@@ -39946,7 +39947,7 @@ function renderProdWeeklyView() {
     '<td style="padding-top:9px">Week totals</td>' +
     _ftot('prodwk-t-units') + _ftot('prodwk-t-f') + _ftot('prodwk-t-m') + _ftot('prodwk-t-l') +
     '<td style="text-align:right;padding-top:9px" id="prodwk-t-tot">\u2014</td><td></td></tr></tfoot>';
-  var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this week</strong>. JTD units roll up across all weeks automatically. Field-labor items track hours only.</div>';
+  var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this day</strong>. JTD units roll up across all days automatically. Field-labor items track hours only.</div>';
   var table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:760px">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' + hint + '</div>';
 
   host.innerHTML = bar + table;
@@ -40027,12 +40028,12 @@ async function prodWkSave() {
         if (res && res.error) throw res.error;
       }
     }
-    if (typeof showToast === 'function') showToast('Week saved'); else alert('Week saved');
+    if (typeof showToast === 'function') showToast('Day saved'); else alert('Day saved');
   } catch(e) {
     console.warn('prodWkSave', e);
     alert('Saved locally, but cloud sync failed: ' + (e.message || e));
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Save week'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Save day'; }
   }
 }
 
@@ -40048,7 +40049,7 @@ function prodWkOpenUpload() {
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Smart upload \u2014 week ending ' + _prodWeekLabel(_prodWeekModel.weekEnding) + '</div>' +
-    '<div class="msb">Upload a photo or PDF of the weekly field production sheet. The AI reads units installed and crew hours per item and fills this week\'s grid for your review. Nothing is saved to the cloud until you click Save week.</div>' +
+    '<div class="msb">Upload a photo or PDF of the daily field production sheet. The AI reads units installed and crew hours per item and fills this day\'s grid for your review. Nothing is saved to the cloud until you click Save day.</div>' +
     '<div class="fgr" style="margin:12px 0"><label>Photo or PDF</label>' +
       '<input type="file" id="prodwk-up-file" accept="application/pdf,image/png,image/jpeg"></div>' +
     '<div id="prodwk-up-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
@@ -40095,7 +40096,7 @@ async function prodWkRunUpload() {
       return '"' + String(l.itemName).replace(/"/g,'') + '" (' + (l.lineType === 'production' ? 'units + hours' : 'hours only') + ')';
     }).join(', ');
     var prompt =
-      'You are reading a hand-filled weekly field production sheet from a masonry construction project. For this one week, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
+      'You are reading a hand-filled daily field production sheet from a masonry construction project. For this one day, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
       'Match every row on the sheet to one of these estimate items, using these EXACT names. Items marked "units + hours" track an installed-unit count; "hours only" items do not:\n  [' + itemList + ']\n\n' +
       'Schema:\n{\n  "items": [\n    {"name": "<exact item name from the list>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>}\n  ]\n}\n\n' +
       'Rules:\n- Match each sheet row to one listed item name EXACTLY. If a row matches no listed item, omit it.\n- Hours are numbers (use 0 for blank, never null).\n- Include "units" only for "units + hours" items; use null otherwise.\n- Return the items array even if empty; never invent values.';
@@ -40133,7 +40134,7 @@ async function prodWkRunUpload() {
     prodWkPersist();          // local autosave of the filled values
     closeModal();
     renderProdWeeklyView();   // reloads from the now-persisted week, showing the fills
-    var msg = res.n + ' item(s) filled from upload \u2014 review and Save week' +
+    var msg = res.n + ' item(s) filled from upload \u2014 review and Save day' +
       (res.unmatched.length ? (' \u00b7 unmatched: ' + res.unmatched.slice(0, 6).join(', ')) : '');
     if (typeof showToast === 'function') showToast(msg); else alert(msg);
   } catch(e) {
@@ -40162,15 +40163,29 @@ function _prodJtdForLine(projectId, lineId) {
   });
   return o;
 }
+// Sunday–Saturday week immediately before the week that contains today.
+// e.g. today Wed 7/1/26 \u2192 current week Sun 6/28\u2013Sat 7/4, so this returns
+// { start:'2026-06-21', end:'2026-06-27' }. Boundaries are inclusive.
+function _prodPrevWeekRange() {
+  var d = new Date(); d.setHours(0,0,0,0);
+  var dow = d.getDay();                       // 0=Sun \u2026 6=Sat
+  var start = new Date(d); start.setDate(d.getDate() - dow - 7);  // last week's Sunday
+  var end = new Date(start); end.setDate(start.getDate() + 6);    // last week's Saturday
+  return { start: _prodDateStr(start), end: _prodDateStr(end) };
+}
+// Units for the most recent COMPLETE calendar week (Sun\u2013Sat) \u2014 the week just
+// before the one containing today. Sums a line's daily unit entries whose
+// date falls in that window. Drives Tracking's "Recent/wk" pace proxy.
 function _prodRecentUnitsForLine(projectId, lineId) {
-  var bestWk = null, bestU = 0;
+  var wk = _prodPrevWeekRange(), sum = 0;
   (db.prodWeekly || []).forEach(function(r){
     if (String(r.projectId) !== String(projectId)) return;
+    var d = String(r.weekEnding || '');
+    if (d < wk.start || d > wk.end) return;
     var e = r.entries && r.entries[lineId]; if (!e) return;
-    var u = Number(e.u) || 0; if (!u) return;
-    if (bestWk === null || String(r.weekEnding) > String(bestWk)) { bestWk = r.weekEnding; bestU = u; }
+    sum += Number(e.u) || 0;
   });
-  return bestU;
+  return sum;
 }
 // Shared compute for the tracking report (screen + PDF use identical math).
 function _prodTrackingCompute(p) {
@@ -40502,10 +40517,10 @@ function prodExportTrackingPdf() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// MOBILE WEEKLY ENTRY (Phase 5a) — field crews enter the week on a phone.
-// Card layout, camera-first, custom line items (notify PM), week note.
+// MOBILE DAILY ENTRY (Phase 5a) — field crews enter the day on a phone.
+// Card layout, camera-first, custom line items (notify PM), day note.
 // Reuses db.prodWeekly + the Phase 1 data layer; mobile-scoped state so it
-// never collides with the desktop weekly screen.
+// never collides with the desktop daily screen.
 // ════════════════════════════════════════════════════════════════════
 var _mobWeekEnding = null;
 var _mobWeekModel = null;   // { weekEnding, entries, custom, note }
@@ -40515,7 +40530,7 @@ function renderMobileWeekly() {
   var p = getProj(_mobileSelectedProjectId);
   if (!p) { nav('m-projects'); return; }
   var hdr = document.getElementById('m-weekly-heading');
-  if (hdr) hdr.textContent = (p.number ? p.number + ' ' : '') + 'Weekly';
+  if (hdr) hdr.textContent = (p.number ? p.number + ' ' : '') + 'Daily';
   var body = document.getElementById('m-weekly-body'); if (!body) return;
   var est = _prodEnsureEstimate(p);
   var lines = est.lines || [];
@@ -40529,10 +40544,10 @@ function renderMobileWeekly() {
   };
 
   var sel = '<div style="background:#fff;border:.5px solid #e8e8e8;border-radius:11px;padding:10px;display:flex;align-items:center;gap:8px;margin-bottom:12px">' +
-    '<button onclick="mobWkGo(\'' + _prodAddDays(_mobWeekEnding,-7) + '\')" style="width:40px;height:40px;border:.5px solid #ddd;background:#fff;border-radius:9px;font-size:18px;color:#555">\u2039</button>' +
-    '<div style="flex:1;text-align:center"><div style="font-size:15px;font-weight:600">Week ending ' + _prodWeekLabel(_mobWeekEnding) + '</div>' +
+    '<button onclick="mobWkGo(\'' + _prodAddDays(_mobWeekEnding,-1) + '\')" style="width:40px;height:40px;border:.5px solid #ddd;background:#fff;border-radius:9px;font-size:18px;color:#555">\u2039</button>' +
+    '<div style="flex:1;text-align:center"><div style="font-size:15px;font-weight:600">' + _prodWeekLabel(_mobWeekEnding) + '</div>' +
       '<div style="font-size:11px;color:#888">' + _prodEsc((p.number||'') + (p.name ? (' \u00b7 ' + p.name) : '')) + '</div></div>' +
-    '<button onclick="mobWkGo(\'' + _prodAddDays(_mobWeekEnding,7) + '\')" style="width:40px;height:40px;border:.5px solid #ddd;background:#fff;border-radius:9px;font-size:18px;color:#555">\u203a</button>' +
+    '<button onclick="mobWkGo(\'' + _prodAddDays(_mobWeekEnding,1) + '\')" style="width:40px;height:40px;border:.5px solid #ddd;background:#fff;border-radius:9px;font-size:18px;color:#555">\u203a</button>' +
   '</div>';
 
   var snap = '<button onclick="mobWkOpenUpload()" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:#EEF0F8;color:var(--kmi);border:.5px solid var(--stl);border-radius:11px;padding:13px;font-size:14px;font-weight:700;margin-bottom:6px">\ud83d\udcf7 Snap the field sheet</button>' +
@@ -40551,11 +40566,11 @@ function renderMobileWeekly() {
   html += '<button onclick="mobWkAddCustom()" style="width:100%;background:#fff;border:1px dashed #c9ccd8;color:var(--kmi);border-radius:11px;padding:12px;font-size:14px;font-weight:600;margin-bottom:16px">+ Add custom item</button>';
 
   html += sec('Notes');
-  html += '<textarea id="mwk-note" oninput="if(_mobWeekModel)_mobWeekModel.note=this.value" placeholder="Anything about this week\u2019s production\u2026" style="width:100%;min-height:80px;border:1px solid #dcdee6;border-radius:11px;padding:12px;font-size:14px;font-family:inherit;margin-bottom:16px">' + _prodEsc(_mobWeekModel.note) + '</textarea>';
+  html += '<textarea id="mwk-note" oninput="if(_mobWeekModel)_mobWeekModel.note=this.value" placeholder="Anything about this day\u2019s production\u2026" style="width:100%;min-height:80px;border:1px solid #dcdee6;border-radius:11px;padding:12px;font-size:14px;font-family:inherit;margin-bottom:16px">' + _prodEsc(_mobWeekModel.note) + '</textarea>';
 
   html += '<div style="background:#fff;border:.5px solid #e8e8e8;border-radius:11px;padding:13px;display:flex;align-items:center;gap:12px;margin-bottom:24px">' +
-    '<div style="flex:1;font-size:12px;color:#666"><b id="mwk-t-hrs" style="color:#1a1a1a;font-size:14px">0</b> hrs \u00b7 <span id="mwk-t-units">0</span> units<br><span style="font-size:11px">this week</span></div>' +
-    '<button onclick="mobWkSave()" id="mwk-save-btn" style="background:var(--kmi);color:#fff;border:none;font-weight:700;font-size:15px;padding:13px 22px;border-radius:11px">Save week</button>' +
+    '<div style="flex:1;font-size:12px;color:#666"><b id="mwk-t-hrs" style="color:#1a1a1a;font-size:14px">0</b> hrs \u00b7 <span id="mwk-t-units">0</span> units<br><span style="font-size:11px">this day</span></div>' +
+    '<button onclick="mobWkSave()" id="mwk-save-btn" style="background:var(--kmi);color:#fff;border:none;font-weight:700;font-size:15px;padding:13px 22px;border-radius:11px">Save day</button>' +
   '</div>';
 
   body.innerHTML = html;
@@ -40684,14 +40699,14 @@ async function mobWkSave() {
         }
       } catch(e) { console.warn('PM notify (custom items) failed:', e); }
     }
-    var msg = 'Week saved' + (newCustom.length ? (' \u00b7 PM notified of ' + newCustom.length + ' custom item' + (newCustom.length>1?'s':'')) : '');
+    var msg = 'Day saved' + (newCustom.length ? (' \u00b7 PM notified of ' + newCustom.length + ' custom item' + (newCustom.length>1?'s':'')) : '');
     if (typeof showToast === 'function') showToast(msg); else alert(msg);
     renderMobileWeekly();
   } catch(e) {
     console.warn('mobWkSave', e);
     alert('Saved on this device, but cloud sync failed: ' + (e.message || e));
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Save week'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Save day'; }
   }
 }
 async function _mobWkNotifyPM(project, items, weekEnding) {
@@ -40728,7 +40743,7 @@ function mobWkOpenUpload() {
   if (!db.anthropic_api_key) { alert('Smart upload needs the Anthropic API key (set it in Settings).'); return; }
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Snap the field sheet</div>' +
-    '<div class="msb">Take or upload a photo (or PDF) of the weekly production sheet. The AI fills this week for your review. Nothing saves until you tap Save week.</div>' +
+    '<div class="msb">Take or upload a photo (or PDF) of the daily production sheet. The AI fills this day for your review. Nothing saves until you tap Save day.</div>' +
     '<div class="fgr" style="margin:12px 0"><label>Photo or PDF</label>' +
       '<input type="file" id="mwk-up-file" accept="image/*,application/pdf" capture="environment"></div>' +
     '<div id="mwk-up-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
@@ -40753,7 +40768,7 @@ async function mobWkRunUpload() {
   try {
     var b64 = await _smartUpFileToBase64(file);
     var itemList = (est.lines || []).map(function(l){ return '"' + String(l.itemName).replace(/"/g,'') + '" (' + (l.lineType==='production'?'units + hours':'hours only') + ')'; }).join(', ');
-    var prompt = 'You are reading a hand-filled weekly field production sheet from a masonry construction project. For this one week, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
+    var prompt = 'You are reading a hand-filled daily field production sheet from a masonry construction project. For this one day, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
       'Match every row to one of these estimate items using these EXACT names ("units + hours" items track units; "hours only" do not):\n  [' + itemList + ']\n\n' +
       'Schema:\n{ "items": [ {"name":"<exact item name>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>} ] }\n\n' +
       'Rules:\n- Match each row to one listed item EXACTLY; omit rows that match nothing.\n- Hours are numbers (0 for blank).\n- Include units only for "units + hours" items; null otherwise.\n- Return items even if empty; never invent values.';
@@ -40783,7 +40798,7 @@ async function mobWkRunUpload() {
     mobWkPersist();
     closeModal();
     renderMobileWeekly();
-    if (typeof showToast === 'function') showToast(n + ' item(s) filled \u2014 review and Save week');
+    if (typeof showToast === 'function') showToast(n + ' item(s) filled \u2014 review and Save day');
   } catch(e) {
     console.error('mobWkRunUpload', e);
     if (errEl) errEl.textContent = 'Extraction failed: ' + (e.message || String(e));
