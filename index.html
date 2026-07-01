@@ -1394,12 +1394,12 @@ textarea{resize:vertical;min-height:72px}
   <div id="m-proc-body"></div>
 </div>
 
-<!-- Mobile: daily production entry (field crews). Card-based, camera-first.
+<!-- Mobile: weekly production entry (field crews). Card-based, camera-first.
      Reuses db.prodWeekly + the Phase 1 data layer. Foremen can add custom
-     line items (which notify the PM) and a free-form day note. -->
+     line items (which notify the PM) and a free-form week note. -->
 <div class="pg mob-only" id="pg-m-weekly">
   <div class="ph" style="margin-bottom:10px">
-    <div><h1 id="m-weekly-heading" style="font-size:17px">Daily Production</h1></div>
+    <div><h1 id="m-weekly-heading" style="font-size:17px">Weekly Production</h1></div>
     <button class="btn btn-sm" onclick="nav('m-project-detail')">← Back</button>
   </div>
   <div id="m-weekly-body"></div>
@@ -2332,6 +2332,7 @@ textarea{resize:vertical;min-height:72px}
         <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
           Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'costClasses')">
         </label>
+        <div id="cc-gl-table" style="margin-top:14px"></div>
       </div>
       <!-- Foundation customers -->
       <div style="background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
@@ -2953,7 +2954,7 @@ textarea{resize:vertical;min-height:72px}
   <div class="card" style="padding:0;overflow:hidden">
     <table>
       <thead><tr>
-        <th class="sortable" onclick="sortSub('status')">Status</th><th class="sortable" onclick="sortSub('response')">Response</th><th class="sortable" onclick="sortSub('project')">Project</th><th class="sortable" onclick="sortSub('kmiNo')">KMI #</th><th class="sortable" onclick="sortSub('csi')">Spec Section</th><th class="sortable" onclick="sortSub('item')">Item</th><th class="sortable" onclick="sortSub('package')">Package</th><th class="sortable" onclick="sortSub('product')">Product</th><th class="sortable" onclick="sortSub('due')">Due</th><th class="sortable" onclick="sortSub('sent')">Sent</th><th class="sortable" onclick="sortSub('returned')">Returned</th><th>Actions</th>
+        <th>Status</th><th>Response</th><th>Project</th><th>KMI #</th><th>Spec Section</th><th>Item</th><th>Package</th><th>Product</th><th>Due</th><th>Sent</th><th>Returned</th><th>Actions</th>
       </tr></thead>
       <tbody id="sb-tbody"></tbody>
     </table>
@@ -3015,7 +3016,7 @@ textarea{resize:vertical;min-height:72px}
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
       <button class="btn" onclick="_subExitForm()">Cancel</button>
-      <button class="btn" onclick="showSubmittalPackageCompile(_editSubmittalId)" id="esb-compile-btn" style="display:none">📄 Compile</button>
+      <button class="btn" onclick="showSubmittalPackageCompile(_editSubmittalId)" id="esb-compile-btn" style="display:none">📄 Compile package</button>
       <button class="btn btn-p" onclick="saveSubmittal()" id="esb-save-btn">Save submittal</button>
       <button class="btn" onclick="deleteSubmittal()" id="esb-del-btn" style="color:#A32D2D;display:none">Delete</button>
     </div>
@@ -5036,7 +5037,7 @@ function mobSetHeaderTitle(page) {
     'm-submittals':     'Submittals',
     'm-submittal-detail': 'Submittal',
     'm-procurement':    'Procurement',
-    'm-weekly':         'Daily Production',
+    'm-weekly':         'Weekly Production',
     'm-desktop-only':   'Desktop only',
     'supabase-setup':   'Supabase'
   };
@@ -5282,7 +5283,7 @@ function renderMobileProjectDetail() {
       '<div class="mob-proj-hero-actions">' +
         '<button class="btn" onclick="mobOpenSubmittalsForProject(' + p.id + ')">▤ Submittals (' + subCt + ')</button>' +
         '<button class="btn" onclick="mobOpenProcurementForProject(' + p.id + ')">📋 Procurement (' + procCt + ')</button>' +
-        '<button class="btn" onclick="mobOpenWeeklyForProject(' + p.id + ')">📊 Daily production</button>' +
+        '<button class="btn" onclick="mobOpenWeeklyForProject(' + p.id + ')">📊 Weekly production</button>' +
       '</div>' +
     '</div>' +
     '<div class="mob-section-hdr">KMI Team <span class="mob-section-hdr-count">' + kmi.length + '</span></div>' +
@@ -9403,26 +9404,20 @@ function renderSubmittals() {
     return true;
   });
 
-  // Sort: user-chosen column (click headers) if set, else default
-  // overdue-first, then due asc, then KMI #.
-  if (_sbSort) {
-    rows = _sortSubmittalRows(rows, _sbSort);
-  } else {
-    rows.sort(function(a, b){
-      var oa = _isOverdue(a.dueDate) ? 0 : 1;
-      var ob = _isOverdue(b.dueDate) ? 0 : 1;
-      if (oa !== ob) return oa - ob;
-      var da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
-      var dbb = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
-      if (da !== dbb) return da - dbb;
-      return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
-    });
-  }
+  // Sort: overdue first, then by due date asc, then by KMI #
+  rows.sort(function(a, b){
+    var oa = _isOverdue(a.dueDate) ? 0 : 1;
+    var ob = _isOverdue(b.dueDate) ? 0 : 1;
+    if (oa !== ob) return oa - ob;
+    var da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+    var dbb = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+    if (da !== dbb) return da - dbb;
+    return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
+  });
 
   var canEdit = canAccess('edit-submittals') === 'full';
   var tbody = g('sb-tbody');
   if (!tbody) return;
-  updateSubSortIndicators();
   if (!rows.length) {
     tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:30px;color:#aaa;font-size:13px">' +
       ((db.submittals || []).length === 0
@@ -9475,67 +9470,6 @@ function renderSubmittals() {
 // ════════════════════════════════════════════════════════════════════
 // EDIT PAGE
 // ════════════════════════════════════════════════════════════════════
-
-// ── Submittal column sorting (shared by the global page and the
-// per-project block). _sbSort drives the global page; the project block
-// keeps its own _psbSort. null on the global page = default sort.
-var _sbSort = null;
-function getSubSortValue(s, col) {
-  switch (col) {
-    case 'status':   return s.status || 'draft';
-    case 'response': return s.response || '';
-    case 'project':  return getProjectName(s.projectId) || '';
-    case 'kmiNo':    return s.kmiSubmittalNo || '';
-    case 'csi':      return s.csiSection || '';
-    case 'item':     return s.itemName || '';
-    case 'package':  return s.packageName || '';
-    case 'product':  {
-      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
-      if (s.isCustom) return 'zzz_custom';
-      if (!pids.length) return '';
-      var p0 = getProduct(pids[0]);
-      return p0 ? (p0.name || '') : '';
-    }
-    case 'due':      return s.dueDate || '';
-    case 'sent':     return s.sentDate || '';
-    case 'returned': return s.responseDate || '';
-    default:         return '';
-  }
-}
-function _sortSubmittalRows(arr, st) {
-  if (!st) return arr;
-  var col = st.col, dir = st.dir, sorted = arr.slice();
-  sorted.sort(function(a, b) {
-    var va = getSubSortValue(a, col), vb = getSubSortValue(b, col);
-    var aEmpty = va === null || va === undefined || va === '';
-    var bEmpty = vb === null || vb === undefined || vb === '';
-    if (aEmpty && bEmpty) return 0;
-    if (aEmpty) return 1;   // blanks sink to the bottom regardless of direction
-    if (bEmpty) return -1;
-    var cmp;
-    if (typeof va === 'number' && typeof vb === 'number') cmp = va - vb;
-    else cmp = String(va).toLowerCase().localeCompare(String(vb).toLowerCase());
-    return dir === 'asc' ? cmp : -cmp;
-  });
-  return sorted;
-}
-function sortSub(col) {
-  if (_sbSort && _sbSort.col === col) _sbSort.dir = _sbSort.dir === 'asc' ? 'desc' : 'asc';
-  else _sbSort = { col: col, dir: 'asc' };
-  renderSubmittals();
-}
-function updateSubSortIndicators() {
-  var tb = g('sb-tbody');
-  var tbl = tb ? tb.closest('table') : null;
-  if (!tbl) return;
-  tbl.querySelectorAll('thead th.sortable').forEach(function(th) {
-    th.classList.remove('asc', 'desc');
-    if (!_sbSort) return;
-    var oc = th.getAttribute('onclick') || '';
-    var m = oc.match(/sortSub\('([^']+)'\)/);
-    if (m && m[1] === _sbSort.col) th.classList.add(_sbSort.dir);
-  });
-}
 
 function initNewSubmittal() {
   if (!requireFull('edit-submittals', 'add submittals')) return;
@@ -10572,7 +10506,7 @@ function _detectImportColumn(headers, patterns) {
   return -1;
 }
 
-function showSubmittalImport(presetProjectId) {
+function showSubmittalImport() {
   if (!requireFull('edit-submittals', 'import submittals')) return;
   if (typeof XLSX === 'undefined') {
     alert('Excel parser is still loading. Wait a moment and try again.');
@@ -10582,22 +10516,18 @@ function showSubmittalImport(presetProjectId) {
     alert('You need at least one project before importing submittals. Add a project first, then come back.');
     return;
   }
-  var _preset = (presetProjectId !== undefined && presetProjectId !== null && String(presetProjectId) !== '');
   _importParsedRows = [];
-  _importTargetProjectId = _preset ? presetProjectId : null;
+  _importTargetProjectId = null;
   var projOpts = (db.projects || []).slice().sort(function(a,b){
     return String(a.name || '').localeCompare(String(b.name || ''));
   }).map(function(p){
-    var sel = (_preset && String(p.id) === String(presetProjectId)) ? ' selected' : '';
-    return '<option value="' + subEsc(p.id) + '"' + sel + '>' + subEsc(p.name || ('Project ' + p.id)) + '</option>';
+    return '<option value="' + subEsc(p.id) + '">' + subEsc(p.name || ('Project ' + p.id)) + '</option>';
   }).join('');
   var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Import submittals from Excel</div>' +
     '<div class="msb">Pick the destination project, then upload your XLSX file</div>' +
     '<div class="fg">' +
-      '<div class="fgr full"><label>Destination project *</label><select id="imp-proj"' + (_preset ? ' disabled' : '') + '>' + (_preset ? '' : '<option value="">— Select —</option>') + projOpts + '</select>' +
-        (_preset ? '<div style="font-size:10px;color:#888;margin-top:3px">Locked to this project. Imported submittals will be added here.</div>' : '') +
-      '</div>' +
+      '<div class="fgr full"><label>Destination project *</label><select id="imp-proj"><option value="">— Select —</option>' + projOpts + '</select></div>' +
       '<div class="fgr full"><label>XLSX file</label>' +
         '<input type="file" id="imp-file" accept=".xlsx,.xls" onchange="onSubmittalImportFile(event)">' +
       '</div>' +
@@ -12087,10 +12017,18 @@ function showSubmittalPackageCompile(submittalId) {
 
   var anchor = getSubmittal(submittalId);
   if (!anchor) { alert('Submittal not found.'); return; }
+  if (!anchor.packageName) {
+    alert('This submittal has no package name yet. Add a package name (e.g. "CMU Test Reports") on the submittal, save, then compile.');
+    return;
+  }
 
-  // Per-submittal compile: the transmittal covers only this one submittal.
-  // Package is organizational only and is no longer required to compile.
-  var pkgItems = [anchor];
+  // Gather every submittal in the same package on the same project
+  var pkgItems = (db.submittals || []).filter(function(s){
+    return String(s.projectId) === String(anchor.projectId) &&
+           (s.packageName || '') === anchor.packageName;
+  }).sort(function(a, b){
+    return String(a.kmiSubmittalNo || '').localeCompare(String(b.kmiSubmittalNo || ''));
+  });
 
   // Project + customer lookup
   var proj = (db.projects || []).find(function(p){ return String(p.id) === String(anchor.projectId); }) || {};
@@ -12167,7 +12105,7 @@ function showSubmittalPackageCompile(submittalId) {
 
   // Title — "Transmittal #N - Submittal #KMI Item Name". The transmittal
   // counter defaults to 1; the user can edit before generating.
-  var defaultTitleSubmittal = (anchor.kmiSubmittalNo ? '#' + anchor.kmiSubmittalNo + ' ' : '') + (anchor.itemName || anchor.packageName || '');
+  var defaultTitleSubmittal = (anchor.kmiSubmittalNo ? '#' + anchor.kmiSubmittalNo + ' ' : '') + (anchor.packageName || anchor.itemName || '');
 
   // Default cover comments — templated using project/package context.
   // The signature block uses the current user's profile; user can edit
@@ -12175,7 +12113,7 @@ function showSubmittalPackageCompile(submittalId) {
   var userTitle = _userTitle(u);
   var defaultComments =
     'Hello,\n\n' +
-    'Attached is the ' + (anchor.itemName || anchor.packageName || 'submittal') +
+    'Attached is the ' + (anchor.packageName || 'submittal') +
     ' submittal for the ' + (proj.name || 'project') + ' project. ' +
     'Please review and provide your response. Reach out with any questions.\n\n' +
     'Thank you,\n' +
@@ -12187,19 +12125,28 @@ function showSubmittalPackageCompile(submittalId) {
   // Today's date (yyyy-mm-dd) for the date inputs
   var todayIso = (new Date()).toISOString().slice(0, 10);
 
-  // Read-only summary of the documents that will be pulled into this
-  // submittal's transmittal. Compile is per-submittal, so there is no
-  // include/exclude checklist — every document on this submittal is used.
-  var _anchorDocs = _gatherCompileDocsForSubmittal(anchor);
-  var itemRows = _anchorDocs.length
-    ? _anchorDocs.map(function(entry){
-        var nm = (entry.productName && entry.productName.length) ? entry.productName : (entry.fileName || '—');
-        return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:0.5px solid #eee">' +
-          '<span style="font-size:12px">' + subEsc(nm) + '</span>' +
-          '<span style="color:#888;font-size:11px">' + subEsc(entry.format || 'file') + '</span>' +
-        '</div>';
-      }).join('')
-    : '<div style="padding:8px;color:#9A7A2E;font-size:12px">⚠ No documents are attached to this submittal.</div>';
+  // Build the items list with checkboxes (per-submittal include/exclude).
+  // The cover sheet's items table will be per-document; this list lets
+  // the PC choose which submittals' docs are pulled into the package.
+  var itemRows = pkgItems.map(function(s){
+    var docs = _gatherCompileDocsForSubmittal(s);
+    var docCount = docs.length;
+    var label = (s.kmiSubmittalNo || ('#' + s.id)) + ' — ' + (s.itemName || '(no name)');
+    if (!s.isCustom) {
+      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+      if (pids.length > 1) {
+        var names = pids.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ('#' + pid); });
+        label += ' [' + names.join(', ') + ']';
+      }
+    }
+    var note = docCount === 0
+      ? '<span style="color:#9A7A2E;font-size:11px;margin-left:8px">⚠ no documents</span>'
+      : '<span style="color:#888;font-size:11px;margin-left:8px">' + docCount + ' doc' + (docCount === 1 ? '' : 's') + '</span>';
+    return '<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:0.5px solid #eee;cursor:pointer">' +
+      '<input type="checkbox" class="cmp-item" data-id="' + subEsc(s.id) + '" ' + (docCount > 0 ? 'checked' : '') + '>' +
+      '<span style="font-size:12px">' + subEsc(label) + note + '</span>' +
+    '</label>';
+  }).join('');
 
   // Project contact dropdown options
   var contactOpts = '<option value="">— Pick a recipient —</option>' +
@@ -12222,7 +12169,7 @@ function showSubmittalPackageCompile(submittalId) {
 
   var html = '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Compile transmittal</div>' +
-    '<div class="msb">Generates a Procore-style transmittal cover + this submittal\'s documents in one PDF</div>' +
+    '<div class="msb">Generates a Procore-style transmittal cover + every checked item\'s documents in one PDF</div>' +
 
     '<div class="fg">' +
       // Title / transmittal #
@@ -12263,11 +12210,11 @@ function showSubmittalPackageCompile(submittalId) {
       '</div>' +
     '</div>' +
 
-    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Documents on this submittal (' + _anchorDocs.length + ')</div>' +
+    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Submittal items in this package (' + pkgItems.length + ')</div>' +
       '<div style="border:0.5px solid #ddd;border-radius:4px;max-height:200px;overflow-y:auto">' +
         itemRows +
       '</div>' +
-      '<div style="font-size:11px;color:#888;margin-top:6px">Each <em>document</em> becomes its own row in the Transmittal Items table on the cover.</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:6px">Each <em>document</em> on a checked submittal becomes its own row in the Transmittal Items table on the cover.</div>' +
     '</div>' +
 
     '<div id="cmp-status" style="margin-top:10px;font-size:12px;color:#888;min-height:18px"></div>' +
@@ -12541,12 +12488,13 @@ async function compileSubmittalPackage() {
   var btn = g('cmp-go-btn');
   var status = g('cmp-status');
 
-  // Per-submittal compile: include the scoped submittal(s) directly.
-  var includedIds = (_compileSubmittalIds || []).map(String);
-  if (!includedIds.length) {
-    if (status) status.innerHTML = '<span style="color:#A32D2D">No submittal to compile.</span>';
+  // Checked items
+  var checks = document.querySelectorAll('.cmp-item:checked');
+  if (!checks || !checks.length) {
+    if (status) status.innerHTML = '<span style="color:#A32D2D">Pick at least one item to include.</span>';
     return;
   }
+  var includedIds = Array.prototype.map.call(checks, function(c){ return c.getAttribute('data-id'); });
 
   // Read every dialog field
   var transNo       = (g('cmp-trans-no').value     || '').trim();
@@ -12747,7 +12695,7 @@ async function compileSubmittalPackage() {
         .trim();
     }
     var _subNo = anchor ? _safeForCompileFilename(anchor.kmiSubmittalNo) : '';
-    var _pkgNm = anchor ? _safeForCompileFilename(anchor.itemName || anchor.packageName) : '';
+    var _pkgNm = anchor ? _safeForCompileFilename(anchor.packageName)    : '';
     var fname;
     if (_subNo && _pkgNm)      fname = _subNo + ' - ' + _pkgNm + '.pdf';
     else if (_subNo)           fname = _subNo + '.pdf';
@@ -12805,227 +12753,103 @@ async function compileSubmittalPackage() {
 // project, suitable for embedding inside the Project Detail page. Empty
 // state encourages the user to add or import.
 
-// Per-project submittals: sort + filter state. Reset when the viewed
-// project changes so one project's search box doesn't bleed into another.
-var _psbSort = { col: 'due', dir: 'asc' };
-var _psbFilter = { q: '', status: '', pkg: '', sent: '', due: '' };
-var _psbProjectId = null;
-var _psbLastProjectId = null;
-
-function _psbOpt(values, labels, cur) {
-  return values.map(function(v, i){
-    return '<option value="' + subEsc(v) + '"' + (String(v) === String(cur) ? ' selected' : '') + '>' + subEsc(labels[i]) + '</option>';
-  }).join('');
-}
-
 function renderProjectSubmittalsBlock(projectId) {
   if (!projectId) return '';
-  var canView = canAccess('view-submittals') !== 'none';
-  if (!canView) return '';
-  var canEdit = canAccess('edit-submittals') === 'full';
-
-  // Reset filters/sort when switching to a different project.
-  if (String(_psbLastProjectId) !== String(projectId)) {
-    _psbFilter = { q: '', status: '', pkg: '', sent: '', due: '' };
-    _psbSort = { col: 'due', dir: 'asc' };
-    _psbLastProjectId = projectId;
-  }
-  _psbProjectId = projectId;
-
-  var allRows = (db.submittals || []).filter(function(s){
+  var rows = (db.submittals || []).filter(function(s){
     return String(s.projectId) === String(projectId);
   });
+  // Sort same as the global page: overdue first, then due asc
+  rows.sort(function(a, b){
+    var oa = _isOverdue(a.dueDate) ? 0 : 1;
+    var ob = _isOverdue(b.dueDate) ? 0 : 1;
+    if (oa !== ob) return oa - ob;
+    var da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+    var dbb = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+    return da - dbb;
+  });
+
+  var canEdit = canAccess('edit-submittals') === 'full';
+  var canView = canAccess('view-submittals') !== 'none';
+  if (!canView) return '';
 
   var addBtn = canEdit
     ? '<button class="btn btn-sm btn-p" onclick="initNewSubmittalForProject(' + projectId + ')">+ Add submittal</button>'
     : '';
-  var importBtn = canEdit
-    ? '<button class="btn btn-sm" onclick="showSubmittalImport(' + projectId + ')">↑ Import XLSX</button>'
-    : '';
 
-  if (!allRows.length) {
+  if (!rows.length) {
     return '<div class="card">' +
-      '<div class="ch"><span class="ct">Submittals</span><span style="display:flex;gap:6px">' + importBtn + addBtn + '</span></div>' +
+      '<div class="ch"><span class="ct">Submittals</span>' + addBtn + '</div>' +
       '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center">' +
         'No submittals on this project yet.' +
         (canEdit ? ' <a href="javascript:void(0)" onclick="goToSubmittalsForProject(' + projectId + ')" style="color:var(--kmi)">View all submittals</a>' : '') +
       '</div></div>';
   }
 
-  // Filter option sets derived from this project's data
-  var statSet = {}, pkgSet = {};
-  allRows.forEach(function(s){
-    statSet[s.status || 'draft'] = true;
-    if (s.packageName) pkgSet[s.packageName] = true;
+  // Group by package for visual clarity
+  var byPkg = {};
+  rows.forEach(function(s){
+    var k = s.packageName || '(no package)';
+    if (!byPkg[k]) byPkg[k] = [];
+    byPkg[k].push(s);
   });
-  var statusOptions = '<option value="">All statuses</option>' + Object.keys(statSet).sort().map(function(st){
-    return '<option value="' + subEsc(st) + '"' + (_psbFilter.status === st ? ' selected' : '') + '>' + subEsc(st) + '</option>';
-  }).join('');
-  var pkgOptions = '<option value="">All packages</option>' + Object.keys(pkgSet).sort().map(function(pk){
-    return '<option value="' + subEsc(pk) + '"' + (_psbFilter.pkg === pk ? ' selected' : '') + '>' + subEsc(pk) + '</option>';
-  }).join('');
 
-  var filterBar =
-    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 10px;border-bottom:0.5px solid #eee">' +
-      '<input id="psb-q" placeholder="Search item, KMI #, product\u2026" value="' + subEsc(_psbFilter.q) + '" oninput="psbApplyFilters()" style="flex:1;min-width:150px;font-size:12px;padding:4px 8px">' +
-      '<select id="psb-status" onchange="psbApplyFilters()" style="font-size:12px">' + statusOptions + '</select>' +
-      '<select id="psb-pkg" onchange="psbApplyFilters()" style="font-size:12px">' + pkgOptions + '</select>' +
-      '<select id="psb-sent" onchange="psbApplyFilters()" style="font-size:12px">' + _psbOpt(['','sent','not'], ['Sent: any','Sent','Not sent'], _psbFilter.sent) + '</select>' +
-      '<select id="psb-due" onchange="psbApplyFilters()" style="font-size:12px">' + _psbOpt(['','overdue','nodate'], ['Due: any','Overdue','No date'], _psbFilter.due) + '</select>' +
-    '</div>';
-
-  var filteredCount = _psbFilteredSorted(projectId).length;
-
-  // Kick sort-arrow indicators once the string has been inserted.
-  setTimeout(updatePsbSortIndicators, 0);
-
-  return '<div class="card" style="padding:0;overflow:hidden">' +
-    '<div class="ch" style="padding:10px 12px"><span class="ct">Submittals <span id="psb-count">(' + filteredCount + ')</span></span>' +
-      '<span style="display:flex;gap:6px">' + importBtn + addBtn + '</span></div>' +
-    filterBar +
-    '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;min-width:820px"><thead><tr>' +
-      '<th class="sortable" onclick="sortPsb(\'status\')" style="padding:6px 8px;text-align:left;width:80px">Status</th>' +
-      '<th class="sortable" onclick="sortPsb(\'response\')" style="padding:6px 8px;text-align:left;width:120px">Response</th>' +
-      '<th class="sortable" onclick="sortPsb(\'kmiNo\')" style="padding:6px 8px;text-align:left;width:100px">KMI #</th>' +
-      '<th class="sortable" onclick="sortPsb(\'csi\')" style="padding:6px 8px;text-align:left;width:80px">CSI</th>' +
-      '<th class="sortable" onclick="sortPsb(\'item\')" style="padding:6px 8px;text-align:left">Item</th>' +
-      '<th class="sortable" onclick="sortPsb(\'package\')" style="padding:6px 8px;text-align:left">Package</th>' +
-      '<th class="sortable" onclick="sortPsb(\'product\')" style="padding:6px 8px;text-align:left">Product</th>' +
-      '<th class="sortable" onclick="sortPsb(\'due\')" style="padding:6px 8px;text-align:left;width:85px">Due</th>' +
-      '<th class="sortable" onclick="sortPsb(\'sent\')" style="padding:6px 8px;text-align:left;width:95px">Sent</th>' +
-      '<th class="sortable" onclick="sortPsb(\'returned\')" style="padding:6px 8px;text-align:left;width:85px">Returned</th>' +
-      '<th style="padding:6px 8px;text-align:left;width:70px">Actions</th>' +
-    '</tr></thead><tbody id="psb-tbody">' + _psbRowsHtml(projectId) + '</tbody></table></div>' +
-  '</div>';
-}
-
-// Apply current filters + sort to a project's submittals; returns the array.
-function _psbFilteredSorted(projectId) {
-  var f = _psbFilter;
-  var rows = (db.submittals || []).filter(function(s){
-    if (String(s.projectId) !== String(projectId)) return false;
-    if (f.status && (s.status || 'draft') !== f.status) return false;
-    if (f.pkg && (s.packageName || '') !== f.pkg) return false;
-    if (f.sent === 'sent' && !s.sentDate) return false;
-    if (f.sent === 'not' && s.sentDate) return false;
-    if (f.due === 'overdue' && !(_isOverdue(s.dueDate) && (s.status || 'draft') !== 'closed')) return false;
-    if (f.due === 'nodate' && s.dueDate) return false;
-    if (f.q) {
-      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
-      var prodNames = pids.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ''; }).join(' ');
-      var hay = ((s.itemName || '') + ' ' + (s.kmiSubmittalNo || '') + ' ' + (s.packageName || '') + ' ' + (s.csiSection || '') + ' ' + prodNames).toLowerCase();
-      if (hay.indexOf(f.q.toLowerCase()) === -1) return false;
-    }
-    return true;
-  });
-  return _sortSubmittalRows(rows, _psbSort);
-}
-
-function _psbRowsHtml(projectId) {
-  var rows = _psbFilteredSorted(projectId);
-  var canEdit = canAccess('edit-submittals') === 'full';
-  if (!rows.length) {
-    return '<tr><td colspan="11" style="text-align:center;padding:20px;color:#aaa;font-size:12px">No submittals match the current filters.</td></tr>';
-  }
-  return rows.map(function(s){
-    var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
-    var prodCell;
-    if (s.isCustom) {
-      prodCell = '<span style="color:#888;font-style:italic">Custom</span>';
-    } else if (!pids.length) {
-      prodCell = '<span style="color:#A32D2D">Missing product</span>';
-    } else {
-      var firstP = getProduct(pids[0]);
-      var firstName = firstP ? firstP.name : ('#' + pids[0]);
-      prodCell = subEsc(firstName) + (pids.length > 1
-        ? ' <span style="color:#888;font-size:11px">(+' + (pids.length - 1) + ')</span>'
-        : '');
-    }
-    var dueCell = s.dueDate || '—';
-    if (_isOverdue(s.dueDate) && (s.status || 'draft') !== 'closed') {
-      dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
-    }
-    var sentCell = s.sentDate
-      ? '<span style="font-family:monospace;font-size:11px">' + subEsc(s.sentDate) + '</span>'
-      : '<span style="display:inline-flex;gap:6px;align-items:center;white-space:nowrap">' +
-          '<span style="background:#FCEBEB;color:#A32D2D;padding:1px 7px;border-radius:20px;font-size:11px">Not sent</span>' +
-          (canEdit ? '<a href="javascript:void(0)" onclick="event.stopPropagation();psbMarkSent(\'' + s.id + '\')" style="font-size:11px;color:var(--kmi)">Mark sent</a>' : '') +
-        '</span>';
-    var returnedCell = subEsc(s.responseDate || '—') +
-      ((s.responseDocuments && s.responseDocuments.length)
-        ? ' <span title="' + s.responseDocuments.length + ' response document' + (s.responseDocuments.length === 1 ? '' : 's') + ' attached" style="color:#888;font-size:11px">📎' + (s.responseDocuments.length > 1 ? s.responseDocuments.length : '') + '</span>'
-        : '');
-    var compileBtn = canEdit
-      ? ' <button class="btn btn-sm" style="font-size:10px;padding:2px 6px" title="Compile this submittal" onclick="event.stopPropagation();showSubmittalPackageCompile(' + s.id + ')">📄</button>'
+  var body = '';
+  Object.keys(byPkg).sort().forEach(function(pkg){
+    // First submittal in the package — used to scope the Compile action
+    var firstId = byPkg[pkg][0] && byPkg[pkg][0].id;
+    var compileBtnHtml = (canEdit && firstId)
+      ? ' <button class="btn btn-sm" style="float:right;margin-top:-3px;font-size:10px;padding:2px 8px" onclick="event.stopPropagation();showSubmittalPackageCompile(' + firstId + ')">📄 Compile</button>'
       : '';
-    return '<tr style="cursor:pointer" onclick="subEditForProject(' + s.id + ', ' + projectId + ')">' +
-      '<td style="padding:5px 8px">' + subStatusBadge(s.status || 'draft') + '</td>' +
-      '<td style="padding:5px 8px">' + subResponseBadge(s.response || '') + '</td>' +
-      '<td style="padding:5px 8px;font-family:monospace;font-size:11px">' + subEsc(s.kmiSubmittalNo || '—') + '</td>' +
-      '<td style="padding:5px 8px;font-size:11px">' + subEsc(_csiPrefix(s.csiSection) || s.csiSection || '—') + '</td>' +
-      '<td style="padding:5px 8px;font-weight:600;font-size:12px">' + subEsc(s.itemName || '') + '</td>' +
-      '<td style="padding:5px 8px;font-size:12px">' + subEsc(s.packageName || '') + '</td>' +
-      '<td style="padding:5px 8px;font-size:12px">' + prodCell + '</td>' +
-      '<td style="padding:5px 8px;font-size:12px">' + dueCell + '</td>' +
-      '<td style="padding:5px 8px">' + sentCell + '</td>' +
-      '<td style="padding:5px 8px;font-size:12px">' + returnedCell + '</td>' +
-      '<td style="padding:5px 8px" onclick="event.stopPropagation()">' +
-        '<button class="btn btn-sm" style="font-size:10px;padding:2px 6px" onclick="subEditForProject(' + s.id + ', ' + projectId + ')">' + (canEdit ? '✎' : 'View') + '</button>' + compileBtn +
-      '</td>' +
-    '</tr>';
-  }).join('');
-}
-
-function psbRefresh() {
-  var tb = g('psb-tbody');
-  if (!tb) return;
-  tb.innerHTML = _psbRowsHtml(_psbProjectId);
-  var cnt = g('psb-count');
-  if (cnt) cnt.textContent = '(' + _psbFilteredSorted(_psbProjectId).length + ')';
-  updatePsbSortIndicators();
-}
-
-function psbApplyFilters() {
-  _psbFilter.q      = (g('psb-q')      || {}).value || '';
-  _psbFilter.status = (g('psb-status') || {}).value || '';
-  _psbFilter.pkg    = (g('psb-pkg')    || {}).value || '';
-  _psbFilter.sent   = (g('psb-sent')   || {}).value || '';
-  _psbFilter.due    = (g('psb-due')    || {}).value || '';
-  psbRefresh();
-}
-
-function sortPsb(col) {
-  if (_psbSort && _psbSort.col === col) _psbSort.dir = _psbSort.dir === 'asc' ? 'desc' : 'asc';
-  else _psbSort = { col: col, dir: 'asc' };
-  psbRefresh();
-}
-
-function updatePsbSortIndicators() {
-  var tb = g('psb-tbody');
-  var tbl = tb ? tb.closest('table') : null;
-  if (!tbl) return;
-  tbl.querySelectorAll('thead th.sortable').forEach(function(th){
-    th.classList.remove('asc', 'desc');
-    var oc = th.getAttribute('onclick') || '';
-    var m = oc.match(/sortPsb\('([^']+)'\)/);
-    if (m && _psbSort && m[1] === _psbSort.col) th.classList.add(_psbSort.dir);
+    body += '<tr style="background:#fafafa"><td colspan="7" style="padding:6px 8px;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">' +
+      subEsc(pkg) + ' <span style="color:#aaa;font-weight:400;text-transform:none">(' + byPkg[pkg].length + ')</span>' +
+      compileBtnHtml +
+      '</td></tr>';
+    byPkg[pkg].forEach(function(s){
+      var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
+      var prodCell;
+      if (s.isCustom) {
+        prodCell = '<span style="color:#888;font-style:italic">Custom</span>';
+      } else if (!pids.length) {
+        prodCell = '<span style="color:#A32D2D">Missing product</span>';
+      } else {
+        var firstP = getProduct(pids[0]);
+        var firstName = firstP ? firstP.name : ('#' + pids[0]);
+        prodCell = subEsc(firstName) + (pids.length > 1
+          ? ' <span style="color:#888;font-size:11px">(+' + (pids.length - 1) + ')</span>'
+          : '');
+      }
+      var dueCell = s.dueDate || '—';
+      if (_isOverdue(s.dueDate) && s.status !== 'closed') {
+        dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
+      }
+      body += '<tr style="cursor:pointer" onclick="subEditForProject(' + s.id + ', ' + projectId + ')">' +
+        '<td style="padding:5px 8px">' + subStatusBadge(s.status || 'draft') + '</td>' +
+        '<td style="padding:5px 8px">' + subResponseBadge(s.response || '') + '</td>' +
+        '<td style="padding:5px 8px;font-family:monospace;font-size:11px">' + subEsc(s.kmiSubmittalNo || '—') + '</td>' +
+        '<td style="padding:5px 8px;font-weight:600;font-size:12px">' + subEsc(s.itemName || '') + '</td>' +
+        '<td style="padding:5px 8px;font-size:12px">' + prodCell + '</td>' +
+        '<td style="padding:5px 8px;font-size:12px">' + dueCell + '</td>' +
+        '<td style="padding:5px 8px;font-size:12px">' + subEsc(s.responseDate || '') +
+          ((s.responseDocuments && s.responseDocuments.length)
+            ? ' <span title="' + s.responseDocuments.length + ' response document' + (s.responseDocuments.length === 1 ? '' : 's') + ' attached" style="color:#888;font-size:11px">📎' + (s.responseDocuments.length > 1 ? s.responseDocuments.length : '') + '</span>'
+            : '') +
+        '</td>' +
+      '</tr>';
+    });
   });
-}
 
-function psbMarkSent(id) {
-  if (!requireFull('edit-submittals', 'update submittals')) return;
-  var s = getSubmittal(id);
-  if (!s) return;
-  s.sentDate = (new Date()).toISOString().slice(0, 10);
-  if ((s.status || 'draft') === 'draft') s.status = 'sent';
-  saveDB();
-  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-    supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(s)).then(function(rr){
-      if (rr && rr.error) console.warn('kmi_submittals sentDate upsert error:', rr.error.message);
-    }).catch(function(rr){ console.warn('kmi_submittals sentDate upsert exception:', rr); });
-  }
-  psbRefresh();
-  if (typeof showToast === 'function') showToast('Marked sent');
+  return '<div class="card">' +
+    '<div class="ch"><span class="ct">Submittals (' + rows.length + ')</span>' + addBtn + '</div>' +
+    '<table style="width:100%;font-size:12px"><thead><tr>' +
+      '<th style="padding:6px 8px;text-align:left;width:90px">Status</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:130px">Response</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:110px">KMI #</th>' +
+      '<th style="padding:6px 8px;text-align:left">Item</th>' +
+      '<th style="padding:6px 8px;text-align:left">Product</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:90px">Due</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:90px">Returned</th>' +
+    '</tr></thead><tbody>' + body + '</tbody></table>' +
+  '</div>';
 }
 
 function initNewSubmittalForProject(projectId) {
@@ -14083,26 +13907,19 @@ async function _fetchUploadedFileBytes(uploadedFile) {
   return await resp.arrayBuffer();
 }
 
-// Choose a letter page in the orientation that matches the source aspect
-// (landscape source -> landscape letter, portrait -> portrait) and return
-// the page dimensions plus a centered, aspect-preserving fit rect. All
-// values in PDF points. Used for image source pages; PDF source pages get
-// their exact native size elsewhere.
-function _orientedLetterFit(srcW, srcH) {
-  var LONG = 792, SHORT = 612;
-  var landscape = srcW > srcH;
-  var PAGE_W = landscape ? LONG : SHORT;
-  var PAGE_H = landscape ? SHORT : LONG;
+// Calculate fit-to-page dimensions preserving aspect ratio.
+// Returns {x, y, w, h} in PDF points for letter-size (612x792).
+function _fitToLetterPage(srcW, srcH) {
+  var PAGE_W = 612, PAGE_H = 792;
   var pageRatio = PAGE_W / PAGE_H;
-  var imgRatio  = (srcH > 0) ? (srcW / srcH) : pageRatio;
-  var w, h;
-  if (imgRatio > pageRatio) { w = PAGE_W; h = w / imgRatio; }
-  else                      { h = PAGE_H; w = h * imgRatio; }
-  return {
-    pageW: PAGE_W, pageH: PAGE_H,
-    orientation: landscape ? 'landscape' : 'portrait',
-    x: (PAGE_W - w) / 2, y: (PAGE_H - h) / 2, w: w, h: h
-  };
+  var imgRatio  = srcW / srcH;
+  if (imgRatio > pageRatio) {
+    var w1 = PAGE_W, h1 = w1 / imgRatio;
+    return { x: 0, y: (PAGE_H - h1) / 2, w: w1, h: h1 };
+  } else {
+    var h2 = PAGE_H, w2 = h2 * imgRatio;
+    return { x: (PAGE_W - w2) / 2, y: 0, w: w2, h: h2 };
+  }
 }
 
 // Append every page of a PDF (given as ArrayBuffer) onto a jsPDF doc as
@@ -14112,12 +13929,6 @@ async function _appendPdfBytesToJsPdf(doc, arrayBuffer) {
   var pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   for (var i = 1; i <= pdf.numPages; i++) {
     var page = await pdf.getPage(i);
-    // True page size in PDF points (72dpi). pdf.js has already applied the
-    // page's /Rotate, so these are the displayed dimensions.
-    var base = page.getViewport({ scale: 1.0 });
-    var pageWpt = base.width, pageHpt = base.height;
-    // Raster at higher scale for line-drawing sharpness; the raster
-    // resolution is independent of the output page size in points.
     var viewport = page.getViewport({ scale: 2.0 });
     var canvas = document.createElement('canvas');
     canvas.width  = viewport.width;
@@ -14125,15 +13936,9 @@ async function _appendPdfBytesToJsPdf(doc, arrayBuffer) {
     var ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport: viewport }).promise;
     var imgData = canvas.toDataURL('image/jpeg', 0.85);
-    // New page matches the source page's native size + orientation exactly,
-    // and the raster fills it edge to edge (aspect is identical, so no
-    // distortion). Read the page size back from jsPDF so addImage always
-    // fills whatever page was actually created.
-    var orient = pageWpt > pageHpt ? 'landscape' : 'portrait';
-    doc.addPage([pageWpt, pageHpt], orient);
-    var pw = doc.internal.pageSize.getWidth();
-    var ph = doc.internal.pageSize.getHeight();
-    doc.addImage(imgData, 'JPEG', 0, 0, pw, ph);
+    var fit = _fitToLetterPage(viewport.width, viewport.height);
+    doc.addPage();
+    doc.addImage(imgData, 'JPEG', fit.x, fit.y, fit.w, fit.h);
   }
   return pdf.numPages;
 }
@@ -14160,8 +13965,8 @@ async function _appendImageBytesToJsPdf(doc, arrayBuffer, contentType) {
     im.src = dataUrl;
   });
 
-  var fit = _orientedLetterFit(img.width, img.height);
-  doc.addPage([fit.pageW, fit.pageH], fit.orientation);
+  var fit = _fitToLetterPage(img.width, img.height);
+  doc.addPage();
   doc.addImage(dataUrl, format, fit.x, fit.y, fit.w, fit.h);
   return 1;
 }
@@ -36404,6 +36209,36 @@ function renderFoundationMasterStatus() {
   }
   renderVendorReconcile();
   renderFoundationMasterBrowser();
+  renderCostClassGL();
+}
+
+// ── Cost-class → G/L expense tagging (Foundation AP export col V) ────
+function renderCostClassGL(){
+  var el=g('cc-gl-table'); if(!el) return;
+  var classes=(db.costClasses||[]).filter(function(c){return c.active!==false;})
+    .sort(function(a,b){return String(a.classNo).localeCompare(String(b.classNo),undefined,{numeric:true});});
+  if(!classes.length){ el.innerHTML=''; return; }
+  var tagged=classes.filter(function(c){return c.glExpense;}).length;
+  var th='text-align:left;padding:4px 8px;background:#f6f7fa;color:#555;font-size:10px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee';
+  el.innerHTML='<div style="font-weight:600;font-size:12px;color:var(--kmi);margin:2px 0 6px">G/L expense account per class '+
+    '<span style="font-weight:400;color:#888">(used for job-cost lines on the Foundation AP export &mdash; '+tagged+'/'+classes.length+' tagged)</span></div>'+
+    '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+
+    '<th style="'+th+'">Class</th><th style="'+th+'">Description</th><th style="'+th+'">G/L expense account</th></tr></thead><tbody>'+
+    classes.map(function(c){
+      return '<tr><td style="padding:4px 8px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace"><strong>'+apEsc(c.classNo)+'</strong></td>'+
+        '<td style="padding:4px 8px;border-bottom:1px solid #eef0f4">'+apEsc(c.description||'')+'</td>'+
+        '<td style="padding:4px 8px;border-bottom:1px solid #eef0f4"><input value="'+apEsc(c.glExpense||'')+'" placeholder="e.g. 5010" onchange="ccSetGL(\''+c.id+'\',this.value)" style="width:130px;padding:4px 7px;font-size:12px;border:1px solid #d8dce6;border-radius:5px;font-family:ui-monospace,monospace"></td></tr>';
+    }).join('')+'</tbody></table>';
+}
+async function ccSetGL(id, val){
+  var c=(db.costClasses||[]).find(function(x){return String(x.id)===String(id);}); if(!c) return;
+  c.glExpense=(val||'').trim();
+  saveDB();
+  if(supabaseClient){
+    try{ var r=await supabaseClient.from('kmi_cost_classes').upsert(toSBCostClass(c)); if(r&&r.error) console.warn('cost class GL push:',r.error.message); }
+    catch(e){ console.warn('cost class GL push threw:',e); }
+  }
+  renderCostClassGL();
 }
 
 // ── BPR Classification → Cost Code Map (Round 4.1) ───────────────────
@@ -39296,7 +39131,7 @@ function renderProjectProduction() {
   host.innerHTML =
     '<div style="display:flex;gap:4px;border-bottom:1px solid #e5e5e5;margin-bottom:18px">' +
       _pst('estimate', 'Estimate') +
-      _pst('weekly', 'Daily Entry') +
+      _pst('weekly', 'Weekly Entry') +
       _pst('tracking', 'Tracking') +
     '</div>' +
     '<div id="nprj-prod-subcontent"></div>';
@@ -39866,22 +39701,21 @@ async function prodSaveEstimate() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// DAILY DATA ENTRY — Production sub-tab (Productivity Phase 1a)
-// Rows = the estimate's line items. Per day: units installed (production
+// WEEKLY DATA ENTRY — Production sub-tab (Productivity Phase 1a)
+// Rows = the estimate's line items. Per week: units installed (production
 // lines only) + Foreman/Mason/Laborer hours (all lines). Stored one row
-// per project+day in db.prodWeekly / kmi_prod_weekly (the week_ending
-// column now holds a single day). JTD units roll up across all days.
-// Wage/dollars are not part of data entry.
+// per project+week in db.prodWeekly / kmi_prod_weekly. JTD units roll up
+// across weeks. Wage/dollars are not part of data entry.
 // ════════════════════════════════════════════════════════════════════
-var _prodWeekEnding = null;   // 'YYYY-MM-DD' currently-shown day
+var _prodWeekEnding = null;   // 'YYYY-MM-DD' currently-shown week
 var _prodWeekModel = null;    // { weekEnding, entries:{ lineId:{u,f,m,l} } }
 function _prodDateStr(d) {
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 function _prodDefaultWeekEnding() {
-  // Daily entry: default to today. (Function/var names kept for call-site
-  // stability; the stored date is now a single day, not a Friday week-ending.)
-  return _prodDateStr(new Date());
+  var d = new Date(); var delta = 5 - d.getDay(); // Friday = 5
+  d.setDate(d.getDate() + delta);
+  return _prodDateStr(d);
 }
 function _prodAddDays(ws, n) {
   var d = new Date(ws + 'T00:00:00'); d.setDate(d.getDate() + n); return _prodDateStr(d);
@@ -39921,14 +39755,14 @@ function renderProdWeeklyView() {
 
   var bar = '<div class="card"><div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">' +
       '<div style="display:flex;align-items:center;gap:8px">' +
-        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,-1) + '\')">\u2039</button>' +
-        '<div style="font-size:15px;font-weight:600;min-width:200px;text-align:center">' + _prodWeekLabel(_prodWeekEnding) + '</div>' +
-        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,1) + '\')">\u203a</button>' +
+        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,-7) + '\')">\u2039</button>' +
+        '<div style="font-size:15px;font-weight:600;min-width:200px;text-align:center">Week ending ' + _prodWeekLabel(_prodWeekEnding) + '</div>' +
+        '<button class="btn" style="width:32px;padding:6px 0" onclick="prodWkGo(\'' + _prodAddDays(_prodWeekEnding,7) + '\')">\u203a</button>' +
       '</div>' +
       '<input type="date" value="' + _prodWeekEnding + '" onchange="prodWkGo(this.value)" style="padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-family:inherit">' +
       '<div style="flex:1"></div>' +
       '<button class="btn btn-pdf btn-sm" onclick="prodWkOpenUpload()">\u2913 Smart upload</button>' +
-      '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save day</button>' +
+      '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save week</button>' +
     '</div></div>';
 
   function sec(label){ return '<tr><td colspan="7" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">' + label + '</td></tr>'; }
@@ -39947,7 +39781,7 @@ function renderProdWeeklyView() {
     '<td style="padding-top:9px">Week totals</td>' +
     _ftot('prodwk-t-units') + _ftot('prodwk-t-f') + _ftot('prodwk-t-m') + _ftot('prodwk-t-l') +
     '<td style="text-align:right;padding-top:9px" id="prodwk-t-tot">\u2014</td><td></td></tr></tfoot>';
-  var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this day</strong>. JTD units roll up across all days automatically. Field-labor items track hours only.</div>';
+  var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this week</strong>. JTD units roll up across all weeks automatically. Field-labor items track hours only.</div>';
   var table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:760px">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' + hint + '</div>';
 
   host.innerHTML = bar + table;
@@ -40028,12 +39862,12 @@ async function prodWkSave() {
         if (res && res.error) throw res.error;
       }
     }
-    if (typeof showToast === 'function') showToast('Day saved'); else alert('Day saved');
+    if (typeof showToast === 'function') showToast('Week saved'); else alert('Week saved');
   } catch(e) {
     console.warn('prodWkSave', e);
     alert('Saved locally, but cloud sync failed: ' + (e.message || e));
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Save day'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Save week'; }
   }
 }
 
@@ -40049,7 +39883,7 @@ function prodWkOpenUpload() {
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Smart upload \u2014 week ending ' + _prodWeekLabel(_prodWeekModel.weekEnding) + '</div>' +
-    '<div class="msb">Upload a photo or PDF of the daily field production sheet. The AI reads units installed and crew hours per item and fills this day\'s grid for your review. Nothing is saved to the cloud until you click Save day.</div>' +
+    '<div class="msb">Upload a photo or PDF of the weekly field production sheet. The AI reads units installed and crew hours per item and fills this week\'s grid for your review. Nothing is saved to the cloud until you click Save week.</div>' +
     '<div class="fgr" style="margin:12px 0"><label>Photo or PDF</label>' +
       '<input type="file" id="prodwk-up-file" accept="application/pdf,image/png,image/jpeg"></div>' +
     '<div id="prodwk-up-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
@@ -40096,7 +39930,7 @@ async function prodWkRunUpload() {
       return '"' + String(l.itemName).replace(/"/g,'') + '" (' + (l.lineType === 'production' ? 'units + hours' : 'hours only') + ')';
     }).join(', ');
     var prompt =
-      'You are reading a hand-filled daily field production sheet from a masonry construction project. For this one day, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
+      'You are reading a hand-filled weekly field production sheet from a masonry construction project. For this one week, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
       'Match every row on the sheet to one of these estimate items, using these EXACT names. Items marked "units + hours" track an installed-unit count; "hours only" items do not:\n  [' + itemList + ']\n\n' +
       'Schema:\n{\n  "items": [\n    {"name": "<exact item name from the list>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>}\n  ]\n}\n\n' +
       'Rules:\n- Match each sheet row to one listed item name EXACTLY. If a row matches no listed item, omit it.\n- Hours are numbers (use 0 for blank, never null).\n- Include "units" only for "units + hours" items; use null otherwise.\n- Return the items array even if empty; never invent values.';
@@ -40134,7 +39968,7 @@ async function prodWkRunUpload() {
     prodWkPersist();          // local autosave of the filled values
     closeModal();
     renderProdWeeklyView();   // reloads from the now-persisted week, showing the fills
-    var msg = res.n + ' item(s) filled from upload \u2014 review and Save day' +
+    var msg = res.n + ' item(s) filled from upload \u2014 review and Save week' +
       (res.unmatched.length ? (' \u00b7 unmatched: ' + res.unmatched.slice(0, 6).join(', ')) : '');
     if (typeof showToast === 'function') showToast(msg); else alert(msg);
   } catch(e) {
@@ -40163,29 +39997,15 @@ function _prodJtdForLine(projectId, lineId) {
   });
   return o;
 }
-// Sunday–Saturday week immediately before the week that contains today.
-// e.g. today Wed 7/1/26 \u2192 current week Sun 6/28\u2013Sat 7/4, so this returns
-// { start:'2026-06-21', end:'2026-06-27' }. Boundaries are inclusive.
-function _prodPrevWeekRange() {
-  var d = new Date(); d.setHours(0,0,0,0);
-  var dow = d.getDay();                       // 0=Sun \u2026 6=Sat
-  var start = new Date(d); start.setDate(d.getDate() - dow - 7);  // last week's Sunday
-  var end = new Date(start); end.setDate(start.getDate() + 6);    // last week's Saturday
-  return { start: _prodDateStr(start), end: _prodDateStr(end) };
-}
-// Units for the most recent COMPLETE calendar week (Sun\u2013Sat) \u2014 the week just
-// before the one containing today. Sums a line's daily unit entries whose
-// date falls in that window. Drives Tracking's "Recent/wk" pace proxy.
 function _prodRecentUnitsForLine(projectId, lineId) {
-  var wk = _prodPrevWeekRange(), sum = 0;
+  var bestWk = null, bestU = 0;
   (db.prodWeekly || []).forEach(function(r){
     if (String(r.projectId) !== String(projectId)) return;
-    var d = String(r.weekEnding || '');
-    if (d < wk.start || d > wk.end) return;
     var e = r.entries && r.entries[lineId]; if (!e) return;
-    sum += Number(e.u) || 0;
+    var u = Number(e.u) || 0; if (!u) return;
+    if (bestWk === null || String(r.weekEnding) > String(bestWk)) { bestWk = r.weekEnding; bestU = u; }
   });
-  return sum;
+  return bestU;
 }
 // Shared compute for the tracking report (screen + PDF use identical math).
 function _prodTrackingCompute(p) {
@@ -40517,10 +40337,10 @@ function prodExportTrackingPdf() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// MOBILE DAILY ENTRY (Phase 5a) — field crews enter the day on a phone.
-// Card layout, camera-first, custom line items (notify PM), day note.
+// MOBILE WEEKLY ENTRY (Phase 5a) — field crews enter the week on a phone.
+// Card layout, camera-first, custom line items (notify PM), week note.
 // Reuses db.prodWeekly + the Phase 1 data layer; mobile-scoped state so it
-// never collides with the desktop daily screen.
+// never collides with the desktop weekly screen.
 // ════════════════════════════════════════════════════════════════════
 var _mobWeekEnding = null;
 var _mobWeekModel = null;   // { weekEnding, entries, custom, note }
@@ -40530,7 +40350,7 @@ function renderMobileWeekly() {
   var p = getProj(_mobileSelectedProjectId);
   if (!p) { nav('m-projects'); return; }
   var hdr = document.getElementById('m-weekly-heading');
-  if (hdr) hdr.textContent = (p.number ? p.number + ' ' : '') + 'Daily';
+  if (hdr) hdr.textContent = (p.number ? p.number + ' ' : '') + 'Weekly';
   var body = document.getElementById('m-weekly-body'); if (!body) return;
   var est = _prodEnsureEstimate(p);
   var lines = est.lines || [];
@@ -40544,10 +40364,10 @@ function renderMobileWeekly() {
   };
 
   var sel = '<div style="background:#fff;border:.5px solid #e8e8e8;border-radius:11px;padding:10px;display:flex;align-items:center;gap:8px;margin-bottom:12px">' +
-    '<button onclick="mobWkGo(\'' + _prodAddDays(_mobWeekEnding,-1) + '\')" style="width:40px;height:40px;border:.5px solid #ddd;background:#fff;border-radius:9px;font-size:18px;color:#555">\u2039</button>' +
-    '<div style="flex:1;text-align:center"><div style="font-size:15px;font-weight:600">' + _prodWeekLabel(_mobWeekEnding) + '</div>' +
+    '<button onclick="mobWkGo(\'' + _prodAddDays(_mobWeekEnding,-7) + '\')" style="width:40px;height:40px;border:.5px solid #ddd;background:#fff;border-radius:9px;font-size:18px;color:#555">\u2039</button>' +
+    '<div style="flex:1;text-align:center"><div style="font-size:15px;font-weight:600">Week ending ' + _prodWeekLabel(_mobWeekEnding) + '</div>' +
       '<div style="font-size:11px;color:#888">' + _prodEsc((p.number||'') + (p.name ? (' \u00b7 ' + p.name) : '')) + '</div></div>' +
-    '<button onclick="mobWkGo(\'' + _prodAddDays(_mobWeekEnding,1) + '\')" style="width:40px;height:40px;border:.5px solid #ddd;background:#fff;border-radius:9px;font-size:18px;color:#555">\u203a</button>' +
+    '<button onclick="mobWkGo(\'' + _prodAddDays(_mobWeekEnding,7) + '\')" style="width:40px;height:40px;border:.5px solid #ddd;background:#fff;border-radius:9px;font-size:18px;color:#555">\u203a</button>' +
   '</div>';
 
   var snap = '<button onclick="mobWkOpenUpload()" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:#EEF0F8;color:var(--kmi);border:.5px solid var(--stl);border-radius:11px;padding:13px;font-size:14px;font-weight:700;margin-bottom:6px">\ud83d\udcf7 Snap the field sheet</button>' +
@@ -40566,11 +40386,11 @@ function renderMobileWeekly() {
   html += '<button onclick="mobWkAddCustom()" style="width:100%;background:#fff;border:1px dashed #c9ccd8;color:var(--kmi);border-radius:11px;padding:12px;font-size:14px;font-weight:600;margin-bottom:16px">+ Add custom item</button>';
 
   html += sec('Notes');
-  html += '<textarea id="mwk-note" oninput="if(_mobWeekModel)_mobWeekModel.note=this.value" placeholder="Anything about this day\u2019s production\u2026" style="width:100%;min-height:80px;border:1px solid #dcdee6;border-radius:11px;padding:12px;font-size:14px;font-family:inherit;margin-bottom:16px">' + _prodEsc(_mobWeekModel.note) + '</textarea>';
+  html += '<textarea id="mwk-note" oninput="if(_mobWeekModel)_mobWeekModel.note=this.value" placeholder="Anything about this week\u2019s production\u2026" style="width:100%;min-height:80px;border:1px solid #dcdee6;border-radius:11px;padding:12px;font-size:14px;font-family:inherit;margin-bottom:16px">' + _prodEsc(_mobWeekModel.note) + '</textarea>';
 
   html += '<div style="background:#fff;border:.5px solid #e8e8e8;border-radius:11px;padding:13px;display:flex;align-items:center;gap:12px;margin-bottom:24px">' +
-    '<div style="flex:1;font-size:12px;color:#666"><b id="mwk-t-hrs" style="color:#1a1a1a;font-size:14px">0</b> hrs \u00b7 <span id="mwk-t-units">0</span> units<br><span style="font-size:11px">this day</span></div>' +
-    '<button onclick="mobWkSave()" id="mwk-save-btn" style="background:var(--kmi);color:#fff;border:none;font-weight:700;font-size:15px;padding:13px 22px;border-radius:11px">Save day</button>' +
+    '<div style="flex:1;font-size:12px;color:#666"><b id="mwk-t-hrs" style="color:#1a1a1a;font-size:14px">0</b> hrs \u00b7 <span id="mwk-t-units">0</span> units<br><span style="font-size:11px">this week</span></div>' +
+    '<button onclick="mobWkSave()" id="mwk-save-btn" style="background:var(--kmi);color:#fff;border:none;font-weight:700;font-size:15px;padding:13px 22px;border-radius:11px">Save week</button>' +
   '</div>';
 
   body.innerHTML = html;
@@ -40699,14 +40519,14 @@ async function mobWkSave() {
         }
       } catch(e) { console.warn('PM notify (custom items) failed:', e); }
     }
-    var msg = 'Day saved' + (newCustom.length ? (' \u00b7 PM notified of ' + newCustom.length + ' custom item' + (newCustom.length>1?'s':'')) : '');
+    var msg = 'Week saved' + (newCustom.length ? (' \u00b7 PM notified of ' + newCustom.length + ' custom item' + (newCustom.length>1?'s':'')) : '');
     if (typeof showToast === 'function') showToast(msg); else alert(msg);
     renderMobileWeekly();
   } catch(e) {
     console.warn('mobWkSave', e);
     alert('Saved on this device, but cloud sync failed: ' + (e.message || e));
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Save day'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Save week'; }
   }
 }
 async function _mobWkNotifyPM(project, items, weekEnding) {
@@ -40743,7 +40563,7 @@ function mobWkOpenUpload() {
   if (!db.anthropic_api_key) { alert('Smart upload needs the Anthropic API key (set it in Settings).'); return; }
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Snap the field sheet</div>' +
-    '<div class="msb">Take or upload a photo (or PDF) of the daily production sheet. The AI fills this day for your review. Nothing saves until you tap Save day.</div>' +
+    '<div class="msb">Take or upload a photo (or PDF) of the weekly production sheet. The AI fills this week for your review. Nothing saves until you tap Save week.</div>' +
     '<div class="fgr" style="margin:12px 0"><label>Photo or PDF</label>' +
       '<input type="file" id="mwk-up-file" accept="image/*,application/pdf" capture="environment"></div>' +
     '<div id="mwk-up-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
@@ -40768,7 +40588,7 @@ async function mobWkRunUpload() {
   try {
     var b64 = await _smartUpFileToBase64(file);
     var itemList = (est.lines || []).map(function(l){ return '"' + String(l.itemName).replace(/"/g,'') + '" (' + (l.lineType==='production'?'units + hours':'hours only') + ')'; }).join(', ');
-    var prompt = 'You are reading a hand-filled daily field production sheet from a masonry construction project. For this one day, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
+    var prompt = 'You are reading a hand-filled weekly field production sheet from a masonry construction project. For this one week, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
       'Match every row to one of these estimate items using these EXACT names ("units + hours" items track units; "hours only" do not):\n  [' + itemList + ']\n\n' +
       'Schema:\n{ "items": [ {"name":"<exact item name>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>} ] }\n\n' +
       'Rules:\n- Match each row to one listed item EXACTLY; omit rows that match nothing.\n- Hours are numbers (0 for blank).\n- Include units only for "units + hours" items; null otherwise.\n- Return items even if empty; never invent values.';
@@ -40798,7 +40618,7 @@ async function mobWkRunUpload() {
     mobWkPersist();
     closeModal();
     renderMobileWeekly();
-    if (typeof showToast === 'function') showToast(n + ' item(s) filled \u2014 review and Save day');
+    if (typeof showToast === 'function') showToast(n + ' item(s) filled \u2014 review and Save week');
   } catch(e) {
     console.error('mobWkRunUpload', e);
     if (errEl) errEl.textContent = 'Extraction failed: ' + (e.message || String(e));
@@ -43370,12 +43190,14 @@ function fromSBCostCode(r) {
 function toSBCostClass(r) {
   return {
     id:r.id, class_no:r.classNo||'', description:r.description||'',
+    gl_expense:r.glExpense||'',
     active:r.active!==false
   };
 }
 function fromSBCostClass(r) {
   return {
     id:r.id, classNo:r.class_no||'', description:r.description||'',
+    glExpense:r.gl_expense||'',
     active:r.active!==false
   };
 }
