@@ -38102,7 +38102,7 @@ function _apRegRow(i){
     '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4;font-size:11.5px;color:#666">'+_apCodingSummary(i)+'</td>'+
     apprCell+
     '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4;font-size:11.5px;color:#888">'+dateCell+'</td>'+
-    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4">'+apStatusPill(i.status)+'</td>'+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4">'+apStatusPill(i.status)+(i.status==='exported'&&i.importConfirmedAt?' <span title="Imported to Foundation" style="color:#3B6D11;font-weight:700">&#10003;</span>':'')+'</td>'+
   '</tr>';
 }
 function _apRegSync(){
@@ -38139,6 +38139,20 @@ function _apRegRender(){
   var totEl=g('ap-appr-total'); if(totEl) totEl.innerHTML=list.length+' invoice'+(list.length===1?'':'s')+' &middot; <strong style="color:var(--kmi);font-size:14px">'+apMoney(tot)+'</strong> total';
 
   var tEl=g('ap-appr-table'); if(!tEl) return;
+  // toolbar (Accounting/Admin): export approved + confirm exported batch
+  var tb=g('ap-appr-toolbar');
+  if(tb){
+    if(_apIsAcct()){
+      var nApproved=base.filter(function(i){return i.status==='approved';}).length;
+      var html='<div style="display:flex;gap:10px;justify-content:flex-end">';
+      if(_apReg.status==='exported'){
+        var nUn=list.filter(function(i){return !i.importConfirmedAt;}).length;
+        html+='<button class="btn" onclick="apConfirmBatch()"'+(nUn?'':' disabled')+' style="'+(nUn?'background:#3B6D11;color:#fff;border-color:#3B6D11':'opacity:.5')+'">Confirm imported ('+nUn+')</button>';
+      }
+      html+='<button class="btn" onclick="apOpenExportModal()"'+(nApproved?'':' disabled')+' style="'+(nApproved?'background:var(--kmi);color:#fff;border-color:var(--kmi)':'opacity:.5')+'">Export to Foundation ('+nApproved+')</button></div>';
+      tb.innerHTML=html;
+    } else tb.innerHTML='';
+  }
   if(!list.length){ tEl.innerHTML='<div style="padding:30px;text-align:center;color:#999;font-size:13px">No invoices match these filters.</div>'; return; }
   var heads=['Vendor','Invoice #','Job','Amount','Coding','Approver','Date','Status'];
   tEl.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'+
@@ -38179,7 +38193,8 @@ function renderApApprovals(){
   '</div>';
 
   el.innerHTML = '<div id="ap-appr-stats" style="margin:0 0 6px"></div>'+
-    '<div id="ap-appr-total" style="font-size:12.5px;color:#555;margin:4px 0 14px"></div>'+
+    '<div id="ap-appr-total" style="font-size:12.5px;color:#555;margin:4px 0 10px"></div>'+
+    '<div id="ap-appr-toolbar" style="margin:0 0 12px"></div>'+
     filters +
     '<div class="card" style="background:#fff;border:1px solid #EEE;border-radius:9px;overflow:hidden"><div id="ap-appr-table"></div></div>';
   _apRegRender();
@@ -38272,6 +38287,13 @@ function apRenderReview(){
       '<div style="font-size:13px;margin-bottom:6px"><strong style="color:'+(i.status==='rejected'?'#b23636':'#3B6D11')+'">'+label+'</strong>'+(i.approvedBy?(' by '+apEsc(apApproverName(i.approvedBy))):'')+(when?(' \u00b7 '+apEsc(when)):'')+'</div>'+
       '<div style="font-size:12px;color:#555">Approver of record: <strong>'+apEsc(apApproverName(i.approverId))+'</strong></div>'+
       (i.decisionNote?('<div style="font-size:12px;color:#555;margin-top:8px;background:#f6f7fa;border-radius:6px;padding:8px 10px">Note: '+apEsc(i.decisionNote)+'</div>'):'')+
+      (i.status==='exported' ? (
+        i.importConfirmedAt
+          ? '<div style="margin-top:10px;font-size:12px;color:#3B6D11;background:#eef6e6;border:1px solid #cfe4bd;border-radius:6px;padding:8px 10px">&#10003; Confirmed imported to Foundation'+(i.importConfirmedBy?(' by '+apEsc(apApproverName(i.importConfirmedBy))):'')+' \u00b7 '+apEsc(new Date(i.importConfirmedAt).toLocaleString())+'</div>'
+          : (_apIsAcct()
+              ? '<div style="margin-top:12px;display:flex;gap:9px;justify-content:flex-end"><button class="btn" style="background:#b23636;color:#fff;border-color:#b23636" onclick="apRevertExport(\''+i.id+'\')">Import failed \u2014 revert to Approved</button><button class="btn" style="background:#3B6D11;color:#fff;border-color:#3B6D11" onclick="apConfirmImported(\''+i.id+'\')">Confirm imported to Foundation</button></div>'
+              : '<div style="margin-top:10px;font-size:12px;color:#7A5C00;background:#fdf4e0;border-radius:6px;padding:8px 10px">Exported \u2014 awaiting Accounting confirmation of the Foundation import.</div>')
+      ) : '')+
     '</div>';
   } else {
     var canDecide=_apCanDecide(i);
@@ -38362,6 +38384,186 @@ async function apReject(id){
     }
     apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+' \u2014 returned to coding. Accounting notified ('+rcpts.length+').'+(nextId?' Next invoice loaded.':''));
   }catch(e){ console.warn('reject email:',e); apSetApprBanner('error','Rejected '+apEsc(i.invoiceNo)+', but the Accounting email failed to send.'); }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// AP → FOUNDATION CSV EXPORT
+// 34 fields (CSV A–AH = template B–AI, shifted left one), every field
+// double-quoted, comma-separated, no header row. Single-line invoice = one
+// combined row (flag N). Multi-line = header row (A–T, flag Y, U–AH blank) +
+// one detail row per line (A–T blank except voucher #, U–AH filled).
+// ════════════════════════════════════════════════════════════════════
+function _apQ(v){ return '"'+String(v==null?'':v).replace(/"/g,'""')+'"'; }
+function _apNum(n){ return (Number(n)||0).toFixed(2); }
+function _apCsvDate(s){
+  if(!s) return '';
+  var t=String(s).trim();
+  var m=t.match(/^(\d{4})-(\d{2})-(\d{2})/);          // ISO → m/d/yyyy
+  if(m) return parseInt(m[2],10)+'/'+parseInt(m[3],10)+'/'+m[1];
+  var m2=t.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if(m2){ var y=m2[3].length===2?('20'+m2[3]):m2[3]; return parseInt(m2[1],10)+'/'+parseInt(m2[2],10)+'/'+y; }
+  return t;
+}
+// G/L expense account for a distribution line (col U, required every detail row)
+function _apLineGL(l){
+  if(l.distType==='job'){
+    var cls=(db.costClasses||[]).find(function(c){ return String(c.classNo)===String(l.costClass); });
+    return cls ? (cls.glExpense||'') : '';
+  }
+  return l.glNo||'';
+}
+// Reasons an approved invoice can't be exported yet (blank = exportable)
+function _apExportBlockers(inv){
+  var out=[];
+  if(!inv.foundationVendorNo) out.push('No Foundation vendor #');
+  var lines=_apInvLines(inv);
+  if(!lines.length){ out.push('No coding lines'); return out; }
+  lines.forEach(function(l){
+    if(l.distType==='job'){
+      if(!l.costClass) out.push('Job line missing cost class');
+      else if(!_apLineGL(l)) out.push('Class '+l.costClass+' has no G/L tagged');
+    } else if(!l.glNo){ out.push('Overhead line missing G/L'); }
+  });
+  return out.filter(function(v,i,a){return a.indexOf(v)===i;});
+}
+
+function apBuildFoundationCSV(invoices){
+  var rows=[];
+  invoices.forEach(function(inv, idx){
+    var voucher=String(idx+1);
+    var lines=_apInvLines(inv);
+    var invDate=_apCsvDate(inv.invoiceDate);
+    var multi=lines.length>1;
+    function blank(){ var a=[]; for(var i=0;i<34;i++) a.push(''); return a; }
+    function header(r){
+      r[0]=multi?'Y':'N';               // A  multi-line flag
+      r[1]=voucher;                     // B  voucher reference
+      r[2]=inv.foundationVendorNo||'';  // C  vendor no
+      r[3]=invDate;                     // D  invoice date
+      r[4]=invDate;                     // E  transaction date (= invoice date)
+      r[5]=_apNum(inv.total);           // F  header amount
+      // G invoice description blank
+      r[7]=inv.invoiceNo||'';           // H  invoice no
+      r[8]=_apCsvDate(inv.dueDate);     // I  due date
+      // J retainage blank ; K PO/Sub always blank
+      r[11]='R';                        // L  voucher type
+      // M–T blank (payment/check/terms/discount/scanned link)
+    }
+    function detail(r,l){
+      r[20]=_apLineGL(l);               // U  G/L expense (required)
+      if(l.distType==='job'){
+        r[25]=String(l.jobNo||'').toUpperCase();     // Z   job no
+        r[27]=String(l.costCode||'').toUpperCase();  // AB  cost code
+        r[28]=String(l.costClass||'').toUpperCase(); // AC  cost class
+      }
+      r[29]=_apNum(l.amount);           // AD distribution amount
+      r[30]=l.description||'';          // AE description
+    }
+    if(!multi){
+      var r=blank(); header(r); detail(r, lines[0]||{}); rows.push(r);
+    } else {
+      var h=blank(); header(h); rows.push(h);            // header row, U–AH blank
+      lines.forEach(function(l){ var d=blank(); d[1]=voucher; detail(d,l); rows.push(d); });
+    }
+  });
+  return rows.map(function(r){ return r.map(_apQ).join(','); }).join('\r\n')+'\r\n';
+}
+
+// ── Export checklist modal ──────────────────────────────────────────
+function apOpenExportModal(){
+  if(!_apIsAcct()) return;
+  var cands=_apRegScopedBase().filter(function(i){ return i.status==='approved'; })
+    .sort(function(a,b){ return String(_apInvDateISO(a)).localeCompare(String(_apInvDateISO(b))); });
+  var ov=document.createElement('div');
+  ov.id='ap-export-modal';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(20,24,45,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+  var okCount=cands.filter(function(i){return _apExportBlockers(i).length===0;}).length;
+  var rowsHtml = cands.length ? cands.map(function(i){
+    var bl=_apExportBlockers(i);
+    var ok=bl.length===0;
+    return '<tr><td style="padding:7px 9px;border-bottom:1px solid #eef0f4;text-align:center">'+
+        (ok?'<input type="checkbox" class="ap-exp-cb" value="'+i.id+'" checked>':'<span title="'+apEsc(bl.join('; '))+'" style="color:#b23636;font-size:15px">&#9888;</span>')+'</td>'+
+      '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4"><strong>'+apEsc(apVendorDisplayName(i)||i.vendorName)+'</strong></td>'+
+      '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
+      '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4">'+apInvoiceJobCell(i)+'</td>'+
+      '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace;text-align:right">'+apMoney(i.total)+'</td>'+
+      '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4;font-size:11px;color:'+(ok?'#3B6D11':'#b23636')+'">'+(ok?'Ready':apEsc(bl.join('; ')))+'</td></tr>';
+  }).join('') : '<tr><td colspan="6" style="padding:24px;text-align:center;color:#888">No approved invoices waiting to export.</td></tr>';
+  ov.innerHTML='<div style="background:#fff;border-radius:12px;max-width:920px;width:100%;max-height:86vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">'+
+    '<div style="padding:15px 20px;background:var(--kmi);color:#fff;display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:16px;font-weight:700">Export to Foundation</div><div style="font-size:12px;color:#c4c9df;margin-top:2px">'+okCount+' ready &middot; '+(cands.length-okCount)+' blocked &middot; one file, batch-local voucher #s</div></div><button onclick="apCloseExportModal()" style="background:none;border:0;color:#c4c9df;font-size:22px;cursor:pointer;line-height:1">&times;</button></div>'+
+    '<div style="padding:8px 20px;border-bottom:1px solid #eef0f4;display:flex;gap:14px;align-items:center;font-size:12px"><label style="cursor:pointer"><input type="checkbox" id="ap-exp-all" checked onchange="document.querySelectorAll(\'.ap-exp-cb\').forEach(function(c){c.checked=this.checked;}.bind(this))"> Select all ready</label><span style="color:#888">Blocked invoices (&#9888;) can\u2019t be selected until fixed.</span></div>'+
+    '<div style="overflow:auto;flex:1"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'+
+      ['','Vendor','Invoice #','Job','Amount','Status'].map(function(h){return '<th style="text-align:'+(h==='Amount'?'right':'left')+';padding:8px 9px;background:#f6f7fa;color:#555;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee;position:sticky;top:0">'+h+'</th>';}).join('')+
+      '</tr></thead><tbody>'+rowsHtml+'</tbody></table></div>'+
+    '<div style="padding:13px 20px;border-top:1px solid #eef0f4;display:flex;justify-content:flex-end;gap:10px"><button class="btn" onclick="apCloseExportModal()">Cancel</button><button class="btn" style="background:#3B6D11;color:#fff;border-color:#3B6D11" onclick="apDoExport()"'+(okCount?'':' disabled')+'>Download CSV &amp; mark exported</button></div>'+
+  '</div>';
+  document.body.appendChild(ov);
+}
+function apCloseExportModal(){ var m=g('ap-export-modal'); if(m) m.remove(); }
+
+async function apDoExport(){
+  var ids=Array.prototype.map.call(document.querySelectorAll('.ap-exp-cb:checked'), function(c){ return c.value; });
+  if(!ids.length){ alert('Select at least one invoice to export.'); return; }
+  var invoices=ids.map(function(id){ return (db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); })
+    .filter(Boolean)
+    .sort(function(a,b){ return String(_apInvDateISO(a)).localeCompare(String(_apInvDateISO(b))); });
+  // final guard
+  for(var k=0;k<invoices.length;k++){ if(_apExportBlockers(invoices[k]).length){ alert('“'+(apVendorDisplayName(invoices[k])||invoices[k].vendorName)+' '+invoices[k].invoiceNo+'” is blocked and can\u2019t be exported.'); return; } }
+
+  var csv=apBuildFoundationCSV(invoices);
+  var stamp=new Date();
+  var batchId='B'+stamp.getTime();
+  var fname='KMI_AP_Foundation_'+stamp.getFullYear()+('0'+(stamp.getMonth()+1)).slice(-2)+('0'+stamp.getDate()).slice(-2)+'_'+('0'+stamp.getHours()).slice(-2)+('0'+stamp.getMinutes()).slice(-2)+'.txt';
+  // download
+  var blob=new Blob([csv],{type:'text/plain;charset=utf-8'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a'); a.href=url; a.download=fname; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1500);
+  // mark exported
+  var meId=_currentUser?String(_currentUser.id):'';
+  invoices.forEach(function(i){
+    i.status='exported'; i.exportedAt=stamp.toISOString(); i.exportedBy=meId; i.exportBatchId=batchId;
+    i.importConfirmedAt=''; i.importConfirmedBy=''; i.updatedAt=i.exportedAt;
+    apLog(i.id,'exported','Exported to Foundation batch '+batchId);
+  });
+  saveDB();
+  if(supabaseClient){ for(var j=0;j<invoices.length;j++){ try{ await apPushInvoice(invoices[j]); }catch(e){ console.warn('export push:',e); } } }
+  apCloseExportModal();
+  renderApApprovals();
+  apSetApprBanner('success','Exported '+invoices.length+' invoice'+(invoices.length===1?'':'s')+' to '+apEsc(fname)+'. After importing into Foundation, confirm the batch from the Exported filter.');
+}
+
+// ── Import confirmation / revert ────────────────────────────────────
+function apConfirmImported(id){
+  if(!_apIsAcct()) return;
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i||i.status!=='exported') return;
+  i.importConfirmedAt=new Date().toISOString(); i.importConfirmedBy=(_currentUser?String(_currentUser.id):''); i.updatedAt=i.importConfirmedAt;
+  saveDB(); apLog(i.id,'import_confirmed','Confirmed imported to Foundation');
+  if(supabaseClient) apPushInvoice(i);
+  if(_apReviewId && String(_apReviewId)===String(id)) apRenderReview(); else renderApApprovals();
+}
+function apRevertExport(id){
+  if(!_apIsAcct()) return;
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i||i.status!=='exported') return;
+  if(!confirm('Revert this invoice to Approved so it can be re-exported? This clears its export stamp.')) return;
+  i.status='approved'; i.exportedAt=''; i.exportedBy=''; i.exportBatchId=''; i.importConfirmedAt=''; i.importConfirmedBy=''; i.updatedAt=new Date().toISOString();
+  saveDB(); apLog(i.id,'export_reverted','Import failed \u2014 reverted to Approved for re-export');
+  if(supabaseClient) apPushInvoice(i);
+  if(_apReviewId && String(_apReviewId)===String(id)){ var nx=_apReviewNextId(); if(nx) apOpenReview(nx); else apCloseReview(); } else renderApApprovals();
+  apSetApprBanner('info','Reverted '+apEsc(i.invoiceNo)+' to Approved \u2014 ready to re-export.');
+}
+// batch-confirm every currently-filtered exported invoice not yet confirmed
+function apConfirmBatch(){
+  if(!_apIsAcct()) return;
+  var list=_apRegScopedBase().filter(_apRegPasses).filter(function(i){ return i.status==='exported' && !i.importConfirmedAt; });
+  if(!list.length){ alert('Nothing to confirm in the current view.'); return; }
+  if(!confirm('Confirm '+list.length+' invoice'+(list.length===1?'':'s')+' as successfully imported to Foundation?')) return;
+  var now=new Date().toISOString(), meId=_currentUser?String(_currentUser.id):'';
+  list.forEach(function(i){ i.importConfirmedAt=now; i.importConfirmedBy=meId; i.updatedAt=now; apLog(i.id,'import_confirmed','Confirmed imported to Foundation (batch confirm)'); });
+  saveDB();
+  if(supabaseClient){ list.forEach(function(i){ try{ apPushInvoice(i); }catch(e){} }); }
+  renderApApprovals();
+  apSetApprBanner('success','Confirmed '+list.length+' invoice'+(list.length===1?'':'s')+' as imported to Foundation.');
 }
 
 function importFoundationCustomers(rows) {
@@ -43236,6 +43438,8 @@ function toSBApInvoice(r) {
     multi_invoice_flag:!!r.multiInvoiceFlag, notes:r.notes||'',
     pdf_path:r.pdfPath||null,
     approver_id:r.approverId||'', approved_by:r.approvedBy||'', approved_at:r.approvedAt||null,
+    exported_at:r.exportedAt||null, exported_by:r.exportedBy||'', export_batch_id:r.exportBatchId||'',
+    import_confirmed_at:r.importConfirmedAt||null, import_confirmed_by:r.importConfirmedBy||'',
     decision_note:r.decisionNote||'', queued_at:r.queuedAt||null, last_reminder_at:r.lastReminderAt||null,
     created_by:r.createdBy||'', updated_at:new Date().toISOString()
   };
@@ -43256,6 +43460,8 @@ function fromSBApInvoice(r) {
     multiInvoiceFlag:!!r.multi_invoice_flag, notes:r.notes||'',
     pdfPath:r.pdf_path||'',
     approverId:r.approver_id||'', approvedBy:r.approved_by||'', approvedAt:r.approved_at||'',
+    exportedAt:r.exported_at||'', exportedBy:r.exported_by||'', exportBatchId:r.export_batch_id||'',
+    importConfirmedAt:r.import_confirmed_at||'', importConfirmedBy:r.import_confirmed_by||'',
     decisionNote:r.decision_note||'', queuedAt:r.queued_at||'', lastReminderAt:r.last_reminder_at||'',
     createdBy:r.created_by||'', createdAt:r.created_at||''
   };
