@@ -36772,16 +36772,28 @@ function importFoundationCostCodes(rows) {
 }
 
 function importFoundationCostClasses(rows) {
+  // Preserve any existing (manually-tagged) G/L when the CSV doesn't carry one.
+  var existing = {};
+  (db.costClasses || []).forEach(function(c){ existing[(c.classNo || '').trim()] = c; });
   var parsed = [];
-  var skipped = 0;
+  var skipped = 0, glCount = 0;
   rows.forEach(function(r){
     var no   = (r.cost_class_no || r.class_no || r.no || r['Cost Class No'] || '').trim();
     var desc = (r.description || r.desc || r.name || r['Description'] || '').trim();
     if (!no) { skipped++; return; }
+    // G/L expense account lives in CSV column H (8th column). Read it positionally,
+    // with a few named fallbacks; keep the prior tag if this row's H is blank.
+    var keys = Object.keys(r);
+    var glH  = keys.length >= 8 ? String(r[keys[7]] || '').trim() : '';
+    var prev = existing[no];
+    var gl   = glH || String(r.gl_expense || r['GL Expense'] || r['G/L Expense'] || r['Expense Account'] || '').trim()
+                   || (prev ? (prev.glExpense || '') : '');
+    if (gl) glCount++;
     parsed.push({
       id: Date.now() + parsed.length,
       classNo: no,
       description: desc,
+      glExpense: gl,
       active: true
     });
   });
@@ -36790,6 +36802,7 @@ function importFoundationCostClasses(rows) {
     return;
   }
   if (!confirm('Replace the cost class list with ' + parsed.length + ' row' + (parsed.length === 1 ? '' : 's') + ' from this CSV?' +
+               '\n\n' + glCount + ' of ' + parsed.length + ' have a G/L expense account (column H).' +
                (skipped ? '\n\n' + skipped + ' row(s) were skipped (missing class number).' : ''))) {
     return;
   }
@@ -36806,7 +36819,7 @@ function importFoundationCostClasses(rows) {
     })();
   }
   renderTemplates();
-  alert('\u2714 Imported ' + parsed.length + ' cost class' + (parsed.length === 1 ? '' : 'es') + '.');
+  alert('\u2714 Imported ' + parsed.length + ' cost class' + (parsed.length === 1 ? '' : 'es') + ' \u00b7 ' + glCount + ' with a G/L expense account.');
 }
 
 // ── GL accounts (Foundation chart of accounts) — AP Session 1 ─────────
