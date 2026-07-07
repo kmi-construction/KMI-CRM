@@ -1241,6 +1241,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="sb-group-items">
       <div class="ni active" onclick="nav('dashboard')"><span class="nico">▦</span>Dashboard</div>
       <div class="ni" onclick="nav('opportunities')"><span class="nico">◈</span>Bid Opportunities</div>
+      <div class="ni" onclick="nav('bid-inbox')"><span class="nico">✉</span>Bid Inbox<span id="biNavCount" class="ni-count" style="display:none"></span></div>
       <div class="ni" onclick="nav('analytics')"><span class="nico">◈</span>Analytics</div>
     </div>
   </div>
@@ -1416,6 +1417,13 @@ textarea{resize:vertical;min-height:72px}
 </div>
 
 <!-- BID OPPORTUNITIES LIST -->
+<div class="pg" id="pg-bid-inbox">
+  <div class="ph">
+    <div><h1>Bid Inbox</h1><div class="sub">Incoming bid invitations parsed from bids@kmi-construction.com</div><div class="stripe"></div></div>
+  </div>
+  <div id="biContent"></div>
+</div>
+
 <div class="pg" id="pg-opportunities">
   <div class="ph">
     <div><h1>Bid Opportunities</h1><div class="sub">Track and manage all incoming bid opportunities</div><div class="stripe"></div></div>
@@ -3505,6 +3513,11 @@ var PERM_ROLES = ['Admin','Project Manager','Project Coordinator','Accounting','
 var PERMISSIONS = {
   'dashboard':          ['full','full','full','read','none','none'],
   'bid-opportunities':  ['full','full','full','read','none','none'],
+  // Bid Inbox — inbound invitation review queue. View mirrors bid-opportunities
+  // (Accounting reads). Route = attach/create-opp/not-bidding, office staff only
+  // (Admin/PM/PC); field roles and Accounting don't triage the pipeline intake.
+  'view-bid-inbox':     ['full','full','full','read','none','none'],
+  'route-bid-inbox':    ['full','full','full','none','none','none'],
   'create-opportunity': ['full','full','full','read','none','none'],
   'edit-opportunity':   ['full','full','full','read','none','none'],
   'change-decision':    ['full','full','full','read','none','none'],
@@ -3676,6 +3689,7 @@ function enforceSeedRoles() {
 var PAGE_ACTION_MAP = {
   'dashboard':      'dashboard',
   'opportunities':  'bid-opportunities',
+  'bid-inbox':      'view-bid-inbox',
   'customers':      'add-customers',
   'pms':            'add-pm',
   'vendors':           'add-vendors',
@@ -4896,6 +4910,7 @@ function nav(page) {
   var fns = {
     dashboard:        renderDash,
     opportunities:    renderOpportunities,
+    'bid-inbox':      renderBidInbox,
     'new-opportunity':initNewOpp,
     customers:        renderCusts,
     pms:              renderPMs,
@@ -4932,6 +4947,32 @@ function nav(page) {
     'm-desktop-only':     function(){}
   };
   if (fns[page]) fns[page]();
+}
+
+// ═══ BID INBOX (inbound bid invitations) ═══════════════════════════════
+// Review queue for invitations parsed by the inbound-bid Edge Function into
+// kmi_bid_inbox. Chunk 1: page shell + data plumbing only. The queue list,
+// Review & Match triage, and attach/create-opp wiring arrive in Chunk 2.
+function renderBidInbox() {
+  var host = g('biContent');
+  if (!host) return;
+  var rows = Array.isArray(db.bidInbox) ? db.bidInbox : [];
+  var newCount = rows.filter(function(r){ return r.status === 'new'; }).length;
+  host.innerHTML = '<div class="card" style="padding:40px;text-align:center;color:#888">'
+    + '<div style="font-size:15px;color:#555;margin-bottom:6px">Bid Inbox foundation is live.</div>'
+    + rows.length + ' invitation record(s) loaded \u00b7 ' + newCount + ' new. '
+    + 'The review queue UI arrives in the next build step.</div>';
+  updateBidInboxNavCount();
+}
+
+// Sidebar badge: count of invitations still awaiting review.
+function updateBidInboxNavCount() {
+  var el = g('biNavCount');
+  if (!el) return;
+  var rows = Array.isArray(db.bidInbox) ? db.bidInbox : [];
+  var n = rows.filter(function(r){ return r.status === 'new'; }).length;
+  if (n > 0) { el.textContent = n; el.style.display = ''; }
+  else { el.textContent = ''; el.style.display = 'none'; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -43603,6 +43644,88 @@ function fromSBRfqResponse(r) {
   };
 }
 
+// ── Bid Inbox mappers (inbound invitation review queue + GC invites) ──
+function toSBBidInbox(r) {
+  return {
+    id: r.id,
+    resend_email_id: r.resendEmailId || null,
+    received_at: r.receivedAt || null,
+    from_email: r.fromEmail || '',
+    from_name: r.fromName || '',
+    to_email: r.toEmail || '',
+    subject: r.subject || '',
+    body_text: r.bodyText || '',
+    body_html: r.bodyHtml || '',
+    attachments: Array.isArray(r.attachments) ? r.attachments : [],
+    extracted: r.extracted || {},
+    match_suggestion: r.matchSuggestion || {},
+    status: r.status || 'new',
+    resolved_opportunity_id: r.resolvedOpportunityId || null,
+    resolved_invite_id: r.resolvedInviteId || null,
+    reviewed_by: r.reviewedBy || null,
+    reviewed_at: r.reviewedAt || null,
+    created: r.created || ''
+  };
+}
+function fromSBBidInbox(r) {
+  return {
+    id: r.id,
+    resendEmailId: r.resend_email_id || null,
+    receivedAt: r.received_at || null,
+    fromEmail: r.from_email || '',
+    fromName: r.from_name || '',
+    toEmail: r.to_email || '',
+    subject: r.subject || '',
+    bodyText: r.body_text || '',
+    bodyHtml: r.body_html || '',
+    attachments: Array.isArray(r.attachments) ? r.attachments : [],
+    extracted: r.extracted || {},
+    matchSuggestion: r.match_suggestion || {},
+    status: r.status || 'new',
+    resolvedOpportunityId: r.resolved_opportunity_id || null,
+    resolvedInviteId: r.resolved_invite_id || null,
+    reviewedBy: r.reviewed_by || null,
+    reviewedAt: r.reviewed_at || null,
+    created: r.created || ''
+  };
+}
+function toSBBidInvite(r) {
+  return {
+    id: r.id,
+    opportunity_id: r.opportunityId || null,
+    customer_id: r.customerId || null,
+    gc_name: r.gcName || '',
+    gc_email: r.gcEmail || '',
+    gc_contact: r.gcContact || '',
+    bid_due_date: r.bidDueDate || '',
+    plan_room_url: r.planRoomUrl || '',
+    source: r.source || 'manual',
+    inbox_id: r.inboxId || null,
+    submitted_amount: (r.submittedAmount == null || r.submittedAmount === '') ? null : Number(r.submittedAmount),
+    submission_status: r.submissionStatus || 'pending',
+    notes: r.notes || '',
+    created: r.created || ''
+  };
+}
+function fromSBBidInvite(r) {
+  return {
+    id: r.id,
+    opportunityId: r.opportunity_id || null,
+    customerId: r.customer_id || null,
+    gcName: r.gc_name || '',
+    gcEmail: r.gc_email || '',
+    gcContact: r.gc_contact || '',
+    bidDueDate: r.bid_due_date || '',
+    planRoomUrl: r.plan_room_url || '',
+    source: r.source || 'manual',
+    inboxId: r.inbox_id || null,
+    submittedAmount: (r.submitted_amount == null) ? null : Number(r.submitted_amount),
+    submissionStatus: r.submission_status || 'pending',
+    notes: r.notes || '',
+    created: r.created || ''
+  };
+}
+
 // ── Foundation master-data mappers (cost codes / classes / customers) ──
 function toSBCostCode(r) {
   return {
@@ -44014,7 +44137,7 @@ async function pullFromSupabase() {
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
          mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
          rfqsRes, rfqRespRes, prodWkRes, prodCatRes, prodItemRes, prodDocTypeRes, prodCategoryRes,
-         eqRes, eqMoveRes, eqInvRes] = await Promise.all([
+         eqRes, eqMoveRes, eqInvRes, biRes, bivRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -44049,7 +44172,9 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_product_categories').select('*'),
       supabaseClient.from('kmi_equipment').select('*'),
       supabaseClient.from('kmi_equipment_moves').select('*'),
-      supabaseClient.from('kmi_equipment_invoices').select('*')
+      supabaseClient.from('kmi_equipment_invoices').select('*'),
+      supabaseClient.from('kmi_bid_inbox').select('*'),
+      supabaseClient.from('kmi_bid_invites').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -44356,6 +44481,19 @@ async function pullFromSupabase() {
     } else if (rfqRespRes && rfqRespRes.error) {
       console.warn('kmi_rfq_responses load error (table missing?):', rfqRespRes.error.message);
       if (!Array.isArray(db.rfqResponses)) db.rfqResponses = [];
+    }
+    // Bid Inbox / inbound invitations — same preserve-on-missing pattern.
+    if (biRes && !biRes.error) {
+      db.bidInbox = (biRes.data || []).map(fromSBBidInbox);
+    } else if (biRes && biRes.error) {
+      console.warn('kmi_bid_inbox load error (table missing?):', biRes.error.message);
+      if (!Array.isArray(db.bidInbox)) db.bidInbox = [];
+    }
+    if (bivRes && !bivRes.error) {
+      db.bidInvites = (bivRes.data || []).map(fromSBBidInvite);
+    } else if (bivRes && bivRes.error) {
+      console.warn('kmi_bid_invites load error (table missing?):', bivRes.error.message);
+      if (!Array.isArray(db.bidInvites)) db.bidInvites = [];
     }
 
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
