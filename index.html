@@ -1528,6 +1528,7 @@ textarea{resize:vertical;min-height:72px}
     </div>
   </div>
   <div id="od-outcome-section"></div>
+  <div id="od-bidinvites-section"></div>
   <div class="card"><div class="pmg" id="od-meta"></div></div>
   <div id="od-final-bid-section"></div>
   <div id="od-prop-section"></div>
@@ -4965,6 +4966,28 @@ function _biMoney(n){ n=Number(n)||0; return (n<0?'-$':'$')+Math.abs(n).toLocale
 function _biFmtDate(d){ if(!d) return '—'; var t=new Date(d); if(isNaN(t.getTime())) return String(d); return t.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
 function _biCanRoute(){ return canAccess('route-bid-inbox')==='full'; }
 
+// Strip noise from GC-platform plain-text bodies for readable preview:
+// drop lone tracking/link-wrapped URL lines, shorten inline monster URLs,
+// and collapse runs of blank lines. Full text stays available via "View original".
+function _biCleanBody(t){
+  if(!t) return '(no plain-text body)';
+  var lines=String(t).split(/\r?\n/).map(function(l){
+    if(/^\s*https?:\/\/\S{90,}\s*$/.test(l)) return '';
+    return l.replace(/https?:\/\/\S{90,}/g,'[link]');
+  });
+  var out=lines.join('\n').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  return out||'(no readable text)';
+}
+
+function biViewOriginalEmail(id){
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(id); }); if(!r) return;
+  showModal('<h3 style="margin:0 0 10px;font-size:15px">Original email \u2014 raw</h3>'
+    + '<div style="font-size:11px;color:#888;margin-bottom:10px">From '+_biEsc(r.fromEmail||'')+' \u00b7 '+_biEsc(r.subject||'')+'</div>'
+    + '<div style="white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:12px;line-height:1.5;color:#333;max-height:60vh;overflow:auto;background:#FAFAF8;border:0.5px solid #eee;border-radius:6px;padding:12px">'
+    + _biEsc(r.bodyText||'(no plain-text body)')+'</div>'
+    + '<div style="text-align:right;margin-top:14px"><button class="btn" onclick="closeModal()">Close</button></div>');
+}
+
 // Match a GC name from extraction back to an existing customer row.
 function _biMatchCustomerId(gcName){
   if(!gcName) return null;
@@ -5005,11 +5028,12 @@ function _biStyles(){
   + '.bi-b-match{background:#faf1d6;color:#9A7A2E;border:1px solid #E8D08A}.bi-b-none{background:#f5f5f5;color:#999}'
   + '.bi-b-att{background:#EAF3DE;color:#3B6D11}.bi-b-cre{background:#EAF3DE;color:#3B6D11}.bi-b-no{background:#FCEBEB;color:#A32D2D}'
   + '.bi-split{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}'
+  + '.bi-split>*{min-width:0}'
   + '.bi-fg{display:grid;grid-template-columns:1fr 1fr;gap:11px 13px}.bi-fg .full{grid-column:1/-1}'
   + '.bi-fld label{display:block;font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}'
   + '.bi-fld input,.bi-fld select{width:100%;padding:8px 10px;font-size:13px;border:1px solid #ddd;border-radius:6px;font-family:inherit;background:#fff}'
   + '.bi-conf{font-size:10px;color:var(--ac);font-weight:600;margin-left:5px}.bi-conf.lo{color:#A32D2D}'
-  + '.bi-email{font-size:13px;line-height:1.6;color:#333;white-space:pre-wrap;max-height:300px;overflow:auto}'
+  + '.bi-email{font-size:13px;line-height:1.55;color:#333;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-height:300px;overflow:auto;background:#FAFAF8;border:0.5px solid #eee;border-radius:6px;padding:10px 12px}'
   + '.bi-ehead{font-size:12px;color:#555;line-height:1.8;border-bottom:0.5px solid #eee;padding-bottom:10px;margin-bottom:10px}'
   + '.bi-ehead b{color:#1a1a1a;display:inline-block;width:56px}'
   + '.bi-chip{display:inline-flex;align-items:center;gap:7px;background:#F5F5F3;border:0.5px solid #e0e0e0;border-radius:7px;padding:6px 10px;font-size:12px;margin:8px 8px 0 0;cursor:pointer}'
@@ -5195,7 +5219,8 @@ function renderBidInboxReview(){
     +       '<div><b>Date</b> '+_biFmtDate(r.receivedAt)+'</div>'
     +       '<div><b>Subject</b> '+_biEsc(r.subject||'')+'</div>'
     +     '</div>'
-    +     '<div class="bi-email">'+_biEsc(r.bodyText||'(no plain-text body)')+'</div>'
+    +     '<div style="text-align:right;margin:-2px 0 6px"><a href="#" onclick="biViewOriginalEmail(\''+_biEsc(r.id)+'\');return false;" style="font-size:11px;color:var(--kmi3);text-decoration:underline">View original</a></div>'
+    +     '<div class="bi-email">'+_biEsc(_biCleanBody(r.bodyText))+'</div>'
     +     (atts?('<div style="margin-top:6px">'+atts+'</div>'):'')
     +   '</div>'
     +   '<div>'
@@ -5323,6 +5348,156 @@ async function biOpenAttachment(path){
     if(res&&res.data&&res.data.signedUrl){ window.open(res.data.signedUrl,'_blank'); }
     else { showToast('Could not open attachment','error'); }
   }catch(e){ console.error('biOpenAttachment', e); showToast('Could not open attachment','error'); }
+}
+
+// ═══ BID INBOX — Chunk 3: multi-GC invitations on the opportunity ══════
+// Renders every kmi_bid_invites row for an opportunity (one job, many GCs).
+// Shared takeoff lives on the opp; each invite tracks its own GC, due date,
+// contact, plan link, and the number KMI submits to that GC.
+function biInvitesForOpp(oppId){
+  return (db.bidInvites||[]).filter(function(v){ return String(v.opportunityId)===String(oppId); })
+    .sort(function(a,b){ return String(a.created||'').localeCompare(String(b.created||'')); });
+}
+function _biInitials(name){
+  var w=String(name||'').trim().split(/\s+/).filter(Boolean).slice(0,3);
+  if(!w.length) return '?';
+  return w.map(function(x){ return x[0]; }).join('').toUpperCase().slice(0,3);
+}
+function _biSubBadge(s){
+  if(s==='bid_sent') return '<span style="display:inline-block;padding:3px 9px;border-radius:100px;font-size:11px;font-weight:600;background:#e6f1fb;color:#185FA5">Bid sent</span>';
+  if(s==='declined') return '<span style="display:inline-block;padding:3px 9px;border-radius:100px;font-size:11px;font-weight:600;background:#FCEBEB;color:#A32D2D">Declined</span>';
+  return '<span style="display:inline-block;padding:3px 9px;border-radius:100px;font-size:11px;font-weight:600;background:#f5f5f5;color:#666">Pending</span>';
+}
+
+function renderOppBidInvites(o){
+  var host=g('od-bidinvites-section'); if(!host||!o) return;
+  var invites=biInvitesForOpp(o.id);
+  var canRoute=(canAccess('route-bid-inbox')==='full');
+  // Nothing to show and no ability to add → keep the section out of the way.
+  if(invites.length===0 && !canRoute){ host.innerHTML=''; return; }
+
+  var rows=invites.map(function(v){
+    var srcNote = v.source==='inbox' ? 'from bid inbox' : 'added manually';
+    var det=[];
+    det.push('\uD83D\uDCC5 Due '+_biFmtDate(v.bidDueDate));
+    if(v.gcContact) det.push('\uD83D\uDC64 '+_biEsc(v.gcContact));
+    if(v.planRoomUrl) det.push('<a href="'+_biEsc(v.planRoomUrl.indexOf('http')===0?v.planRoomUrl:('https://'+v.planRoomUrl))+'" target="_blank" style="color:var(--kmi3);text-decoration:none">\uD83D\uDCCE Plans</a>');
+    var amtInput = canRoute
+      ? '<input type="number" step="1" value="'+(v.submittedAmount==null?'':_biEsc(v.submittedAmount))+'" placeholder="—" onchange="biSetInviteAmount(\''+_biEsc(v.id)+'\',this.value)" style="width:120px;text-align:right;padding:6px 8px;font-size:13px;border:1px solid #ddd;border-radius:6px">'
+      : '<span style="font-weight:600">'+(v.submittedAmount==null?'—':_biMoney(v.submittedAmount))+'</span>';
+    var statusCtl = canRoute
+      ? '<select onchange="biSetInviteStatus(\''+_biEsc(v.id)+'\',this.value)" style="padding:6px 8px;font-size:12px;border:1px solid #ddd;border-radius:6px;font-family:inherit">'
+        + '<option value="pending"'+(v.submissionStatus==='pending'?' selected':'')+'>Pending</option>'
+        + '<option value="bid_sent"'+(v.submissionStatus==='bid_sent'?' selected':'')+'>Bid sent</option>'
+        + '<option value="declined"'+(v.submissionStatus==='declined'?' selected':'')+'>Declined</option>'
+        + '</select>'
+      : _biSubBadge(v.submissionStatus);
+    var rm = canRoute ? '<button class="btn btn-sm" title="Remove invitation" onclick="biRemoveInvite(\''+_biEsc(v.id)+'\')" style="padding:4px 8px">\u2715</button>' : '';
+    return '<div style="display:flex;align-items:center;gap:14px;padding:13px 4px;border-bottom:0.5px solid #eee">'
+      + '<div style="width:40px;height:40px;border-radius:8px;background:var(--kmi);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0">'+_biEsc(_biInitials(v.gcName))+'</div>'
+      + '<div style="flex:1;min-width:0">'
+      +   '<div style="font-weight:600;font-size:13px">'+_biEsc(v.gcName||'(unnamed GC)')+' <span style="font-weight:400;color:#999;font-size:11px">\u00b7 '+srcNote+'</span></div>'
+      +   '<div style="font-size:12px;color:#777;margin-top:3px;display:flex;gap:14px;flex-wrap:wrap">'+det.join('<span style="color:#ddd">|</span>')+'</div>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:12px;flex-shrink:0">'
+      +   '<div style="text-align:right"><div>'+amtInput+'</div><div style="font-size:9px;color:#999;text-transform:uppercase;letter-spacing:.4px;margin-top:2px">Submitted</div></div>'
+      +   statusCtl + rm
+      + '</div>'
+      + '</div>';
+  }).join('');
+
+  var addBtn = canRoute ? '<button class="btn btn-sm" onclick="biAddManualInvite(\''+_biEsc(o.id)+'\')">+ Add invitation</button>' : '';
+  var banner = invites.length>0
+    ? '<div style="background:#e6f1fb;border:0.5px solid #B5D2EC;border-radius:8px;padding:10px 13px;font-size:12px;color:#185FA5;margin-bottom:12px;line-height:1.5"><strong>Shared takeoff.</strong> Scope &amp; quantities live once on this opportunity. Each GC below is a separate invitation \u2014 same job, tracked individually.</div>'
+    : '<div style="font-size:13px;color:#888;padding:6px 0">No bid invitations yet. Invitations attached from the Bid Inbox appear here, or add one manually.</div>';
+
+  host.innerHTML='<div class="card">'
+    + '<div class="ch" style="margin-bottom:10px"><span class="ct">Bid invitations'+(invites.length?' \u00b7 '+invites.length+' GC'+(invites.length>1?'s':''):'')+'</span>'+addBtn+'</div>'
+    + banner + rows
+    + '</div>';
+}
+
+async function _biPersistInvite(v){
+  try{
+    var r=await supabaseClient.from('kmi_bid_invites').upsert(toSBBidInvite(v));
+    if(r.error) throw r.error;
+    saveDB();
+    return true;
+  }catch(e){ console.error('_biPersistInvite', e); showToast('Save failed: '+(e.message||e),'error'); return false; }
+}
+
+async function biSetInviteAmount(id, val){
+  if(canAccess('route-bid-inbox')!=='full') return;
+  var v=(db.bidInvites||[]).find(function(x){ return String(x.id)===String(id); }); if(!v) return;
+  v.submittedAmount=(val===''||val==null)?null:Number(val);
+  await _biPersistInvite(v);
+}
+
+async function biSetInviteStatus(id, val){
+  if(canAccess('route-bid-inbox')!=='full') return;
+  var v=(db.bidInvites||[]).find(function(x){ return String(x.id)===String(id); }); if(!v) return;
+  v.submissionStatus=val;
+  if(await _biPersistInvite(v)){ renderOppBidInvites(getOpp(v.opportunityId)); }
+}
+
+function biAddManualInvite(oppId){
+  if(canAccess('route-bid-inbox')!=='full'){ showToast('Not permitted','error'); return; }
+  var custOpts=(db.customers||[]).slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); })
+    .map(function(c){ return '<option value="'+_biEsc(c.id)+'">'+_biEsc(c.name)+'</option>'; }).join('');
+  showModal(
+    '<h3 style="margin:0 0 14px;font-size:16px">Add bid invitation</h3>'
+    + '<div style="display:grid;gap:11px">'
+    +   '<div><label style="font-size:11px;color:#888;display:block;margin-bottom:4px">General contractor</label>'
+    +     '<input id="bim-gc" placeholder="GC name" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px"></div>'
+    +   '<div><label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Or pick an existing customer</label>'
+    +     '<select id="bim-cust" onchange="var o=this.options[this.selectedIndex];if(this.value){document.getElementById(\'bim-gc\').value=o.text;}" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px"><option value="">\u2014</option>'+custOpts+'</select></div>'
+    +   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:11px">'
+    +     '<div><label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Bid due date</label><input id="bim-due" type="date" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px"></div>'
+    +     '<div><label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Contact</label><input id="bim-contact" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px"></div>'
+    +   '</div>'
+    +   '<div><label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Plan room link</label><input id="bim-plan" placeholder="https://\u2026" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px"></div>'
+    + '</div>'
+    + '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">'
+    +   '<button class="btn" onclick="closeModal()">Cancel</button>'
+    +   '<button class="btn btn-p" onclick="biAddManualInviteSave(\''+_biEsc(oppId)+'\')">Add invitation</button>'
+    + '</div>'
+  );
+}
+
+async function biAddManualInviteSave(oppId){
+  if(canAccess('route-bid-inbox')!=='full'){ showToast('Not permitted','error'); return; }
+  var gc=(g('bim-gc')&&g('bim-gc').value||'').trim();
+  if(!gc){ showToast('GC name is required','error'); return; }
+  var custId=(g('bim-cust')&&g('bim-cust').value)||null;
+  var now=new Date().toISOString();
+  var invite={
+    id:'biv-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
+    opportunityId:oppId, customerId:custId||_biMatchCustomerId(gc),
+    gcName:gc, gcEmail:'', gcContact:(g('bim-contact')&&g('bim-contact').value||'').trim(),
+    bidDueDate:(g('bim-due')&&g('bim-due').value)||'', planRoomUrl:(g('bim-plan')&&g('bim-plan').value||'').trim(),
+    source:'manual', inboxId:null, submittedAmount:null, submissionStatus:'pending', notes:'', created:now
+  };
+  db.bidInvites=db.bidInvites||[]; db.bidInvites.push(invite);
+  if(await _biPersistInvite(invite)){
+    closeModal(); showToast('Invitation added','success');
+    var o=getOpp(oppId); if(o) renderOppBidInvites(o);
+  } else {
+    db.bidInvites=db.bidInvites.filter(function(x){ return x.id!==invite.id; });
+  }
+}
+
+async function biRemoveInvite(id){
+  if(canAccess('route-bid-inbox')!=='full'){ showToast('Not permitted','error'); return; }
+  var v=(db.bidInvites||[]).find(function(x){ return String(x.id)===String(id); }); if(!v) return;
+  if(!confirm('Remove this bid invitation from the opportunity?')) return;
+  var oppId=v.opportunityId;
+  db.bidInvites=db.bidInvites.filter(function(x){ return String(x.id)!==String(id); });
+  try{
+    var r=await supabaseClient.from('kmi_bid_invites').delete().eq('id', String(id));
+    if(r.error) throw r.error;
+    saveDB(); showToast('Invitation removed','success');
+    var o=getOpp(oppId); if(o) renderOppBidInvites(o);
+  }catch(e){ console.error('biRemoveInvite', e); showToast('Remove failed: '+(e.message||e),'error'); db.bidInvites.push(v); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -24556,6 +24731,7 @@ function renderOppDetail(id) {
   renderAddenda(o);
   renderScopeChecklist(o);
   renderOppRfqs(o);
+  renderOppBidInvites(o);
 }
 
 // ── RFQ / VENDOR PRICING ────────────────────────────────────────
