@@ -4958,6 +4958,7 @@ var _biView = 'list';        // 'list' | 'review'
 var _biReviewId = null;      // kmi_bid_inbox row under review
 var _biRoute = 'attach';     // 'attach' | 'new'
 var _biChosenOppId = null;   // target opp when attaching
+var _biChosenCustomerId = null; // resolved GC customer for attach/create
 var _biStatusFilter = 'open';// 'open' | 'all' | 'attached' | 'created' | 'not_bidding'
 var _biSearch = '';
 
@@ -4994,6 +4995,60 @@ function _biMatchCustomerId(gcName){
   var n=String(gcName).trim().toLowerCase();
   var hit=(db.customers||[]).find(function(c){ return (c.name||'').trim().toLowerCase()===n; });
   return hit?hit.id:null;
+}
+
+// Fuzzy GC->customer: strip company-suffix noise, score token overlap so
+// "Pepper Construction" resolves to "Pepper Construction Company".
+function _biNormCo(s){
+  return String(s||'').toLowerCase().replace(/[.,&']/g,' ')
+    .split(/\s+/).filter(function(w){ return w && !/^(the|company|co|llc|inc|incorporated|corp|corporation|construction|constr|contractors?|builders?|group|and)$/.test(w); });
+}
+function _biFuzzyCustomerId(gcName){
+  if(!gcName) return null;
+  var a=_biNormCo(gcName); if(!a.length) return null;
+  var aset={}; a.forEach(function(w){ aset[w]=1; });
+  var best=null, bestScore=0;
+  (db.customers||[]).forEach(function(c){
+    var b=_biNormCo(c.name); if(!b.length) return;
+    var inter=0; b.forEach(function(w){ if(aset[w]) inter++; });
+    if(!inter) return;
+    var union=a.length+b.length-inter;
+    var score=union?inter/union:0;
+    if(inter===Math.min(a.length,b.length)) score=Math.max(score,0.9); // shorter fully contained
+    if(score>bestScore){ bestScore=score; best=c; }
+  });
+  return (best && bestScore>=0.5) ? best.id : null;
+}
+
+// Preserve in-progress field edits across review re-renders (route toggle,
+// customer create) by writing the current inputs back into the row's extracted.
+function _biStashForm(){
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); }); if(!r) return;
+  var f=_biReadForm(); var ex=r.extracted||{};
+  ex.project=f.project; ex.gc=f.gc; ex.bid_due_date=f.bidDate; ex.address=f.address;
+  ex.city=f.city; ex.state=f.state; ex.zip=f.zip; ex.type=f.type; ex.contact=f.contact; ex.plan_room_url=f.planUrl;
+  r.extracted=ex;
+}
+
+async function biCreateCustomerFromGC(){
+  if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
+  var f=_biReadForm();
+  var name=(f.gc||'').trim();
+  if(!name){ showToast('Enter the GC name first','error'); return; }
+  _biStashForm();
+  var existing=(db.customers||[]).find(function(c){ return (c.name||'').trim().toLowerCase()===name.toLowerCase(); });
+  if(existing){ _biChosenCustomerId=existing.id; showToast('Linked to existing customer','success'); renderBidInboxReview(); return; }
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
+  var gcType=(db.companyTypes||[]).find(function(t){ return /general|gc|contractor/i.test(t); }) || (db.companyTypes&&db.companyTypes[0]) || '';
+  var cust={ id:Date.now(), name:name, contact:f.contact||'', email:(r&&r.fromEmail)||'', phone:'', type:gcType,
+    address:f.address||'', cityState:[f.city,f.state].filter(Boolean).join(', '), city:f.city||'' };
+  db.customers.push(cust);
+  try{
+    var resp=await supabaseClient.from('kmi_customers').upsert(toSBCustomer(cust));
+    if(resp.error) throw resp.error;
+    _biChosenCustomerId=cust.id;
+    saveDB(); showToast('Customer created: '+name,'success'); renderBidInboxReview();
+  }catch(e){ console.error('biCreateCustomerFromGC', e); showToast('Save failed: '+(e.message||e),'error'); db.customers=db.customers.filter(function(x){ return x.id!==cust.id; }); }
 }
 
 function renderBidInbox(){
@@ -5131,13 +5186,14 @@ function openBidReview(id){
   var ms=r&&r.matchSuggestion?r.matchSuggestion:{};
   _biRoute = (ms&&ms.opportunity_id) ? 'attach' : 'new';
   _biChosenOppId = (ms&&ms.opportunity_id) ? ms.opportunity_id : null;
+  _biChosenCustomerId = _biFuzzyCustomerId((r&&r.extracted?r.extracted.gc:'')||'');
   _biView='review';
   renderBidInboxReview();
 }
 
 function biBackToList(){ _biView='list'; _biReviewId=null; renderBidInboxList(); }
 
-function biSetRoute(route){ _biRoute=route; renderBidInboxReview(); }
+function biSetRoute(route){ _biStashForm(); _biRoute=route; renderBidInboxReview(); }
 
 function _biConf(ex,key){
   var c=(ex&&ex.confidence)?ex.confidence[key]:null;
@@ -5209,6 +5265,21 @@ function renderBidInboxReview(){
       + '</div>')
     : '<div class="bi-note" style="margin-top:14px">Your role can review invitations but not route them. Contact an Admin, PM, or Project Coordinator to attach or create.</div>';
 
+  var custMatched = _biChosenCustomerId ? getCust(_biChosenCustomerId) : null;
+  var custOpts=(db.customers||[]).slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); })
+    .map(function(c){ return '<option value="'+c.id+'"'+(String(c.id)===String(_biChosenCustomerId)?' selected':'')+'>'+_biEsc(c.name)+'</option>'; }).join('');
+  var custHint = (custMatched && custMatched.name && custMatched.name!=='Unknown')
+    ? '<span style="color:#3B6D11">\u2713 Matched to '+_biEsc(custMatched.name)+'</span>'
+    : '<span style="color:#9A7A2E">No customer match \u2014 pick one, or create from this GC</span>';
+  var custBlock='<div class="card" style="padding:14px 18px;margin-top:12px">'
+    + '<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:#555;margin-bottom:4px">Customer (GC record)</div>'
+    + '<div style="font-size:11px;margin-bottom:9px">'+custHint+'</div>'
+    + '<div style="display:flex;gap:8px;align-items:center">'
+    +   '<select id="biCustSelect" '+(canRoute?'':'disabled')+' onchange="_biChosenCustomerId=parseInt(this.value)||null" style="flex:1;padding:8px 10px;font-size:13px;border:1px solid #ddd;border-radius:6px">'
+    +     '<option value="">\u2014 no customer \u2014</option>'+custOpts+'</select>'
+    +   (canRoute?'<button class="btn btn-sm" onclick="biCreateCustomerFromGC()">+ Create from GC</button>':'')
+    + '</div></div>';
+
   host.innerHTML=_biStyles()
     + '<div style="margin-bottom:14px"><button class="btn" onclick="biBackToList()">\u2190 Back to inbox</button></div>'
     + '<div class="bi-split">'
@@ -5238,6 +5309,7 @@ function renderBidInboxReview(){
     +         '<div class="bi-fld full"><label>Plan room link '+_biConf(ex,'plan_room_url')+'</label><input id="bif-planUrl" value="'+_biEsc(ex.plan_room_url||'')+'"></div>'
     +       '</div>'
     +     '</div>'
+    +     custBlock
     +     '<div class="bi-panel">'
     +       '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#9A7A2E;margin-bottom:12px">Route this invitation</div>'
     +       attachBlock + newBlock + actions
@@ -5269,7 +5341,7 @@ async function biAttach(){
   var now=new Date().toISOString();
   var invite={
     id:'biv-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
-    opportunityId:oppId, customerId:_biMatchCustomerId(f.gc),
+    opportunityId:oppId, customerId:_biChosenCustomerId,
     gcName:f.gc||r.fromName||'', gcEmail:r.fromEmail||'', gcContact:f.contact||'',
     bidDueDate:f.bidDate||'', planRoomUrl:f.planUrl||'',
     source:'inbox', inboxId:r.id, submittedAmount:null, submissionStatus:'pending',
@@ -5297,7 +5369,7 @@ async function biCreateOpp(){
   var now=new Date().toISOString();
   var oppId='OPP-'+new Date().getFullYear()+'-'+String((db.opportunities||[]).length+1).padStart(3,'0');
   var opp={
-    id:oppId, project:f.project, customerId:_biMatchCustomerId(f.gc),
+    id:oppId, project:f.project, customerId:_biChosenCustomerId,
     type:f.type||'', types:f.type?[f.type]:[], bidDate:f.bidDate||'', estValue:0,
     estimatorId:null, pmId:null, address:f.address||'', city:f.city||'', state:f.state||'', zip:f.zip||'',
     notes:'', decision:'pending', noReason:'', proposalId:null, finalBidAmount:null,
