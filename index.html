@@ -4949,30 +4949,380 @@ function nav(page) {
   if (fns[page]) fns[page]();
 }
 
-// ═══ BID INBOX (inbound bid invitations) ═══════════════════════════════
+// ═══ BID INBOX (inbound bid invitations) — Chunk 2 ═════════════════════
 // Review queue for invitations parsed by the inbound-bid Edge Function into
-// kmi_bid_inbox. Chunk 1: page shell + data plumbing only. The queue list,
-// Review & Match triage, and attach/create-opp wiring arrive in Chunk 2.
-function renderBidInbox() {
-  var host = g('biContent');
-  if (!host) return;
-  var rows = Array.isArray(db.bidInbox) ? db.bidInbox : [];
-  var newCount = rows.filter(function(r){ return r.status === 'new'; }).length;
-  host.innerHTML = '<div class="card" style="padding:40px;text-align:center;color:#888">'
-    + '<div style="font-size:15px;color:#555;margin-bottom:6px">Bid Inbox foundation is live.</div>'
-    + rows.length + ' invitation record(s) loaded \u00b7 ' + newCount + ' new. '
-    + 'The review queue UI arrives in the next build step.</div>';
+// kmi_bid_inbox. List + Review & Match + attach/create-opp/not-bidding.
+// Master-detail lives inside #biContent; state below drives which view.
+var _biView = 'list';        // 'list' | 'review'
+var _biReviewId = null;      // kmi_bid_inbox row under review
+var _biRoute = 'attach';     // 'attach' | 'new'
+var _biChosenOppId = null;   // target opp when attaching
+var _biStatusFilter = 'open';// 'open' | 'all' | 'attached' | 'created' | 'not_bidding'
+var _biSearch = '';
+
+function _biEsc(v){ return (v==null?'':String(v)).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function _biMoney(n){ n=Number(n)||0; return (n<0?'-$':'$')+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}); }
+function _biFmtDate(d){ if(!d) return '—'; var t=new Date(d); if(isNaN(t.getTime())) return String(d); return t.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+function _biCanRoute(){ return canAccess('route-bid-inbox')==='full'; }
+
+// Match a GC name from extraction back to an existing customer row.
+function _biMatchCustomerId(gcName){
+  if(!gcName) return null;
+  var n=String(gcName).trim().toLowerCase();
+  var hit=(db.customers||[]).find(function(c){ return (c.name||'').trim().toLowerCase()===n; });
+  return hit?hit.id:null;
+}
+
+function renderBidInbox(){
   updateBidInboxNavCount();
+  if(_biView==='review') return renderBidInboxReview();
+  return renderBidInboxList();
 }
 
 // Sidebar badge: count of invitations still awaiting review.
-function updateBidInboxNavCount() {
-  var el = g('biNavCount');
-  if (!el) return;
-  var rows = Array.isArray(db.bidInbox) ? db.bidInbox : [];
-  var n = rows.filter(function(r){ return r.status === 'new'; }).length;
-  if (n > 0) { el.textContent = n; el.style.display = ''; }
-  else { el.textContent = ''; el.style.display = 'none'; }
+function updateBidInboxNavCount(){
+  var el=g('biNavCount'); if(!el) return;
+  var rows=Array.isArray(db.bidInbox)?db.bidInbox:[];
+  var n=rows.filter(function(r){ return r.status==='new'; }).length;
+  if(n>0){ el.textContent=n; el.style.display=''; } else { el.textContent=''; el.style.display='none'; }
+}
+
+function _biStyles(){
+  return '<style>'
+  + '.bi-mets{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}'
+  + '.bi-mc{background:#fff;border:0.5px solid #e5e5e5;border-radius:8px;padding:13px 15px;border-left:3px solid var(--kmi)}'
+  + '.bi-mc.am{border-left-color:var(--ac)}.bi-mc.gn{border-left-color:#3B6D11}.bi-mc.bl{border-left-color:#185FA5}'
+  + '.bi-ml{font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}'
+  + '.bi-mv{font-size:22px;font-weight:600}'
+  + '.bi-tools{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}'
+  + '.bi-tools input,.bi-tools select{padding:7px 10px;font-size:13px;border:1px solid #ddd;border-radius:6px;font-family:inherit}'
+  + '.bi-tbl{width:100%;border-collapse:collapse;font-size:13px}'
+  + '.bi-tbl th{text-align:left;padding:10px 14px;font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.6px;border-bottom:0.5px solid #eee;background:#fafafa}'
+  + '.bi-tbl td{padding:11px 14px;border-bottom:0.5px solid #eee;vertical-align:middle}'
+  + '.bi-tbl tbody tr{cursor:pointer}.bi-tbl tbody tr:hover td{background:#FAF9F6}'
+  + '.bi-bdg{display:inline-block;padding:3px 9px;border-radius:100px;font-size:11px;font-weight:600;white-space:nowrap}'
+  + '.bi-b-new{background:#e6f1fb;color:#185FA5}.bi-b-rev{background:#f1efe8;color:#5F5E5A}'
+  + '.bi-b-match{background:#faf1d6;color:#9A7A2E;border:1px solid #E8D08A}.bi-b-none{background:#f5f5f5;color:#999}'
+  + '.bi-b-att{background:#EAF3DE;color:#3B6D11}.bi-b-cre{background:#EAF3DE;color:#3B6D11}.bi-b-no{background:#FCEBEB;color:#A32D2D}'
+  + '.bi-split{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}'
+  + '.bi-fg{display:grid;grid-template-columns:1fr 1fr;gap:11px 13px}.bi-fg .full{grid-column:1/-1}'
+  + '.bi-fld label{display:block;font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}'
+  + '.bi-fld input,.bi-fld select{width:100%;padding:8px 10px;font-size:13px;border:1px solid #ddd;border-radius:6px;font-family:inherit;background:#fff}'
+  + '.bi-conf{font-size:10px;color:var(--ac);font-weight:600;margin-left:5px}.bi-conf.lo{color:#A32D2D}'
+  + '.bi-email{font-size:13px;line-height:1.6;color:#333;white-space:pre-wrap;max-height:300px;overflow:auto}'
+  + '.bi-ehead{font-size:12px;color:#555;line-height:1.8;border-bottom:0.5px solid #eee;padding-bottom:10px;margin-bottom:10px}'
+  + '.bi-ehead b{color:#1a1a1a;display:inline-block;width:56px}'
+  + '.bi-chip{display:inline-flex;align-items:center;gap:7px;background:#F5F5F3;border:0.5px solid #e0e0e0;border-radius:7px;padding:6px 10px;font-size:12px;margin:8px 8px 0 0;cursor:pointer}'
+  + '.bi-panel{background:#FBFAF6;border:1px solid #E8D08A;border-radius:10px;padding:15px 16px;margin-top:14px}'
+  + '.bi-opt{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1.5px solid #e5e5e5;border-radius:9px;background:#fff;cursor:pointer;margin-bottom:9px}'
+  + '.bi-opt.sel{border-color:var(--kmi3);background:#FBFCFF}'
+  + '.bi-sig{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:6px}'
+  + '.bi-sig .ic{width:17px;height:17px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700}'
+  + '.bi-sig.hit .ic{background:#EAF3DE;color:#3B6D11}.bi-sig.no .ic{background:#faf1d6;color:#9A7A2E}'
+  + '.bi-note{font-size:12px;color:#555;line-height:1.5;background:#F0F2F8;border-left:3px solid var(--kmi3);border-radius:0 6px 6px 0;padding:9px 11px;margin-top:10px}'
+  + '.bi-acts{display:flex;justify-content:flex-end;gap:10px;margin-top:14px;padding-top:14px;border-top:0.5px solid #eee}'
+  + '</style>';
+}
+
+function _biStatusBadge(s){
+  if(s==='new') return '<span class="bi-bdg bi-b-new">New</span>';
+  if(s==='reviewed') return '<span class="bi-bdg bi-b-rev">Reviewed</span>';
+  if(s==='attached') return '<span class="bi-bdg bi-b-att">Attached</span>';
+  if(s==='created') return '<span class="bi-bdg bi-b-cre">Opp created</span>';
+  if(s==='not_bidding') return '<span class="bi-bdg bi-b-no">Not bidding</span>';
+  return '<span class="bi-bdg bi-b-none">'+_biEsc(s)+'</span>';
+}
+
+function renderBidInboxList(){
+  var host=g('biContent'); if(!host) return;
+  var all=Array.isArray(db.bidInbox)?db.bidInbox:[];
+  var newN=all.filter(function(r){return r.status==='new';}).length;
+  var matchN=all.filter(function(r){return r.status==='new' && r.matchSuggestion && r.matchSuggestion.opportunity_id;}).length;
+  var revN=all.filter(function(r){return r.status==='reviewed';}).length;
+  var creN=all.filter(function(r){return r.status==='created';}).length;
+
+  var q=_biSearch.trim().toLowerCase();
+  var rows=all.filter(function(r){
+    var f=_biStatusFilter;
+    if(f==='open'){ if(r.status!=='new' && r.status!=='reviewed') return false; }
+    else if(f!=='all'){ if(r.status!==f) return false; }
+    if(q){
+      var ex=r.extracted||{};
+      var hay=((r.fromName||'')+' '+(r.fromEmail||'')+' '+(ex.project||'')+' '+(r.subject||'')+' '+(ex.city||'')).toLowerCase();
+      if(hay.indexOf(q)<0) return false;
+    }
+    return true;
+  }).sort(function(a,b){ return String(b.receivedAt||b.created||'').localeCompare(String(a.receivedAt||a.created||'')); });
+
+  var body='';
+  if(rows.length===0){
+    body='<tr><td colspan="6" style="text-align:center;color:#999;padding:30px">No invitations match this view.</td></tr>';
+  } else {
+    body=rows.map(function(r){
+      var ex=r.extracted||{}, ms=r.matchSuggestion||{};
+      var gc=r.fromName||ex.gc||r.fromEmail||'—';
+      var proj=ex.project||r.subject||'(no subject)';
+      var loc=[ex.city,ex.state].filter(Boolean).join(', ')||'—';
+      var matchCell = (r.status==='new'||r.status==='reviewed')
+        ? (ms.opportunity_id?'<span class="bi-bdg bi-b-match">\u25C6 Possible match</span>':'<span class="bi-bdg bi-b-none">No match</span>')
+        : (r.resolvedOpportunityId?'<span class="bi-bdg bi-b-att">\u2192 '+_biEsc(r.resolvedOpportunityId)+'</span>':'—');
+      return '<tr onclick="openBidReview(\''+_biEsc(r.id)+'\')">'
+        + '<td><div style="font-weight:600">'+_biEsc(gc)+'</div><div style="font-size:11px;color:#888">'+_biEsc(r.fromEmail||'')+'</div></td>'
+        + '<td>'+_biEsc(proj)+'</td>'
+        + '<td>'+_biFmtDate(ex.bid_due_date)+'</td>'
+        + '<td>'+_biEsc(loc)+'</td>'
+        + '<td>'+matchCell+'</td>'
+        + '<td>'+_biStatusBadge(r.status)+'</td>'
+        + '</tr>';
+    }).join('');
+  }
+
+  host.innerHTML=_biStyles()
+    + '<div class="bi-mets">'
+    +   '<div class="bi-mc bl"><div class="bi-ml">New \u00b7 needs review</div><div class="bi-mv">'+newN+'</div></div>'
+    +   '<div class="bi-mc am"><div class="bi-ml">Possible match</div><div class="bi-mv">'+matchN+'</div></div>'
+    +   '<div class="bi-mc"><div class="bi-ml">Reviewed</div><div class="bi-mv">'+revN+'</div></div>'
+    +   '<div class="bi-mc gn"><div class="bi-ml">Opps created</div><div class="bi-mv">'+creN+'</div></div>'
+    + '</div>'
+    + '<div class="bi-tools">'
+    +   '<input id="biSearch" placeholder="Search GC, project, city\u2026" value="'+_biEsc(_biSearch)+'" oninput="_biSearch=this.value;clearTimeout(window._biT);window._biT=setTimeout(renderBidInboxList,200)">'
+    +   '<select id="biFilter" onchange="_biStatusFilter=this.value;renderBidInboxList()">'
+    +     '<option value="open"'+(_biStatusFilter==='open'?' selected':'')+'>Open (new + reviewed)</option>'
+    +     '<option value="all"'+(_biStatusFilter==='all'?' selected':'')+'>All</option>'
+    +     '<option value="attached"'+(_biStatusFilter==='attached'?' selected':'')+'>Attached</option>'
+    +     '<option value="created"'+(_biStatusFilter==='created'?' selected':'')+'>Opp created</option>'
+    +     '<option value="not_bidding"'+(_biStatusFilter==='not_bidding'?' selected':'')+'>Not bidding</option>'
+    +   '</select>'
+    + '</div>'
+    + '<div class="card" style="padding:0;overflow:hidden">'
+    +   '<table class="bi-tbl"><thead><tr><th>From (GC)</th><th>Project</th><th>Bid due</th><th>Location</th><th>Match</th><th>Status</th></tr></thead>'
+    +   '<tbody>'+body+'</tbody></table>'
+    + '</div>';
+  var _si=g('biSearch'); if(_si && _biSearch){ _si.focus(); try{ _si.setSelectionRange(_si.value.length,_si.value.length); }catch(e){} }
+}
+
+function openBidReview(id){
+  _biReviewId=id;
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(id); });
+  var ms=r&&r.matchSuggestion?r.matchSuggestion:{};
+  _biRoute = (ms&&ms.opportunity_id) ? 'attach' : 'new';
+  _biChosenOppId = (ms&&ms.opportunity_id) ? ms.opportunity_id : null;
+  _biView='review';
+  renderBidInboxReview();
+}
+
+function biBackToList(){ _biView='list'; _biReviewId=null; renderBidInboxList(); }
+
+function biSetRoute(route){ _biRoute=route; renderBidInboxReview(); }
+
+function _biConf(ex,key){
+  var c=(ex&&ex.confidence)?ex.confidence[key]:null;
+  if(c==null) return '';
+  return '<span class="bi-conf'+(Number(c)<75?' lo':'')+'">'+Number(c)+'%</span>';
+}
+
+function renderBidInboxReview(){
+  var host=g('biContent'); if(!host) return;
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
+  if(!r){ biBackToList(); return; }
+  var ex=r.extracted||{}, ms=r.matchSuggestion||{};
+  var canRoute=_biCanRoute();
+
+  // attachments
+  var atts=(Array.isArray(r.attachments)?r.attachments:[]).map(function(a){
+    return '<span class="bi-chip" onclick="biOpenAttachment(\''+_biEsc(a.storage_path||'')+'\')">\uD83D\uDCCE '+_biEsc(a.filename||'attachment')+'</span>';
+  }).join('');
+
+  // opp dropdown (attach target) — open opps, suggested first
+  var opps=(db.opportunities||[]).slice().sort(function(a,b){ return String(b.created||'').localeCompare(String(a.created||'')); });
+  var oppOpts=opps.map(function(o){
+    var sel=(String(o.id)===String(_biChosenOppId))?' selected':'';
+    return '<option value="'+_biEsc(o.id)+'"'+sel+'>'+_biEsc(o.id)+' \u2014 '+_biEsc(o.project||'(untitled)')+'</option>';
+  }).join('');
+
+  // signals
+  var sigHtml='';
+  if(ms.signals&&ms.signals.length){
+    sigHtml=ms.signals.map(function(s){
+      return '<div class="bi-sig '+(s.hit?'hit':'no')+'"><span class="ic">'+(s.hit?'\u2713':'~')+'</span>'+_biEsc(s.detail||s.type)+'</div>';
+    }).join('');
+  }
+
+  var matchCard='';
+  if(ms.opportunity_id){
+    matchCard='<div class="bi-note" style="background:#fff;border:0.5px solid #e5e5e5;border-left:3px solid var(--ac)"><b>'+_biEsc(ms.opportunity_id)+'</b> \u2014 '+_biEsc(ms.opportunity_name||'')+(ms.score!=null?' \u00b7 score '+ms.score:'')+'</div>'+sigHtml;
+  }
+
+  var attachBlock=''
+    + '<label class="bi-opt'+(_biRoute==='attach'?' sel':'')+'" onclick="biSetRoute(\'attach\')">'
+    +   '<input type="radio" name="biRoute" '+(_biRoute==='attach'?'checked':'')+' '+(canRoute?'':'disabled')+'>'
+    +   '<div style="flex:1">'
+    +     '<div style="font-weight:600;font-size:13px;margin-bottom:2px">Attach to existing opportunity</div>'
+    +     '<div style="font-size:12px;color:#777">Add this GC as another invitation on the same job.</div>'
+    +     (_biRoute==='attach'?(
+          matchCard
+          + '<div style="margin-top:10px"><label style="font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Opportunity</label>'
+          + '<select id="biOppSelect" onchange="_biChosenOppId=this.value" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid #ddd;border-radius:6px">'
+          + '<option value="">Select an opportunity\u2026</option>'+oppOpts+'</select></div>'
+          + '<div class="bi-note">Your takeoff &amp; scope stay shared on the opportunity. This adds a bid invitation so you can track this GC\u2019s due date, contact, and the number you submit separately.</div>'
+        ):'')
+    +   '</div>'
+    + '</label>';
+
+  var newBlock=''
+    + '<label class="bi-opt'+(_biRoute==='new'?' sel':'')+'" onclick="biSetRoute(\'new\')">'
+    +   '<input type="radio" name="biRoute" '+(_biRoute==='new'?'checked':'')+' '+(canRoute?'':'disabled')+'>'
+    +   '<div style="flex:1">'
+    +     '<div style="font-weight:600;font-size:13px;margin-bottom:2px">Create a new opportunity</div>'
+    +     '<div style="font-size:12px;color:#777">Treat this as a distinct job. A new opp is created from the details, with this GC as its first invitation.</div>'
+    +   '</div>'
+    + '</label>';
+
+  var actions = canRoute
+    ? ('<div class="bi-acts">'
+        + '<button class="btn" onclick="biNotBidding()">Mark not bidding</button>'
+        + '<button class="btn btn-p" onclick="biConfirmRoute()">'+(_biRoute==='attach'?'Attach invitation':'Create opportunity')+'</button>'
+      + '</div>')
+    : '<div class="bi-note" style="margin-top:14px">Your role can review invitations but not route them. Contact an Admin, PM, or Project Coordinator to attach or create.</div>';
+
+  host.innerHTML=_biStyles()
+    + '<div style="margin-bottom:14px"><button class="btn" onclick="biBackToList()">\u2190 Back to inbox</button></div>'
+    + '<div class="bi-split">'
+    +   '<div class="card" style="padding:16px 18px">'
+    +     '<div class="bi-ehead">'
+    +       '<div><b>From</b> '+_biEsc(r.fromName||'')+' &lt;'+_biEsc(r.fromEmail||'')+'&gt;</div>'
+    +       '<div><b>To</b> '+_biEsc(r.toEmail||'')+'</div>'
+    +       '<div><b>Date</b> '+_biFmtDate(r.receivedAt)+'</div>'
+    +       '<div><b>Subject</b> '+_biEsc(r.subject||'')+'</div>'
+    +     '</div>'
+    +     '<div class="bi-email">'+_biEsc(r.bodyText||'(no plain-text body)')+'</div>'
+    +     (atts?('<div style="margin-top:6px">'+atts+'</div>'):'')
+    +   '</div>'
+    +   '<div>'
+    +     '<div class="card" style="padding:16px 18px">'
+    +       '<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:#555;margin-bottom:12px">Extracted details</div>'
+    +       '<div class="bi-fg">'
+    +         '<div class="bi-fld full"><label>Project '+_biConf(ex,'project')+'</label><input id="bif-project" value="'+_biEsc(ex.project||'')+'"></div>'
+    +         '<div class="bi-fld"><label>General contractor '+_biConf(ex,'gc')+'</label><input id="bif-gc" value="'+_biEsc(ex.gc||'')+'"></div>'
+    +         '<div class="bi-fld"><label>Bid due date '+_biConf(ex,'bid_due_date')+'</label><input id="bif-bidDate" type="date" value="'+_biEsc(ex.bid_due_date||'')+'"></div>'
+    +         '<div class="bi-fld full"><label>Address '+_biConf(ex,'address')+'</label><input id="bif-address" value="'+_biEsc(ex.address||'')+'"></div>'
+    +         '<div class="bi-fld"><label>City</label><input id="bif-city" value="'+_biEsc(ex.city||'')+'"></div>'
+    +         '<div class="bi-fld"><label>State / Zip</label><input id="bif-state" value="'+_biEsc([ex.state,ex.zip].filter(Boolean).join(' '))+'"></div>'
+    +         '<div class="bi-fld"><label>Scope / type '+_biConf(ex,'type')+'</label><input id="bif-type" value="'+_biEsc(ex.type||'')+'"></div>'
+    +         '<div class="bi-fld"><label>GC contact</label><input id="bif-contact" value="'+_biEsc(ex.contact||'')+'"></div>'
+    +         '<div class="bi-fld full"><label>Plan room link '+_biConf(ex,'plan_room_url')+'</label><input id="bif-planUrl" value="'+_biEsc(ex.plan_room_url||'')+'"></div>'
+    +       '</div>'
+    +     '</div>'
+    +     '<div class="bi-panel">'
+    +       '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#9A7A2E;margin-bottom:12px">Route this invitation</div>'
+    +       attachBlock + newBlock + actions
+    +     '</div>'
+    +   '</div>'
+    + '</div>';
+}
+
+function _biReadForm(){
+  function v(id){ var el=g(id); return el?el.value.trim():''; }
+  var sz=v('bif-state').split(/\s+/);
+  var st=sz[0]||''; var zip=sz.slice(1).join(' ')||'';
+  return {
+    project:v('bif-project'), gc:v('bif-gc'), bidDate:v('bif-bidDate'),
+    address:v('bif-address'), city:v('bif-city'), state:st, zip:zip,
+    type:v('bif-type'), contact:v('bif-contact'), planUrl:v('bif-planUrl')
+  };
+}
+
+function biConfirmRoute(){ if(_biRoute==='attach') return biAttach(); return biCreateOpp(); }
+
+async function biAttach(){
+  if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
+  if(!r) return;
+  var oppId=_biChosenOppId||(g('biOppSelect')?g('biOppSelect').value:'');
+  if(!oppId){ showToast('Pick an opportunity to attach to','error'); return; }
+  var f=_biReadForm();
+  var now=new Date().toISOString();
+  var invite={
+    id:'biv-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
+    opportunityId:oppId, customerId:_biMatchCustomerId(f.gc),
+    gcName:f.gc||r.fromName||'', gcEmail:r.fromEmail||'', gcContact:f.contact||'',
+    bidDueDate:f.bidDate||'', planRoomUrl:f.planUrl||'',
+    source:'inbox', inboxId:r.id, submittedAmount:null, submissionStatus:'pending',
+    notes:'', created:now
+  };
+  db.bidInvites=db.bidInvites||[]; db.bidInvites.push(invite);
+  r.status='attached'; r.resolvedOpportunityId=oppId; r.resolvedInviteId=invite.id;
+  r.reviewedBy=(_currentUser?_currentUser.id:null); r.reviewedAt=now;
+  try{
+    var a=await supabaseClient.from('kmi_bid_invites').upsert(toSBBidInvite(invite));
+    if(a.error) throw a.error;
+    var b=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
+    if(b.error) throw b.error;
+    db.activity.unshift({text:'Bid invite from '+(invite.gcName||'GC')+' attached to '+oppId, type:'pending', time:'Just now'});
+    saveDB(); showToast('Invitation attached to '+oppId, 'success'); biBackToList();
+  }catch(e){ console.error('biAttach', e); showToast('Save failed: '+(e.message||e), 'error'); }
+}
+
+async function biCreateOpp(){
+  if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
+  if(!r) return;
+  var f=_biReadForm();
+  if(!f.project){ showToast('Project name is required','error'); return; }
+  var now=new Date().toISOString();
+  var oppId='OPP-'+new Date().getFullYear()+'-'+String((db.opportunities||[]).length+1).padStart(3,'0');
+  var opp={
+    id:oppId, project:f.project, customerId:_biMatchCustomerId(f.gc),
+    type:f.type||'', types:f.type?[f.type]:[], bidDate:f.bidDate||'', estValue:0,
+    estimatorId:null, pmId:null, address:f.address||'', city:f.city||'', state:f.state||'', zip:f.zip||'',
+    notes:'', decision:'pending', noReason:'', proposalId:null, finalBidAmount:null,
+    outcomeStatus:null, scopeItems:[], scopeSourceUrl:'', addenda:[], vendorAssignments:[],
+    created:now.slice(0,10)
+  };
+  var invite={
+    id:'biv-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
+    opportunityId:oppId, customerId:opp.customerId,
+    gcName:f.gc||r.fromName||'', gcEmail:r.fromEmail||'', gcContact:f.contact||'',
+    bidDueDate:f.bidDate||'', planRoomUrl:f.planUrl||'',
+    source:'inbox', inboxId:r.id, submittedAmount:null, submissionStatus:'pending',
+    notes:'', created:now
+  };
+  db.opportunities.push(opp);
+  db.bidInvites=db.bidInvites||[]; db.bidInvites.push(invite);
+  r.status='created'; r.resolvedOpportunityId=oppId; r.resolvedInviteId=invite.id;
+  r.reviewedBy=(_currentUser?_currentUser.id:null); r.reviewedAt=now;
+  try{
+    var a=await supabaseClient.from('kmi_opportunities').upsert(toSBOpp(opp));
+    if(a.error) throw a.error;
+    var b=await supabaseClient.from('kmi_bid_invites').upsert(toSBBidInvite(invite));
+    if(b.error) throw b.error;
+    var c=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
+    if(c.error) throw c.error;
+    db.activity.unshift({text:oppId+' created from bid inbox \u2014 '+f.project, type:'pending', time:'Just now'});
+    saveDB(); showToast('Created '+oppId, 'success'); biBackToList();
+  }catch(e){ console.error('biCreateOpp', e); showToast('Save failed: '+(e.message||e), 'error'); }
+}
+
+async function biNotBidding(){
+  if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
+  if(!r) return;
+  var now=new Date().toISOString();
+  r.status='not_bidding'; r.reviewedBy=(_currentUser?_currentUser.id:null); r.reviewedAt=now;
+  try{
+    var b=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
+    if(b.error) throw b.error;
+    saveDB(); showToast('Marked not bidding', 'success'); biBackToList();
+  }catch(e){ console.error('biNotBidding', e); showToast('Save failed: '+(e.message||e), 'error'); }
+}
+
+async function biOpenAttachment(path){
+  if(!path){ showToast('No stored file for this attachment','error'); return; }
+  try{
+    var res=await supabaseClient.storage.from('bid-inbox').createSignedUrl(path, 120);
+    if(res&&res.data&&res.data.signedUrl){ window.open(res.data.signedUrl,'_blank'); }
+    else { showToast('Could not open attachment','error'); }
+  }catch(e){ console.error('biOpenAttachment', e); showToast('Could not open attachment','error'); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
