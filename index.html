@@ -5331,6 +5331,15 @@ function _biReadForm(){
 
 function biConfirmRoute(){ if(_biRoute==='attach') return biAttach(); return biCreateOpp(); }
 
+// Detects a Postgres unique-constraint violation (23505) on kmi_bid_invites,
+// i.e. this GC's email is already invited on the target opportunity.
+function _biIsDupInvite(err){
+  if(!err) return false;
+  if(err.code==='23505') return true;
+  var m=(err.message||'')+' '+(err.details||'');
+  return /duplicate key|kmi_bid_invites_opp_gc_email/i.test(m);
+}
+
 async function biAttach(){
   if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
   var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
@@ -5339,25 +5348,59 @@ async function biAttach(){
   if(!oppId){ showToast('Pick an opportunity to attach to','error'); return; }
   var f=_biReadForm();
   var now=new Date().toISOString();
-  var invite={
-    id:'biv-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
-    opportunityId:oppId, customerId:_biChosenCustomerId,
-    gcName:f.gc||r.fromName||'', gcEmail:r.fromEmail||'', gcContact:f.contact||'',
-    bidDueDate:f.bidDate||'', planRoomUrl:f.planUrl||'',
-    source:'inbox', inboxId:r.id, submittedAmount:null, submissionStatus:'pending',
-    notes:'', created:now
-  };
-  db.bidInvites=db.bidInvites||[]; db.bidInvites.push(invite);
+  var gcEmail=r.fromEmail||'';
+  db.bidInvites=db.bidInvites||[];
+  // The DB enforces one invite per (opportunity_id, gc_email). If this GC's email
+  // is already invited on this opp, reuse that invitation instead of inserting a
+  // duplicate (which would fail kmi_bid_invites_opp_gc_email_uidx).
+  var existing=gcEmail ? db.bidInvites.find(function(x){
+    return String(x.opportunityId)===String(oppId)
+      && (x.gcEmail||'').toLowerCase()===gcEmail.toLowerCase();
+  }) : null;
+  var isUpdate=!!existing, invite;
+  if(existing){
+    invite=existing;
+    invite.gcName=f.gc||invite.gcName||r.fromName||'';
+    invite.gcContact=f.contact||invite.gcContact||'';
+    invite.bidDueDate=f.bidDate||invite.bidDueDate||'';
+    invite.planRoomUrl=f.planUrl||invite.planRoomUrl||'';
+    if(!invite.customerId) invite.customerId=_biChosenCustomerId;
+    invite.inboxId=r.id;
+  } else {
+    invite={
+      id:'biv-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
+      opportunityId:oppId, customerId:_biChosenCustomerId,
+      gcName:f.gc||r.fromName||'', gcEmail:gcEmail, gcContact:f.contact||'',
+      bidDueDate:f.bidDate||'', planRoomUrl:f.planUrl||'',
+      source:'inbox', inboxId:r.id, submittedAmount:null, submissionStatus:'pending',
+      notes:'', created:now
+    };
+    db.bidInvites.push(invite);
+  }
   r.status='attached'; r.resolvedOpportunityId=oppId; r.resolvedInviteId=invite.id;
   r.reviewedBy=(_currentUser?_currentUser.id:null); r.reviewedAt=now;
   try{
     var a=await supabaseClient.from('kmi_bid_invites').upsert(toSBBidInvite(invite));
-    if(a.error) throw a.error;
+    if(a.error){
+      // Row already exists on this opp for this GC email (created elsewhere/earlier).
+      // Treat as already-attached rather than a hard failure.
+      if(_biIsDupInvite(a.error)){
+        if(!isUpdate){ db.bidInvites=db.bidInvites.filter(function(x){ return x.id!==invite.id; }); }
+        var b0=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
+        if(b0.error) throw b0.error;
+        saveDB(); showToast('This GC is already invited on '+oppId+' \u2014 kept the existing invitation', 'info'); biBackToList(); return;
+      }
+      throw a.error;
+    }
     var b=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
     if(b.error) throw b.error;
-    db.activity.unshift({text:'Bid invite from '+(invite.gcName||'GC')+' attached to '+oppId, type:'pending', time:'Just now'});
-    saveDB(); showToast('Invitation attached to '+oppId, 'success'); biBackToList();
-  }catch(e){ console.error('biAttach', e); showToast('Save failed: '+(e.message||e), 'error'); }
+    db.activity.unshift({text:'Bid invite from '+(invite.gcName||'GC')+(isUpdate?' updated on ':' attached to ')+oppId, type:'pending', time:'Just now'});
+    saveDB(); showToast(isUpdate?('Updated existing invitation on '+oppId):('Invitation attached to '+oppId), 'success'); biBackToList();
+  }catch(e){
+    // Roll back the optimistic local insert so the UI doesn't show a phantom invite.
+    if(!isUpdate){ db.bidInvites=db.bidInvites.filter(function(x){ return x.id!==invite.id; }); }
+    console.error('biAttach', e); showToast('Save failed: '+(e.message||e), 'error');
+  }
 }
 
 async function biCreateOpp(){
