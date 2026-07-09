@@ -5337,7 +5337,7 @@ function _biIsDupInvite(err){
   if(!err) return false;
   if(err.code==='23505') return true;
   var m=(err.message||'')+' '+(err.details||'');
-  return /duplicate key|kmi_bid_invites_opp_gc_email/i.test(m);
+  return /duplicate key|kmi_bid_invites_opp_gc/i.test(m);
 }
 
 async function biAttach(){
@@ -5349,13 +5349,15 @@ async function biAttach(){
   var f=_biReadForm();
   var now=new Date().toISOString();
   var gcEmail=r.fromEmail||'';
+  var gcName=(f.gc||r.fromName||'').trim();
   db.bidInvites=db.bidInvites||[];
-  // The DB enforces one invite per (opportunity_id, gc_email). If this GC's email
-  // is already invited on this opp, reuse that invitation instead of inserting a
-  // duplicate (which would fail kmi_bid_invites_opp_gc_email_uidx).
-  var existing=gcEmail ? db.bidInvites.find(function(x){
+  // The DB enforces one invite per GC (company) per opportunity, keyed on
+  // (opportunity_id, lower(trim(gc_name))). Email is NOT the key — multiple GCs
+  // can share a sender address. If this GC is already invited on this opp, reuse
+  // that invitation instead of inserting a duplicate.
+  var existing=gcName ? db.bidInvites.find(function(x){
     return String(x.opportunityId)===String(oppId)
-      && (x.gcEmail||'').toLowerCase()===gcEmail.toLowerCase();
+      && (x.gcName||'').trim().toLowerCase()===gcName.toLowerCase();
   }) : null;
   var isUpdate=!!existing, invite;
   if(existing){
@@ -5382,7 +5384,7 @@ async function biAttach(){
   try{
     var a=await supabaseClient.from('kmi_bid_invites').upsert(toSBBidInvite(invite));
     if(a.error){
-      // Row already exists on this opp for this GC email (created elsewhere/earlier).
+      // This GC already exists on this opp (created elsewhere/earlier).
       // Treat as already-attached rather than a hard failure.
       if(_biIsDupInvite(a.error)){
         if(!isUpdate){ db.bidInvites=db.bidInvites.filter(function(x){ return x.id!==invite.id; }); }
