@@ -38082,30 +38082,53 @@ function apInvoiceJobCell(i){
   return i.jobNo ? apEsc(i.jobNo) : '<span style="color:#aaa">\u2014</span>';
 }
 
+// AP Invoices inbox status filter — clickable KPI boxes act like AP Approvals.
+// "coded" folds into To code; "hold" folds into Pending approval.
+var _apInboxFilter = 'tocode';   // default view = the coding queue (received + coded)
+function _apInboxSetFilter(k){ _apInboxFilter = k; renderApInbox(); }
+function _apInboxMatch(i){
+  var s = i.status||'received';
+  switch(_apInboxFilter){
+    case 'tocode':   return s==='received' || s==='coded';
+    case 'pending':  return s==='pending'  || s==='hold';
+    case 'approved': return s==='approved';
+    case 'exported': return s==='exported';
+    case 'rejected': return s==='rejected';
+    default:         return true;   // 'all'
+  }
+}
+
 function renderApInbox(){
   if (!hasRead('ap-invoices')) return;
   var inv = (db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
-  var byStatus = {};
-  inv.forEach(function(i){ byStatus[i.status]=(byStatus[i.status]||0)+1; });
-  var sumExportable = inv.filter(function(i){return i.status==='approved';}).reduce(function(t,i){return t+(Number(i.total)||0);},0);
-  var kpis = [
-    { n: byStatus.received||0, l:'To code' },
-    { n: byStatus.pending||0,  l:'Pending approval' },
-    { n: byStatus.approved||0, l:'Approved' },
-    { n: apMoney(sumExportable), l:'Approved $' }
-  ];
+  var cnt = { tocode:0, pending:0, approved:0, exported:0, rejected:0, all:inv.length };
+  inv.forEach(function(i){
+    var s = i.status||'received';
+    if(s==='received'||s==='coded') cnt.tocode++;
+    else if(s==='pending'||s==='hold') cnt.pending++;
+    else if(cnt[s]!=null) cnt[s]++;
+  });
+  var boxes=[['tocode','To code'],['pending','Pending approval'],['approved','Approved'],['exported','Exported'],['rejected','Rejected'],['all','All']];
   var kpiEl = g('ap-kpis');
-  if (kpiEl) kpiEl.innerHTML = kpis.map(function(k){
-    return '<div style="background:#fff;border:.5px solid #e3e6ee;border-radius:9px;padding:12px 16px;min-width:120px">'+
-      '<div style="font-size:22px;font-weight:700;color:var(--kmi)">'+k.n+'</div>'+
-      '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+k.l+'</div></div>';
+  if (kpiEl) kpiEl.innerHTML = boxes.map(function(b){
+    var on=_apInboxFilter===b[0];
+    return '<div onclick="_apInboxSetFilter(\''+b[0]+'\')" style="cursor:pointer;background:'+(on?'#fffdf6':'#fff')+';border:1px solid #e3e6ee;border-top:3px solid '+(on?'var(--ac)':'transparent')+';border-radius:9px;padding:10px 15px;min-width:100px'+(on?';box-shadow:0 2px 10px rgba(200,168,75,.18)':'')+'">'+
+      '<div style="font-size:20px;font-weight:700;color:var(--kmi)">'+cnt[b[0]]+'</div>'+
+      '<div style="font-size:10.5px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+b[1]+'</div></div>';
   }).join('');
   var el = g('ap-list'); if(!el) return;
   if (!inv.length){
     el.innerHTML = '<div style="padding:26px;text-align:center;color:#888;font-size:13px">No invoices yet. Upload a PDF above to get started.</div>';
     return;
   }
-  var rows = inv.map(function(i){
+  var filtered = inv.filter(_apInboxMatch);
+  var totSum = filtered.reduce(function(t,i){return t+(Number(i.total)||0);},0);
+  var totLine = '<div style="padding:10px 13px;border-bottom:1px solid #eef0f4;font-size:12px;color:#666">'+filtered.length+' invoice'+(filtered.length===1?'':'s')+' &middot; <strong style="color:var(--kmi);font-size:13px">'+apMoney(totSum)+'</strong> total</div>';
+  if (!filtered.length){
+    el.innerHTML = totLine + '<div style="padding:26px;text-align:center;color:#999;font-size:13px">No invoices match this filter.</div>';
+    return;
+  }
+  var rows = filtered.map(function(i){
     var coded = String(i.status||'received') !== 'received';
     var rf = (i.readFailed || (i.extractedJson && i.extractedJson._readFailed)) && !coded;
     var dup = (i.isDuplicate && !coded) ? ' style="background:#fdf6f6;cursor:pointer"' : ' style="cursor:pointer"';
@@ -38125,7 +38148,7 @@ function renderApInbox(){
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;text-align:center"><button onclick="apDeleteInvoice(\''+i.id+'\',event)" title="Delete invoice" style="border:0;background:none;color:#b23636;cursor:pointer;font-size:15px;line-height:1">&#128465;</button></td>'+
     '</tr>';
   }).join('');
-  el.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12.5px">'+
+  el.innerHTML = totLine + '<table style="width:100%;border-collapse:collapse;font-size:12.5px">'+
     '<thead><tr>'+
     ['Vendor','Invoice #','Date','Job','Amount','Source','Status',''].map(function(h){return '<th style="text-align:left;padding:7px 9px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h+'</th>';}).join('')+
     '</tr></thead><tbody>'+rows+'</tbody></table>';
