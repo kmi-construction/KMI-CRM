@@ -2177,7 +2177,7 @@ textarea{resize:vertical;min-height:72px}
     <select class="fs" onchange="filterUsers()" id="usr-fr">
       <option value="">All roles</option>
       <option>Admin</option><option>Project Manager</option><option>Project Coordinator</option>
-      <option>Accounting</option><option>Superintendent</option><option>Foreman</option>
+      <option>Accounting</option><option>Superintendent</option><option>Foreman</option><option>Shop</option>
     </select>
   </div>
   <div class="card" style="padding:0;overflow:hidden">
@@ -3203,7 +3203,7 @@ textarea{resize:vertical;min-height:72px}
 <script>
 var PM_TITLES = ['Assistant Project Manager','Estimator','Project Engineer','Project Executive','Project Manager','Sr. Project Manager','Superintendent'];
 var US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','DC','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'];
-var USER_ROLES = ['Admin','Project Manager','Project Coordinator','Accounting','Superintendent','Foreman'];
+var USER_ROLES = ['Admin','Project Manager','Project Coordinator','Accounting','Superintendent','Foreman','Shop'];
 var DB_KEY = 'kmi_crm_v2';
 var _npIdx = 0, _editPMId = null, _editOppId = null, _editUserId = null, _npOppId = null, _editClarId = null, _editProposalId = null;
 // Signature image upload state for the user form. 
@@ -3510,96 +3510,100 @@ _normalizeBudgetQtyConversions();  // correct stale cached settings before first
 var SESSION_KEY = 'kmi_crm_session_v1';
 var _currentUser = null;
 
-var PERM_ROLES = ['Admin','Project Manager','Project Coordinator','Accounting','Superintendent','Foreman'];
+// Shop (Round 11): equipment-focused role. Full equipment board (view/move/edit)
+// + AP invoice approvals routed to them; read-only Projects LIST (no drill-in,
+// enforced in viewProject/editProject); no pipeline, no other project data, no
+// maintenance screens. Appended LAST so existing role→column indices are stable.
+var PERM_ROLES = ['Admin','Project Manager','Project Coordinator','Accounting','Superintendent','Foreman','Shop'];
 var PERMISSIONS = {
-  'dashboard':          ['full','full','full','read','none','none'],
-  'bid-opportunities':  ['full','full','full','read','none','none'],
+  'dashboard': ['full','full','full','read','none','none','none'],
+  'bid-opportunities': ['full','full','full','read','none','none','none'],
   // Bid Inbox — inbound invitation review queue. View mirrors bid-opportunities
   // (Accounting reads). Route = attach/create-opp/not-bidding, office staff only
   // (Admin/PM/PC); field roles and Accounting don't triage the pipeline intake.
-  'view-bid-inbox':     ['full','full','full','read','none','none'],
-  'route-bid-inbox':    ['full','full','full','none','none','none'],
-  'create-opportunity': ['full','full','full','read','none','none'],
-  'edit-opportunity':   ['full','full','full','read','none','none'],
-  'change-decision':    ['full','full','full','read','none','none'],
-  'change-outcome':     ['full','full','read','read','none','none'],
-  'create-proposal':    ['full','full','read','read','none','none'],
-  'view-opportunity':   ['full','full','full','read','none','none'],
-  'upload-scope':       ['full','full','full','read','none','none'],
-  'input-source-doc':   ['full','full','full','read','none','none'],
-  'enter-bid-amount':   ['full','full','read','read','none','none'],
-  'edit-proposal':      ['full','full','read','read','none','none'],
-  'delete-proposal':    ['full','full','read','read','none','none'],
-  'download-proposal':  ['full','full','full','read','none','none'],
-  'email-pm-proposal':  ['full','full','read','read','none','none'],
-  'delete-opportunity': ['full','read','read','read','none','none'],
-  'add-customers':      ['full','full','full','read','none','none'],
-  'edit-customers':     ['full','full','full','read','none','none'],
-  'add-pm':             ['full','full','full','read','none','none'],
-  'edit-pm':            ['full','full','full','read','none','none'],
-  'add-vendors':        ['full','full','full','full','read','read'],
-  'edit-vendors':       ['full','full','full','full','none','none'],
-  'add-vendor-contacts':  ['full','full','full','full','read','read'],
-  'edit-vendor-contacts': ['full','full','full','full','none','none'],
+  'view-bid-inbox': ['full','full','full','read','none','none','none'],
+  'route-bid-inbox': ['full','full','full','none','none','none','none'],
+  'create-opportunity': ['full','full','full','read','none','none','none'],
+  'edit-opportunity': ['full','full','full','read','none','none','none'],
+  'change-decision': ['full','full','full','read','none','none','none'],
+  'change-outcome': ['full','full','read','read','none','none','none'],
+  'create-proposal': ['full','full','read','read','none','none','none'],
+  'view-opportunity': ['full','full','full','read','none','none','none'],
+  'upload-scope': ['full','full','full','read','none','none','none'],
+  'input-source-doc': ['full','full','full','read','none','none','none'],
+  'enter-bid-amount': ['full','full','read','read','none','none','none'],
+  'edit-proposal': ['full','full','read','read','none','none','none'],
+  'delete-proposal': ['full','full','read','read','none','none','none'],
+  'download-proposal': ['full','full','full','read','none','none','none'],
+  'email-pm-proposal': ['full','full','read','read','none','none','none'],
+  'delete-opportunity': ['full','read','read','read','none','none','none'],
+  'add-customers': ['full','full','full','read','none','none','none'],
+  'edit-customers': ['full','full','full','read','none','none','none'],
+  'add-pm': ['full','full','full','read','none','none','none'],
+  'edit-pm': ['full','full','full','read','none','none','none'],
+  'add-vendors': ['full','full','full','full','read','read','none'],
+  'edit-vendors': ['full','full','full','full','none','none','none'],
+  'add-vendor-contacts': ['full','full','full','full','read','read','none'],
+  'edit-vendor-contacts': ['full','full','full','full','none','none','none'],
   // Purchase Orders (PO Module v1) — issued to vendors by KMI office staff.
   // Admin/PM/PC drive PO creation since they handle vendor commitments and
   // pricing; Accounting needs read access for AP matching; field roles
   // (Foreman/Super) don't issue POs.
-  'view-purchase-orders':   ['full','full','full','read','none','none'],
-  'add-purchase-orders':    ['full','full','full','none','none','none'],
-  'edit-purchase-orders':   ['full','full','full','none','none','none'],
-  'delete-purchase-orders': ['full','full','none','none','none','none'],
+  'view-purchase-orders': ['full','full','full','read','none','none','none'],
+  'add-purchase-orders': ['full','full','full','none','none','none','none'],
+  'edit-purchase-orders': ['full','full','full','none','none','none','none'],
+  'delete-purchase-orders': ['full','full','none','none','none','none','none'],
   // Status transitions: Issue (Draft→Issued + email), Mark Open, Mark Closed,
   // Void, Revise. Same trust shape as edit (Admin/PM/PC). Field roles never
   // transition POs; Accounting reads only.
-  'issue-purchase-orders':  ['full','full','full','none','none','none'],
+  'issue-purchase-orders': ['full','full','full','none','none','none','none'],
   // Equipment board — units (owned/rented machines) + scaffold/winter packages.
   // View: everyone with board access (Accounting & Foreman read-only). Move:
   // office (Admin/PM/PC) + Superintendent — the field lead who directs the iron.
   // Edit (add/edit/delete equipment & packages, mark struck): office only.
-  'view-equipment': ['full','full','full','read','full','read'],
-  'move-equipment': ['full','full','full','none','full','none'],
-  'edit-equipment': ['full','full','full','none','none','none'],
+  'view-equipment': ['full','full','full','read','full','read','full'],
+  'move-equipment': ['full','full','full','none','full','none','full'],
+  'edit-equipment': ['full','full','full','none','none','none','full'],
   // Procurement tab: reconciles the project material list / BPR imports against
   // PO line items (what's ordered, lead times, dates). Field roles get READ —
   // they already consume the read-only mobile procurement page. Accounting
   // reads it for AP matching. Office staff (Admin/PM/PC) get full edit.
-  'view-procurement':   ['full','full','full','read','read','read'],
-  'edit-procurement':   ['full','full','full','none','none','none'],
-  'analytics':          ['full','read','read','read','none','none'],
-  'users':              ['full','none','none','none','none','none'],
-  'templates':          ['full','read','none','none','none','none'],
-  'ap-invoices':        ['full','none','none','full','none','none'],
-  'ap-approvals':       ['full','full','none','full','none','none'],
-  'email-log':          ['full','none','none','none','none','none'],
-  'email-settings':     ['full','none','none','none','none','none'],
+  'view-procurement': ['full','full','full','read','read','read','none'],
+  'edit-procurement': ['full','full','full','none','none','none','none'],
+  'analytics': ['full','read','read','read','none','none','none'],
+  'users': ['full','none','none','none','none','none','none'],
+  'templates': ['full','read','none','none','none','none','none'],
+  'ap-invoices': ['full','none','none','full','none','none','none'],
+  'ap-approvals': ['full','full','none','full','none','none','full'],
+  'email-log': ['full','none','none','none','none','none','none'],
+  'email-settings': ['full','none','none','none','none','none','none'],
   // Projects module: the project record itself + its workspace. view-project
   // gates the Projects list, the project detail, and the Details/Directory tabs.
   // create/edit gate the New/Edit Project page and Save; delete is Admin-only.
   // Field roles manage field work (T&M, procurement) on mobile, not the
   // office-side project record, so they're none on view/create/edit.
-  'view-project':    ['full','full','full','full','read','read'],
-  'create-project':  ['full','full','full','full','none','none'],
-  'edit-project':    ['full','full','full','full','none','none'],
-  'delete-project':  ['full','none','none','full','none','none'],
+  'view-project': ['full','full','full','full','read','read','read'],
+  'create-project': ['full','full','full','full','none','none','none'],
+  'edit-project': ['full','full','full','full','none','none','none'],
+  'delete-project': ['full','none','none','full','none','none','none'],
   // Project Kickoff (post-spec): Admin / PM / PC can send. Mirrors the
   // create-opportunity / edit-customers trust shape — same people who can
   // set up the project record can send the kickoff email + Job File CSV.
   // Field roles can't see projects in detail, so they're none.
-  'send-project-kickoff':  ['full','full','full','none','none','none'],
+  'send-project-kickoff': ['full','full','full','none','none','none','none'],
   // Budget feature: viewable by all roles, editable by Admin/PM/Accounting,
   // exportable by Admin/PM/Accounting (Accounting drives the actual
   // Foundation upload, so they need both edit and export).
-  'view_project_budget':   ['full','full','full','full','read','read'],
-  'edit_project_budget':   ['full','full','none','full','none','none'],
-  'export_project_budget': ['full','full','none','full','none','none'],
+  'view_project_budget': ['full','full','full','full','read','read','none'],
+  'edit_project_budget': ['full','full','none','full','none','none','none'],
+  'export_project_budget': ['full','full','none','full','none','none','none'],
   // T&M Tickets: Foreman/Super are full creators of their own tickets while in Draft.
   // Other gating (own-only edits before signoff, KMI-PM-only approval) is enforced
   // in the action handlers, not here. Approval/signing/upload actions land in Round 3.
-  'view-tm-tickets':   ['full','full','full','read','full','full'],
-  'create-tm-ticket':  ['full','full','full','none','full','full'],
-  'edit-tm-ticket':    ['full','full','full','none','full','full'],
-  'delete-tm-ticket':  ['full','full','none','none','none','none'],
+  'view-tm-tickets': ['full','full','full','read','full','full','none'],
+  'create-tm-ticket': ['full','full','full','none','full','full','none'],
+  'edit-tm-ticket': ['full','full','full','none','full','full','none'],
+  'delete-tm-ticket': ['full','full','none','none','none','none','none'],
   // Round 3: signing actions
   'send-tm-signature': ['full','full','none','none','none','none'],   // Send for Signature, Send Reminder
   'approve-tm-ticket': ['full','full','none','none','none','none'],   // KMI PM final approval
@@ -3614,33 +3618,33 @@ var PERMISSIONS = {
   // — these are KMI-internal billing artifacts. Coordinator can read for
   // tracking / referencing on customer calls, but only PMs and Admins
   // create/edit/send/transition them.
-  'view-cors':       ['full','full','read','read','none','none'],
-  'create-cor':      ['full','full','none','none','none','none'],
-  'edit-cor':        ['full','full','none','none','none','none'],
-  'send-cor':        ['full','full','none','none','none','none'],
-  'transition-cor':  ['full','full','none','none','none','none'],
-  'delete-cor':      ['full','none','none','none','none','none'],
+  'view-cors': ['full','full','read','read','none','none','none'],
+  'create-cor': ['full','full','none','none','none','none','none'],
+  'edit-cor': ['full','full','none','none','none','none','none'],
+  'send-cor': ['full','full','none','none','none','none','none'],
+  'transition-cor': ['full','full','none','none','none','none','none'],
+  'delete-cor': ['full','none','none','none','none','none','none'],
   // Round 4.4: Foundation CO CSV exports — Admin/PM/Accounting full, others
   // none. Mirrors export_project_budget since Accounting drives the actual
   // Foundation upload.
-  'export-cor-foundation': ['full','full','none','full','none','none'],
+  'export-cor-foundation': ['full','full','none','full','none','none','none'],
   // Product Library (Round 1) — master library of manufacturers, products,
   // and their attached documents (product data sheets, test reports, etc.)
   // Admin / PM / Project Coordinator have full create+edit+delete; Accounting
   // is read-only; Field roles can't see it (not relevant to their work).
-  'view-product-library':   ['full','full','full','read','none','none'],
-  'edit-product-library':   ['full','full','full','none','none','none'],
-  'delete-product-library': ['full','full','full','none','none','none'],
+  'view-product-library': ['full','full','full','read','none','none','none'],
+  'edit-product-library': ['full','full','full','none','none','none','none'],
+  'delete-product-library': ['full','full','full','none','none','none','none'],
   // Confirming a stale document is "still valid" follows the same trust
   // boundary as edit — pulled out so we can tighten it later (e.g.
   // PM-only) without touching every call site.
-  'confirm-product-document': ['full','full','full','none','none','none'],
+  'confirm-product-document': ['full','full','full','none','none','none','none'],
   // Submittals (Round 2A) — per-project tracking list. Same trust shape
   // as the Product Library: Admin / PM / PC create+edit+delete; Accounting
   // is read-only; field roles don't see this module at all.
-  'view-submittals':   ['full','full','full','read','none','none'],
-  'edit-submittals':   ['full','full','full','none','none','none'],
-  'delete-submittals': ['full','full','full','none','none','none']
+  'view-submittals': ['full','full','full','read','none','none','none'],
+  'edit-submittals': ['full','full','full','none','none','none','none'],
+  'delete-submittals': ['full','full','full','none','none','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -3733,6 +3737,14 @@ function hasRead(action) { var a = canAccess(action); return a === 'full' || a =
 function _isScopedUser(u) {
   u = u || _currentUser;
   return !!u && normalizeRole(u.role) === 'Foreman';
+}
+// Shop role: read-only visibility of the Projects LIST but no drill-in. The
+// view-project permission is 'read' (so the list + nav item show), but opening
+// an individual project record — via viewProject() or the edit/view form — is
+// blocked here so Shop never reaches project detail, budgets, tabs, etc.
+function _isShopUser(u) {
+  u = u || _currentUser;
+  return !!u && normalizeRole(u.role) === 'Shop';
 }
 function _userAssignedProjectIds(u) {
   u = u || _currentUser;
@@ -4085,6 +4097,14 @@ function applyUserPermissions() {
       sib = sib.nextElementSibling;
     }
     lbl.style.display = anyVisible ? '' : 'none';
+  });
+  // Hide any collapsible nav group whose items are all permission-hidden, so
+  // restricted roles (e.g. Shop) don't see empty group headers like "Pipeline"
+  // or "Maintenance" with nothing under them.
+  document.querySelectorAll('.sb .sb-group').forEach(function(grp){
+    var items = grp.querySelectorAll('.sb-group-items .ni');
+    var anyVisible = Array.prototype.some.call(items, function(el){ return el.style.display !== 'none'; });
+    grp.style.display = (items.length && !anyVisible) ? 'none' : '';
   });
   var ini = ((_currentUser.firstName || '')[0] || '').toUpperCase() + ((_currentUser.lastName || '')[0] || '').toUpperCase();
   var nameEl = g('sb-user-name'), roleEl = g('sb-user-role'), avEl = g('sb-user-avatar'), box = g('sb-user');
@@ -5630,7 +5650,7 @@ async function biRemoveInvite(id){
 // list & form (which reflow to cards via media queries).
 
 var _isMobile = false;
-var _mobileDeniedRoles = ['Accounting'];
+var _mobileDeniedRoles = ['Accounting','Shop'];
 var _mobileAllowedPages = {
   // Existing pages with mobile-friendly UX (via responsive CSS):
   'tm-tickets': 1, 'new-tm-ticket': 1,
@@ -30056,6 +30076,10 @@ function filterProj() {
     g('prj-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;color:#aaa;padding:32px;font-size:13px">No projects yet. Create one manually, or mark a bid opportunity as <strong>Won</strong> to generate a project.</td></tr>';
     return;
   }
+  // Shop role: list is view-only with no drill-in — rows aren't clickable and
+  // the View/Edit action is suppressed (opening is also blocked in viewProject/
+  // editProject as a backstop).
+  var _canOpen = !_isShopUser();
   g('prj-tbody').innerHTML = list.map(function(p){
     var c = getCust(p.customerId);
     var types = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
@@ -30065,9 +30089,15 @@ function filterProj() {
     var sourceCell = p.opportunityId
       ? '<span class="tag" style="cursor:pointer;color:var(--kmi);border-color:var(--stl)" onclick="openOppDetail(\'' + p.opportunityId + '\')" title="View source opportunity">' + p.opportunityId + '</span>'
       : '<span class="tag">Manual</span>';
+    var numCell = _canOpen
+      ? '<td style="font-weight:600;color:var(--kmi);cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.number || '—') + '</td>'
+      : '<td style="font-weight:600;color:var(--kmi)">' + (p.number || '—') + '</td>';
+    var nameCell = _canOpen
+      ? '<td style="cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.name || '<span style="color:#aaa">—</span>') + '</td>'
+      : '<td>' + (p.name || '<span style="color:#aaa">—</span>') + '</td>';
     return '<tr>' +
-      '<td style="font-weight:600;color:var(--kmi);cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.number || '—') + '</td>' +
-      '<td style="cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.name || '<span style="color:#aaa">—</span>') + '</td>' +
+      numCell +
+      nameCell +
       '<td>' + c.name + '</td>' +
       '<td style="font-size:12px;color:#555">' + (formatProjAddress(p) || '<span style="color:#aaa">—</span>') + '</td>' +
       '<td>' + typeCell + '</td>' +
@@ -30083,9 +30113,11 @@ function filterProj() {
       })() + '</td>' +
       '<td>' + sourceCell + '</td>' +
       '<td>' +
-        (hasFull('edit-project')
-          ? '<button class="btn btn-sm" onclick="editProject(' + p.id + ')">✎ Edit</button>'
-          : '<button class="btn btn-sm" onclick="editProject(' + p.id + ')">👁 View</button>') +
+        (!_canOpen
+          ? '<span style="color:#aaa;font-size:12px">—</span>'
+          : (hasFull('edit-project')
+              ? '<button class="btn btn-sm" onclick="editProject(' + p.id + ')">✎ Edit</button>'
+              : '<button class="btn btn-sm" onclick="editProject(' + p.id + ')">👁 View</button>')) +
         (hasFull('delete-project')
           ? '&nbsp;<button class="btn btn-sm" style="color:#A32D2D" onclick="deleteProject(' + p.id + ')">Delete</button>'
           : '') +
@@ -30465,6 +30497,8 @@ function editProject(id, initialTab) {
   // can browse the Details/Directory/Procurement tabs (the only path into
   // the project's data). saveProject() still gates the actual write.
   if (!requireRead('view-project', 'view projects')) return;
+  // Shop role sees the project LIST only — no drill-in to any project record.
+  if (_isShopUser()) { alert('Your role can view the project list only, not individual project records.'); return; }
   var p = getProj(id); if (!p) { alert('Project not found.'); return; }
   if (!_canAccessProject(p)) { alert("You don't have access to that project — it isn't assigned to you."); return; }
   _editProjectId = id;
@@ -30833,6 +30867,8 @@ function readContactAssignments() {
 }
 
 function viewProject(id) {
+  // Shop role sees the project LIST only — no drill-in to any project record.
+  if (_isShopUser()) { alert('Your role can view the project list only, not individual project records.'); return; }
   var p = getProj(id); if (!p) return;
   if (!_canAccessProject(p)) { alert("You don't have access to that project — it isn't assigned to you."); return; }
   var c = getCust(p.customerId);
