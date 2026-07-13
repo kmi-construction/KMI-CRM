@@ -1253,6 +1253,7 @@ textarea{resize:vertical;min-height:72px}
       <div class="ni" onclick="nav('tm-tickets')"><span class="nico">⏱</span>T&amp;M Tickets</div>
       <div class="ni" onclick="nav('cors')"><span class="nico">◇</span>CORs</div>
       <div class="ni" onclick="nav('submittals')"><span class="nico">▤</span>Submittals</div>
+      <div class="ni" onclick="nav('meetings')"><span class="nico">🗒</span>Meeting Minutes</div>
     </div>
   </div>
   <div class="sb-group" data-group="accounting">
@@ -2970,6 +2971,20 @@ textarea{resize:vertical;min-height:72px}
   </div>
 </div>
 
+<!-- MEETING MINUTES — internal weekly meeting record, organized by project.
+     Header is static; renderMeetings() fills #mm-content with the week bar,
+     per-project sections (discussion + action items) and the footer. -->
+<div class="pg" id="pg-meetings">
+  <div class="ph" style="margin-bottom:0">
+    <div>
+      <h1>Meeting Minutes</h1>
+      <div class="sub">Internal weekly meeting — organized by project. Unchecked action items carry over to the next week automatically.</div>
+      <div class="stripe"></div>
+    </div>
+  </div>
+  <div id="mm-content"></div>
+</div>
+
 <!-- EDIT SUBMITTAL — dedicated page (modal pattern is fragile with file
      uploads; even though Round 2A doesn't have custom-doc upload, Round 2B
      will, so building on a page from the start avoids a rebuild). -->
@@ -3276,6 +3291,13 @@ var DB_DEFAULTS = {
   // See the COR module (separate) for how rolled-up tickets feed CORs.
   tmTickets: [],
   prodWeekly: [],
+  // Meeting Minutes (Round 1) — internal weekly meeting record, organized by
+  // project. kmi_meetings holds one row per week (per-project discussion +
+  // per-week hidden/added project lists); kmi_meeting_action_items is a
+  // dedicated persistent action-item table (Model A: an item carries over
+  // across weeks until its checkbox is ticked).
+  meetings: [],
+  meetingActionItems: [],
   // CORs (Change Order Requests) — Round 4. Three types: T&M, Premium Time
   // (OT or DT), and Fixed Fee. T&M and Premium Time roll up approved T&M
   // tickets; Fixed Fee is purely manual. Issued to the customer; not signed
@@ -3644,7 +3666,13 @@ var PERMISSIONS = {
   // is read-only; field roles don't see this module at all.
   'view-submittals': ['full','full','full','read','none','none','none'],
   'edit-submittals': ['full','full','full','none','none','none','none'],
-  'delete-submittals': ['full','full','full','none','none','none','none']
+  'delete-submittals': ['full','full','full','none','none','none','none'],
+  // Meeting Minutes (Round 1) — internal weekly office meeting record.
+  // Admin / PM / Project Coordinator run and edit the meeting; everyone else
+  // (Accounting + field roles) has no access. view and edit share the same
+  // trust boundary today, split out so edit can be tightened later.
+  'view-meetings': ['full','full','full','none','none','none','none'],
+  'edit-meetings': ['full','full','full','none','none','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -3715,7 +3743,8 @@ var PAGE_ACTION_MAP = {
   'edit-product':    'edit-product-library',
   'submittals':      'view-submittals',
   'edit-submittal':  'edit-submittals',
-  'equipment':       'view-equipment'
+  'equipment':       'view-equipment',
+  'meetings':        'view-meetings'
 };
 function canAccess(action) {
   if (!_currentUser) return 'none';
@@ -4959,6 +4988,7 @@ function nav(page) {
     'configure-form':  renderConfigureFormPage,
     'submittals':      renderSubmittalsPage,
     'edit-submittal':  renderEditSubmittalPage,
+    'meetings':        renderMeetings,
     'm-projects':         renderMobileProjects,
     'm-project-detail':   renderMobileProjectDetail,
     'm-submittals':       renderMobileSubmittals,
@@ -43927,6 +43957,67 @@ function fromSBProject(r) {
   };
 }
 
+// ── Meeting Minutes mappers (Round 1) ──────────────────────────────────
+// kmi_meetings: one row per week (week_key = Monday 'YYYY-MM-DD'). discussion
+// is a JSONB map keyed by projectId; hidden/added project lists are JSONB arrays.
+function toSBMeeting(r) {
+  return {
+    id:                 r.id,
+    week_key:           r.weekKey || null,
+    discussion:         (r.discussion && typeof r.discussion === 'object') ? r.discussion : {},
+    hidden_project_ids: Array.isArray(r.hiddenProjectIds) ? r.hiddenProjectIds : [],
+    added_project_ids:  Array.isArray(r.addedProjectIds)  ? r.addedProjectIds  : [],
+    created_at:         r.createdAt || null,
+    created_by:         r.createdBy || null,
+    updated_at:         r.updatedAt || null
+  };
+}
+function fromSBMeeting(r) {
+  return {
+    id:               r.id,
+    weekKey:          r.week_key || '',
+    discussion:       (r.discussion && typeof r.discussion === 'object') ? r.discussion : {},
+    hiddenProjectIds: Array.isArray(r.hidden_project_ids) ? r.hidden_project_ids : [],
+    addedProjectIds:  Array.isArray(r.added_project_ids)  ? r.added_project_ids  : [],
+    createdAt:        r.created_at || '',
+    createdBy:        r.created_by || '',
+    updatedAt:        r.updated_at || ''
+  };
+}
+// kmi_meeting_action_items: persistent action items (Model A). created_week /
+// completed_week are week_keys; an open item shows on every week >= created_week
+// until done, then only on completed_week.
+function toSBMeetingItem(r) {
+  return {
+    id:               r.id,
+    project_id:       r.projectId || null,
+    text:             r.text || '',
+    assignee_user_id: r.assigneeUserId || null,
+    done:             !!r.done,
+    created_week:     r.createdWeek || null,
+    completed_week:   r.completedWeek || null,
+    created_at:       r.createdAt || null,
+    created_by:       r.createdBy || null,
+    completed_at:     r.completedAt || null,
+    updated_at:       r.updatedAt || null
+  };
+}
+function fromSBMeetingItem(r) {
+  return {
+    id:             r.id,
+    projectId:      r.project_id || null,
+    text:           r.text || '',
+    assigneeUserId: r.assignee_user_id || null,
+    done:           !!r.done,
+    createdWeek:    r.created_week || '',
+    completedWeek:  r.completed_week || '',
+    createdAt:      r.created_at || '',
+    createdBy:      r.created_by || '',
+    completedAt:    r.completed_at || null,
+    updatedAt:      r.updated_at || ''
+  };
+}
+
 // ── T&M Ticket mappers (Round 1) ───────────────────────────────────────
 // Productivity (Phase 1) — weekly data mappers. entries is keyed by estimate
 // line id: { lineId: { u:units, f:foremanHrs, m:masonHrs, l:laborerHrs } }.
@@ -44651,6 +44742,15 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_submittals').upsert(db.submittals.map(toSBSubmittal));
       if (r && r.error) errs.push('submittals: ' + r.error.message);
     }
+    // Meeting Minutes (Round 1) — non-fatal if tables missing
+    if ((db.meetings || []).length) {
+      var r = await supabaseClient.from('kmi_meetings').upsert(db.meetings.map(toSBMeeting));
+      if (r && r.error) errs.push('meetings: ' + r.error.message);
+    }
+    if ((db.meetingActionItems || []).length) {
+      var r = await supabaseClient.from('kmi_meeting_action_items').upsert(db.meetingActionItems.map(toSBMeetingItem));
+      if (r && r.error) errs.push('meeting_action_items: ' + r.error.message);
+    }
     // Transmittals (autonumber history) — non-fatal if table missing
     if ((db.transmittals || []).length) {
       var r = await supabaseClient.from('kmi_transmittals').upsert(db.transmittals.map(toSBTransmittal));
@@ -44842,7 +44942,8 @@ async function pullFromSupabase() {
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
          mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
          rfqsRes, rfqRespRes, prodWkRes, prodCatRes, prodItemRes, prodDocTypeRes, prodCategoryRes,
-         eqRes, eqMoveRes, eqInvRes, biRes, bivRes] = await Promise.all([
+         eqRes, eqMoveRes, eqInvRes, biRes, bivRes,
+         mtgRes, mtgItemRes] = await Promise.all([
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -44879,7 +44980,9 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_equipment_moves').select('*'),
       supabaseClient.from('kmi_equipment_invoices').select('*'),
       supabaseClient.from('kmi_bid_inbox').select('*'),
-      supabaseClient.from('kmi_bid_invites').select('*')
+      supabaseClient.from('kmi_bid_invites').select('*'),
+      supabaseClient.from('kmi_meetings').select('*'),
+      supabaseClient.from('kmi_meeting_action_items').select('*')
     ]);
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
@@ -45120,6 +45223,20 @@ async function pullFromSupabase() {
       console.warn('kmi_submittals load error (table missing?):', subsRes.error.message);
       if (!Array.isArray(db.submittals)) db.submittals = [];
     }
+    // Meeting Minutes (Round 1) — same preserve-on-missing pattern. If the
+    // meeting_minutes_round1 migration hasn't run yet, keep whatever's local.
+    if (mtgRes && !mtgRes.error) {
+      db.meetings = (mtgRes.data || []).map(fromSBMeeting);
+    } else if (mtgRes && mtgRes.error) {
+      console.warn('kmi_meetings load error (table missing?):', mtgRes.error.message);
+      if (!Array.isArray(db.meetings)) db.meetings = [];
+    }
+    if (mtgItemRes && !mtgItemRes.error) {
+      db.meetingActionItems = (mtgItemRes.data || []).map(fromSBMeetingItem);
+    } else if (mtgItemRes && mtgItemRes.error) {
+      console.warn('kmi_meeting_action_items load error (table missing?):', mtgItemRes.error.message);
+      if (!Array.isArray(db.meetingActionItems)) db.meetingActionItems = [];
+    }
     // Spec sections (Round 5) — same preserve-on-missing pattern
     if (specRes && !specRes.error) {
       db.specSections = (specRes.data || []).map(fromSBSpecSection);
@@ -45240,7 +45357,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget, 'product-library':renderProductLibrary, submittals:renderSubmittalsPage};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget, 'product-library':renderProductLibrary, submittals:renderSubmittalsPage, meetings:renderMeetings};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
@@ -46268,6 +46385,385 @@ async function sendProjectKickoffEmail() {
     showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// MEETING MINUTES (Round 1) — internal weekly meeting record, by project.
+// Model A: action items persist across weeks until checked off (see the
+// meeting_minutes_round1.sql migration for the data model). One weekly meeting
+// doc contains a section per project (discussion + action items). Unchecked
+// items carry forward automatically; a checked item shows struck-through only
+// on the week it was completed.
+// ═══════════════════════════════════════════════════════════════════════
+var _mmWeek = null;        // current viewed week key (Monday 'YYYY-MM-DD')
+var _mmCollapsed = {};     // projectId -> true when its card is collapsed
+
+function _mmToday(){ var d = new Date(); d.setHours(0,0,0,0); return d; }
+function _mmDateStr(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function _mmParseKey(k){ var p = String(k||'').split('-'); return new Date(Number(p[0]), Number(p[1])-1, Number(p[2])); }
+function _mmWeekKeyOf(d){ var x = new Date(d); x.setHours(0,0,0,0); var day = x.getDay(); var diff = (day===0 ? -6 : 1-day); x.setDate(x.getDate()+diff); return _mmDateStr(x); }
+function _mmShiftWeekKey(k, weeks){ var d = _mmParseKey(k); d.setDate(d.getDate() + weeks*7); return _mmDateStr(d); }
+var _MM_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function _mmWeekLabel(k){ var d = _mmParseKey(k); return 'Week of ' + _MM_MONTHS[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear(); }
+function _mmCanEdit(){ return canAccess('edit-meetings') === 'full'; }
+
+function _mmUser(uid){ return (db.users||[]).find(function(u){ return String(u.id) === String(uid); }); }
+function _mmUserName(uid){ var u = _mmUser(uid); if(!u) return ''; return ((u.firstName||'') + ' ' + (u.lastName||'')).trim() || u.email || ''; }
+function _mmUserInitials(uid){ var u = _mmUser(uid); if(!u) return '?'; var s = ((u.firstName||'').charAt(0) + (u.lastName||'').charAt(0)).toUpperCase(); return s || (u.email||'?').charAt(0).toUpperCase(); }
+function _mmAssignableUsers(){
+  return (db.users||[]).filter(function(u){ return (u.status||'active') !== 'inactive'; })
+    .slice().sort(function(a,b){ return (((a.firstName||'')+' '+(a.lastName||'')).trim().toLowerCase()).localeCompare(((b.firstName||'')+' '+(b.lastName||'')).trim().toLowerCase()); });
+}
+
+function _mmGetMeeting(k){ return (db.meetings||[]).find(function(m){ return String(m.weekKey) === String(k); }); }
+function _mmGetOrCreateMeeting(k){
+  var m = _mmGetMeeting(k);
+  if(!m){
+    m = { id:'mtg-' + Date.now() + '-' + Math.random().toString(36).slice(2,7), weekKey:k, discussion:{}, hiddenProjectIds:[], addedProjectIds:[], createdAt:new Date().toISOString(), createdBy:(_currentUser?String(_currentUser.id):''), updatedAt:new Date().toISOString() };
+    db.meetings = db.meetings || [];
+    db.meetings.push(m);
+  }
+  return m;
+}
+async function _mmPersistMeeting(m){
+  m.updatedAt = new Date().toISOString();
+  saveDB();
+  if(typeof supabaseClient !== 'undefined' && supabaseClient){
+    try { var r = await supabaseClient.from('kmi_meetings').upsert(toSBMeeting(m)); if(r && r.error) console.warn('kmi_meetings upsert:', r.error.message); }
+    catch(e){ console.warn('kmi_meetings upsert', e); }
+  }
+}
+async function _mmPersistItem(it){
+  it.updatedAt = new Date().toISOString();
+  saveDB();
+  if(typeof supabaseClient !== 'undefined' && supabaseClient){
+    try { var r = await supabaseClient.from('kmi_meeting_action_items').upsert(toSBMeetingItem(it)); if(r && r.error) console.warn('kmi_meeting_action_items upsert:', r.error.message); }
+    catch(e){ console.warn('kmi_meeting_action_items upsert', e); }
+  }
+}
+async function _mmDeleteItemCloud(id){
+  if(typeof supabaseClient !== 'undefined' && supabaseClient){
+    try { var r = await supabaseClient.from('kmi_meeting_action_items').delete().eq('id', id); if(r && r.error) console.warn('kmi_meeting_action_items delete:', r.error.message); }
+    catch(e){ console.warn('kmi_meeting_action_items delete', e); }
+  }
+}
+
+// Projects to show this week (decision 3-C: auto-list all, allow per-week hide,
+// plus an explicit add for anything that fell off).
+function _mmVisibleProjects(weekKey){
+  var m = _mmGetMeeting(weekKey);
+  var hidden = (m && Array.isArray(m.hiddenProjectIds)) ? m.hiddenProjectIds.map(String) : [];
+  var added  = (m && Array.isArray(m.addedProjectIds))  ? m.addedProjectIds.map(String)  : [];
+  var today  = _mmDateStr(_mmToday());
+  var items  = db.meetingActionItems || [];
+  return (db.projects||[]).filter(function(p){
+    var pid = String(p.id);
+    if(hidden.indexOf(pid) >= 0) return false;
+    if(added.indexOf(pid) >= 0) return true;
+    var active = !p.endDate || String(p.endDate) >= today;
+    if(active) return true;
+    // A completed project stays visible while it still has open action items,
+    // or if it has content recorded for this week.
+    if(items.some(function(it){ return String(it.projectId) === pid && !it.done; })) return true;
+    if(m && m.discussion && String(m.discussion[pid]||'').trim()) return true;
+    return items.some(function(it){ return String(it.projectId) === pid && (String(it.createdWeek) === String(weekKey) || String(it.completedWeek) === String(weekKey)); });
+  }).sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
+}
+function _mmHiddenProjects(weekKey){
+  var m = _mmGetMeeting(weekKey);
+  var hidden = (m && Array.isArray(m.hiddenProjectIds)) ? m.hiddenProjectIds.map(String) : [];
+  if(!hidden.length) return [];
+  return (db.projects||[]).filter(function(p){ return hidden.indexOf(String(p.id)) >= 0; })
+    .sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
+}
+// Items visible for a project in a given week (Model A visibility rule).
+function _mmItemsFor(projectId, weekKey){
+  var pid = String(projectId);
+  var list = (db.meetingActionItems||[]).filter(function(it){
+    if(String(it.projectId) !== pid) return false;
+    if(String(it.createdWeek) > String(weekKey)) return false;      // not created yet
+    if(it.done) return String(it.completedWeek) === String(weekKey); // done -> only its completed week
+    return true;                                                    // open -> carries over
+  });
+  list.sort(function(a,b){
+    if(!!a.done !== !!b.done) return a.done ? 1 : -1;
+    if(String(a.createdWeek) !== String(b.createdWeek)) return String(a.createdWeek) < String(b.createdWeek) ? -1 : 1;
+    return String(a.createdAt).localeCompare(String(b.createdAt));
+  });
+  return list;
+}
+
+function _mmInjectStyles(){
+  if(document.getElementById('mm-styles')) return;
+  var css =
+    '#pg-meetings .mm-weekbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px 0 14px}' +
+    '#pg-meetings .mm-wknav{display:flex;align-items:center;gap:8px;background:#fff;border:0.5px solid var(--stl);border-radius:10px;padding:6px 8px}' +
+    '#pg-meetings .mm-wknav button{width:30px;height:30px;border:0.5px solid var(--stl);background:#fff;border-radius:7px;font-size:15px;color:var(--kmi);cursor:pointer;line-height:1}' +
+    '#pg-meetings .mm-wknav button:hover{background:#f0f1f6}' +
+    '#pg-meetings .mm-wklabel{min-width:170px;text-align:center;font-size:13px;font-weight:600;color:var(--kmi)}' +
+    '#pg-meetings .mm-proj{background:#fff;border:0.5px solid var(--stl);border-radius:12px;margin-bottom:12px;overflow:hidden}' +
+    '#pg-meetings .mm-phead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:0.5px solid #eceef4}' +
+    '#pg-meetings .mm-phead.mm-collapsed{border-bottom:none}' +
+    '#pg-meetings .mm-pnum{font-size:11.5px;color:#8891ac;font-weight:600;margin-right:8px}' +
+    '#pg-meetings .mm-pname{font-size:14px;font-weight:700;color:var(--kmi)}' +
+    '#pg-meetings .mm-pcount{display:flex;gap:6px;align-items:center;font-size:11px}' +
+    '#pg-meetings .mm-chip{background:#FBF3E2;color:#9A7A2E;border-radius:20px;padding:2px 9px;font-weight:600;font-size:10.5px}' +
+    '#pg-meetings .mm-chip.done{background:#ECF5EF;color:#2F7D4F}' +
+    '#pg-meetings .mm-body{padding:12px 14px}' +
+    '#pg-meetings .mm-lbl{font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;color:#8891ac;font-weight:700;margin-bottom:6px}' +
+    '#pg-meetings .mm-disc{width:100%;border:0.5px solid var(--stl);border-radius:8px;padding:9px 10px;font-size:13px;font-family:inherit;color:#1c1c1c;resize:vertical;min-height:52px;background:#fcfcfd;box-sizing:border-box}' +
+    '#pg-meetings .mm-disc:focus{outline:none;border-color:var(--kmi);background:#fff}' +
+    '#pg-meetings .mm-item{display:flex;align-items:flex-start;gap:10px;padding:9px 6px;border-radius:8px}' +
+    '#pg-meetings .mm-item:hover{background:#fafafb}' +
+    '#pg-meetings .mm-cb{width:19px;height:19px;border:1.5px solid #c3c3bf;border-radius:5px;margin-top:1px;cursor:pointer;flex-shrink:0;position:relative;background:#fff}' +
+    '#pg-meetings .mm-cb.on{background:#2F7D4F;border-color:#2F7D4F}' +
+    '#pg-meetings .mm-cb.on:after{content:"";position:absolute;left:6px;top:2px;width:4px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}' +
+    '#pg-meetings .mm-itext{flex:1;font-size:13px;line-height:1.4}' +
+    '#pg-meetings .mm-itext .mm-strike{text-decoration:line-through;color:#9aa}' +
+    '#pg-meetings .mm-meta{display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap}' +
+    '#pg-meetings .mm-av{width:16px;height:16px;border-radius:50%;background:#EEF0F8;color:var(--kmi);font-size:8.5px;font-weight:700;display:inline-flex;align-items:center;justify-content:center}' +
+    '#pg-meetings .mm-asg{border:0.5px solid var(--stl);border-radius:6px;padding:3px 6px;font-size:11px;font-family:inherit;color:#444;background:#fff}' +
+    '#pg-meetings .mm-carry{font-size:9.5px;background:#FBF3E2;color:#9A7A2E;border-radius:4px;padding:1px 5px;font-weight:700;letter-spacing:.3px}' +
+    '#pg-meetings .mm-ix{border:none;background:none;color:#c0c4d4;cursor:pointer;font-size:14px;padding:2px 4px}' +
+    '#pg-meetings .mm-ix:hover{color:#A32D2D}' +
+    '#pg-meetings .mm-add{display:flex;gap:8px;margin-top:8px;padding-top:10px;border-top:1px dashed #e6e8f0}' +
+    '#pg-meetings .mm-add input{flex:1;border:0.5px solid var(--stl);border-radius:7px;padding:7px 9px;font-size:12.5px;font-family:inherit}' +
+    '#pg-meetings .mm-add input:focus{outline:none;border-color:var(--kmi)}' +
+    '#pg-meetings .mm-add select{border:0.5px solid var(--stl);border-radius:7px;padding:7px 9px;font-size:12px;font-family:inherit;background:#fff}' +
+    '#pg-meetings .mm-hidebtn{border:none;background:none;color:#b8bccd;cursor:pointer;font-size:12px;padding:2px 6px}' +
+    '#pg-meetings .mm-hidebtn:hover{color:#A32D2D}' +
+    '#pg-meetings .mm-foot{margin-top:14px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12px;color:#8891ac}' +
+    '#pg-meetings .mm-hchip{background:#EEF0F8;color:var(--kmi);border:0.5px solid var(--stl);border-radius:16px;padding:3px 10px;font-size:11.5px;cursor:pointer}' +
+    '#pg-meetings .mm-hchip:hover{background:#e2e6f4}';
+  var s = document.createElement('style'); s.id = 'mm-styles'; s.textContent = css; document.head.appendChild(s);
+}
+
+function renderMeetings(){
+  if(canAccess('view-meetings') === 'none'){ return; }
+  _mmInjectStyles();
+  if(!_mmWeek) _mmWeek = _mmWeekKeyOf(_mmToday());
+  var host = g('mm-content'); if(!host) return;
+  var canEdit = _mmCanEdit();
+  var wk = _mmWeek;
+  var thisWeekKey = _mmWeekKeyOf(_mmToday());
+  var asgOpts = _mmAssignableUsers();
+
+  var html = '';
+  // Week bar
+  html += '<div class="mm-weekbar">';
+  html +=   '<div class="mm-wknav"><button onclick="mmShiftWeek(-1)" title="Previous week">\u2039</button>';
+  html +=     '<div class="mm-wklabel">' + escapeHtml(_mmWeekLabel(wk)) + '</div>';
+  html +=     '<button onclick="mmShiftWeek(1)" title="Next week">\u203a</button></div>';
+  html +=   '<div style="display:flex;gap:8px;align-items:center">';
+  if(wk !== thisWeekKey) html += '<button class="btn btn-sm" onclick="mmGoThisWeek()">This week</button>';
+  html +=     '<button class="btn btn-sm" disabled title="PDF export is coming in a later round">\u2193 Export PDF</button>';
+  html +=   '</div>';
+  html += '</div>';
+
+  var visible = _mmVisibleProjects(wk);
+  if(!visible.length){
+    html += '<div class="card" style="text-align:center;color:#aaa;padding:40px 20px;font-size:13px">No projects to show for this week. Use <strong>Add a project</strong> below to include one.</div>';
+  }
+  visible.forEach(function(p){
+    var pid = String(p.id);
+    var items = _mmItemsFor(pid, wk);
+    var open = items.filter(function(it){ return !it.done; }).length;
+    var done = items.filter(function(it){ return it.done; }).length;
+    var m = _mmGetMeeting(wk);
+    var disc = (m && m.discussion && m.discussion[pid]) ? m.discussion[pid] : '';
+    var collapsed = !!_mmCollapsed[pid];
+
+    html += '<div class="mm-proj">';
+    html +=   '<div class="mm-phead' + (collapsed ? ' mm-collapsed' : '') + '">';
+    html +=     '<div style="display:flex;align-items:center;gap:2px;cursor:pointer" onclick="mmToggleCollapse(\'' + pid + '\')">';
+    html +=       '<span style="color:#bcc;margin-right:6px;font-size:11px">' + (collapsed ? '\u25b8' : '\u25be') + '</span>';
+    html +=       '<span class="mm-pnum">#' + escapeHtml(p.number || '\u2014') + '</span><span class="mm-pname">' + escapeHtml(p.name || 'Untitled project') + '</span>';
+    html +=     '</div>';
+    html +=     '<div style="display:flex;align-items:center;gap:10px">';
+    html +=       '<div class="mm-pcount">' + (open ? '<span class="mm-chip">' + open + ' open</span>' : '') + (done ? '<span class="mm-chip done">' + done + ' done</span>' : '') + '</div>';
+    if(canEdit) html += '<button class="mm-hidebtn" title="Hide this project for this week" onclick="mmHideProject(\'' + pid + '\')">Hide</button>';
+    html +=     '</div>';
+    html +=   '</div>';
+
+    if(!collapsed){
+      html += '<div class="mm-body">';
+      html +=   '<div class="mm-lbl">Update / Discussion</div>';
+      html +=   '<textarea class="mm-disc" ' + (canEdit ? '' : 'readonly ') + 'placeholder="Notes, status, decisions\u2026" onchange="mmSaveDiscussion(\'' + pid + '\', this.value)">' + escapeHtml(disc) + '</textarea>';
+      html +=   '<div class="mm-lbl" style="margin-top:14px">Action Items</div>';
+      if(!items.length){
+        html += '<div style="font-size:12px;color:#aaa;padding:6px 6px">No action items yet.</div>';
+      }
+      items.forEach(function(it){
+        var carried = (!it.done && String(it.createdWeek) < String(wk));
+        html += '<div class="mm-item">';
+        html +=   '<div class="mm-cb' + (it.done ? ' on' : '') + '" ' + (canEdit ? 'onclick="mmToggleDone(\'' + it.id + '\')"' : '') + '></div>';
+        html +=   '<div class="mm-itext"><span class="' + (it.done ? 'mm-strike' : '') + '">' + escapeHtml(it.text) + '</span>';
+        html +=     '<div class="mm-meta">';
+        if(canEdit){
+          html += '<select class="mm-asg" onchange="mmReassign(\'' + it.id + '\', this.value)">';
+          html +=   '<option value=""' + (!it.assigneeUserId ? ' selected' : '') + '>\u2014 unassigned \u2014</option>';
+          asgOpts.forEach(function(u){ html += '<option value="' + escapeHtml(String(u.id)) + '"' + (String(u.id) === String(it.assigneeUserId) ? ' selected' : '') + '>' + escapeHtml(_mmUserName(u.id)) + '</option>'; });
+          html += '</select>';
+        } else {
+          html += '<span style="font-size:11px;color:#889"><span class="mm-av">' + _mmUserInitials(it.assigneeUserId) + '</span> ' + escapeHtml(_mmUserName(it.assigneeUserId) || 'Unassigned') + '</span>';
+        }
+        if(carried) html += '<span class="mm-carry">CARRIED OVER</span>';
+        if(canEdit){
+          html += '<button class="mm-ix" title="Edit text" onclick="mmEditItem(\'' + it.id + '\')">\u270e</button>';
+          html += '<button class="mm-ix" title="Delete" onclick="mmDeleteItem(\'' + it.id + '\')">\u00d7</button>';
+        }
+        html +=     '</div>';
+        html +=   '</div>';
+        html += '</div>';
+      });
+      if(canEdit){
+        html += '<div class="mm-add">';
+        html +=   '<input id="mm-newitem-' + pid + '" placeholder="New action item\u2026" onkeydown="if(event.key===\'Enter\')mmAddItem(\'' + pid + '\')">';
+        html +=   '<select id="mm-newasg-' + pid + '"><option value="">Assign\u2026</option>';
+        asgOpts.forEach(function(u){ html += '<option value="' + escapeHtml(String(u.id)) + '">' + escapeHtml(_mmUserName(u.id)) + '</option>'; });
+        html +=   '</select>';
+        html +=   '<button class="btn btn-sm btn-p" onclick="mmAddItem(\'' + pid + '\')">Add</button>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  });
+
+  // Footer: hidden-project chips + add-a-project
+  var hiddenProjs = _mmHiddenProjects(wk);
+  var addable = (db.projects||[]).filter(function(p){ return visible.indexOf(p) < 0 && hiddenProjs.indexOf(p) < 0; })
+    .sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
+  if(canEdit && (hiddenProjs.length || addable.length)){
+    html += '<div class="mm-foot">';
+    if(hiddenProjs.length){
+      html += '<span>Hidden this week:</span>';
+      hiddenProjs.forEach(function(p){ html += '<span class="mm-hchip" title="Show again" onclick="mmUnhideProject(\'' + String(p.id) + '\')">#' + escapeHtml(p.number || '\u2014') + ' ' + escapeHtml(p.name || '') + ' \u21ba</span>'; });
+    }
+    if(addable.length){
+      html += '<select class="mm-asg" style="margin-left:auto" onchange="mmAddProject(this.value); this.value=\'\'">';
+      html += '<option value="">+ Add a project\u2026</option>';
+      addable.forEach(function(p){ html += '<option value="' + String(p.id) + '">#' + escapeHtml(p.number || '\u2014') + ' ' + escapeHtml(p.name || '') + '</option>'; });
+      html += '</select>';
+    }
+    html += '</div>';
+  }
+
+  host.innerHTML = html;
+}
+
+// ── Handlers ───────────────────────────────────────────────────────────
+function mmShiftWeek(n){ _mmWeek = _mmShiftWeekKey(_mmWeek || _mmWeekKeyOf(_mmToday()), n); renderMeetings(); }
+function mmGoThisWeek(){ _mmWeek = _mmWeekKeyOf(_mmToday()); renderMeetings(); }
+function mmToggleCollapse(pid){ _mmCollapsed[pid] = !_mmCollapsed[pid]; renderMeetings(); }
+
+function mmSaveDiscussion(pid, value){
+  if(!_mmCanEdit()) return;
+  var m = _mmGetOrCreateMeeting(_mmWeek);
+  m.discussion = m.discussion || {};
+  m.discussion[String(pid)] = value;
+  _mmPersistMeeting(m);
+  // no re-render — keep the textarea focused/caret intact
+}
+
+function mmAddItem(pid){
+  if(!_mmCanEdit()) return;
+  var inp = g('mm-newitem-' + pid); var asg = g('mm-newasg-' + pid);
+  var text = inp ? (inp.value||'').trim() : '';
+  if(!text){ if(inp) inp.focus(); return; }
+  var it = {
+    id: 'mai-' + Date.now() + '-' + Math.random().toString(36).slice(2,7),
+    projectId: String(pid),
+    text: text,
+    assigneeUserId: (asg && asg.value) ? asg.value : '',
+    done: false,
+    createdWeek: _mmWeek,
+    completedWeek: '',
+    createdAt: new Date().toISOString(),
+    createdBy: (_currentUser ? String(_currentUser.id) : ''),
+    completedAt: null,
+    updatedAt: new Date().toISOString()
+  };
+  db.meetingActionItems = db.meetingActionItems || [];
+  db.meetingActionItems.push(it);
+  _mmPersistItem(it);
+  renderMeetings();
+}
+
+function mmToggleDone(itemId){
+  if(!_mmCanEdit()) return;
+  var it = (db.meetingActionItems||[]).find(function(x){ return String(x.id) === String(itemId); });
+  if(!it) return;
+  it.done = !it.done;
+  if(it.done){ it.completedWeek = _mmWeek; it.completedAt = new Date().toISOString(); }
+  else { it.completedWeek = ''; it.completedAt = null; }
+  _mmPersistItem(it);
+  renderMeetings();
+}
+
+function mmReassign(itemId, uid){
+  if(!_mmCanEdit()) return;
+  var it = (db.meetingActionItems||[]).find(function(x){ return String(x.id) === String(itemId); });
+  if(!it) return;
+  it.assigneeUserId = uid || '';
+  _mmPersistItem(it);
+  // no re-render needed for a select change
+}
+
+function mmEditItem(itemId){
+  if(!_mmCanEdit()) return;
+  var it = (db.meetingActionItems||[]).find(function(x){ return String(x.id) === String(itemId); });
+  if(!it) return;
+  var next = prompt('Edit action item:', it.text);
+  if(next === null) return;
+  next = next.trim();
+  if(!next) return;
+  it.text = next;
+  _mmPersistItem(it);
+  renderMeetings();
+}
+
+function mmDeleteItem(itemId){
+  if(!_mmCanEdit()) return;
+  var it = (db.meetingActionItems||[]).find(function(x){ return String(x.id) === String(itemId); });
+  if(!it) return;
+  if(!confirm('Delete this action item? This removes it from every week.')) return;
+  db.meetingActionItems = (db.meetingActionItems||[]).filter(function(x){ return String(x.id) !== String(itemId); });
+  saveDB();
+  _mmDeleteItemCloud(itemId);
+  renderMeetings();
+}
+
+function mmHideProject(pid){
+  if(!_mmCanEdit()) return;
+  var m = _mmGetOrCreateMeeting(_mmWeek);
+  m.hiddenProjectIds = Array.isArray(m.hiddenProjectIds) ? m.hiddenProjectIds : [];
+  m.addedProjectIds  = Array.isArray(m.addedProjectIds)  ? m.addedProjectIds  : [];
+  pid = String(pid);
+  if(m.hiddenProjectIds.map(String).indexOf(pid) < 0) m.hiddenProjectIds.push(pid);
+  m.addedProjectIds = m.addedProjectIds.filter(function(x){ return String(x) !== pid; });
+  _mmPersistMeeting(m);
+  renderMeetings();
+}
+function mmUnhideProject(pid){
+  if(!_mmCanEdit()) return;
+  var m = _mmGetOrCreateMeeting(_mmWeek);
+  pid = String(pid);
+  m.hiddenProjectIds = (m.hiddenProjectIds||[]).filter(function(x){ return String(x) !== pid; });
+  _mmPersistMeeting(m);
+  renderMeetings();
+}
+function mmAddProject(pid){
+  if(!_mmCanEdit() || !pid) return;
+  var m = _mmGetOrCreateMeeting(_mmWeek);
+  m.addedProjectIds  = Array.isArray(m.addedProjectIds)  ? m.addedProjectIds  : [];
+  m.hiddenProjectIds = Array.isArray(m.hiddenProjectIds) ? m.hiddenProjectIds : [];
+  pid = String(pid);
+  if(m.addedProjectIds.map(String).indexOf(pid) < 0) m.addedProjectIds.push(pid);
+  m.hiddenProjectIds = m.hiddenProjectIds.filter(function(x){ return String(x) !== pid; });
+  _mmPersistMeeting(m);
+  renderMeetings();
+}
+
 </script>
 
 <!-- Mobile-only bottom tab bar. Hidden on desktop via media query. -->
