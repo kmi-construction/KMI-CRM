@@ -1254,6 +1254,7 @@ textarea{resize:vertical;min-height:72px}
       <div class="ni" onclick="nav('cors')"><span class="nico">◇</span>CORs</div>
       <div class="ni" onclick="nav('submittals')"><span class="nico">▤</span>Submittals</div>
       <div class="ni" onclick="nav('meetings')"><span class="nico">🗒</span>Meeting Minutes</div>
+      <div class="ni" onclick="nav('tasks')"><span class="nico">☑</span>Tasks</div>
     </div>
   </div>
   <div class="sb-group" data-group="accounting">
@@ -2985,6 +2986,20 @@ textarea{resize:vertical;min-height:72px}
   <div id="mm-content"></div>
 </div>
 
+<!-- TASKS — action items by job (jobs-as-cards board, like Equipment).
+     Shares kmi_meeting_action_items with Meeting Minutes; renderTasks() fills
+     #tsk-content with metrics, toolbar and the board. -->
+<div class="pg" id="pg-tasks">
+  <div class="ph" style="margin-bottom:0">
+    <div>
+      <h1>Tasks</h1>
+      <div class="sub">Action items by job — drag a task to another job to reassign, click its status to advance.</div>
+      <div class="stripe"></div>
+    </div>
+  </div>
+  <div id="tsk-content"></div>
+</div>
+
 <!-- EDIT SUBMITTAL — dedicated page (modal pattern is fragile with file
      uploads; even though Round 2A doesn't have custom-doc upload, Round 2B
      will, so building on a page from the start avoids a rebuild). -->
@@ -3672,7 +3687,11 @@ var PERMISSIONS = {
   // (Accounting + field roles) has no access. view and edit share the same
   // trust boundary today, split out so edit can be tightened later.
   'view-meetings': ['full','full','full','none','none','none','none'],
-  'edit-meetings': ['full','full','full','none','none','none','none']
+  'edit-meetings': ['full','full','full','none','none','none','none'],
+  //                 Admin  PM     PC     Acct   Super  Foreman Shop
+  'view-tasks':     ['full','full','full','full','full','full','full'],
+  'edit-tasks':     ['full','full','full','full','full','full','full'],
+  'view-all-tasks': ['full','none','full','none','none','none','none']
 };
 // Legacy-role migration: users created under the old USER_ROLES (which included
 // 'Estimator', 'Other', 'Project Executive') still have those values after a
@@ -3744,7 +3763,8 @@ var PAGE_ACTION_MAP = {
   'submittals':      'view-submittals',
   'edit-submittal':  'edit-submittals',
   'equipment':       'view-equipment',
-  'meetings':        'view-meetings'
+  'meetings':        'view-meetings',
+  'tasks':           'view-tasks'
 };
 function canAccess(action) {
   if (!_currentUser) return 'none';
@@ -4989,6 +5009,7 @@ function nav(page) {
     'submittals':      renderSubmittalsPage,
     'edit-submittal':  renderEditSubmittalPage,
     'meetings':        renderMeetings,
+    'tasks':           renderTasks,
     'm-projects':         renderMobileProjects,
     'm-project-detail':   renderMobileProjectDetail,
     'm-submittals':       renderMobileSubmittals,
@@ -43999,7 +44020,12 @@ function toSBMeetingItem(r) {
     created_at:       r.createdAt || null,
     created_by:       r.createdBy || null,
     completed_at:     r.completedAt || null,
-    updated_at:       r.updatedAt || null
+    updated_at:       r.updatedAt || null,
+    // Tasks-board fields (shared table; see kmi_tasks_round1.sql)
+    status:           r.status || (r.done ? 'done' : 'open'),
+    priority:         r.priority || 'med',
+    due_date:         r.dueDate || null,
+    source:           r.source || 'meeting'
   };
 }
 function fromSBMeetingItem(r) {
@@ -44014,7 +44040,12 @@ function fromSBMeetingItem(r) {
     createdAt:      r.created_at || '',
     createdBy:      r.created_by || '',
     completedAt:    r.completed_at || null,
-    updatedAt:      r.updated_at || ''
+    updatedAt:      r.updated_at || '',
+    // Tasks-board fields (shared table; see kmi_tasks_round1.sql)
+    status:         r.status || (r.done ? 'done' : 'open'),
+    priority:       r.priority || 'med',
+    dueDate:        r.due_date || null,
+    source:         r.source || 'meeting'
   };
 }
 
@@ -45357,7 +45388,7 @@ async function pullFromSupabase() {
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
       var pageId = activePg.id.replace('pg-', '');
-      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget, 'product-library':renderProductLibrary, submittals:renderSubmittalsPage, meetings:renderMeetings};
+      var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget, 'product-library':renderProductLibrary, submittals:renderSubmittalsPage, meetings:renderMeetings, tasks:renderTasks};
       if (fns[pageId]) fns[pageId]();
     }
   } catch(e) {
@@ -46463,9 +46494,9 @@ function _mmVisibleProjects(weekKey){
     if(active) return true;
     // A completed project stays visible while it still has open action items,
     // or if it has content recorded for this week.
-    if(items.some(function(it){ return String(it.projectId) === pid && !it.done; })) return true;
+    if(items.some(function(it){ return String(it.projectId) === pid && !it.done && it.source !== 'task'; })) return true;
     if(m && m.discussion && String(m.discussion[pid]||'').trim()) return true;
-    return items.some(function(it){ return String(it.projectId) === pid && (String(it.createdWeek) === String(weekKey) || String(it.completedWeek) === String(weekKey)); });
+    return items.some(function(it){ return String(it.projectId) === pid && it.source !== 'task' && (String(it.createdWeek) === String(weekKey) || String(it.completedWeek) === String(weekKey)); });
   }).sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
 }
 function _mmHiddenProjects(weekKey){
@@ -46480,6 +46511,7 @@ function _mmItemsFor(projectId, weekKey){
   var pid = String(projectId);
   var list = (db.meetingActionItems||[]).filter(function(it){
     if(String(it.projectId) !== pid) return false;
+    if(it.source === 'task') return false;                          // Tasks-board items never surface in the meeting
     if(String(it.createdWeek) > String(weekKey)) return false;      // not created yet
     if(it.done) return String(it.completedWeek) === String(weekKey); // done -> only its completed week
     return true;                                                    // open -> carries over
@@ -46681,7 +46713,12 @@ function mmAddItem(pid){
     createdAt: new Date().toISOString(),
     createdBy: (_currentUser ? String(_currentUser.id) : ''),
     completedAt: null,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    // shared Tasks-board fields — this item originates in the weekly meeting
+    status: 'open',
+    priority: 'med',
+    dueDate: null,
+    source: 'meeting'
   };
   db.meetingActionItems = db.meetingActionItems || [];
   db.meetingActionItems.push(it);
@@ -46694,6 +46731,8 @@ function mmToggleDone(itemId){
   var it = (db.meetingActionItems||[]).find(function(x){ return String(x.id) === String(itemId); });
   if(!it) return;
   it.done = !it.done;
+  // keep the shared 4-state status in sync with the meeting checkbox
+  it.status = it.done ? 'done' : (it.status === 'done' ? 'open' : (it.status || 'open'));
   if(it.done){ it.completedWeek = _mmWeek; it.completedAt = new Date().toISOString(); }
   else { it.completedWeek = ''; it.completedAt = null; }
   _mmPersistItem(it);
@@ -46762,6 +46801,352 @@ function mmAddProject(pid){
   m.hiddenProjectIds = m.hiddenProjectIds.filter(function(x){ return String(x) !== pid; });
   _mmPersistMeeting(m);
   renderMeetings();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TASKS — action items by job (jobs-as-cards board). Shares the
+// kmi_meeting_action_items table with Meeting Minutes (see kmi_tasks_round1.sql):
+//   source='meeting' -> lives in the weekly meeting + Tasks board (badge shown)
+//   source='task'    -> Tasks board only (never surfaces in the meeting)
+// Persistence/serialization reuse _mmPersistItem / toSBMeetingItem.
+// ═══════════════════════════════════════════════════════════════════════
+var _tskScopeSel = 'mine';   // 'mine' | 'all'
+
+function _tskCurWeek(){ return _mmWeekKeyOf(_mmToday()); }
+function _tskTodayStr(){ return _mmDateStr(_mmToday()); }
+function _tskEsc(s){ return escapeHtml(s == null ? '' : String(s)); }
+function _tskFind(id){ return (db.meetingActionItems||[]).find(function(x){ return String(x.id) === String(id); }); }
+function _tskCanEdit(){ return hasFull('edit-tasks'); }
+function _tskCanViewAll(){ return canAccess('view-all-tasks') === 'full'; }
+function _tskCtlVal(id){ var el = g(id); return el ? el.value : ''; }
+function _tskIsOverdue(it){ return it.dueDate && String(it.dueDate) < _tskTodayStr() && it.status !== 'done'; }
+function _tskFmtDue(d){ if(!d) return '—'; var p = String(d).split('-'); return (p[1]||'') + '/' + (p[2]||''); }
+function _tskPriRank(p){ return p === 'high' ? 0 : (p === 'med' ? 1 : 2); }
+
+function _tskScopeTier(){
+  if(_tskCanViewAll()) return 'all';
+  var role = normalizeRole(_currentUser ? _currentUser.role : '');
+  if(role === 'Project Manager' || role === 'Superintendent') return 'project';
+  return 'self';
+}
+
+// Role-scoped set of items the current user is allowed to see (decision 5).
+function _tskBaseItems(){
+  var u = _currentUser; if(!u) return [];
+  var uid = String(u.id);
+  var all = (db.meetingActionItems||[]).slice();
+  var tier = _tskScopeTier();
+  if(tier === 'all') return all;
+  if(tier === 'project'){
+    var mine = _userAssignedProjectIds(u);
+    return all.filter(function(it){
+      if(String(it.assigneeUserId) === uid) return true;
+      if(it.projectId && mine[String(it.projectId)]) return true;
+      return false;
+    });
+  }
+  return all.filter(function(it){ return String(it.assigneeUserId) === uid; });
+}
+
+// Apply scope segment + toolbar filters.
+function _tskVisibleItems(){
+  var uid = _currentUser ? String(_currentUser.id) : '';
+  var list = _tskBaseItems();
+  if(_tskScopeSel === 'mine') list = list.filter(function(it){ return String(it.assigneeUserId) === uid; });
+  var pm = _tskCtlVal('tsk-pm');
+  if(pm && _tskCanViewAll()){
+    var pmUser = _mmUser(pm);
+    var pmProj = pmUser ? _userAssignedProjectIds(pmUser) : {};
+    list = list.filter(function(it){
+      if(String(it.assigneeUserId) === String(pm)) return true;
+      if(it.projectId && pmProj[String(it.projectId)]) return true;
+      return false;
+    });
+  }
+  var pf = _tskCtlVal('tsk-proj');
+  if(pf === '__gen') list = list.filter(function(it){ return !it.projectId; });
+  else if(pf) list = list.filter(function(it){ return String(it.projectId) === String(pf); });
+  var pri = _tskCtlVal('tsk-pri');
+  if(pri) list = list.filter(function(it){ return (it.priority||'med') === pri; });
+  var q = _tskCtlVal('tsk-q');
+  if(q){ q = q.toLowerCase(); list = list.filter(function(it){ return String(it.text||'').toLowerCase().indexOf(q) >= 0; }); }
+  return list;
+}
+
+function _tskItemSort(a, b){
+  if(!!a.done !== !!b.done) return a.done ? 1 : -1;
+  var ao = _tskIsOverdue(a), bo = _tskIsOverdue(b);
+  if(ao !== bo) return ao ? -1 : 1;
+  var ad = a.dueDate || '9999-99-99', bd = b.dueDate || '9999-99-99';
+  if(ad !== bd) return ad < bd ? -1 : 1;
+  return _tskPriRank(a.priority) - _tskPriRank(b.priority);
+}
+
+function _tskColsFor(vis){
+  var today = _tskTodayStr();
+  var withTasks = {}; vis.forEach(function(it){ if(it.projectId) withTasks[String(it.projectId)] = 1; });
+  var cols = (db.projects||[]).filter(function(p){
+    var active = !p.endDate || String(p.endDate) >= today;
+    return active || withTasks[String(p.id)];
+  }).sort(function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); })
+    .map(function(p){ return { id:String(p.id), kind:'job', number:p.number||'', name:p.name||'' }; });
+  cols.push({ id:'__gen', kind:'gen', number:'', name:'General / Office' });
+  var pf = _tskCtlVal('tsk-proj');
+  if(pf === '__gen') cols = cols.filter(function(c){ return c.id === '__gen'; });
+  else if(pf) cols = cols.filter(function(c){ return String(c.id) === String(pf); });
+  return cols;
+}
+
+function _tskMet(label, val, color){
+  return '<div class="mc"><div class="ml">' + label + '</div><div class="mv"' + (color ? ' style="color:' + color + '"' : '') + '>' + val + '</div></div>';
+}
+
+var _TSK_STATUS_NAME = { open:'Open', in_progress:'In progress', waiting:'Waiting', done:'Done' };
+
+function _tskItemHtml(it){
+  var od = _tskIsOverdue(it);
+  var who = _mmUserName(it.assigneeUserId);
+  var ini = it.assigneeUserId ? _mmUserInitials(it.assigneeUserId) : '–';
+  var pri = it.priority || 'med';
+  var st  = it.status || 'open';
+  var due = '<span class="tsk-due' + (od ? ' overdue' : '') + '">' + (od ? '⚠ ' : '') + _tskFmtDue(it.dueDate) + '</span>';
+  var badge = it.source === 'meeting' ? '<span class="tsk-badge-meeting">Meeting</span>' : '';
+  var click = _tskCanEdit() ? ' onclick="_tskCycleStatus(event,\'' + it.id + '\')" title="Click to advance status"' : '';
+  return '<div class="tsk-item pri-' + pri + (od ? ' overdue' : '') + '" data-id="' + _tskEsc(it.id) + '">' +
+    '<div class="tsk-item-title' + (od ? ' overdue' : '') + '">' + _tskEsc(it.text) + '</div>' +
+    '<div class="tsk-item-meta">' +
+      '<span class="tsk-av">' + _tskEsc(ini) + '</span>' +
+      '<span class="tsk-who">' + _tskEsc(who || 'Unassigned') + '</span>' + due +
+    '</div>' +
+    '<div class="tsk-item-foot">' +
+      '<span class="tsk-status s-' + st + '"' + click + '>' + _TSK_STATUS_NAME[st] + '</span>' +
+      '<span class="tsk-pchip ' + pri + '">' + pri + '</span>' + badge +
+    '</div></div>';
+}
+
+function renderTasks(){
+  if(canAccess('view-tasks') === 'none'){ return; }
+  _tskInjectTaskStyles();
+  var host = g('tsk-content'); if(!host) return;
+  var canAll = _tskCanViewAll();
+  var byName = function(a, b){ return _mmUserName(a.id).toLowerCase().localeCompare(_mmUserName(b.id).toLowerCase()); };
+  var descNum = function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); };
+  var pmOpts = '<option value="">All PMs</option>' +
+    (db.users||[]).filter(function(u){ return normalizeRole(u.role) === 'Project Manager' && (u.status||'active') !== 'inactive'; })
+      .sort(byName).map(function(u){ return '<option value="' + _tskEsc(u.id) + '">' + _tskEsc(_mmUserName(u.id)) + '</option>'; }).join('');
+  var projOpts = '<option value="">All jobs</option><option value="__gen">General / Office</option>' +
+    (db.projects||[]).slice().sort(descNum).map(function(p){ return '<option value="' + _tskEsc(p.id) + '">' + _tskEsc((p.number||'') + ' — ' + (p.name||'')) + '</option>'; }).join('');
+  var html =
+    '<div class="mets" id="tsk-mets"></div>' +
+    '<div class="tsk-toolbar">' +
+      '<div class="eqb-seg" id="tsk-scope-seg">' +
+        '<button class="eqb-segbtn' + (_tskScopeSel === 'mine' ? ' on' : '') + '" onclick="_tskSetScope(\'mine\')">My items</button>' +
+        '<button class="eqb-segbtn' + (_tskScopeSel === 'all' ? ' on' : '') + '" onclick="_tskSetScope(\'all\')">All</button>' +
+      '</div>' +
+      '<span class="tsk-hint" id="tsk-hint"></span>' +
+    '</div>' +
+    '<div class="ab">' +
+      '<input class="si" id="tsk-q" placeholder="Search tasks..." oninput="_tskRenderBoard()">' +
+      (canAll ? '<select class="fs" id="tsk-pm" onchange="_tskRenderBoard()">' + pmOpts + '</select>' : '') +
+      '<select class="fs" id="tsk-proj" onchange="_tskRenderBoard()">' + projOpts + '</select>' +
+      '<select class="fs" id="tsk-pri" onchange="_tskRenderBoard()"><option value="">All priorities</option><option value="high">High</option><option value="med">Medium</option><option value="low">Low</option></select>' +
+      (_tskCanEdit() ? '<button class="btn btn-p" style="margin-left:auto" onclick="_tskOpenAdd()">+ Add task</button>' : '') +
+    '</div>' +
+    '<div class="tsk-board" id="tsk-board"></div>';
+  host.innerHTML = html;
+  _tskRenderBoard();
+}
+
+function _tskRenderBoard(){
+  if(!g('tsk-board')) return;
+  var vis = _tskVisibleItems();
+  var tier = _tskScopeTier();
+  var hint = (tier === 'all')
+    ? (_tskScopeSel === 'all' ? 'Showing every task in the company.' : 'Showing tasks assigned to you.')
+    : (tier === 'project'
+        ? (_tskScopeSel === 'all' ? 'Showing tasks assigned to you plus everything on your jobs.' : 'Showing tasks assigned to you.')
+        : 'Your role sees tasks assigned to you.');
+  if(g('tsk-hint')) g('tsk-hint').textContent = hint;
+  var mo = 0, mp = 0, mw = 0, mov = 0;
+  vis.forEach(function(t){
+    if(t.status === 'open') mo++; else if(t.status === 'in_progress') mp++; else if(t.status === 'waiting') mw++;
+    if(_tskIsOverdue(t)) mov++;
+  });
+  if(g('tsk-mets')) g('tsk-mets').innerHTML =
+    _tskMet('Open', mo, '') + _tskMet('In progress', mp, '') + _tskMet('Waiting', mw, '') + _tskMet('Overdue', mov, mov ? '#A32D2D' : '');
+  var cols = _tskColsFor(vis);
+  g('tsk-board').innerHTML = cols.map(function(c){
+    var items = vis.filter(function(it){ return c.id === '__gen' ? !it.projectId : String(it.projectId) === String(c.id); });
+    items.sort(_tskItemSort);
+    var body = items.length ? items.map(_tskItemHtml).join('') : '<div class="tsk-cempty">No tasks</div>';
+    var hdr = c.kind === 'gen'
+      ? '<div class="tsk-cwrap"><div class="tsk-cname">General / Office</div><div class="tsk-cnum">No job</div></div>'
+      : '<div class="tsk-cwrap"><div class="tsk-cnum">' + _tskEsc(c.number) + '</div><div class="tsk-cname">' + _tskEsc(c.name) + '</div></div>';
+    return '<div class="tsk-col' + (c.kind === 'gen' ? ' is-gen' : '') + '">' +
+      '<div class="tsk-chead">' + hdr + '<span class="tsk-ccount">' + items.length + '</span></div>' +
+      '<div class="tsk-cbody" data-proj="' + _tskEsc(c.id) + '">' + body + '</div></div>';
+  }).join('');
+  _tskInitDrag();
+}
+
+function _tskSetScope(s){
+  _tskScopeSel = s;
+  var seg = g('tsk-scope-seg');
+  if(seg){ Array.prototype.forEach.call(seg.querySelectorAll('.eqb-segbtn'), function(b, i){
+    b.classList.toggle('on', (i === 0 && s === 'mine') || (i === 1 && s === 'all'));
+  }); }
+  _tskRenderBoard();
+}
+
+function _tskSetStatus(it, s){
+  it.status = s;
+  if(s === 'done'){ it.done = true; if(!it.completedWeek) it.completedWeek = _tskCurWeek(); if(!it.completedAt) it.completedAt = new Date().toISOString(); }
+  else { it.done = false; it.completedWeek = ''; it.completedAt = null; }
+  it.updatedAt = new Date().toISOString();
+}
+
+function _tskCycleStatus(ev, id){
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+  if(!_tskCanEdit()) return;
+  var it = _tskFind(id); if(!it) return;
+  var order = ['open','in_progress','waiting','done'];
+  var i = order.indexOf(it.status || 'open'); if(i < 0) i = 0;
+  _tskSetStatus(it, order[(i + 1) % 4]);
+  _mmPersistItem(it);
+  _tskRenderBoard();
+}
+
+function _tskInitDrag(){
+  if(typeof Sortable === 'undefined') return;
+  if(!_tskCanEdit()) return;
+  document.querySelectorAll('#tsk-board .tsk-cbody').forEach(function(body){
+    Sortable.create(body, {
+      group:'kmi-tasks', animation:140, forceFallback:true, fallbackOnBody:true, fallbackTolerance:4,
+      draggable:'.tsk-item', ghostClass:'sortable-ghost',
+      onEnd:function(ev){
+        var id = ev.item.getAttribute('data-id');
+        var to = ev.to.getAttribute('data-proj');
+        var it = _tskFind(id); if(!it){ _tskRenderBoard(); return; }
+        var newProj = (to === '__gen') ? null : to;
+        if(String(it.projectId||'') !== String(newProj||'')){ it.projectId = newProj; it.updatedAt = new Date().toISOString(); _mmPersistItem(it); }
+        _tskRenderBoard();
+      }
+    });
+  });
+}
+
+function _tskOpenAdd(){
+  if(!_tskCanEdit()) return;
+  var today = _tskTodayStr();
+  var descNum = function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); };
+  var projOpts = '<option value="__gen">General / Office</option>' +
+    (db.projects||[]).filter(function(p){ return !p.endDate || String(p.endDate) >= today; }).sort(descNum)
+      .map(function(p){ return '<option value="' + _tskEsc(p.id) + '">' + _tskEsc((p.number||'') + ' — ' + (p.name||'')) + '</option>'; }).join('');
+  var userOpts = '<option value="">Unassigned</option>' +
+    _mmAssignableUsers().map(function(u){ return '<option value="' + _tskEsc(u.id) + '">' + _tskEsc(_mmUserName(u.id)) + '</option>'; }).join('');
+  var html =
+    '<div class="tsk-modal">' +
+      '<h3>New task</h3>' +
+      '<div class="tsk-fld"><label>Title</label><input id="tsk-a-title" placeholder="e.g. Submit brick samples to architect"></div>' +
+      '<div class="tsk-fld"><label>Job</label><select id="tsk-a-proj">' + projOpts + '</select></div>' +
+      '<div class="tsk-fld"><label>Assignee</label><select id="tsk-a-assignee">' + userOpts + '</select></div>' +
+      '<div class="tsk-frow">' +
+        '<div class="tsk-fld"><label>Status</label><select id="tsk-a-status"><option value="open">Open</option><option value="in_progress">In progress</option><option value="waiting">Waiting</option><option value="done">Done</option></select></div>' +
+        '<div class="tsk-fld"><label>Priority</label><select id="tsk-a-pri"><option value="high">High</option><option value="med" selected>Medium</option><option value="low">Low</option></select></div>' +
+      '</div>' +
+      '<div class="tsk-fld"><label>Due date</label><input type="date" id="tsk-a-due"></div>' +
+      '<div class="tsk-mfoot"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="_tskSaveAdd()">Add task</button></div>' +
+    '</div>';
+  showModal(html);
+  if(g('tsk-a-title')) g('tsk-a-title').focus();
+}
+
+function _tskSaveAdd(){
+  if(!_tskCanEdit()) return;
+  var title = (g('tsk-a-title') && g('tsk-a-title').value || '').trim();
+  if(!title){ if(g('tsk-a-title')) g('tsk-a-title').focus(); return; }
+  var projV = g('tsk-a-proj') ? g('tsk-a-proj').value : '__gen';
+  var asgV  = g('tsk-a-assignee') ? g('tsk-a-assignee').value : '';
+  var stV   = g('tsk-a-status') ? g('tsk-a-status').value : 'open';
+  var priV  = g('tsk-a-pri') ? g('tsk-a-pri').value : 'med';
+  var dueV  = g('tsk-a-due') ? g('tsk-a-due').value : '';
+  var nowISO = new Date().toISOString();
+  var isDone = stV === 'done';
+  var it = {
+    id: 'mai-' + Date.now() + '-' + Math.random().toString(36).slice(2,7),
+    projectId: projV === '__gen' ? null : projV,
+    text: title,
+    assigneeUserId: asgV || '',
+    done: isDone,
+    createdWeek: '',                                   // task-board items are not tied to a meeting week
+    completedWeek: isDone ? _tskCurWeek() : '',
+    createdAt: nowISO,
+    createdBy: (_currentUser ? String(_currentUser.id) : ''),
+    completedAt: isDone ? nowISO : null,
+    updatedAt: nowISO,
+    status: stV,
+    priority: priV,
+    dueDate: dueV || null,
+    source: 'task'
+  };
+  db.meetingActionItems = db.meetingActionItems || [];
+  db.meetingActionItems.push(it);
+  _mmPersistItem(it);
+  closeModal();
+  renderTasks();
+  if(typeof showToast === 'function') showToast('Task added', 'success');
+}
+
+function _tskInjectTaskStyles(){
+  if(document.getElementById('tsk-styles')) return;
+  var css =
+    '#pg-tasks .tsk-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0 12px}' +
+    '#pg-tasks .tsk-hint{font-size:11.5px;color:#627D98}' +
+    '#pg-tasks .tsk-board{display:grid;grid-template-columns:repeat(auto-fill,minmax(255px,1fr));gap:12px;align-items:start}' +
+    '#pg-tasks .tsk-col{background:#fff;border:1px solid var(--stl);border-radius:10px;display:flex;flex-direction:column;min-height:110px;box-shadow:0 1px 2px rgba(16,42,67,.06)}' +
+    '#pg-tasks .tsk-col.is-gen{border-style:dashed}' +
+    '#pg-tasks .tsk-chead{padding:9px 11px;border-bottom:1px solid var(--stl);display:flex;align-items:center;gap:8px;border-radius:10px 10px 0 0;background:#F1F5F9}' +
+    '#pg-tasks .tsk-col.is-gen .tsk-chead{background:#FAFAFA}' +
+    '#pg-tasks .tsk-cwrap{min-width:0}' +
+    '#pg-tasks .tsk-cnum{font-family:monospace;font-size:10.5px;color:var(--kmi);font-weight:700}' +
+    '#pg-tasks .tsk-cname{font-weight:650;font-size:12px;color:#243B53;line-height:1.15;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '#pg-tasks .tsk-ccount{margin-left:auto;font-size:10.5px;font-weight:700;color:#627D98;background:#EEF2F7;border-radius:20px;padding:1px 8px;min-width:22px;text-align:center}' +
+    '#pg-tasks .tsk-cbody{padding:8px;display:flex;flex-direction:column;gap:8px;min-height:44px}' +
+    '#pg-tasks .tsk-cempty{color:#b0b8c4;font-size:11px;text-align:center;padding:14px 4px}' +
+    '#pg-tasks .tsk-item{background:#fff;border:0.5px solid #e5e5e5;border-left:3px solid var(--kmi);border-radius:7px;padding:8px 9px;cursor:grab}' +
+    '#pg-tasks .tsk-item:active{cursor:grabbing}' +
+    '#pg-tasks .tsk-item.pri-high{border-left-color:#A32D2D}' +
+    '#pg-tasks .tsk-item.pri-med{border-left-color:var(--ac)}' +
+    '#pg-tasks .tsk-item.pri-low{border-left-color:#8B93B8}' +
+    '#pg-tasks .tsk-item.overdue{border:0.5px solid #E24B4A;border-left:3px solid #A32D2D;background:#FDEBEB}' +
+    '#pg-tasks .tsk-item.sortable-ghost{opacity:.4}' +
+    '#pg-tasks .tsk-item-title{font-size:12px;font-weight:600;color:#1a1a1a;line-height:1.3}' +
+    '#pg-tasks .tsk-item-title.overdue{color:#A32D2D}' +
+    '#pg-tasks .tsk-item-meta{display:flex;align-items:center;gap:6px;margin-top:6px}' +
+    '#pg-tasks .tsk-av{width:19px;height:19px;border-radius:50%;background:var(--kmi);color:#fff;font-size:8.5px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}' +
+    '#pg-tasks .tsk-item.overdue .tsk-av{background:#A32D2D}' +
+    '#pg-tasks .tsk-who{font-size:10.5px;color:#627D98;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '#pg-tasks .tsk-due{margin-left:auto;font-size:10px;color:#627D98;white-space:nowrap}' +
+    '#pg-tasks .tsk-due.overdue{color:#A32D2D;font-weight:700}' +
+    '#pg-tasks .tsk-item-foot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px;padding-top:7px;border-top:0.5px solid #f0f0f0}' +
+    '#pg-tasks .tsk-status{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;border-radius:4px;padding:2px 8px;cursor:pointer;user-select:none}' +
+    '#pg-tasks .tsk-status.s-open{color:#627D98;background:#F1F5F9}' +
+    '#pg-tasks .tsk-status.s-in_progress{color:var(--kmi3);background:#EEF0F8}' +
+    '#pg-tasks .tsk-status.s-waiting{color:#9A7A2E;background:#FFF8E1}' +
+    '#pg-tasks .tsk-status.s-done{color:#3B6D11;background:#EAF3DE}' +
+    '#pg-tasks .tsk-pchip{font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;border-radius:4px;padding:2px 6px}' +
+    '#pg-tasks .tsk-pchip.high{color:#A32D2D;background:#FDEBEB}' +
+    '#pg-tasks .tsk-pchip.med{color:#9A7A2E;background:#FFF8E1}' +
+    '#pg-tasks .tsk-pchip.low{color:#627D98;background:#F1F5F9}' +
+    '#pg-tasks .tsk-badge-meeting{font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#6B4FA0;background:#F0EBFA;border:0.5px solid #d9ccf0;border-radius:4px;padding:1px 5px}' +
+    '.tsk-modal h3{font-size:16px;font-weight:600;margin-bottom:14px;color:var(--kmi)}' +
+    '.tsk-fld{margin-bottom:11px}' +
+    '.tsk-fld label{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:#8891ac;font-weight:700;margin-bottom:5px}' +
+    '.tsk-fld input,.tsk-fld select{width:100%;padding:8px 10px;font-size:13px;border:0.5px solid var(--stl);border-radius:7px;font-family:inherit;box-sizing:border-box}' +
+    '.tsk-frow{display:flex;gap:10px}' +
+    '.tsk-frow .tsk-fld{flex:1}' +
+    '.tsk-mfoot{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}';
+  var s = document.createElement('style'); s.id = 'tsk-styles'; s.textContent = css; document.head.appendChild(s);
 }
 
 </script>
