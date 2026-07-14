@@ -46467,9 +46467,10 @@ async function _mmPersistItem(it){
   it.updatedAt = new Date().toISOString();
   saveDB();
   if(typeof supabaseClient !== 'undefined' && supabaseClient){
-    try { var r = await supabaseClient.from('kmi_meeting_action_items').upsert(toSBMeetingItem(it)); if(r && r.error) console.warn('kmi_meeting_action_items upsert:', r.error.message); }
-    catch(e){ console.warn('kmi_meeting_action_items upsert', e); }
+    try { var r = await supabaseClient.from('kmi_meeting_action_items').upsert(toSBMeetingItem(it)); if(r && r.error){ console.warn('kmi_meeting_action_items upsert:', r.error.message); return r.error.message; } }
+    catch(e){ console.warn('kmi_meeting_action_items upsert', e); return (e && e.message) ? e.message : String(e); }
   }
+  return null;
 }
 async function _mmDeleteItemCloud(id){
   if(typeof supabaseClient !== 'undefined' && supabaseClient){
@@ -47067,7 +47068,7 @@ function _tskOpenAdd(preProj){
   if(g('tsk-a-title')) g('tsk-a-title').focus();
 }
 
-function _tskSaveAdd(){
+async function _tskSaveAdd(){
   if(!_tskCanEdit()) return;
   var title = (g('tsk-a-title') && g('tsk-a-title').value || '').trim();
   if(!title){ if(g('tsk-a-title')) g('tsk-a-title').focus(); return; }
@@ -47084,7 +47085,7 @@ function _tskSaveAdd(){
     text: title,
     assigneeUserId: asgV || '',
     done: isDone,
-    createdWeek: '',                                   // task-board items are not tied to a meeting week
+    createdWeek: _tskCurWeek(),                         // real week (never null); source:'task' keeps it out of the meeting
     completedWeek: isDone ? _tskCurWeek() : '',
     createdAt: nowISO,
     createdBy: (_currentUser ? String(_currentUser.id) : ''),
@@ -47097,7 +47098,7 @@ function _tskSaveAdd(){
   };
   db.meetingActionItems = db.meetingActionItems || [];
   db.meetingActionItems.push(it);
-  _mmPersistItem(it);
+  var err = await _mmPersistItem(it);
   closeModal();
   // renderTasks() resets the filter inputs, but the scope segment persists — if
   // the new task isn't assigned to me, drop out of "My items" so it shows.
@@ -47106,9 +47107,13 @@ function _tskSaveAdd(){
     _tskScopeSel = 'all';
   }
   renderTasks();
-  var shown = _tskVisibleItems().some(function(x){ return String(x.id) === String(it.id); });
   if(typeof showToast === 'function'){
-    showToast(shown ? 'Task added' : 'Task added — assigned to another user, not shown in your current view', shown ? 'success' : 'info');
+    if(err){
+      showToast('Saved locally but cloud sync FAILED: ' + err, 'error');
+    } else {
+      var shown = _tskVisibleItems().some(function(x){ return String(x.id) === String(it.id); });
+      showToast(shown ? 'Task added' : 'Task added — assigned to another user, not shown in your current view', shown ? 'success' : 'info');
+    }
   }
 }
 
