@@ -38827,8 +38827,8 @@ function apRenderCode(){
     '<div style="font-size:12px;color:#555">On submit, this routes for approval'+(proj?(' on job '+apEsc(proj.number)+(proj.name?(' — '+apEsc(proj.name)):'')):'')+'. The approver queue & sign-off screen arrive in the next session; submitting now marks it <strong>Pending</strong> and logs it.</div></div>';
 
   var actions = '<div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:30px">'+
-    '<button class="btn" onclick="apCodeSave(false)">Save coding</button>'+
-    '<button class="btn btn-p" onclick="apCodeSave(true)">Submit for approval \u2192</button></div>';
+    '<button class="btn" id="apc-save-btn" onclick="apCodeSave(false)">Save coding</button>'+
+    '<button class="btn btn-p" id="apc-submit-btn" onclick="apCodeSave(true)">Submit for approval \u2192</button></div>';
 
   // Split view: source PDF on the left (sticky), coding form on the right.
   var pdfInner = i.pdfPath
@@ -38880,7 +38880,19 @@ function _apReadHeader(i){
   i.subtotal=num('apc-sub'); i.salesTax=num('apc-taxamt'); i.freight=num('apc-freight'); i.total=num('apc-total');
 }
 
+// Re-entry guard: a Save/Submit whose async cloud write is still in flight must
+// block a second Save/Submit. Without this, a double-click (or Save then a quick
+// Submit) can interleave the line delete/insert and leave duplicate lines.
+var _apCodeSaving = false;
+function _apSetSaveButtons(disabled){
+  ['apc-save-btn','apc-submit-btn'].forEach(function(id){
+    var b=g(id); if(b){ b.disabled=!!disabled; b.style.opacity=disabled?'0.55':''; b.style.pointerEvents=disabled?'none':''; }
+  });
+}
 async function apCodeSave(submit){
+  if(_apCodeSaving) return;                    // ignore re-entry while a save is in flight
+  _apCodeSaving = true; _apSetSaveButtons(true);
+  try {
   _apCodeSync();
   var d=_apCodeDraft;
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(_apCodeId);}); if(!i) return;
@@ -38935,7 +38947,10 @@ async function apCodeSave(submit){
   var idStr = String(i.id);
   db.apInvoiceLines = (db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)!==idStr; });
   var stamp = Date.now();
-  var newLines = lines.map(function(ln,ix){ return { id:'apl-'+stamp+'-'+ix, invoiceId:i.id, lineNo:ix+1, description:ln.description, amount:ln.amount, distType:ln.distType, jobNo:ln.jobNo, costCode:ln.costCode, costClass:ln.costClass, glNo:ln.glNo, taxable:ln.taxable, notes:'' }; });
+  // Deterministic line IDs (apl-<invoiceId>-<lineNo>): stable across re-saves, so
+  // re-writing the same coding upserts the same rows instead of inserting a new set.
+  var _lineBase = 'apl-' + String(i.id).replace(/[^A-Za-z0-9_-]/g,'');
+  var newLines = lines.map(function(ln,ix){ return { id:_lineBase+'-'+(ix+1), invoiceId:i.id, lineNo:ix+1, description:ln.description, amount:ln.amount, distType:ln.distType, jobNo:ln.jobNo, costCode:ln.costCode, costClass:ln.costClass, glNo:ln.glNo, taxable:ln.taxable, notes:'' }; });
   newLines.forEach(function(l){ db.apInvoiceLines.push(l); });
   // alias memory
   var aliasRec = null;
@@ -38955,8 +38970,11 @@ async function apCodeSave(submit){
       var del = await supabaseClient.from('kmi_ap_invoice_lines').delete().eq('invoice_id', idStr);
       if(del && del.error) throw new Error('line delete \u2014 '+del.error.message);
       if(newLines.length){
-        var ins = await supabaseClient.from('kmi_ap_invoice_lines').insert(newLines.map(toSBApLine));
-        if(ins && ins.error) throw new Error('line insert \u2014 '+ins.error.message);
+        // Upsert on the deterministic primary key: a repeat write overwrites the
+        // same rows rather than adding a second stamped set. The delete above still
+        // clears any lines dropped when the line count shrank between saves.
+        var ins = await supabaseClient.from('kmi_ap_invoice_lines').upsert(newLines.map(toSBApLine));
+        if(ins && ins.error) throw new Error('line upsert \u2014 '+ins.error.message);
       }
       if(aliasRec){
         var ar = await supabaseClient.from('kmi_ap_vendor_aliases').upsert(toSBApAlias(aliasRec));
@@ -38974,6 +38992,7 @@ async function apCodeSave(submit){
   var pill=g('apc-status-pill'); if(pill) pill.innerHTML = apStatusPill(i.status);
   apSetBanner('success', (submit?'Submitted for approval':'Saved coding')+' for '+apEsc(apVendorDisplayName(i)||i.vendorName)+' \u00b7 '+apEsc(i.invoiceNo)+'.'+(aliasRec?' Vendor alias remembered.':''));
   try{ window.scrollTo(0,0); }catch(_e){}
+  } finally { _apCodeSaving = false; _apSetSaveButtons(false); }
 }
 
 // ════════════════════════════════════════════════════════════════════
