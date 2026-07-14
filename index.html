@@ -1297,6 +1297,7 @@ textarea{resize:vertical;min-height:72px}
     <div class="sb-group-hdr" onclick="toggleSbGroup('resources')"><span>Resources</span><span class="sb-chev">▾</span></div>
     <div class="sb-group-items">
       <div class="ni" onclick="nav('equipment')"><span class="nico">▥</span>Equipment</div>
+      <div class="ni" onclick="nav('cost-jobs')"><span class="nico">#</span>Cost Jobs</div>
     </div>
   </div>
   <div class="sb-group" data-group="directory">
@@ -2138,6 +2139,32 @@ textarea{resize:vertical;min-height:72px}
     <button class="btn" id="eqb-pin-btn" onclick="_eqbPinModal()" style="display:none;margin-left:6px">&#9881; Trucking PIN</button>
   </div>
   <div class="eqb-board" id="eqb-board"></div>
+</div>
+
+<!-- COST JOBS -->
+<div class="pg" id="pg-cost-jobs">
+  <div class="ph"><div><h1>Cost jobs</h1><div class="sub">Internal cost-tracking jobs for equipment and overhead. Hidden from the Projects list and every project picker &mdash; equipment jobs appear on the Equipment board; both stay codeable in AP.</div><div class="stripe"></div></div></div>
+  <div class="ab">
+    <input class="si" placeholder="Search cost jobs..." oninput="renderCostJobs()" id="cj-s">
+    <select class="fs" onchange="renderCostJobs()" id="cj-fc">
+      <option value="">All categories</option>
+      <option value="equipment">Equipment</option>
+      <option value="overhead">Overhead</option>
+    </select>
+    <button class="btn btn-p" style="margin-left:auto" onclick="showAddCostJob()" id="cj-new-btn">+ Add cost job</button>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table>
+      <thead><tr>
+        <th style="width:120px">Number</th>
+        <th>Name</th>
+        <th style="width:120px">Category</th>
+        <th style="width:130px">Equipment board</th>
+        <th style="width:140px">Actions</th>
+      </tr></thead>
+      <tbody id="cj-tbody"></tbody>
+    </table>
+  </div>
 </div>
 
 <!-- CUSTOMERS -->
@@ -3652,6 +3679,9 @@ var PERMISSIONS = {
   'create-project': ['full','full','full','full','none','none','none'],
   'edit-project': ['full','full','full','full','none','none','none'],
   'delete-project': ['full','none','none','full','none','none','none'],
+  // Cost Jobs manager — internal equipment/overhead cost-tracking jobs.
+  // Owned by whoever owns the cost structure: Admin + Accounting only.
+  'manage-cost-jobs': ['full','none','none','full','none','none','none'],
   // Project Kickoff (post-spec): Admin / PM / PC can send. Mirrors the
   // create-opportunity / edit-customers trust shape — same people who can
   // set up the project record can send the kickoff email + Job File CSV.
@@ -3792,6 +3822,7 @@ var PAGE_ACTION_MAP = {
   'submittals':      'view-submittals',
   'edit-submittal':  'edit-submittals',
   'equipment':       'view-equipment',
+  'cost-jobs':       'manage-cost-jobs',
   'meetings':        'view-meetings',
   'tasks':           'view-tasks'
 };
@@ -5029,6 +5060,7 @@ function nav(page) {
     'new-tm-ticket':  initNewTmTicket,
     cors:             renderCors,
     equipment:        renderEquipment,
+    'cost-jobs':      renderCostJobs,
     'new-cor':        initNewCor,
     'email-log':      renderEmailLog,
     'email-settings': renderEmailSettings,
@@ -5900,7 +5932,7 @@ function _mobEsc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').rep
 function _mobAssignedProjects() {
   if (!_currentUser) return [];
   var uid = String(_currentUser.id);
-  var all = (db.projects || []).slice();
+  var all = _projectsOnly();
   var mine = all.filter(function(p){
     if (!Array.isArray(p.kmiAssignments)) return false;
     return p.kmiAssignments.some(function(a){ return String(a.userId) === uid; });
@@ -6886,7 +6918,7 @@ function _ntmApplyMobileProjectFilter() {
       // Repopulate by re-calling the original initializer — but that
       // resets the whole form. Better: just rebuild the dropdown from
       // db.projects (matching the original logic) and keep form state.
-      var projects = db.projects.slice().sort(function(a,b){
+      var projects = _projectsOnly().sort(function(a,b){
         return String(a.number || '').localeCompare(String(b.number || ''));
       });
       sel.innerHTML = '<option value="">Select project...</option>' +
@@ -10072,7 +10104,7 @@ function renderSubmittalsPage() {
   var projSel = g('sb-fproj');
   if (projSel) {
     var prevProj = projSel.value;
-    var projs = (db.projects || []).slice().sort(function(a,b){
+    var projs = _projectsOnly().sort(function(a,b){
       return String(a.number || '').localeCompare(String(b.number || ''));
     });
     projSel.innerHTML = '<option value="">All projects</option>' +
@@ -10549,7 +10581,7 @@ function renderEditSubmittalPage() {
   var preselectProj = (!r && _preselectSubmittalProjectId) ? _preselectSubmittalProjectId : null;
   var projSel = g('esb-proj');
   if (projSel) {
-    var projs = (db.projects || []).slice().sort(function(a,b){
+    var projs = _projectsOnly().sort(function(a,b){
       return String(a.number || '').localeCompare(String(b.number || ''));
     });
     projSel.innerHTML = '<option value="">— Select —</option>' +
@@ -11369,7 +11401,7 @@ function showSubmittalImport(presetProjectId) {
   var _preset = (presetProjectId !== undefined && presetProjectId !== null && String(presetProjectId) !== '');
   _importParsedRows = [];
   _importTargetProjectId = _preset ? presetProjectId : null;
-  var projOpts = (db.projects || []).slice().sort(function(a,b){
+  var projOpts = _projectsOnly().sort(function(a,b){
     return String(a.name || '').localeCompare(String(b.name || ''));
   }).map(function(p){
     var sel = (_preset && String(p.id) === String(presetProjectId)) ? ' selected' : '';
@@ -13965,7 +13997,7 @@ function tmCanDeleteTicket(t) {
 // ── List page ──────────────────────────────────────────────────────────
 function renderTmTickets() {
   // Project filter
-  var _tmProjPool = db.projects.slice();
+  var _tmProjPool = _projectsOnly();
   if (_isScopedUser()) {
     var _tmFiltIds = _userAssignedProjectIds();
     _tmProjPool = _tmProjPool.filter(function(p){ return _tmFiltIds[String(p.id)]; });
@@ -14211,7 +14243,7 @@ function initNewTmTicket(prefillProjectId) {
 
   // Project options — populate from projects (sorted by number). Foreman is
   // scoped to assigned projects only.
-  var projects = db.projects.slice();
+  var projects = _projectsOnly();
   if (_isScopedUser()) {
     var _ntmIds = _userAssignedProjectIds();
     projects = projects.filter(function(p){ return _ntmIds[String(p.id)]; });
@@ -14319,7 +14351,7 @@ function viewTmTicket(id) {
 
   // Project dropdown — disable changing project on existing tickets to keep
   // the ticket-number/project relationship intact.
-  var projects = db.projects.slice().sort(function(a,b){
+  var projects = _projectsOnly().sort(function(a,b){
     return String(a.number || '').localeCompare(String(b.number || ''));
   });
   g('ntm-project').innerHTML = '<option value="">Select project...</option>' +
@@ -15963,7 +15995,7 @@ function showSmartUploadModal(prefillProjectId) {
   }
 
   // Build project options
-  var projects = db.projects.slice().sort(function(a,b){
+  var projects = _projectsOnly().sort(function(a,b){
     return String(a.number || '').localeCompare(String(b.number || ''));
   });
   var projOpts = '<option value="">Select project...</option>' +
@@ -16202,7 +16234,7 @@ function _smartUpOpenReviewForm(project, parsed) {
   g('ntm-pdf-btn').style.display = 'none';
 
   // Project dropdown — locked to the chosen project
-  var projects = db.projects.slice().sort(function(a,b){
+  var projects = _projectsOnly().sort(function(a,b){
     return String(a.number || '').localeCompare(String(b.number || ''));
   });
   g('ntm-project').innerHTML = '<option value="">Select project...</option>' +
@@ -17500,7 +17532,7 @@ function renderCors() {
   }
   // Project filter
   var projOpts = '<option value="">All projects</option>' +
-    db.projects.slice().sort(function(a,b){
+    _projectsOnly().sort(function(a,b){
       return String(a.number || '').localeCompare(String(b.number || ''));
     }).map(function(p){ return '<option value="' + p.id + '">' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>'; }).join('');
   g('cor-fp').innerHTML = projOpts;
@@ -17640,7 +17672,7 @@ function showNewCorModal(preselectProjectId) {
   if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); return; }
   var lock = preselectProjectId !== null && preselectProjectId !== undefined && preselectProjectId !== '';
   var projOpts = '<option value="">— Select project —</option>' +
-    db.projects.slice().sort(function(a,b){
+    _projectsOnly().sort(function(a,b){
       return String(a.number || '').localeCompare(String(b.number || ''));
     }).map(function(p){
       var sel = (lock && String(p.id) === String(preselectProjectId)) ? ' selected' : '';
@@ -17719,7 +17751,7 @@ function initNewCor() {
   });
 
   // Build project dropdown (always allowed at create time)
-  var projects = db.projects.slice().sort(function(a,b){
+  var projects = _projectsOnly().sort(function(a,b){
     return String(a.number || '').localeCompare(String(b.number || ''));
   });
   var prefillProjectId = _newCorPrefill ? _newCorPrefill.projectId : '';
@@ -17796,7 +17828,7 @@ function viewCor(id) {
   g('ncor-save-btn').style.display  = canEdit ? '' : 'none';
 
   // Project — locked on existing CORs
-  var projects = db.projects.slice().sort(function(a,b){
+  var projects = _projectsOnly().sort(function(a,b){
     return String(a.number || '').localeCompare(String(b.number || ''));
   });
   g('ncor-project').innerHTML = '<option value="">Select project...</option>' +
@@ -18321,7 +18353,7 @@ function showSmartUploadCorModal() {
     return;
   }
 
-  var projects = db.projects.slice().sort(function(a,b){
+  var projects = _projectsOnly().sort(function(a,b){
     return String(a.number || '').localeCompare(String(b.number || ''));
   });
   var projOpts = '<option value="">Select project...</option>' +
@@ -22203,7 +22235,7 @@ function bgShowPicker() {
   var stale = document.getElementById('bg-unmapped-panel');
   if (stale) stale.remove();
 
-  var projects = (db.projects || []).slice().sort(function(a,b){
+  var projects = _projectsOnly().sort(function(a,b){
     return String(b.number || '').localeCompare(String(a.number || ''));
   });
   if (!projects.length) {
@@ -27405,6 +27437,180 @@ var _npActiveTab = 'details';
 
 function getProj(id) { return db.projects.find(function(p){ return p.id === id; }); }
 
+// ═══ COST JOBS ═══════════════════════════════════════════════════════
+// Internal cost-tracking jobs live in db.projects tagged with
+// category 'equipment' or 'overhead' (real customer projects are 'project'
+// or legacy-undefined). _isCostJob / _projectsOnly / _costJobs are the shared
+// filters used across the Projects list, every project picker, the Equipment
+// board, and AP coding. Definition order does not matter — all callers run at
+// runtime, after this script has fully parsed.
+function _isCostJob(p){ return !!p && (p.category === 'equipment' || p.category === 'overhead'); }
+function _projectsOnly(){ return (db.projects || []).filter(function(p){ return !_isCostJob(p); }); }
+function _costJobs(){ return (db.projects || []).filter(_isCostJob); }
+function _cjFind(id){ return (db.projects || []).find(function(p){ return String(p.id) === String(id); }); }
+function _cjEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+
+var _cjEditId = null;
+var _cjCat = 'equipment';
+
+function renderCostJobs(){
+  var nb = g('cj-new-btn'); if (nb) nb.style.display = hasFull('manage-cost-jobs') ? '' : 'none';
+  var tb = g('cj-tbody'); if (!tb) return;
+  var s  = ((g('cj-s') && g('cj-s').value) || '').toLowerCase().trim();
+  var fc = (g('cj-fc') && g('cj-fc').value) || '';
+  var rows = _costJobs().filter(function(p){
+    if (fc && p.category !== fc) return false;
+    if (!s) return true;
+    return ((p.number||'') + ' ' + (p.name||'')).toLowerCase().indexOf(s) !== -1;
+  }).sort(function(a,b){ return String(a.number||'').localeCompare(String(b.number||''), undefined, {numeric:true}); });
+
+  if (!rows.length){
+    tb.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#aaa;padding:32px;font-size:13px">' +
+      (s || fc ? 'No cost jobs match your filters.'
+               : 'No cost jobs yet. Click <strong>+ Add cost job</strong> to create equipment or overhead cost-tracking jobs.') +
+      '</td></tr>';
+    return;
+  }
+  var canEdit = hasFull('manage-cost-jobs');
+  tb.innerHTML = rows.map(function(p){
+    var eq = p.category === 'equipment';
+    var pill = eq
+      ? '<span style="font-size:11px;font-weight:700;letter-spacing:.3px;border-radius:5px;padding:2px 8px;background:#E1F0EE;color:#0F6E56;border:0.5px solid #9FD6C7">Equipment</span>'
+      : '<span style="font-size:11px;font-weight:700;letter-spacing:.3px;border-radius:5px;padding:2px 8px;background:#FBF3E2;color:#9A7A2E;border:0.5px solid #E8D08A">Overhead</span>';
+    var board = eq
+      ? '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:#3B6D11"><span style="width:6px;height:6px;border-radius:50%;background:#639922"></span>On board</span>'
+      : '<span style="font-size:12px;color:#b8b8b8">&mdash;</span>';
+    var acts = canEdit
+      ? '<div style="display:flex;gap:6px"><button class="btn btn-sm" onclick="editCostJob(\'' + _cjEsc(p.id) + '\')">Edit</button><button class="btn btn-sm" style="color:#A32D2D" onclick="deleteCostJob(\'' + _cjEsc(p.id) + '\')">Delete</button></div>'
+      : '<span style="color:#bbb;font-size:12px">&mdash;</span>';
+    return '<tr>' +
+      '<td><span style="font-weight:600;color:var(--kmi);font-variant-numeric:tabular-nums">' + _cjEsc(p.number||'') + '</span></td>' +
+      '<td>' + _cjEsc(p.name||'') + '</td>' +
+      '<td>' + pill + '</td>' +
+      '<td>' + board + '</td>' +
+      '<td>' + acts + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function _cjNoteHtml(cat){
+  return (cat === 'equipment')
+    ? '<b>Equipment</b> jobs appear as a card on the Equipment board, so units can be assigned and their costs tracked. Codeable in AP.'
+    : '<b>Overhead</b> jobs are cost-buckets only &mdash; codeable in AP, but they do not appear on the Equipment board.';
+}
+
+function _cjFormHtml(cj){
+  cj = cj || {};
+  var cat  = _cjCat || cj.category || 'equipment';
+  var eqOn = cat === 'equipment';
+  var lblCss = 'display:block;font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px';
+  var inpCss = 'width:100%;padding:9px 11px;border:0.5px solid #ddd;border-radius:7px;font-size:13px;font-family:inherit';
+  var noteCss = 'background:#F6F8FB;border:0.5px solid #E3E9F1;border-radius:8px;padding:11px 13px;font-size:12px;color:#4A5568;line-height:1.5;margin-top:2px';
+  return '' +
+    '<h3 style="margin:0 0 16px;font-size:15px">' + (cj.id ? 'Edit cost job' : 'Add cost job') + '</h3>' +
+    '<div style="margin-bottom:16px">' +
+      '<label style="' + lblCss + '">Category</label>' +
+      '<div class="eqb-seg" style="width:100%">' +
+        '<button type="button" id="cj-seg-eq" class="eqb-segbtn' + (eqOn ? ' on' : '') + '" style="flex:1" onclick="_cjPickCategory(\'equipment\')">Equipment</button>' +
+        '<button type="button" id="cj-seg-oh" class="eqb-segbtn' + (!eqOn ? ' on' : '') + '" style="flex:1" onclick="_cjPickCategory(\'overhead\')">Overhead</button>' +
+      '</div>' +
+    '</div>' +
+    '<div style="margin-bottom:16px">' +
+      '<label style="' + lblCss + '">Job number</label>' +
+      '<input id="cj-number" style="' + inpCss + '" value="' + _cjEsc(cj.number||'') + '" placeholder="' + (eqOn ? 'e.g. 1234' : 'e.g. 9000') + '">' +
+      '<div id="cj-numhint" style="font-size:11px;color:#999;margin-top:6px">' + (eqOn ? 'Equipment numbers are 4 digits.' : 'Use your Foundation number &mdash; any format.') + '</div>' +
+    '</div>' +
+    '<div style="margin-bottom:16px">' +
+      '<label style="' + lblCss + '">Name</label>' +
+      '<input id="cj-name" style="' + inpCss + '" value="' + _cjEsc(cj.name||'') + '" placeholder="e.g. Scissor lift SL-114">' +
+    '</div>' +
+    '<div id="cj-note" style="' + noteCss + '">' + _cjNoteHtml(cat) + '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="saveCostJob()">Save cost job</button>' +
+    '</div>';
+}
+
+function _cjPickCategory(cat){
+  _cjCat = cat;
+  var eqOn = cat === 'equipment';
+  var se = g('cj-seg-eq'), so = g('cj-seg-oh');
+  if (se) se.className = 'eqb-segbtn' + (eqOn ? ' on' : '');
+  if (so) so.className = 'eqb-segbtn' + (!eqOn ? ' on' : '');
+  var h = g('cj-numhint'); if (h) h.innerHTML = eqOn ? 'Equipment numbers are 4 digits.' : 'Use your Foundation number &mdash; any format.';
+  var np = g('cj-number'); if (np && !np.value) np.placeholder = eqOn ? 'e.g. 1234' : 'e.g. 9000';
+  var n = g('cj-note'); if (n) n.innerHTML = _cjNoteHtml(cat);
+}
+
+function showAddCostJob(){
+  if (!hasFull('manage-cost-jobs')) { showToast('You do not have access to manage cost jobs.', 'error'); return; }
+  _cjEditId = null; _cjCat = 'equipment';
+  showModal(_cjFormHtml(null));
+}
+function editCostJob(id){
+  if (!hasFull('manage-cost-jobs')) return;
+  var cj = _cjFind(id); if (!cj) return;
+  _cjEditId = cj.id; _cjCat = cj.category || 'equipment';
+  showModal(_cjFormHtml(cj));
+}
+
+function saveCostJob(){
+  if (!hasFull('manage-cost-jobs')) { showToast('You do not have access to manage cost jobs.', 'error'); return; }
+  var cat  = _cjCat || 'equipment';
+  var num  = ((g('cj-number') && g('cj-number').value) || '').trim();
+  var name = ((g('cj-name')   && g('cj-name').value)   || '').trim();
+  if (!num)  { showToast('Enter a job number.', 'error'); return; }
+  if (!name) { showToast('Enter a name.', 'error'); return; }
+  if (!isProjectNumberUnique(num, _cjEditId || undefined)) { showToast('That number is already in use.', 'error'); return; }
+  // Soft-warn only: equipment numbers are 4 digits, but the save still goes through.
+  if (cat === 'equipment' && !/^\d{4}$/.test(num)) {
+    if (!confirm('Equipment job numbers are usually 4 digits. Save "' + num + '" anyway?')) return;
+  }
+  var rec = _cjEditId ? _cjFind(_cjEditId) : null;
+  if (rec) {
+    rec.number = num; rec.name = name; rec.category = cat;
+  } else {
+    rec = { id: Date.now(), number: num, name: name, category: cat,
+            customerId: null, types: [], type: '', kmiAssignments: [], contactAssignments: [],
+            contractAmount: 0, created: new Date().toISOString().slice(0,10) };
+    db.projects.push(rec);
+  }
+  saveDB();
+  closeModal();
+  renderCostJobs();
+  showToast('Cost job ' + num + (_cjEditId ? ' updated.' : ' added.'), 'success');
+  _cjEditId = null;
+  if (supabaseClient) {
+    var payload = toSBProject(rec);
+    supabaseClient.from('kmi_projects').upsert(payload).then(function(r){
+      if (r && r.error) showToast('Cost job saved on this device, but cloud sync failed: ' + r.error.message, 'error');
+    }, function(e){ showToast('Cost job cloud sync failed: ' + ((e && e.message) || e), 'error'); });
+  }
+}
+
+function deleteCostJob(id){
+  if (!hasFull('manage-cost-jobs')) return;
+  var cj = _cjFind(id); if (!cj || !_isCostJob(cj)) return;
+  if (!confirm('Delete cost job ' + (cj.number||'') + (cj.name ? (' \u2014 ' + cj.name) : '') + '?\nAny equipment on it moves back to the Yard.')) return;
+  var nowISO = new Date().toISOString();
+  var moved = [];
+  (db.equipment || []).forEach(function(e){
+    if (String(e.currentCol) === String(id)) { e.currentCol = 'yard'; e.updatedAt = nowISO; moved.push(e); }
+  });
+  db.projects = db.projects.filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+  renderCostJobs();
+  var ap = document.querySelector('.pg.active');
+  if (ap && ap.id === 'pg-equipment' && typeof renderEquipment === 'function') renderEquipment();
+  showToast('Cost job ' + (cj.number||'') + ' deleted.', 'success');
+  if (supabaseClient) {
+    supabaseClient.from('kmi_projects').delete().eq('id', id).then(function(r){
+      if (r && r.error) showToast('Deleted on this device, but cloud delete failed: ' + r.error.message, 'error');
+    }, function(e){ showToast('Cloud delete failed: ' + ((e && e.message) || e), 'error'); });
+    moved.forEach(function(e){ try { supabaseClient.from('kmi_equipment').upsert(toSBEquipment(e)); } catch(_e){} });
+  }
+}
+
 // Switch tabs on the New/Edit Project page. Mirrors plSwTab in the
 // product library — toggles header active state and shows/hides the
 // matching tab body. Pass `el` from the inline onclick to keep the
@@ -29476,7 +29682,9 @@ function _eqbPkgIcon(pkgType){
 }
 
 function _eqbActiveProjects(){
-  var list = (db.projects || []).slice();
+  // Real projects plus equipment cost jobs (each equipment job is its own board
+  // card so units can be assigned to it). Overhead cost jobs never get a card.
+  var list = (db.projects || []).filter(function(p){ return !_isCostJob(p) || p.category === 'equipment'; });
   if (typeof _isScopedUser === 'function' && _isScopedUser()) {
     list = list.filter(function(p){ return _canAccessProject(p); });
   }
@@ -30001,7 +30209,9 @@ async function _eqbEnterTruckMode(token){
     if(row.kind==='package'){ return _truckRender(_truckErr('Not movable','Scaffold & winter packages stay with their job and aren\u2019t moved by scan.')); }
     _truckUnit={ id:row.id, unitNo:row.unit_no, manufacturer:row.manufacturer, model:row.model, name:row.name, eqType:row.eq_type, currentCol:row.current_col, kind:row.kind };
     var pjRes=await _truckClient.from('kmi_projects').select('*');
-    _truckProjects=(pjRes&&pjRes.data)?pjRes.data:[];
+    // Real projects + equipment cost jobs are valid move destinations; overhead
+    // cost jobs are AP-only and never appear as a place to park a unit.
+    _truckProjects=((pjRes&&pjRes.data)?pjRes.data:[]).filter(function(r){ return r.category!=='overhead'; });
     var stRes=await _truckClient.from('kmi_settings').select('value').eq('key','truckingPin').limit(1);
     _truckPin=(stRes&&stRes.data&&stRes.data[0])?String(stRes.data[0].value||''):'';
   }catch(e){ return _truckRender(_truckErr('Unable to load','Please check your signal and try again, or contact KMI.')); }
@@ -30125,9 +30335,10 @@ function filterProj() {
   // Round 10: Foreman is strictly scoped to the projects they're assigned to
   // via kmiAssignments — no fallback to the full list. All other roles
   // (including Superintendent) see every project.
-  var _scope = db.projects;
+  // Cost jobs (equipment/overhead) never appear in the Projects list.
+  var _scope = _projectsOnly();
   if (_isScopedUser()) {
-    _scope = db.projects.filter(function(p){ return _canAccessProject(p); });
+    _scope = _scope.filter(function(p){ return _canAccessProject(p); });
   }
   var list = _scope.filter(function(p){
     if (fc && String(p.customerId) !== String(fc)) return false;
@@ -44149,6 +44360,11 @@ function fromSBProposal(r) {
 function toSBProject(r) {
   return {
     id:r.id, number:r.number||'', name:r.name||'',
+    // Cost Jobs: 'project' (real customer project, default) | 'equipment' | 'overhead'.
+    // Equipment/overhead rows are internal cost-tracking jobs — hidden from the
+    // Projects list and every project picker; equipment jobs still appear on the
+    // Equipment board; both remain codeable in AP.
+    category:r.category||'project',
     customer_id:r.customerId||null,
     address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
     contract_amount:r.contractAmount||0,
@@ -44219,6 +44435,7 @@ function toSBProject(r) {
 function fromSBProject(r) {
   return {
     id:r.id, number:r.number||'', name:r.name||'',
+    category:r.category||'project',
     customerId:r.customer_id||null,
     address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
     contractAmount:r.contract_amount||0,
@@ -46784,7 +47001,7 @@ function _mmVisibleProjects(weekKey){
   var added  = (m && Array.isArray(m.addedProjectIds))  ? m.addedProjectIds.map(String)  : [];
   var today  = _mmDateStr(_mmToday());
   var items  = db.meetingActionItems || [];
-  return (db.projects||[]).filter(function(p){
+  return _projectsOnly().filter(function(p){
     var pid = String(p.id);
     if(hidden.indexOf(pid) >= 0) return false;
     if(added.indexOf(pid) >= 0) return true;
@@ -46801,7 +47018,7 @@ function _mmHiddenProjects(weekKey){
   var m = _mmGetMeeting(weekKey);
   var hidden = (m && Array.isArray(m.hiddenProjectIds)) ? m.hiddenProjectIds.map(String) : [];
   if(!hidden.length) return [];
-  return (db.projects||[]).filter(function(p){ return hidden.indexOf(String(p.id)) >= 0; })
+  return _projectsOnly().filter(function(p){ return hidden.indexOf(String(p.id)) >= 0; })
     .sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
 }
 // Items visible for a project in a given week (Model A visibility rule).
@@ -46961,7 +47178,7 @@ function renderMeetings(){
 
   // Footer: hidden-project chips + add-a-project
   var hiddenProjs = _mmHiddenProjects(wk);
-  var addable = (db.projects||[]).filter(function(p){ return visible.indexOf(p) < 0 && hiddenProjs.indexOf(p) < 0; })
+  var addable = _projectsOnly().filter(function(p){ return visible.indexOf(p) < 0 && hiddenProjs.indexOf(p) < 0; })
     .sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
   if(canEdit && (hiddenProjs.length || addable.length)){
     html += '<div class="mm-foot">';
@@ -47183,7 +47400,7 @@ function _tskItemSort(a, b){
 function _tskColsFor(vis){
   var today = _tskTodayStr();
   var withTasks = {}; vis.forEach(function(it){ if(it.projectId) withTasks[String(it.projectId)] = 1; });
-  var cols = (db.projects||[]).filter(function(p){
+  var cols = _projectsOnly().filter(function(p){
     var active = !p.endDate || String(p.endDate) >= today;
     return active || withTasks[String(p.id)];
   }).sort(function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); })
@@ -47233,7 +47450,7 @@ function renderTasks(){
     (db.users||[]).filter(function(u){ return normalizeRole(u.role) === 'Project Manager' && (u.status||'active') !== 'inactive'; })
       .sort(byName).map(function(u){ return '<option value="' + _tskEsc(u.id) + '">' + _tskEsc(_mmUserName(u.id)) + '</option>'; }).join('');
   var projOpts = '<option value="">All jobs</option><option value="__gen">General / Office</option>' +
-    (db.projects||[]).slice().sort(descNum).map(function(p){ return '<option value="' + _tskEsc(p.id) + '">' + _tskEsc((p.number||'') + ' — ' + (p.name||'')) + '</option>'; }).join('');
+    _projectsOnly().sort(descNum).map(function(p){ return '<option value="' + _tskEsc(p.id) + '">' + _tskEsc((p.number||'') + ' — ' + (p.name||'')) + '</option>'; }).join('');
   var html =
     '<div class="mets" id="tsk-mets"></div>' +
     '<div class="tsk-toolbar">' +
@@ -47342,7 +47559,7 @@ function _tskOpenAdd(preProj){
   var today = _tskTodayStr();
   var descNum = function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); };
   var sel = (preProj == null) ? '' : String(preProj);
-  var projList = (db.projects||[]).filter(function(p){ return (!p.endDate || String(p.endDate) >= today) || String(p.id) === sel; }).sort(descNum);
+  var projList = _projectsOnly().filter(function(p){ return (!p.endDate || String(p.endDate) >= today) || String(p.id) === sel; }).sort(descNum);
   var projOpts = '<option value="__gen"' + (sel === '__gen' ? ' selected' : '') + '>General / Office</option>' +
     projList.map(function(p){ var s = (String(p.id) === sel) ? ' selected' : ''; return '<option value="' + _tskEsc(p.id) + '"' + s + '>' + _tskEsc((p.number||'') + ' — ' + (p.name||'')) + '</option>'; }).join('');
   var meId = _currentUser ? String(_currentUser.id) : '';
