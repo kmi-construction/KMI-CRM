@@ -23798,8 +23798,15 @@ function closeModal()    { g('overlay').classList.remove('show'); g('modal-body'
 //   - Subs     → 1 row per matched cost code (via latest budget class-3
 //                line lookup by name); unmatched rows fall back to
 //                coDefaultSubCostCode. All rows class 3.
+//   - Equipment→ total equipment cost spread across the SAME cost code /
+//                cost class split the budget uses (db.budgetEquipmentSplit
+//                applied to the 'equipment_split' budgetTemplate lines —
+//                classes 5/6/10/11). One row per class with a non-zero share.
 //
-// Header Cost = totalLabor + totalMaterial + totalSub (raw cost, no OH&P)
+// Header Cost = the exact sum of the detail rows (each rounded to cents the
+//   same way the detail CSV writes them). Deriving the header from the detail
+//   guarantees the two files always reconcile — Foundation rejects the import
+//   if header Cost ≠ sum of the detail distribution.
 // Header Income = totalAmount (raw cost + OH&P markup)
 // ════════════════════════════════════════════════════════════════════════
 
@@ -23849,14 +23856,39 @@ function corGetBudgetSubLines(projectId) {
   });
 }
 
+// Helper — equipment distribution lines, mirroring the budget calc.
+// The budget spreads a project's total equipment cost across cost classes
+// 5/6/10/11 using db.budgetEquipmentSplit (percent per class) applied to
+// budgetTemplate lines whose sourceType is 'equipment_split'. Each of those
+// template lines carries the cost CODE + cost CLASS for its class; the split
+// map carries the PERCENT (keyed class_5 / class_6 / class_10 / class_11).
+// Returns [{ costCode, costClass, pct, sourceKey }] so the CO Detail export
+// can distribute equipment exactly the same way.
+function corGetEquipmentSplitLines() {
+  var split = db.budgetEquipmentSplit || {};
+  return (db.budgetTemplate || [])
+    .filter(function(l){ return l.sourceType === 'equipment_split'; })
+    .map(function(l){
+      return {
+        costCode:  String(l.costCode || '').trim(),
+        // Prefer the template line's cost class; fall back to the number
+        // embedded in the split key (class_5 → '5') if it's blank.
+        costClass: String(l.costClass || '').trim() || String(l.sourceKey || '').replace('class_', ''),
+        pct:       Number(split[l.sourceKey]) || 0,
+        sourceKey: l.sourceKey
+      };
+    });
+}
+
 // Build the detail rows for a single COR. Returns:
-//   { rows: [[code, class, cost], ...], unmappedMaterials: [...], unmappedSubs: [...] }
+//   { rows: [[code, class, cost], ...], unmappedMaterials, unmappedSubs, unmappedEquipment }
 // Caller is responsible for prepending the Job No / CO No / Seq columns.
 function corBuildFoundationDetailRows(cor, project) {
   var rows = [];
   var unmappedMaterials = [];
   var unmappedSubs = [];
-  if (!cor || !project) return { rows: rows, unmappedMaterials: unmappedMaterials, unmappedSubs: unmappedSubs };
+  var unmappedEquipment = [];
+  if (!cor || !project) return { rows: rows, unmappedMaterials: unmappedMaterials, unmappedSubs: unmappedSubs, unmappedEquipment: unmappedEquipment };
 
   var laborCc = project.coDefaultLaborCostCode    || '4000';
   var matCc   = project.coDefaultMaterialCostCode || '4000';
@@ -23944,7 +23976,33 @@ function corBuildFoundationDetailRows(cor, project) {
     rows.push([code, '3', subBuckets[code]]);
   });
 
-  return { rows: rows, unmappedMaterials: unmappedMaterials, unmappedSubs: unmappedSubs };
+  // ── EQUIPMENT — distribute total equipment cost across the same cost
+  //    code / cost class split the budget uses (db.budgetEquipmentSplit +
+  //    the 'equipment_split' budgetTemplate lines: classes 5/6/10/11). ────
+  // Use the raw equipment cost (qty × unitPrice) — same basis as materials
+  // and subs above (OH&P markup lives in the header Income column, not Cost).
+  var equipTotal = (cor.equipmentRows || []).reduce(function(s, r){
+    return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
+  }, 0);
+  if (Math.abs(equipTotal) > 0.005) {
+    var eqLines = corGetEquipmentSplitLines();
+    if (!eqLines.length) {
+      // No equipment_split template lines configured — nowhere to route it.
+      unmappedEquipment.push({ reason: 'no-split', cost: equipTotal });
+    } else {
+      eqLines.forEach(function(el){
+        var amt = equipTotal * el.pct / 100;
+        if (Math.abs(amt) <= 0.005) return;
+        if (!el.costCode) {
+          unmappedEquipment.push({ reason: 'no-code', sourceKey: el.sourceKey, cost: amt });
+          return;
+        }
+        rows.push([el.costCode, el.costClass, amt]);
+      });
+    }
+  }
+
+  return { rows: rows, unmappedMaterials: unmappedMaterials, unmappedSubs: unmappedSubs, unmappedEquipment: unmappedEquipment };
 }
 
 // Validate a COR + its project for Foundation CO export. Returns
@@ -23992,6 +24050,28 @@ function corValidateForFoundationExport(cor, project) {
         : ' This project has no saved budget yet — sub names match against the latest budget version. Save a budget first to enable per-row sub cost code lookup.';
       warnings.push('Some subcontractor rows have no match in the project budget and will fall back to the default sub cost code (' + (project.coDefaultSubCostCode || '—') + '): ' + subSample + subMore + '.' + hint);
     }
+    if (built.unmappedEquipment && built.unmappedEquipment.length) {
+      var noSplit = built.unmappedEquipment.some(function(e){ return e.reason === 'no-split'; });
+      var eqCost  = built.unmappedEquipment.reduce(function(s, e){ return s + (Number(e.cost) || 0); }, 0);
+      if (noSplit) {
+        warnings.push('This COR has equipment cost ($' + bgFmtMoney(eqCost) + ') but no equipment split is configured, so it will NOT be exported. Set up the equipment cost split under Templates → Budget settings (classes 5/6/10/11) so equipment distributes the same way the budget does.');
+      } else {
+        warnings.push('Some equipment split classes have no cost code on their budget template line and will be dropped ($' + bgFmtMoney(eqCost) + ' total). Set the cost code on the equipment_split template lines.');
+      }
+    } else {
+      // Equipment present but the split percentages don't total 100 → the
+      // distributed sum won't equal the equipment cost. Warn (this mirrors
+      // the budget's own behavior, which also multiplies by whatever % is set).
+      var eqRaw = (cor.equipmentRows || []).reduce(function(s, r){
+        return s + ((Number(r.quantity) || 0) * (Number(r.unitPrice) || 0));
+      }, 0);
+      if (Math.abs(eqRaw) > 0.005) {
+        var splitSum = corGetEquipmentSplitLines().reduce(function(s, el){ return s + el.pct; }, 0);
+        if (Math.abs(splitSum - 100) > 0.01) {
+          warnings.push('Equipment cost split totals ' + splitSum.toFixed(2) + '% (should be 100%). The exported equipment cost ($' + bgFmtMoney(eqRaw) + ') will be distributed at that rate — fix the split under Templates → Budget settings if that is not intended.');
+        }
+      }
+    }
   }
 
   return { ok: errors.length === 0, errors: errors, warnings: warnings };
@@ -24001,11 +24081,20 @@ function corValidateForFoundationExport(cor, project) {
 // matching the JC_CO_header_Import_File.xlsx column order.
 function corBuildFoundationHeaderRow(cor, project) {
   var seq = corExtractKmiSeq(cor.corNumber);
-  // Cost column = actual internal cost (labor uses cost rates, not the
-  // customer-billed total). Income column stays as the customer total
-  // since that's what KMI bills.
-  var laborCost = corComputeLaborCost(cor, project);
-  var rawCost = laborCost + (Number(cor.totalMaterial) || 0) + (Number(cor.totalSub) || 0);
+  // Cost column = the EXACT sum of the detail rows, each rounded to cents
+  // the same way the detail CSV writes them (Number(cost).toFixed(2)), then
+  // summed. Deriving the header from the detail guarantees the two files
+  // always reconcile — previously the header summed the ceiling-rounded
+  // category totals (cor.totalMaterial/totalSub) while the detail used raw
+  // values, so any fractional cost code left the header a few cents high and
+  // Foundation rejected the import. This also auto-includes equipment, which
+  // the detail now distributes across the budget's cost-class split.
+  // Income column stays as the customer total (with OH&P) since that's what
+  // KMI bills.
+  var built  = corBuildFoundationDetailRows(cor, project);
+  var rawCost = built.rows.reduce(function(s, r){
+    return s + parseFloat(Number(r[2]).toFixed(2));
+  }, 0);
   var income  = Number(cor.totalAmount) || 0;
   return [
     project.number || '',                            // Job No
