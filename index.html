@@ -47440,6 +47440,14 @@ function mmAddProject(pid){
 // Persistence/serialization reuse _mmPersistItem / toSBMeetingItem.
 // ═══════════════════════════════════════════════════════════════════════
 var _tskScopeSel = 'mine';   // 'mine' | 'all'
+var _tskDoneSel  = 'active'; // 'active' (hide done) | 'completed' (only done) | 'all'
+// Completion filter applied to the board only — metrics are computed from the
+// un-filtered visible set so the Completed count is accurate in every mode.
+function _tskApplyDone(list){
+  if(_tskDoneSel === 'active')    return list.filter(function(it){ return !it.done; });
+  if(_tskDoneSel === 'completed') return list.filter(function(it){ return  it.done; });
+  return list;
+}
 
 function _tskCurWeek(){ return _mmWeekKeyOf(_mmToday()); }
 function _tskTodayStr(){ return _mmDateStr(_mmToday()); }
@@ -47575,6 +47583,11 @@ function renderTasks(){
         '<button class="eqb-segbtn' + (_tskScopeSel === 'mine' ? ' on' : '') + '" onclick="_tskSetScope(\'mine\')">My items</button>' +
         '<button class="eqb-segbtn' + (_tskScopeSel === 'all' ? ' on' : '') + '" onclick="_tskSetScope(\'all\')">All</button>' +
       '</div>' +
+      '<div class="eqb-seg" id="tsk-done-seg">' +
+        '<button class="eqb-segbtn' + (_tskDoneSel === 'active' ? ' on' : '') + '" onclick="_tskSetDone(\'active\')">Active</button>' +
+        '<button class="eqb-segbtn' + (_tskDoneSel === 'completed' ? ' on' : '') + '" onclick="_tskSetDone(\'completed\')">Completed</button>' +
+        '<button class="eqb-segbtn' + (_tskDoneSel === 'all' ? ' on' : '') + '" onclick="_tskSetDone(\'all\')">All</button>' +
+      '</div>' +
       '<span class="tsk-hint" id="tsk-hint"></span>' +
     '</div>' +
     '<div class="ab">' +
@@ -47599,16 +47612,18 @@ function _tskRenderBoard(){
         ? (_tskScopeSel === 'all' ? 'Showing tasks assigned to you plus everything on your jobs.' : 'Showing tasks assigned to you.')
         : 'Your role sees tasks assigned to you.');
   if(g('tsk-hint')) g('tsk-hint').textContent = hint;
-  var mo = 0, mp = 0, mw = 0, mov = 0;
+  var mo = 0, mp = 0, mw = 0, mov = 0, mc = 0;
   vis.forEach(function(t){
-    if(t.status === 'open') mo++; else if(t.status === 'in_progress') mp++; else if(t.status === 'waiting') mw++;
+    if(t.done){ mc++; }
+    else if(t.status === 'open') mo++; else if(t.status === 'in_progress') mp++; else if(t.status === 'waiting') mw++;
     if(_tskIsOverdue(t)) mov++;
   });
   if(g('tsk-mets')) g('tsk-mets').innerHTML =
-    _tskMet('Open', mo, '') + _tskMet('In progress', mp, '') + _tskMet('Waiting', mw, '') + _tskMet('Overdue', mov, mov ? '#A32D2D' : '');
-  var cols = _tskColsFor(vis);
+    _tskMet('Open', mo, '') + _tskMet('In progress', mp, '') + _tskMet('Waiting', mw, '') + _tskMet('Overdue', mov, mov ? '#A32D2D' : '') + _tskMet('Completed', mc, mc ? '#3B6D11' : '');
+  var board = _tskApplyDone(vis);
+  var cols = _tskColsFor(board);
   g('tsk-board').innerHTML = cols.map(function(c){
-    var items = vis.filter(function(it){ return c.id === '__gen' ? !it.projectId : String(it.projectId) === String(c.id); });
+    var items = board.filter(function(it){ return c.id === '__gen' ? !it.projectId : String(it.projectId) === String(c.id); });
     items.sort(_tskItemSort);
     var body = items.length ? items.map(_tskItemHtml).join('') : '<div class="tsk-cempty">No tasks</div>';
     var hdr = c.kind === 'gen'
@@ -47630,6 +47645,16 @@ function _tskSetScope(s){
   var seg = g('tsk-scope-seg');
   if(seg){ Array.prototype.forEach.call(seg.querySelectorAll('.eqb-segbtn'), function(b, i){
     b.classList.toggle('on', (i === 0 && s === 'mine') || (i === 1 && s === 'all'));
+  }); }
+  _tskRenderBoard();
+}
+
+function _tskSetDone(s){
+  _tskDoneSel = s;
+  var order = ['active','completed','all'];
+  var seg = g('tsk-done-seg');
+  if(seg){ Array.prototype.forEach.call(seg.querySelectorAll('.eqb-segbtn'), function(b, i){
+    b.classList.toggle('on', order[i] === s);
   }); }
   _tskRenderBoard();
 }
