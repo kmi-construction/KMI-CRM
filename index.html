@@ -45987,6 +45987,31 @@ async function pullFromSupabase() {
     setSyncStatus('connected', 'Connected \u2022 Up to date');
     showSBResult('\u2714 Data loaded from Supabase (' + db.customers.length + ' customers, ' + db.opportunities.length + ' opportunities)', true);
 
+    // ── Self-heal: single-candidate opportunity → proposal reverse-link ──
+    // Some cloud opportunity rows carry a blank proposal_id even though exactly
+    // one proposal points back at them (proposal.opportunityId === opp.id).
+    // Repair that reverse-link in memory on each load so the Opportunities /
+    // Proposals UI shows the tie. In-memory only — this runs after the
+    // localStorage cache write and issues no saveDB / Supabase upsert, so the
+    // fix never persists and is re-derived fresh on every load. Ambiguous cases
+    // (a blank opp matched by more than one candidate proposal) are left alone.
+    (function _healOppProposalLinks() {
+      var _healed = 0;
+      (db.opportunities || []).forEach(function(opp) {
+        if (opp.proposalId) return;                 // already linked — leave as-is
+        var oid = String(opp.id);
+        var cands = (db.proposals || []).filter(function(p) {
+          return String(p.opportunityId) === oid;
+        });
+        if (cands.length === 1) {                    // exactly one candidate → heal
+          opp.proposalId = cands[0].id;
+          _healed++;
+        }
+        // cands.length > 1 → ambiguous, skip;  0 → nothing to link
+      });
+      if (_healed) console.log('Reverse-linked ' + _healed + ' opportunity\u2192proposal pair(s) in memory.');
+    })();
+
     // Re-render current page
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
