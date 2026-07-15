@@ -47540,8 +47540,11 @@ function _tskItemHtml(it){
   var st  = it.status || 'open';
   var due = '<span class="tsk-due' + (od ? ' overdue' : '') + '">' + (od ? '⚠ ' : '') + _tskFmtDue(it.dueDate) + '</span>';
   var badge = it.source === 'meeting' ? '<span class="tsk-badge-meeting">Meeting</span>' : '';
-  var click = _tskCanEdit() ? ' onclick="_tskCycleStatus(event,\'' + it.id + '\')" title="Click to advance status"' : '';
-  return '<div class="tsk-item pri-' + pri + (od ? ' overdue' : '') + '" data-id="' + _tskEsc(it.id) + '">' +
+  var canEd = _tskCanEdit();
+  var click = canEd ? ' onclick="_tskCycleStatus(event,\'' + it.id + '\')" title="Click to advance status"' : '';
+  var cardClick = canEd ? ' onclick="_tskOpenEdit(\'' + it.id + '\')" title="Click to edit"' : '';
+  var cardCls = canEd ? ' tsk-clickable' : '';
+  return '<div class="tsk-item pri-' + pri + (od ? ' overdue' : '') + cardCls + '" data-id="' + _tskEsc(it.id) + '"' + cardClick + '>' +
     '<div class="tsk-item-title' + (od ? ' overdue' : '') + '">' + _tskEsc(it.text) + '</div>' +
     '<div class="tsk-item-meta">' +
       '<span class="tsk-av">' + _tskEsc(ini) + '</span>' +
@@ -47745,6 +47748,95 @@ async function _tskSaveAdd(){
   }
 }
 
+// Click a card body to edit (decision 1-A). Pre-fills the Add-modal fields with
+// the task's current values; adds a Delete button (decision 2-A). Works for both
+// source:'task' and source:'meeting' items — editing a meeting item here writes
+// back to the same kmi_meeting_action_items row it shares with Meeting Minutes.
+function _tskOpenEdit(id){
+  if(!_tskCanEdit()) return;
+  var it = _tskFind(id); if(!it) return;
+  var today = _tskTodayStr();
+  var descNum = function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); };
+  var cur = (it.projectId == null) ? '__gen' : String(it.projectId);
+  // Keep the task's own job selectable even if it has ended.
+  var projList = _projectsOnly().filter(function(p){ return (!p.endDate || String(p.endDate) >= today) || String(p.id) === cur; }).sort(descNum);
+  var projOpts = '<option value="__gen"' + (cur === '__gen' ? ' selected' : '') + '>General / Office</option>' +
+    projList.map(function(p){ var s = (String(p.id) === cur) ? ' selected' : ''; return '<option value="' + _tskEsc(p.id) + '"' + s + '>' + _tskEsc((p.number||'') + ' — ' + (p.name||'')) + '</option>'; }).join('');
+  var asg = it.assigneeUserId ? String(it.assigneeUserId) : '';
+  var userOpts = '<option value="">Unassigned</option>' +
+    _mmAssignableUsers().map(function(u){ var s = (String(u.id) === asg) ? ' selected' : ''; return '<option value="' + _tskEsc(u.id) + '"' + s + '>' + _tskEsc(_mmUserName(u.id)) + '</option>'; }).join('');
+  var stV = it.status || 'open';
+  var priV = it.priority || 'med';
+  var stOpt = function(v, l){ return '<option value="' + v + '"' + (stV === v ? ' selected' : '') + '>' + l + '</option>'; };
+  var priOpt = function(v, l){ return '<option value="' + v + '"' + (priV === v ? ' selected' : '') + '>' + l + '</option>'; };
+  var titleVal = String(it.text || '').replace(/"/g, '&quot;');
+  var dueVal = it.dueDate ? String(it.dueDate) : '';
+  var mtNote = it.source === 'meeting' ? '<div class="tsk-editnote">From a meeting — changes also apply in Meeting Minutes.</div>' : '';
+  var html =
+    '<div class="tsk-modal">' +
+      '<h3>Edit task</h3>' + mtNote +
+      '<div class="tsk-fld"><label>Title</label><input id="tsk-e-title" value="' + titleVal + '"></div>' +
+      '<div class="tsk-fld"><label>Job</label><select id="tsk-e-proj">' + projOpts + '</select></div>' +
+      '<div class="tsk-fld"><label>Assignee</label><select id="tsk-e-assignee">' + userOpts + '</select></div>' +
+      '<div class="tsk-frow">' +
+        '<div class="tsk-fld"><label>Status</label><select id="tsk-e-status">' + stOpt('open','Open') + stOpt('in_progress','In progress') + stOpt('waiting','Waiting') + stOpt('done','Done') + '</select></div>' +
+        '<div class="tsk-fld"><label>Priority</label><select id="tsk-e-pri">' + priOpt('high','High') + priOpt('med','Medium') + priOpt('low','Low') + '</select></div>' +
+      '</div>' +
+      '<div class="tsk-fld"><label>Due date</label><input type="date" id="tsk-e-due" value="' + dueVal + '"></div>' +
+      '<div class="tsk-mfoot tsk-mfoot-edit">' +
+        '<button class="btn tsk-del" onclick="_tskDeleteItem(\'' + it.id + '\')">Delete</button>' +
+        '<span class="tsk-mfoot-spacer"></span>' +
+        '<button class="btn" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-p" onclick="_tskSaveEdit(\'' + it.id + '\')">Save</button>' +
+      '</div>' +
+    '</div>';
+  showModal(html);
+  if(g('tsk-e-title')) g('tsk-e-title').focus();
+}
+
+async function _tskSaveEdit(id){
+  if(!_tskCanEdit()) return;
+  var it = _tskFind(id); if(!it) return;
+  var title = (g('tsk-e-title') && g('tsk-e-title').value || '').trim();
+  if(!title){ if(g('tsk-e-title')) g('tsk-e-title').focus(); return; }
+  var projV = g('tsk-e-proj') ? g('tsk-e-proj').value : '__gen';
+  var asgV  = g('tsk-e-assignee') ? g('tsk-e-assignee').value : '';
+  var stV   = g('tsk-e-status') ? g('tsk-e-status').value : (it.status || 'open');
+  var priV  = g('tsk-e-pri') ? g('tsk-e-pri').value : (it.priority || 'med');
+  var dueV  = g('tsk-e-due') ? g('tsk-e-due').value : '';
+  it.text = title;
+  it.projectId = (projV === '__gen') ? null : projV;
+  it.assigneeUserId = asgV || '';
+  it.priority = priV;
+  it.dueDate = dueV || null;
+  _tskSetStatus(it, stV);   // keeps done/completedWeek/completedAt/updatedAt in sync
+  var err = await _mmPersistItem(it);
+  closeModal();
+  // If reassigned off me while in "My items", widen scope so the task stays visible.
+  var meId = _currentUser ? String(_currentUser.id) : '';
+  if(String(it.assigneeUserId) !== meId && _tskScopeSel === 'mine' && (_tskCanViewAll() || _tskScopeTier() === 'project')){
+    _tskScopeSel = 'all';
+  }
+  renderTasks();
+  if(typeof showToast === 'function'){
+    if(err) showToast('Saved locally but cloud sync FAILED: ' + err, 'error');
+    else showToast('Task updated', 'success');
+  }
+}
+
+function _tskDeleteItem(id){
+  if(!_tskCanEdit()) return;
+  var it = _tskFind(id); if(!it) return;
+  var extra = it.source === 'meeting' ? '\n\nThis task came from a meeting and will also be removed from Meeting Minutes.' : '';
+  if(!confirm('Delete this task?' + extra)) return;
+  db.meetingActionItems = (db.meetingActionItems||[]).filter(function(x){ return String(x.id) !== String(id); });
+  saveDB();
+  _mmDeleteItemCloud(id);
+  closeModal();
+  renderTasks();
+  if(typeof showToast === 'function') showToast('Task deleted', 'success');
+}
+
 function _tskInjectTaskStyles(){
   if(document.getElementById('tsk-styles')) return;
   var css =
@@ -47798,6 +47890,12 @@ function _tskInjectTaskStyles(){
     '.tsk-fld input,.tsk-fld select{width:100%;padding:8px 10px;font-size:13px;border:0.5px solid var(--stl);border-radius:7px;font-family:inherit;box-sizing:border-box}' +
     '.tsk-frow{display:flex;gap:10px}' +
     '.tsk-frow .tsk-fld{flex:1}' +
+    '#pg-tasks .tsk-item.tsk-clickable:hover{box-shadow:0 2px 7px rgba(16,42,67,.16)}' +
+    '.tsk-editnote{font-size:11px;color:#6B4FA0;background:#F0EBFA;border:0.5px solid #d9ccf0;border-radius:6px;padding:7px 9px;margin-bottom:12px}' +
+    '.tsk-mfoot-edit{align-items:center}' +
+    '.tsk-mfoot-spacer{flex:1}' +
+    '.tsk-del{color:#A32D2D;border-color:#E7C3C3}' +
+    '.tsk-del:hover{background:#FDEBEB}' +
     '.tsk-mfoot{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}';
   var s = document.createElement('style'); s.id = 'tsk-styles'; s.textContent = css; document.head.appendChild(s);
 }
