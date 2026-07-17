@@ -2262,6 +2262,7 @@ textarea{resize:vertical;min-height:72px}
         <div style="font-size:11px;color:#9A7A2E;margin-top:6px">Inbound auto-intake arrives in Session 5 — for now, upload above.</div>
       </div>
     </div>
+    <div id="ap-inv-filters"></div>
     <div class="card" style="padding:0;overflow:hidden"><div id="ap-list"></div></div>
   </div>
   <div id="ap-code" style="display:none"></div>
@@ -38456,6 +38457,7 @@ var AP_STATUS = {
   pending:  { label:'Pending',  bg:'#fdf4e0', fg:'#7A5C00' },
   approved: { label:'Approved', bg:'#e7f3e0', fg:'#3B6D11' },
   exported: { label:'Exported', bg:'#e9e6f5', fg:'#5a4a9a' },
+  completed:{ label:'Completed',bg:'#e0f0e2', fg:'#276b31' },
   rejected: { label:'Rejected', bg:'#fde4e4', fg:'#b23636' },
   hold:     { label:'On hold',  bg:'#f0f0f0', fg:'#777' }
 };
@@ -38504,44 +38506,147 @@ function apInvoiceJobCell(i){
 
 // AP Invoices inbox status filter — clickable KPI boxes act like AP Approvals.
 // "coded" folds into To code; "hold" folds into Pending approval.
-var _apInboxFilter = 'tocode';   // default view = the coding queue (received + coded)
-function _apInboxSetFilter(k){ _apInboxFilter = k; renderApInbox(); }
-function _apInboxMatch(i){
-  var s = i.status||'received';
-  switch(_apInboxFilter){
-    case 'tocode':   return s==='received' || s==='coded';
-    case 'pending':  return s==='pending'  || s==='hold';
-    case 'approved': return s==='approved';
-    case 'exported': return s==='exported';
-    case 'rejected': return s==='rejected';
-    default:         return true;   // 'all'
-  }
+// Effective status: an exported invoice that's been confirmed imported to
+// Foundation reads as its own terminal state, "completed". Exported and
+// Completed are therefore mutually exclusive everywhere they're counted.
+function _apEffStatus(i){ return (i.status==='exported' && i.importConfirmedAt) ? 'completed' : (i.status||'received'); }
+// Primary job number for sorting (coded job lines first, else the header job).
+function _apPrimaryJob(i){
+  var jl=(db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)===String(i.id) && l.distType==='job' && l.jobNo; }).map(function(l){ return String(l.jobNo); });
+  if(jl.length){ jl.sort(function(a,b){ return a.localeCompare(b,undefined,{numeric:true}); }); return jl[0]; }
+  return i.jobNo?String(i.jobNo):'';
 }
 
+var _apInboxFilter = 'tocode';   // default view = the coding queue (received + coded)
+// null = default order (newest received first, i.e. createdAt desc). Clicking a
+// header sets {col,dir}; clicking the same header flips direction.
+var _apInvSort = null;
+function _apInboxSetFilter(k){ _apInboxFilter = k; renderApInbox(); }
+function _apInboxMatch(i){
+  var e = _apEffStatus(i);
+  switch(_apInboxFilter){
+    case 'tocode':    return e==='received' || e==='coded';
+    case 'pending':   return e==='pending'  || e==='hold';
+    case 'approved':  return e==='approved';
+    case 'exported':  return e==='exported';   // excludes completed (1-A)
+    case 'completed': return e==='completed';
+    case 'rejected':  return e==='rejected';
+    default:          return true;   // 'all'
+  }
+}
+function apInvSort(col){
+  if(_apInvSort && _apInvSort.col===col){ _apInvSort.dir = _apInvSort.dir==='asc'?'desc':'asc'; }
+  else { _apInvSort = { col:col, dir:'asc' }; }
+  renderApInbox();
+}
+function _apInvSortVal(i,col){
+  switch(col){
+    case 'vendor': return (apVendorDisplayName(i)||i.vendorName||'').toLowerCase();
+    case 'no':     return i.invoiceNo||'';
+    case 'date':   return _apInvDateISO(i)||'';
+    case 'job':    return _apPrimaryJob(i);
+    case 'amount': return Number(i.total)||0;
+    case 'source': return i.source||'';
+    case 'status': return (AP_STATUS[_apEffStatus(i)]||{}).label||'';
+    default:       return '';
+  }
+}
+// No-op when _apInvSort is null — caller has already applied the default order.
+function _apInvSortArray(arr){
+  if(!_apInvSort) return arr;
+  var col=_apInvSort.col, dir=_apInvSort.dir, out=arr.slice();
+  out.sort(function(a,b){
+    var va=_apInvSortVal(a,col), vb=_apInvSortVal(b,col);
+    var ae=(va===null||va===undefined||va===''), be=(vb===null||vb===undefined||vb==='');
+    if(ae&&be) return Number(a.id)-Number(b.id);
+    if(ae) return 1; if(be) return -1;
+    var cmp = (typeof va==='number' && typeof vb==='number') ? (va-vb) : String(va).localeCompare(String(vb),undefined,{numeric:true,sensitivity:'base'});
+    if(cmp===0) cmp=Number(a.id)-Number(b.id);
+    return dir==='asc'?cmp:-cmp;
+  });
+  return out;
+}
+
+// Column-filter state for the AP Invoices inbox (mirrors the AP Approvals bar).
+var _apInv = { ven:'', no:'', job:'', src:'', amin:'', amax:'', dfrom:'', dto:'' };
+function _apInvSyncFilters(){
+  function v(id){ var e=g(id); return e?e.value:''; }
+  _apInv.ven=v('ai-f-ven'); _apInv.no=v('ai-f-no'); _apInv.job=v('ai-f-job'); _apInv.src=v('ai-f-src');
+  _apInv.amin=v('ai-f-amin'); _apInv.amax=v('ai-f-amax'); _apInv.dfrom=v('ai-f-dfrom'); _apInv.dto=v('ai-f-dto');
+}
+function _apInvOnFilter(){ _apInvSyncFilters(); renderApInbox(); }
+function apInvClear(){
+  _apInv={ ven:'', no:'', job:'', src:'', amin:'', amax:'', dfrom:'', dto:'' };
+  ['ai-f-ven','ai-f-no','ai-f-job','ai-f-src','ai-f-amin','ai-f-amax','ai-f-dfrom','ai-f-dto'].forEach(function(id){ var e=g(id); if(e) e.value=''; });
+  renderApInbox();
+}
+// Column filters (independent of the status KPI boxes and the search-by-column).
+function _apInvColPasses(i){
+  var f=_apInv;
+  if(f.ven && (apVendorDisplayName(i)||i.vendorName||'')!==f.ven) return false;
+  if(f.no && String(i.invoiceNo||'').toLowerCase().indexOf(f.no.toLowerCase())<0) return false;
+  if(f.job){
+    var lines=(db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)===String(i.id); });
+    if(String(i.jobNo||'')!==f.job && !lines.some(function(l){ return String(l.jobNo||'')===f.job; })) return false;
+  }
+  if(f.src && String(i.source||'upload')!==f.src) return false;
+  var amin=parseFloat(f.amin); if(!isNaN(amin) && (Number(i.total)||0)<amin) return false;
+  var amax=parseFloat(f.amax); if(!isNaN(amax) && (Number(i.total)||0)>amax) return false;
+  if(f.dfrom||f.dto){ var iso=_apInvDateISO(i); if(!iso) return false; if(f.dfrom && iso<f.dfrom) return false; if(f.dto && iso>f.dto) return false; }
+  return true;
+}
+// The visible inbox set: status box + column filters + current sort.
+function _apInboxVisible(){
+  var inv=(db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
+  return _apInvSortArray(inv.filter(_apInboxMatch).filter(_apInvColPasses));
+}
 function renderApInbox(){
   if (!hasRead('ap-invoices')) return;
-  var inv = (db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
-  var cnt = { tocode:0, pending:0, approved:0, exported:0, rejected:0, all:inv.length };
-  inv.forEach(function(i){
-    var s = i.status||'received';
-    if(s==='received'||s==='coded') cnt.tocode++;
-    else if(s==='pending'||s==='hold') cnt.pending++;
-    else if(cnt[s]!=null) cnt[s]++;
+  var all = (db.apInvoices||[]).slice();
+  var cnt = { tocode:0, pending:0, approved:0, exported:0, completed:0, rejected:0, all:all.length };
+  all.forEach(function(i){
+    var e = _apEffStatus(i);
+    if(e==='received'||e==='coded') cnt.tocode++;
+    else if(e==='pending'||e==='hold') cnt.pending++;
+    else if(cnt[e]!=null) cnt[e]++;
   });
-  var boxes=[['tocode','To code'],['pending','Pending approval'],['approved','Approved'],['exported','Exported'],['rejected','Rejected'],['all','All']];
+  var boxes=[['tocode','To code'],['pending','Pending approval'],['approved','Approved'],['exported','Exported'],['completed','Completed'],['rejected','Rejected'],['all','All']];
   var kpiEl = g('ap-kpis');
   if (kpiEl) kpiEl.innerHTML = boxes.map(function(b){
     var on=_apInboxFilter===b[0];
-    return '<div onclick="_apInboxSetFilter(\''+b[0]+'\')" style="cursor:pointer;background:'+(on?'#fffdf6':'#fff')+';border:1px solid #e3e6ee;border-top:3px solid '+(on?'var(--ac)':'transparent')+';border-radius:9px;padding:10px 15px;min-width:100px'+(on?';box-shadow:0 2px 10px rgba(200,168,75,.18)':'')+'">'+
+    return '<div onclick="_apInboxSetFilter(\''+b[0]+'\')" style="cursor:pointer;background:'+(on?'#fffdf6':'#fff')+';border:1px solid #e3e6ee;border-top:3px solid '+(on?'var(--ac)':'transparent')+';border-radius:9px;padding:10px 15px;min-width:96px'+(on?';box-shadow:0 2px 10px rgba(200,168,75,.18)':'')+'">'+
       '<div style="font-size:20px;font-weight:700;color:var(--kmi)">'+cnt[b[0]]+'</div>'+
       '<div style="font-size:10.5px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+b[1]+'</div></div>';
   }).join('');
+
+  // Column-filter bar (mirrors AP Approvals). Distinct values from the full set.
+  var fEl = g('ap-inv-filters');
+  if (fEl){
+    if(!all.length){ fEl.innerHTML=''; }
+    else {
+      function uq(a){ var o={},out=[]; a.forEach(function(v){ if(v!=null&&v!==''&&!o[v]){o[v]=1;out.push(v);} }); return out.sort(); }
+      var vens=uq(all.map(function(i){return apVendorDisplayName(i)||i.vendorName;}));
+      var jobs=uq(all.reduce(function(acc,i){ acc.push(i.jobNo); (db.apInvoiceLines||[]).forEach(function(l){ if(String(l.invoiceId)===String(i.id)) acc.push(l.jobNo); }); return acc; },[]));
+      function sel(id,label,vals,cur){ return '<select id="'+id+'" onchange="_apInvOnFilter()" style="font-family:inherit;border:1px solid #d8dce6;border-radius:6px;padding:6px 8px;font-size:12.5px;min-width:120px"><option value="">'+label+'</option>'+vals.map(function(v){return '<option'+(String(v)===String(cur)?' selected':'')+'>'+apEsc(v)+'</option>';}).join('')+'</select>'; }
+      function fc(label,inner){ return '<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4">'+label+'</label>'+inner+'</div>'; }
+      fEl.innerHTML='<div style="background:#fff;border:1px solid #e7e9f0;border-radius:9px;padding:12px 14px;margin-bottom:16px;display:flex;gap:10px 12px;flex-wrap:wrap;align-items:flex-end">'+
+        fc('Vendor',sel('ai-f-ven','All vendors',vens,_apInv.ven))+
+        fc('Invoice #','<input id="ai-f-no" oninput="_apInvOnFilter()" value="'+apEsc(_apInv.no)+'" placeholder="search\u2026" style="border:1px solid #d8dce6;border-radius:6px;padding:6px 8px;font-size:12.5px;min-width:120px">')+
+        fc('Job',sel('ai-f-job','All jobs',jobs,_apInv.job))+
+        fc('Source','<select id="ai-f-src" onchange="_apInvOnFilter()" style="font-family:inherit;border:1px solid #d8dce6;border-radius:6px;padding:6px 8px;font-size:12.5px;min-width:120px"><option value="">All sources</option><option value="upload"'+(_apInv.src==='upload'?' selected':'')+'>Upload</option><option value="email"'+(_apInv.src==='email'?' selected':'')+'>Email</option></select>')+
+        fc('Amount','<div style="display:flex;gap:5px;align-items:center"><input id="ai-f-amin" oninput="_apInvOnFilter()" value="'+apEsc(_apInv.amin)+'" placeholder="min" style="width:74px;border:1px solid #d8dce6;border-radius:6px;padding:6px 7px;font-size:12.5px"><span style="color:#aaa">\u2013</span><input id="ai-f-amax" oninput="_apInvOnFilter()" value="'+apEsc(_apInv.amax)+'" placeholder="max" style="width:74px;border:1px solid #d8dce6;border-radius:6px;padding:6px 7px;font-size:12.5px"></div>')+
+        fc('Date','<div style="display:flex;gap:5px;align-items:center"><input id="ai-f-dfrom" type="date" onchange="_apInvOnFilter()" value="'+apEsc(_apInv.dfrom)+'" style="border:1px solid #d8dce6;border-radius:6px;padding:5px 7px;font-size:12.5px"><span style="color:#aaa">\u2013</span><input id="ai-f-dto" type="date" onchange="_apInvOnFilter()" value="'+apEsc(_apInv.dto)+'" style="border:1px solid #d8dce6;border-radius:6px;padding:5px 7px;font-size:12.5px"></div>')+
+        '<button class="btn" onclick="apInvClear()" style="margin-left:auto;align-self:flex-end">Clear filters</button>'+
+      '</div>';
+    }
+  }
+
   var el = g('ap-list'); if(!el) return;
-  if (!inv.length){
+  if (!all.length){
     el.innerHTML = '<div style="padding:26px;text-align:center;color:#888;font-size:13px">No invoices yet. Upload a PDF above to get started.</div>';
     return;
   }
-  var filtered = inv.filter(_apInboxMatch);
+  var filtered = _apInboxVisible();
   var totSum = filtered.reduce(function(t,i){return t+(Number(i.total)||0);},0);
   var totLine = '<div style="padding:10px 13px;border-bottom:1px solid #eef0f4;font-size:12px;color:#666">'+filtered.length+' invoice'+(filtered.length===1?'':'s')+' &middot; <strong style="color:var(--kmi);font-size:13px">'+apMoney(totSum)+'</strong> total</div>';
   if (!filtered.length){
@@ -38553,7 +38658,7 @@ function renderApInbox(){
     var rf = (i.readFailed || (i.extractedJson && i.extractedJson._readFailed)) && !coded;
     var dup = (i.isDuplicate && !coded) ? ' style="background:#fdf6f6;cursor:pointer"' : ' style="cursor:pointer"';
     var stCell = rf ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fff1d6;color:#9A6A00">Read failed</span>'
-                    : ((i.isDuplicate && !coded) ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(i.status));
+                    : ((i.isDuplicate && !coded) ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(_apEffStatus(i)));
     var src = i.source==='email' ? '&#128231; email' : '&#11014; upload';
     var vName = apVendorDisplayName(i);
     var vCell = rf ? '<span style="color:#9A6A00">(could not read — code manually)</span>' : ('<strong>'+apEsc(vName||'(unknown vendor)')+'</strong>');
@@ -38568,10 +38673,13 @@ function renderApInbox(){
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;text-align:center"><button onclick="apDeleteInvoice(\''+i.id+'\',event)" title="Delete invoice" style="border:0;background:none;color:#b23636;cursor:pointer;font-size:15px;line-height:1">&#128465;</button></td>'+
     '</tr>';
   }).join('');
+  var cols=[['vendor','Vendor'],['no','Invoice #'],['date','Date'],['job','Job'],['amount','Amount'],['source','Source'],['status','Status']];
+  var thead='<thead><tr>'+cols.map(function(h){
+    var cls='sortable'+(_apInvSort&&_apInvSort.col===h[0]?' '+_apInvSort.dir:'');
+    return '<th class="'+cls+'" onclick="apInvSort(\''+h[0]+'\')" style="text-align:left;padding:7px 9px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h[1]+'</th>';
+  }).join('')+'<th style="padding:7px 9px;background:#f6f7fa;border-bottom:1px solid #e3e6ee"></th></tr></thead>';
   el.innerHTML = totLine + '<table style="width:100%;border-collapse:collapse;font-size:12.5px">'+
-    '<thead><tr>'+
-    ['Vendor','Invoice #','Date','Job','Amount','Source','Status',''].map(function(h){return '<th style="text-align:left;padding:7px 9px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h+'</th>';}).join('')+
-    '</tr></thead><tbody>'+rows+'</tbody></table>';
+    thead+'<tbody>'+rows+'</tbody></table>';
 }
 
 // Delete an invoice (and its lines + log) from the inbox — local + cloud.
@@ -38884,6 +38992,11 @@ function apCodeApplyJobAll(){
 
 // Inbox order (newest first) — shared by the inbox and the coder's prev/next.
 function _apOrderedInvoices(){
+  // Walk the same order the user sees in the inbox (status box + column
+  // filters + current sort), so prev/next matches the visible list. Falls
+  // back to the full received-order list if the open invoice was filtered out.
+  var vis = (typeof _apInboxVisible==='function') ? _apInboxVisible() : null;
+  if(vis && vis.some(function(x){ return String(x.id)===String(_apCodeId); })) return vis;
   return (db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
 }
 function apCodeNav(dir){
@@ -39654,6 +39767,47 @@ function apSetApprBanner(kind, html){
 
 // ── AP register: filterable list with stat-box status filter ────────
 var _apReg = { status:'pending', ven:'', no:'', job:'', code:'', cls:'', appr:'', amin:'', amax:'', dfrom:'', dto:'' };
+// null = default order (newest invoice date first). Clicking a header sets
+// {col,dir}; the same header flips direction.
+var _apRegSort = null;
+function apRegSort(col){
+  if(_apRegSort && _apRegSort.col===col){ _apRegSort.dir = _apRegSort.dir==='asc'?'desc':'asc'; }
+  else { _apRegSort = { col:col, dir:'asc' }; }
+  _apRegRender();
+}
+function _apRegSortVal(i,col){
+  switch(col){
+    case 'vendor':   return (apVendorDisplayName(i)||i.vendorName||'').toLowerCase();
+    case 'no':       return i.invoiceNo||'';
+    case 'job':      return _apPrimaryJob(i);
+    case 'amount':   return Number(i.total)||0;
+    case 'approver': return (apApproverName(i.approverId)||'').toLowerCase();
+    case 'date':     return _apInvDateISO(i)||'';
+    case 'status':   return (AP_STATUS[_apEffStatus(i)]||{}).label||'';
+    default:         return '';
+  }
+}
+// Always returns a sorted array: the default (invoice date desc) when no
+// header is active, otherwise the chosen column. Both the register table and
+// the review-screen prev/next use this so they stay in the same order.
+function _apRegSortArray(arr){
+  var out=arr.slice();
+  if(!_apRegSort){
+    out.sort(function(a,b){ return String(_apInvDateISO(b)).localeCompare(String(_apInvDateISO(a))); });
+    return out;
+  }
+  var col=_apRegSort.col, dir=_apRegSort.dir;
+  out.sort(function(a,b){
+    var va=_apRegSortVal(a,col), vb=_apRegSortVal(b,col);
+    var ae=(va===null||va===undefined||va===''), be=(vb===null||vb===undefined||vb==='');
+    if(ae&&be) return Number(a.id)-Number(b.id);
+    if(ae) return 1; if(be) return -1;
+    var cmp = (typeof va==='number' && typeof vb==='number') ? (va-vb) : String(va).localeCompare(String(vb),undefined,{numeric:true,sensitivity:'base'});
+    if(cmp===0) cmp=Number(a.id)-Number(b.id);
+    return dir==='asc'?cmp:-cmp;
+  });
+  return out;
+}
 
 function _apInvLines(i){ return (db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)===String(i.id); }); }
 function _apInvDateISO(i){
@@ -39675,6 +39829,8 @@ function _apRegPasses(i){
   var r=_apReg;
   if(r.status!=='all'){
     if(r.status==='unassigned'){ if(!(i.status==='pending' && !i.approverId)) return false; }
+    else if(r.status==='completed'){ if(!(i.status==='exported' && i.importConfirmedAt)) return false; }
+    else if(r.status==='exported'){ if(!(i.status==='exported' && !i.importConfirmedAt)) return false; }
     else if(String(i.status)!==r.status) return false;
   }
   if(r.ven && (apVendorDisplayName(i)||i.vendorName||'')!==r.ven) return false;
@@ -39705,7 +39861,7 @@ function _apRegRow(i){
     '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4;font-size:11.5px;color:#666">'+_apCodingSummary(i)+'</td>'+
     apprCell+
     '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4;font-size:11.5px;color:#888">'+dateCell+'</td>'+
-    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4">'+apStatusPill(i.status)+(i.status==='exported'&&i.importConfirmedAt?' <span title="Imported to Foundation" style="color:#3B6D11;font-weight:700">&#10003;</span>':'')+'</td>'+
+    '<td style="padding:9px 11px;border-bottom:1px solid #eef0f4">'+apStatusPill(_apEffStatus(i))+'</td>'+
   '</tr>';
 }
 function _apRegSync(){
@@ -39723,21 +39879,22 @@ function apRegClear(){ _apReg={ status:_apReg.status, ven:'', no:'', job:'', cod
 
 function _apRegRender(){
   var base=_apRegScopedBase();
-  // stat counts over the scoped set
-  var c={ pending:0, unassigned:0, hold:0, approved:0, exported:0, rejected:0, all:base.length };
+  // stat counts over the scoped set (exported vs completed are exclusive)
+  var c={ pending:0, unassigned:0, hold:0, approved:0, exported:0, completed:0, rejected:0, all:base.length };
   base.forEach(function(i){
-    if(c[i.status]!=null) c[i.status]++;
-    if(i.status==='pending' && !i.approverId) c.unassigned++;
+    var e=_apEffStatus(i);
+    if(c[e]!=null) c[e]++;
+    if(e==='pending' && !i.approverId) c.unassigned++;
   });
-  var boxes=[['pending','Pending'],['unassigned','Unassigned'],['hold','On hold'],['approved','Approved'],['exported','Exported'],['rejected','Rejected'],['all','All']];
+  var boxes=[['pending','Pending'],['unassigned','Unassigned'],['hold','On hold'],['approved','Approved'],['exported','Exported'],['completed','Completed'],['rejected','Rejected'],['all','All']];
   var statsEl=g('ap-appr-stats');
   if(statsEl) statsEl.innerHTML='<div style="display:flex;gap:10px;flex-wrap:wrap">'+boxes.map(function(b){
     var on=_apReg.status===b[0];
     return '<div onclick="_apRegStatus(\''+b[0]+'\')" style="cursor:pointer;background:'+(on?'#fffdf6':'#fff')+';border:1px solid #e3e6ee;border-top:3px solid '+(on?'var(--ac)':'transparent')+';border-radius:9px;padding:10px 15px;min-width:100px'+(on?';box-shadow:0 2px 10px rgba(200,168,75,.18)':'')+'"><div style="font-size:20px;font-weight:700;color:var(--kmi)">'+c[b[0]]+'</div><div style="font-size:10.5px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+b[1]+'</div></div>';
   }).join('')+'</div>';
 
-  // filtered list (newest invoice date first)
-  var list=base.filter(_apRegPasses).sort(function(a,b){ return String(_apInvDateISO(b)).localeCompare(String(_apInvDateISO(a))); });
+  // filtered list — default is newest invoice date first; header clicks re-sort
+  var list=_apRegSortArray(base.filter(_apRegPasses));
   var tot=list.reduce(function(t,i){return t+(Number(i.total)||0);},0);
   var totEl=g('ap-appr-total'); if(totEl) totEl.innerHTML=list.length+' invoice'+(list.length===1?'':'s')+' &middot; <strong style="color:var(--kmi);font-size:14px">'+apMoney(tot)+'</strong> total';
 
@@ -39757,9 +39914,14 @@ function _apRegRender(){
     } else tb.innerHTML='';
   }
   if(!list.length){ tEl.innerHTML='<div style="padding:30px;text-align:center;color:#999;font-size:13px">No invoices match these filters.</div>'; return; }
-  var heads=['Vendor','Invoice #','Job','Amount','Coding','Approver','Date','Status'];
+  var heads=[['vendor','Vendor'],['no','Invoice #'],['job','Job'],['amount','Amount'],['','Coding'],['approver','Approver'],['date','Date'],['status','Status']];
   tEl.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'+
-    heads.map(function(h){return '<th style="text-align:left;padding:8px 11px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee;white-space:nowrap">'+h+'</th>';}).join('')+
+    heads.map(function(h){
+      var base='text-align:left;padding:8px 11px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee;white-space:nowrap';
+      if(!h[0]) return '<th style="'+base+'">'+h[1]+'</th>';   // Coding — derived, non-sortable
+      var cls='sortable'+(_apRegSort&&_apRegSort.col===h[0]?' '+_apRegSort.dir:'');
+      return '<th class="'+cls+'" onclick="apRegSort(\''+h[0]+'\')" style="'+base+'">'+h[1]+'</th>';
+    }).join('')+
     '</tr></thead><tbody>'+list.map(_apRegRow).join('')+'</tbody></table>';
 }
 
@@ -39806,7 +39968,7 @@ function renderApApprovals(){
 // ── Sign-off review screen ──────────────────────────────────────────
 // prev/next walks the current filtered register list
 function _apReviewOrdered(){
-  return _apRegScopedBase().filter(_apRegPasses).sort(function(a,b){ return String(_apInvDateISO(b)).localeCompare(String(_apInvDateISO(a))); });
+  return _apRegSortArray(_apRegScopedBase().filter(_apRegPasses));
 }
 function apOpenReview(id){
   if(!hasRead('ap-approvals')) return;
