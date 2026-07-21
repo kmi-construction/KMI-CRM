@@ -5060,6 +5060,48 @@ function fmtC(v) { return '$' + Number(v || 0).toLocaleString(); }
 function getCust(id) { return db.customers.find(function(c){ return c.id === id; }) || {name:'Unknown', contact:'', address:'', cityState:''}; }
 function getOpp(id)  { return db.opportunities.find(function(o){ return o.id === id; }); }
 function getProp(id) { return db.proposals.find(function(p){ return p.id === id; }); }
+
+// -- SEQUENTIAL ID GENERATION -----------------------------------------------
+// Earlier versions derived new record IDs from array length (list.length + 1).
+// That re-issues a number the moment the array shrinks -- most commonly via a
+// cascade delete in deleteOpp() -- producing a duplicate ID. Duplicate
+// proposal IDs are especially destructive: getProp() resolves by first match,
+// so an opportunity renders a different opportunity's proposal, and the
+// Supabase upsert batch aborts with "ON CONFLICT DO UPDATE command cannot
+// affect row a second time", silently blocking every proposal save from that
+// point forward.
+//
+// nextSeqId derives from the highest sequence number already issued for the
+// given prefix+year, then steps past anything still taken. Deleted numbers are
+// never reclaimed, which is the correct behavior for a document ID.
+function nextSeqId(list, prefix, year) {
+  var pre   = prefix + '-' + (year || new Date().getFullYear()) + '-';
+  var taken = {};
+  var max   = 0;
+  (list || []).forEach(function(r) {
+    var rid = String((r && r.id) || '');
+    if (!rid) return;
+    taken[rid] = true;
+    if (rid.indexOf(pre) !== 0) return;
+    var n = parseInt(rid.slice(pre.length), 10);
+    if (!isNaN(n) && n > max) max = n;
+  });
+  var n = max + 1;
+  while (taken[pre + String(n).padStart(3,'0')]) n++;
+  return pre + String(n).padStart(3,'0');
+}
+
+// Returns the sorted list of IDs appearing more than once in a collection.
+// Used as a pre-push sync guard and as a load-time integrity warning.
+function _findDupIds(list) {
+  var seen = {}, dup = {};
+  (list || []).forEach(function(r) {
+    var rid = String((r && r.id) || '');
+    if (!rid) return;
+    if (seen[rid]) dup[rid] = true; else seen[rid] = true;
+  });
+  return Object.keys(dup).sort();
+}
 function getVendor(id)        { return (db.vendors        || []).find(function(v){ return v.id === id; }); }
 function getVendorContact(id) { return (db.vendorContacts || []).find(function(c){ return c.id === id; }); }
 function getUser(id) { return db.users.find(function(u){ return u.id === id; }); }
@@ -5625,7 +5667,7 @@ async function biCreateOpp(){
   var f=_biReadForm();
   if(!f.project){ showToast('Project name is required','error'); return; }
   var now=new Date().toISOString();
-  var oppId='OPP-'+new Date().getFullYear()+'-'+String((db.opportunities||[]).length+1).padStart(3,'0');
+  var oppId=nextSeqId(db.opportunities||[], 'OPP');
   var opp={
     id:oppId, project:f.project, customerId:_biChosenCustomerId,
     type:f.type||'', types:f.type?[f.type]:[], bidDate:f.bidDate||'', estValue:0,
@@ -24572,7 +24614,7 @@ function importCSV(evt, type) {
         var pmFirst = r['Customer PM First Name'], pmLast = r['Customer PM Last Name'];
         var pmRec   = (pmFirst && pmLast) ? db.pms.find(function(p){ return p.firstName.toLowerCase()===pmFirst.toLowerCase() && p.lastName.toLowerCase()===pmLast.toLowerCase() && p.customerId===cust.id; }) : null;
         // Use provided ID or auto-generate
-        var id = r['Opportunity ID'] || ('OPP-' + new Date().getFullYear() + '-' + String(db.opportunities.length + 1).padStart(3,'0'));
+        var id = r['Opportunity ID'] || nextSeqId(db.opportunities, 'OPP');
         var exists = db.opportunities.find(function(o){ return o.id === id; });
         if (exists) { skipped++; return; }
         var dec = (r['Decision'] || 'pending').toLowerCase().replace(' ','-');
@@ -26116,7 +26158,8 @@ async function sendEstimatorNotification(usr, o, cust, assignedBy, action) {
 // ── NEW / EDIT OPPORTUNITY ──────────────────────────────────────
 function initNewOpp() {
   _editOppId = null;
-  var id = 'OPP-' + new Date().getFullYear() + '-' + String(db.opportunities.length + 1).padStart(3,'0');
+  // Preview only -- re-derived in the create branch of the opportunity save path.
+  var id = nextSeqId(db.opportunities, 'OPP');
   g('nop-heading').textContent      = 'New bid opportunity';
   g('nop-save-btn').textContent     = 'Create opportunity';
   g('nop-id-display').textContent   = id;
@@ -26201,7 +26244,14 @@ function nopSave() {
     maybeNotifyEstimator(o.id, prevEstimatorId);
     openOppDetail(o.id);
   } else {
-    var id = g('nop-id-display').dataset.oid;
+    // Preview ID re-derived at save -- see the matching guard in saveProposal().
+    var id = nextSeqId(db.opportunities, 'OPP');
+    var oidEl = g('nop-id-display');
+    if (oidEl) { oidEl.textContent = id; oidEl.dataset.oid = id; }
+    if (db.opportunities.some(function(x){ return String(x.id) === String(id); })) {
+      alert('Could not generate a unique opportunity ID (' + id + ' is already in use).\n\nNothing was saved. Please report this before retrying.');
+      return;
+    }
     db.opportunities.push({
       id: id, project: project, customerId: custId,
       types: getCheckedProjectTypes(), type: getCheckedProjectTypes()[0] || '', bidDate: g('nop-date').value,
@@ -26264,7 +26314,8 @@ function openNewProposal(oppId) {
   var o = getOpp(oppId); if (!o) return;
   _npOppId = oppId; _npIdx = 0; _editProposalId = null;
   var c   = getCust(o.customerId);
-  var pid = 'KMI-' + new Date().getFullYear() + '-' + String(db.proposals.length + 1).padStart(3,'0');
+  // Preview only -- the binding ID is re-derived in saveProposal(). See nextSeqId().
+  var pid = nextSeqId(db.proposals, 'KMI');
   g('np-pid-display').textContent    = pid;
   g('np-pid-display').dataset.pid    = pid;
   g('np-project').value              = o.project || '';
@@ -26779,7 +26830,16 @@ function npSave() {
   }
 
   // CREATE new proposal
-  var pid = g('np-pid-display').dataset.pid;
+  // The ID rendered on the form when the page opened is a preview. Re-derive it
+  // here so two tabs, or two users, that opened the create form against the same
+  // proposal count cannot land on the same number.
+  var pid = nextSeqId(db.proposals, 'KMI');
+  var pidEl = g('np-pid-display');
+  if (pidEl) { pidEl.textContent = pid; pidEl.dataset.pid = pid; }
+  if (db.proposals.some(function(p){ return String(p.id) === String(pid); })) {
+    alert('Could not generate a unique proposal ID (' + pid + ' is already in use).\n\nNothing was saved. Please report this before retrying.');
+    return;
+  }
   db.proposals.push({id:pid, opportunityId:_npOppId, project:project, customerId:o.customerId, value:Math.round(total), status:'draft', created:new Date().toISOString().slice(0,10), type:o.type||'', inc:incs, pc:[], exc:excs, customIncs:customIncs, customExcs:customExcs, costs:costs, alternateCosts:alternateCosts, veCosts:veCosts});
   o.proposalId = pid;
   db.activity.unshift({text: pid + ' proposal created for ' + o.id, type: 'draft', time: 'Just now'});
@@ -45681,14 +45741,30 @@ async function pushToSupabase() {
       if (r.error) errs.push('users: ' + r.error.message);
     }
     // Opportunities
+    // A duplicate ID inside a single upsert batch makes Postgres abort the whole
+    // statement ("ON CONFLICT DO UPDATE command cannot affect row a second
+    // time"), so every record in the table silently stops syncing. Detect it here
+    // and surface a message that names the offending ID instead.
     if (db.opportunities.length) {
-      var r = await supabaseClient.from('kmi_opportunities').upsert(db.opportunities.map(toSBOpp));
-      if (r.error) errs.push('opportunities: ' + r.error.message);
+      var dupOpp = _findDupIds(db.opportunities);
+      if (dupOpp.length) {
+        errs.push('opportunities: duplicate ID(s) ' + dupOpp.join(', ') + ' \u2014 upsert skipped until resolved');
+        console.error('[sync] duplicate opportunity IDs block the upsert:', dupOpp);
+      } else {
+        var r = await supabaseClient.from('kmi_opportunities').upsert(db.opportunities.map(toSBOpp));
+        if (r.error) errs.push('opportunities: ' + r.error.message);
+      }
     }
     // Proposals
     if (db.proposals.length) {
-      var r = await supabaseClient.from('kmi_proposals').upsert(db.proposals.map(toSBProposal));
-      if (r.error) errs.push('proposals: ' + r.error.message);
+      var dupProp = _findDupIds(db.proposals);
+      if (dupProp.length) {
+        errs.push('proposals: duplicate ID(s) ' + dupProp.join(', ') + ' \u2014 upsert skipped until resolved');
+        console.error('[sync] duplicate proposal IDs block the upsert:', dupProp);
+      } else {
+        var r = await supabaseClient.from('kmi_proposals').upsert(db.proposals.map(toSBProposal));
+        if (r.error) errs.push('proposals: ' + r.error.message);
+      }
     }
     // Projects
     if (db.projects.length) {
@@ -46290,6 +46366,24 @@ async function pullFromSupabase() {
         // cands.length > 1 → ambiguous, skip;  0 → nothing to link
       });
       if (_healed) console.log('Reverse-linked ' + _healed + ' opportunity\u2192proposal pair(s) in memory.');
+    })();
+
+    // -- Integrity warning: duplicate IDs and crossed opportunity->proposal links --
+    // Diagnostic only; nothing is mutated or written. Duplicate IDs make
+    // getProp()/getOpp() resolve by first match (wrong record rendered) and abort
+    // the Supabase upsert batch for the whole table. A crossed link means an
+    // opportunity points at a proposal that belongs to a different opportunity.
+    (function _warnIdIntegrity() {
+      var dOpp  = _findDupIds(db.opportunities);
+      var dProp = _findDupIds(db.proposals);
+      if (dOpp.length)  console.error('[integrity] duplicate opportunity ID(s):', dOpp);
+      if (dProp.length) console.error('[integrity] duplicate proposal ID(s):', dProp);
+      var crossed = (db.opportunities || []).filter(function(o) {
+        if (!o.proposalId) return false;
+        var p = (db.proposals || []).find(function(x){ return String(x.id) === String(o.proposalId); });
+        return !!p && !!p.opportunityId && String(p.opportunityId) !== String(o.id);
+      }).map(function(o){ return o.id + ' \u2192 ' + o.proposalId; });
+      if (crossed.length) console.error('[integrity] crossed opportunity\u2192proposal link(s):', crossed);
     })();
 
     // Re-render current page
