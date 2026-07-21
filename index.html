@@ -1177,6 +1177,49 @@ textarea{resize:vertical;min-height:72px}
 .rv-match.err strong{color:#A32D2D}
 .rv-kbd{font-size:10px;color:#aaa;text-align:center;margin-top:8px;line-height:1.7}
 .rv-kbd kbd{background:#f1efe8;border:0.5px solid #ddd;border-radius:3px;padding:1px 4px;font-family:monospace;font-size:10px;color:#666}
+
+/* ═══ DRAWINGS — LEARNED RE-SCAN BANNERS & PROPOSAL DIFF ════════════ */
+.dw-lb{background:linear-gradient(180deg,#FDF8E9,#FAF1D6);border:0.5px solid var(--acd);border-radius:8px;padding:12px 14px;margin-bottom:10px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.dw-lb-ico{width:30px;height:30px;border-radius:50%;background:var(--ac);color:#3a2f00;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;flex-shrink:0}
+.dw-lb-txt{flex:1;min-width:220px;font-size:13px;color:#4a3d10;line-height:1.5}
+.dw-lb-txt strong{color:#3a2f00}
+.dw-lb-txt code{background:rgba(255,255,255,.75);border:0.5px solid #E0D2A6;border-radius:4px;padding:1px 5px;font-family:monospace;font-size:11px}
+.dw-lb.idx{background:linear-gradient(180deg,#F2F6FD,#E9EFFA);border-color:var(--stl)}
+.dw-lb.idx .dw-lb-ico{background:var(--kmi3);color:#fff}
+.dw-lb.idx .dw-lb-txt{color:#2b3357}
+.dw-lb.idx .dw-lb-txt strong{color:var(--kmi)}
+.dw-lb.warn{background:linear-gradient(180deg,#FDF1F1,#FBE7E7);border-color:#E8C8C8}
+.dw-lb.warn .dw-lb-ico{background:#C24B4A;color:#fff}
+.dw-lb.warn .dw-lb-txt{color:#6d2726}
+.dw-lb.warn .dw-lb-txt strong{color:#A32D2D}
+.dw-lb-x{background:none;border:none;color:#9a8a55;cursor:pointer;font-size:18px;line-height:1;padding:2px 6px}
+.dw-lb-x:hover{color:#3a2f00}
+.btn-gold{background:var(--ac);border-color:var(--acd);color:#3a2f00;font-weight:600}
+.btn-gold:hover{background:var(--acl)}
+.dw-df-ov{position:fixed;inset:0;background:rgba(20,22,38,.55);z-index:950;display:none;align-items:center;justify-content:center;padding:28px}
+.dw-df-ov.show{display:flex}
+.dw-df-box{background:#F5F5F3;border-radius:12px;width:100%;max-width:1020px;max-height:100%;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.3)}
+.dw-df-head{padding:16px 20px;background:#fff;border-bottom:0.5px solid #e5e5e5}
+.dw-df-head h2{font-size:17px;font-weight:600;color:#1a1a1a;margin-bottom:3px}
+.dw-df-head .s{font-size:12px;color:#666}
+.dw-df-legend{display:flex;gap:14px;margin-top:9px;font-size:11px;color:#666;flex-wrap:wrap;align-items:center}
+.dw-df-body{flex:1;overflow-y:auto;padding:14px 20px}
+.dw-df-foot{padding:13px 20px;background:#fff;border-top:0.5px solid #e5e5e5;display:flex;align-items:center;gap:10px}
+.dw-df-foot .sp{flex:1;font-size:12px;color:#888}
+.dw-df-sec{font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.8px;margin:16px 0 7px}
+.dw-df-sec:first-child{margin-top:0}
+.dw-was{color:#aaa;text-decoration:line-through;font-family:monospace;font-size:12px}
+.dw-new{color:#1a1a1a;font-weight:700;font-family:monospace;font-size:13px}
+.dw-twas{color:#aaa;text-decoration:line-through;font-size:12px}
+.dw-tnew{color:#1a1a1a;font-size:12px}
+.dw-arw{color:#bbb;margin:0 5px}
+.dw-src{display:inline-block;padding:2px 7px;border-radius:100px;font-size:10px;font-weight:600;white-space:nowrap}
+.dw-src.pos{background:#faf1d6;color:#9A7A2E}
+.dw-src.idx{background:#e6f1fb;color:#185FA5}
+.dw-src.ai{background:#eee9f7;color:#5B3E9B}
+.dw-src.none{background:#f1efe8;color:#5F5E5A}
+tr.dw-unres td{background:#FFFBF0}
+.rv-rail-item.prop{border-color:var(--kmi3);background:#F4F6FC}
 </style>
 </head>
 <body>
@@ -49025,6 +49068,11 @@ async function dwStartUpload(){
     // rail thumbnail from a previous upload would show the wrong sheet.
     _dwRvIdx = 0; _dwRvMode = 'split'; _dwPvCrop = 'tb'; _dwPvZoom = 100;
     _dwUpPdfDoc = null; _dwRailCache = {}; _dwPvRendered = 0; _dwPvFitted = false;
+    // Learning is per-set: a position learned from one GC's title block says
+    // nothing about the next set's.
+    _dwLearned = null; _dwIndexMap = null; _dwIndexPage = null;
+    _dwIndexUsed = false; _dwSetCrop = null; _dwBanners = {}; _dwProposals = [];
+    try { _dwParseDrawingIndex(); } catch(e){ console.warn('index parse:', e); }
     // Open on the first flagged page — that's what needs a human.
     for(var _fi=0; _fi<_dwUpRows.length; _fi++){
       if(_dwRowFlagged(_dwUpRows[_fi])){ _dwRvIdx = _fi; break; }
@@ -49053,6 +49101,11 @@ async function _dwExtractPageText(bytes, onProgress){
     var vp   = page.getViewport({ scale:1.0 });
     var tc   = await page.getTextContent();
     var W = vp.width, H = vp.height;
+    // Retain every run with its geometry, client-side only. This is what
+    // makes the learned-position re-scan possible: a correction can be
+    // located on its own page, and that position read on every other page.
+    // Never sent to the API — only the joined crop text below is.
+    _dwCapturePageText(i, tc.items, W, H);
     var parts = [];
     tc.items.forEach(function(it){
       if(!it.str || !it.str.trim()) return;
@@ -49073,7 +49126,7 @@ async function _dwExtractPageText(bytes, onProgress){
   return out;
 }
 
-async function _dwCallExtractor(pages){
+async function _dwCallExtractor(pages, examples){
   var creds = getSBCreds();
   if((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY){
     creds = { url:DEFAULT_SB_URL, key:DEFAULT_SB_KEY };
@@ -49086,7 +49139,7 @@ async function _dwCallExtractor(pages){
     resp = await fetch(fnUrl, {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'apikey':creds.key, 'Authorization':'Bearer '+creds.key },
-      body: JSON.stringify({ pages: pages })
+      body: JSON.stringify({ pages: pages, examples: examples || [] })
     });
     data = await resp.json();
   }catch(e){
@@ -49121,7 +49174,11 @@ function _dwBuildReviewRows(extracted, areaId){
       revLabel: (x.revision==null?'':String(x.revision).trim()),
       confidence: x.confidence || 'low',
       matchDrawingId: match ? match.id : null,
-      include: true
+      include: true,
+      // Provenance. `edited` makes a page permanently immune to re-scans;
+      // `proposed` marks a value that arrived from one.
+      edited: false,
+      proposed: false
     };
   });
 }
@@ -49184,6 +49241,9 @@ function _dwRenderReview(){
     '<div style="font-size:12px;color:#888;margin:-8px 0 12px">'+
       _dwEsc(setRow.sourceFileName||'')+' \u00b7 '+_dwUpRows.length+' pages \u00b7 '+
       _dwEsc(area?area.name:'')+'</div>'+
+    // Learned-position / drawing-index banners sit above the extraction
+    // summary, since they offer an action rather than report a count.
+    '<div id="dw-rv-banners"></div>'+
     '<div id="dw-rv-banner"></div>'+
     '<div class="rv-wrap" id="dw-rv-split">'+
       '<div class="rv-rail" id="dw-rv-rail"></div>'+
@@ -49233,6 +49293,7 @@ function _dwRenderReview(){
 
   _dwPvAttach();
   _dwRvSyncMode();
+  _dwRvRenderBanners();
   _dwRvRenderBanner();
   _dwRvRenderRail();
   _dwRvRenderFields();
@@ -49352,8 +49413,9 @@ async function _dwPvOpen(refit){
   try{
     var pg   = await _dwUpPdfDoc.getPage(r.page);
     var base = pg.getViewport({ scale:1 });
+    var _crop = _dwActiveCrop();
     _dwPvBase = (_dwPvCrop === 'tb')
-      ? { w: base.width * DW_TB_CROP.w, h: base.height * DW_TB_CROP.h }
+      ? { w: base.width * _crop.w, h: base.height * _crop.h }
       : { w: base.width, h: base.height };
     if(refit) _dwPvZoom = _dwPvFitPct();
     _dwPvRendered = 0;
@@ -49389,8 +49451,9 @@ async function _dwPvRender(){
   if(token !== _dwPvToken) return;
   var base = pg.getViewport({ scale:1 });
 
-  var cropX = (_dwPvCrop==='tb') ? base.width  * DW_TB_CROP.x : 0;
-  var cropY = (_dwPvCrop==='tb') ? base.height * DW_TB_CROP.y : 0;
+  var _crop = _dwActiveCrop();
+  var cropX = (_dwPvCrop==='tb') ? base.width  * _crop.x : 0;
+  var cropY = (_dwPvCrop==='tb') ? base.height * _crop.y : 0;
 
   var vp = pg.getViewport({ scale:want, offsetX:-cropX*want, offsetY:-cropY*want });
   var cw = Math.max(1, Math.round(_dwPvBase.w * want));
@@ -49575,6 +49638,17 @@ function _dwRvRenderMatch(){
 function dwRvEdit(field, value){
   var r = _dwRvRow(); if(!r) return;
   r[field] = value;
+  // A manual edit pins the page: no re-scan will ever overwrite it.
+  r.edited = true;
+  r.proposed = false;
+  if(field === 'number' || field === 'title'){
+    // If the value you typed exists in this page's text layer, we now know
+    // where this set prints that field — measured, not guessed.
+    if(_dwLearnFromEdit(r, field, value)){
+      _dwBanners.learn = false;
+      _dwRvRenderBanners();
+    }
+  }
   if(field === 'number'){
     var setRow = (db.drawingSets||[]).find(function(s){ return String(s.id)===String(_dwUpSetId); });
     var areaId = setRow ? setRow.areaId : _dwAreaId;
@@ -49705,6 +49779,7 @@ async function dwCancelReview(){
   _dwUpSetId=null; _dwUpRows=[]; _dwUpPdfBytes=null;
   if(_dwUpPdfDoc){ try{ _dwUpPdfDoc.destroy(); }catch(e){} _dwUpPdfDoc=null; }
   _dwRailCache={}; _dwPvToken++;
+  _dwPageText={}; _dwLearned=null; _dwIndexMap=null; _dwSetCrop=null; _dwProposals=[];
   _dwView='log';
   _dwRenderLog();
 }
@@ -49866,6 +49941,7 @@ async function dwCommitReview(){
     _dwUpSetId=null; _dwUpRows=[]; _dwUpPdfBytes=null;
     if(_dwUpPdfDoc){ try{ _dwUpPdfDoc.destroy(); }catch(e){} _dwUpPdfDoc=null; }
     _dwRailCache={}; _dwPvToken++;
+    _dwPageText={}; _dwLearned=null; _dwIndexMap=null; _dwSetCrop=null; _dwProposals=[];
     _dwView='log';
     _dwRenderLog();
     showToast('Committed '+rows.length+' sheet'+(rows.length===1?'':'s')+' to '+
@@ -49877,6 +49953,540 @@ async function dwCommitReview(){
   }finally{
     _dwUpBusy = false;
     var b3 = g('dw-commit'); if(b3){ b3.disabled=false; b3.textContent='\u2713 Commit'; }
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// LEARNED RE-SCAN — positional probe, drawing index, AI fallback
+// ═══════════════════════════════════════════════════════════════════════
+// The first extraction pass reads every page independently, so a title block
+// that sits outside the assumed crop makes every page come back low
+// confidence. But a drawing set is internally consistent: the same title
+// block sits in the same place on every sheet.
+//
+// So when you correct a sheet number, we look for that exact string in the
+// page's own text layer. Finding it tells us where THIS set prints its sheet
+// numbers — not a guess, the measured position. Every other page can then be
+// read at the same spot. One correction, sixty fixes, no API call.
+//
+// Everything here is proposal-only. Nothing is written to a row without
+// explicit confirmation in the diff, and a page you have edited is never
+// touched.
+
+// Per-page text with geometry, kept in memory only — never persisted, never
+// sent to the API. Page number -> { W, H, items:[{s,x,y,w,h,cx,cy}] } with
+// all coordinates normalised 0..1 and y measured from the TOP of the page.
+var _dwPageText   = {};
+var _dwLearned    = null;   // { page, num:{cx,cy}, ttl:{cx,cy}|null }
+var _dwIndexMap   = null;   // { 'A-101': 'First Floor Plan', ... }
+var _dwIndexPage  = null;   // page the index was parsed from
+var _dwIndexUsed  = false;
+var _dwSetCrop    = null;   // retargeted preview crop for this set
+var _dwBanners    = {};     // dismissed banner keys
+var _dwProposals  = [];
+var _dwPropBusy   = false;
+
+// Probe tolerance, as a fraction of page size. Title blocks repeat to within
+// a hair across a set; loose tolerance starts picking up neighbouring fields.
+var DW_PROBE_DX = 0.055;
+var DW_PROBE_DY = 0.022;
+
+function _dwActiveCrop(){ return _dwSetCrop || DW_TB_CROP; }
+function _dwNormTxt(s){ return String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
+
+// Does this look like a sheet number rather than a date, scale or drawer's
+// initials? Deliberately permissive on the suffix (A-101A, S2.1, M-401.02)
+// but it must start with letters and contain digits.
+function _dwLooksLikeSheetNo(s){
+  var t = String(s||'').trim().toUpperCase();
+  if(t.length < 2 || t.length > 14) return false;
+  if(!/\d/.test(t)) return false;
+  return /^[A-Z]{1,3}[\s\-.]?\d{1,4}(\.\d{1,2})?[A-Z]?$/.test(t);
+}
+
+// ── capture ────────────────────────────────────────────────────────────
+// Called by _dwExtractPageText for every page. Stores all text with
+// geometry so the probe and the index parser have something to work with.
+function _dwCapturePageText(pageNo, items, W, H){
+  var out = [];
+  for(var i=0; i<items.length && out.length < 3000; i++){
+    var it = items[i];
+    if(!it.str || !it.str.trim()) continue;
+    var tr = it.transform || [];
+    var x = tr[4], y = tr[5];
+    if(x == null || y == null) continue;
+    var w = it.width  || 0;
+    var h = it.height || 10;
+    // pdf.js origin is bottom-left; flip to top-origin so "12% from the
+    // bottom" reads as y≈0.88 and stays intuitive everywhere downstream.
+    var nx = x / W, ny = (H - y - h) / H, nw = w / W, nh = h / H;
+    out.push({ s: it.str.trim().slice(0,80), x:nx, y:ny, w:nw, h:nh,
+               cx: nx + nw/2, cy: ny + nh/2 });
+  }
+  _dwPageText[pageNo] = { W:W, H:H, items:out };
+}
+
+// ── learning ───────────────────────────────────────────────────────────
+// Locate a value in a page's text layer. Exact normalised match first, then
+// a containment match for numbers split across text runs.
+function _dwFindTextPos(pageNo, value){
+  var pt = _dwPageText[pageNo];
+  var want = _dwNormTxt(value);
+  if(!pt || !want) return null;
+
+  for(var i=0;i<pt.items.length;i++){
+    if(_dwNormTxt(pt.items[i].s) === want) return pt.items[i];
+  }
+  // Split across runs: find a run that starts the value, then absorb
+  // neighbours on the same line until the value is complete.
+  for(var j=0;j<pt.items.length;j++){
+    var a = pt.items[j];
+    var acc = _dwNormTxt(a.s);
+    if(!acc || want.indexOf(acc) !== 0) continue;
+    var minX = a.x, maxX = a.x + a.w, k = j + 1;
+    while(k < pt.items.length && acc.length < want.length){
+      var b = pt.items[k];
+      if(Math.abs(b.cy - a.cy) > 0.008) { k++; continue; }
+      acc += _dwNormTxt(b.s);
+      maxX = Math.max(maxX, b.x + b.w);
+      k++;
+    }
+    if(acc === want){
+      return { s:value, x:minX, y:a.y, w:maxX-minX, h:a.h,
+               cx:(minX+maxX)/2, cy:a.cy };
+    }
+  }
+  return null;
+}
+
+// Called after a manual edit. Returns true if something new was learned.
+function _dwLearnFromEdit(row, field, value){
+  if(!value || !_dwPageText[row.page]) return false;
+  var hit = _dwFindTextPos(row.page, value);
+  if(!hit) return false;
+
+  if(!_dwLearned) _dwLearned = { page:row.page, num:null, ttl:null };
+  if(field === 'number' && !_dwLearned.num){
+    _dwLearned.num = { cx:hit.cx, cy:hit.cy };
+    _dwLearned.page = row.page;
+    _dwRetargetCrop(hit);
+    return true;
+  }
+  if(field === 'title' && !_dwLearned.ttl){
+    _dwLearned.ttl = { cx:hit.cx, cy:hit.cy };
+    return true;
+  }
+  return false;
+}
+
+// Point the preview crop at the title block we just measured, instead of the
+// hardcoded guess. Generous margins — the number usually sits at the foot of
+// the block, with the title and project above and to the left of it.
+function _dwRetargetCrop(hit){
+  var x0 = Math.max(0, Math.min(hit.cx - 0.32, 0.90));
+  var y0 = Math.max(0, Math.min(hit.cy - 0.42, 0.90));
+  var x1 = Math.min(1, Math.max(hit.cx + 0.12, x0 + 0.18));
+  var y1 = Math.min(1, Math.max(hit.cy + 0.10, y0 + 0.18));
+  _dwSetCrop = { x:x0, y:y0, w:x1-x0, h:y1-y0 };
+}
+
+// Read whatever sits at a learned position on another page. Multiple runs in
+// the box get joined left-to-right, which is how a split number reassembles.
+function _dwProbeAt(pageNo, pos){
+  var pt = _dwPageText[pageNo];
+  if(!pt || !pos) return '';
+  var near = pt.items.filter(function(it){
+    return Math.abs(it.cx - pos.cx) <= DW_PROBE_DX &&
+           Math.abs(it.cy - pos.cy) <= DW_PROBE_DY;
+  });
+  if(!near.length) return '';
+  near.sort(function(a,b){ return a.x - b.x; });
+  return near.map(function(it){ return it.s; }).join(' ').replace(/\s{2,}/g,' ').trim();
+}
+
+// ── drawing index ──────────────────────────────────────────────────────
+// Most GC sets open with a sheet index: a column of sheet numbers with
+// titles to their right. It's authoritative — it's what the architect
+// published — and it's the only thing that can tell us a sheet is missing.
+function _dwParseDrawingIndex(){
+  var best = null;
+  Object.keys(_dwPageText).forEach(function(pno){
+    var pt = _dwPageText[pno];
+    if(!pt || pt.items.length < 10) return;
+    var map = {}, pairs = 0;
+    pt.items.forEach(function(it){
+      if(!_dwLooksLikeSheetNo(it.s)) return;
+      // Title = nearest run to the right on the same baseline.
+      var cands = pt.items.filter(function(o){
+        return o !== it && Math.abs(o.cy - it.cy) <= 0.006 &&
+               o.x > it.x + it.w*0.5 && (o.x - (it.x+it.w)) < 0.30 &&
+               o.s.length > 3 && !_dwLooksLikeSheetNo(o.s);
+      }).sort(function(a,b){ return a.x - b.x; });
+      if(!cands.length) return;
+      var num = it.s.trim().toUpperCase().replace(/\s+/g,'');
+      if(map[num]) return;
+      map[num] = cands[0].s.trim().replace(/\s{2,}/g,' ');
+      pairs++;
+    });
+    // A real index lists most of the set. A random plan sheet with a few
+    // detail callouts will not clear this bar.
+    if(pairs >= 5 && (!best || pairs > best.pairs)){
+      best = { page:Number(pno), map:map, pairs:pairs };
+    }
+  });
+  if(!best) return false;
+  _dwIndexMap = best.map;
+  _dwIndexPage = best.page;
+  return true;
+}
+
+// ── proposals ──────────────────────────────────────────────────────────
+function _dwIndexLookup(num){
+  if(!_dwIndexMap || !num) return null;
+  var want = _dwNormTxt(num);
+  var k = Object.keys(_dwIndexMap).find(function(n){ return _dwNormTxt(n) === want; });
+  return k ? _dwIndexMap[k] : null;
+}
+
+// Build the change set from the learned position. Untouched pages only.
+function _dwBuildRescanProposals(){
+  var out = [];
+  if(!_dwLearned || !_dwLearned.num) return out;
+
+  _dwUpRows.forEach(function(r, i){
+    if(r.edited) return;
+    var pt = _dwPageText[r.page];
+    if(!pt || !pt.items.length){
+      // No text layer at all — a scanned insert. The probe has nothing to
+      // read, so this is honestly unresolvable here rather than guessable.
+      if(!r.number){
+        out.push({ i:i, page:r.page, src:'none', noText:true, on:false, unresolved:true,
+                   num:{ was:r.number, now:r.number }, ttl:{ was:r.title, now:r.title } });
+      }
+      return;
+    }
+    var probedNum = _dwProbeAt(r.page, _dwLearned.num);
+    var cleanNum  = probedNum.replace(/\s+/g,'');
+    var probedTtl = _dwLearned.ttl ? _dwProbeAt(r.page, _dwLearned.ttl) : '';
+    var idxTtl    = _dwIndexLookup(cleanNum);
+    var newTtl    = idxTtl || probedTtl || r.title;
+
+    var numOk = _dwLooksLikeSheetNo(cleanNum);
+    var numChanged = numOk && _dwNormTxt(cleanNum) !== _dwNormTxt(r.number);
+    var ttlChanged = newTtl && newTtl !== r.title;
+
+    if(!numOk && !r.number){
+      out.push({ i:i, page:r.page, src:'pos', on:false, unresolved:true,
+                 reason: probedNum ? 'Read "'+probedNum+'" — not a sheet number' : 'Nothing at the learned position',
+                 num:{ was:r.number, now:r.number }, ttl:{ was:r.title, now:r.title } });
+      return;
+    }
+    if(numChanged || ttlChanged){
+      out.push({ i:i, page:r.page, src:(idxTtl && !numChanged) ? 'idx' : 'pos', on:true,
+                 num:{ was:r.number, now: numOk ? cleanNum : r.number },
+                 ttl:{ was:r.title,  now: newTtl } });
+    }
+  });
+  return out;
+}
+
+// Titles only, straight from the published index, keyed off the number each
+// row already carries.
+function _dwBuildIndexProposals(){
+  var out = [];
+  _dwUpRows.forEach(function(r, i){
+    if(r.edited || !r.number) return;
+    var t = _dwIndexLookup(r.number);
+    if(t && t !== r.title){
+      out.push({ i:i, page:r.page, src:'idx', on:true,
+                 num:{ was:r.number, now:r.number }, ttl:{ was:r.title, now:t } });
+    }
+  });
+  return out;
+}
+
+function _dwMissingFromIndex(){
+  if(!_dwIndexMap) return [];
+  var have = {};
+  _dwUpRows.forEach(function(r){ if(r.number) have[_dwNormTxt(r.number)] = true; });
+  return Object.keys(_dwIndexMap).filter(function(n){ return !have[_dwNormTxt(n)]; }).sort();
+}
+
+// ── banners ────────────────────────────────────────────────────────────
+function _dwRvRenderBanners(){
+  var el = g('dw-rv-banners'); if(!el) return;
+  var out = '';
+
+  if(_dwIndexMap && !_dwIndexUsed && !_dwBanners.idx){
+    var n = Object.keys(_dwIndexMap).length;
+    out += '<div class="dw-lb idx"><div class="dw-lb-ico">&#9636;</div>'+
+      '<div class="dw-lb-txt"><strong>Page '+_dwIndexPage+' looks like a drawing index</strong> listing '+n+
+      ' sheets. It can fill titles and flag sheets missing from this upload.</div>'+
+      '<button class="btn btn-sm btn-p" onclick="dwUseIndex()">Use index</button>'+
+      '<button class="dw-lb-x" onclick="dwDismissBanner(\'idx\')">&#215;</button></div>';
+  }
+
+  if(_dwIndexUsed && !_dwBanners.missing){
+    var miss = _dwMissingFromIndex();
+    if(miss.length){
+      out += '<div class="dw-lb warn"><div class="dw-lb-ico">!</div>'+
+        '<div class="dw-lb-txt"><strong>'+miss.length+' sheet'+(miss.length===1?'':'s')+
+        ' in the index '+(miss.length===1?'is':'are')+' not in this upload:</strong> '+
+        miss.slice(0,12).map(function(x){ return '<code>'+_dwEsc(x)+'</code>'; }).join(' ')+
+        (miss.length>12 ? ' <span style="opacity:.7">+'+(miss.length-12)+' more</span>' : '')+
+        '. Either the PDF is short, or those sheets were not reissued.</div>'+
+        '<button class="dw-lb-x" onclick="dwDismissBanner(\'missing\')">&#215;</button></div>';
+    }
+  }
+
+  if(_dwLearned && _dwLearned.num && !_dwBanners.learn){
+    var pend = _dwUpRows.filter(function(r){ return !r.edited; }).length;
+    var pos = 'x '+Math.round(_dwLearned.num.cx*100)+'%, y '+Math.round(_dwLearned.num.cy*100)+'%';
+    out += '<div class="dw-lb"><div class="dw-lb-ico">&#10003;</div>'+
+      '<div class="dw-lb-txt"><strong>Learned where this set prints its sheet number</strong> \u2014 '+
+      'from your correction on page '+_dwLearned.page+', at <code>'+pos+'</code>. '+
+      (pend ? 'The same position can be read on '+pend+' page'+(pend===1?'':'s')+' you have not edited.'
+            : 'No unedited pages left to re-scan.')+'</div>'+
+      (pend ? '<button class="btn btn-sm btn-gold" onclick="dwRescan()">Re-scan '+pend+' page'+(pend===1?'':'s')+'</button>' : '')+
+      '<button class="dw-lb-x" onclick="dwDismissBanner(\'learn\')">&#215;</button></div>';
+  }
+
+  el.innerHTML = out;
+}
+function dwDismissBanner(k){ _dwBanners[k] = true; _dwRvRenderBanners(); }
+
+function dwUseIndex(){
+  _dwProposals = _dwBuildIndexProposals();
+  _dwIndexUsed = true;
+  if(!_dwProposals.length){
+    showToast('Index read — every title already matches.','success');
+    _dwRvRenderBanners();
+    return;
+  }
+  _dwPropOpen('Titles from the drawing index',
+    'Read off the cover sheet. The index is what the architect published, so it outranks title-block OCR.');
+}
+
+function dwRescan(){
+  _dwProposals = _dwBuildRescanProposals();
+  if(!_dwProposals.length){
+    showToast('Re-scan found nothing to change.','success');
+    return;
+  }
+  _dwPropOpen('Proposed changes from the learned position',
+    'Nothing is applied until you confirm. Pages you have already edited are never touched.');
+}
+
+// ── proposal review modal ──────────────────────────────────────────────
+function _dwPropOpen(title, sub){
+  var ov = document.getElementById('dw-prop-ov');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'dw-prop-ov';
+    ov.className = 'dw-df-ov';
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML =
+    '<div class="dw-df-box">'+
+      '<div class="dw-df-head">'+
+        '<h2>'+_dwEsc(title)+'</h2><div class="s">'+_dwEsc(sub)+'</div>'+
+        '<div class="dw-df-legend">'+
+          '<span><span class="dw-src pos">Title-block position</span> learned from your correction</span>'+
+          '<span><span class="dw-src idx">Drawing index</span> read off the cover sheet</span>'+
+          '<span><span class="dw-src ai">Claude re-read</span> with your corrections as examples</span>'+
+        '</div>'+
+      '</div>'+
+      '<div class="dw-df-body" id="dw-df-body"></div>'+
+      '<div class="dw-df-foot">'+
+        '<button class="btn btn-sm" onclick="dwPropAll(true)">Select all</button>'+
+        '<button class="btn btn-sm" onclick="dwPropAll(false)">Select none</button>'+
+        '<span class="sp" id="dw-df-count"></span>'+
+        '<button class="btn" onclick="dwPropClose()">Cancel</button>'+
+        '<button class="btn btn-p" id="dw-df-apply" onclick="dwPropApply()">Apply</button>'+
+      '</div>'+
+    '</div>';
+  ov.classList.add('show');
+  _dwPropRender();
+}
+
+function dwPropClose(){
+  var ov = document.getElementById('dw-prop-ov');
+  if(ov) ov.classList.remove('show');
+  _dwProposals = [];
+}
+
+function _dwPropRender(){
+  var body = g('dw-df-body'); if(!body) return;
+  var conf  = _dwProposals.filter(function(p){ return !p.unresolved; });
+  var unres = _dwProposals.filter(function(p){ return p.unresolved; });
+  var head = '<thead><tr><th style="width:44px">Pg</th><th style="width:190px">Sheet no.</th>'+
+    '<th>Title</th><th style="width:150px">Source</th><th style="width:52px">Apply</th></tr></thead>';
+  var html = '';
+
+  if(conf.length){
+    html += '<div class="dw-df-sec">Confident \u2014 '+conf.length+' page'+(conf.length===1?'':'s')+'</div>'+
+      '<div class="card" style="padding:0;overflow:hidden"><table>'+head+'<tbody>'+
+      conf.map(_dwPropRowHtml).join('')+'</tbody></table></div>';
+  }
+  if(unres.length){
+    html += '<div class="dw-df-sec">Needs your eyes \u2014 '+unres.length+' page'+(unres.length===1?'':'s')+'</div>'+
+      '<div class="card" style="padding:0;overflow:hidden"><table>'+head+'<tbody>'+
+      unres.map(_dwPropRowHtml).join('')+'</tbody></table></div>'+
+      '<div style="font-size:12px;color:#8a7a45;margin-top:8px;line-height:1.5">'+
+      'The learned position could not be read on these pages. Unticked by default \u2014 '+
+      'open the page and check the preview before applying anything here.'+
+      (unres.some(function(p){ return p.noText; })
+        ? ' Pages marked <em>no text layer</em> are scanned images; they can only be typed in by hand.' : '')+
+      '</div>'+
+      (unres.some(function(p){ return !p.noText; })
+        ? '<div style="margin-top:10px"><button class="btn btn-sm" id="dw-ai-btn" onclick="dwAiRerun()">'+
+          'Ask Claude to re-read these pages</button>'+
+          '<span style="font-size:11px;color:#888;margin-left:9px">Sends their title-block text '+
+          'with your corrections as worked examples.</span></div>'
+        : '');
+  }
+  body.innerHTML = html;
+  _dwPropCount();
+}
+
+function _dwPropRowHtml(p){
+  var k = _dwProposals.indexOf(p);
+  var src = p.src==='pos' ? '<span class="dw-src pos">Title-block position</span>'
+          : p.src==='idx' ? '<span class="dw-src idx">Drawing index</span>'
+          : p.src==='ai'  ? '<span class="dw-src ai">Claude re-read</span>'
+                          : '<span class="dw-src none">'+(p.noText?'No text layer':'Unresolved')+'</span>';
+  var numCell = (_dwNormTxt(p.num.was) === _dwNormTxt(p.num.now))
+    ? '<span style="font-family:monospace;font-size:12px;color:#888">'+_dwEsc(p.num.now||'\u2014')+'</span>'
+    : (p.num.was ? '<span class="dw-was">'+_dwEsc(p.num.was)+'</span><span class="dw-arw">&rarr;</span>' : '')+
+      '<span class="dw-new">'+_dwEsc(p.num.now)+'</span>';
+  var ttlCell = (p.ttl.was === p.ttl.now)
+    ? '<span style="font-size:12px;color:#888">'+_dwEsc(p.ttl.now||'\u2014')+'</span>'
+    : (p.ttl.was ? '<span class="dw-twas">'+_dwEsc(p.ttl.was)+'</span><span class="dw-arw">&rarr;</span>' : '')+
+      '<span class="dw-tnew">'+_dwEsc(p.ttl.now||'\u2014')+'</span>';
+  var note = p.reason ? '<div style="font-size:10px;color:#a08a45;margin-top:2px">'+_dwEsc(p.reason)+'</div>' : '';
+  return '<tr'+(p.unresolved?' class="dw-unres"':'')+'>'+
+    '<td style="color:#888;cursor:pointer;text-decoration:underline" onclick="dwPropPeek('+p.i+')">'+p.page+'</td>'+
+    '<td>'+numCell+note+'</td><td>'+ttlCell+'</td><td>'+src+'</td>'+
+    '<td style="text-align:center"><input type="checkbox"'+(p.on?' checked':'')+
+      (p.noText?' disabled':'')+' onchange="dwPropToggle('+k+',this.checked)" '+
+      'style="width:16px;height:16px;accent-color:var(--kmi)"></td></tr>';
+}
+
+function dwPropToggle(k, v){ if(_dwProposals[k]) _dwProposals[k].on = v; _dwPropCount(); }
+function dwPropAll(v){
+  _dwProposals.forEach(function(p){ if(!p.noText) p.on = v; });
+  _dwPropRender();
+}
+function _dwPropCount(){
+  var n = _dwProposals.filter(function(p){ return p.on; }).length;
+  var c = g('dw-df-count'), a = g('dw-df-apply');
+  if(c) c.textContent = n+' of '+_dwProposals.length+' selected';
+  if(a){ a.textContent = 'Apply '+n+' change'+(n===1?'':'s'); a.disabled = !n; }
+}
+function dwPropPeek(i){ dwPropClose(); dwRvSetMode('split'); dwRvGo(i); }
+
+// ── AI fallback ────────────────────────────────────────────────────────
+// For pages the probe couldn't read but that DO have text, ask Claude again
+// — this time with the corrections already made on this set as worked
+// examples. Generic prompting failed on these once already; showing the
+// model what this GC's title block actually looks like is what changes.
+// Pages with no text layer are skipped: there is nothing to send.
+async function dwAiRerun(){
+  if(_dwPropBusy) return;
+  var targets = _dwProposals.filter(function(p){ return p.unresolved && !p.noText; });
+  if(!targets.length) return;
+
+  // Worked examples: pages you corrected, paired with their raw text.
+  var examples = _dwUpRows.filter(function(r){ return r.edited && r.number; })
+    .slice(0, 4)
+    .map(function(r){
+      var pt = _dwPageText[r.page];
+      return {
+        text: pt ? pt.items.map(function(i){ return i.s; }).join(' | ').slice(0,900) : '',
+        sheet_number: r.number, title: r.title || '', discipline: r.discipline || ''
+      };
+    })
+    .filter(function(e){ return e.text; });
+
+  var pages = targets.map(function(p){
+    var pt = _dwPageText[p.page];
+    return { page: p.page, width: pt?Math.round(pt.W):0, height: pt?Math.round(pt.H):0,
+             text: pt ? pt.items.map(function(i){ return i.s; }).join(' | ').slice(0,1600) : '' };
+  });
+
+  _dwPropBusy = true;
+  var btn = g('dw-ai-btn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Claude is re-reading ' + pages.length + ' page' + (pages.length===1?'':'s') + '\u2026'; }
+
+  try{
+    var out = await _dwCallExtractor(pages, examples);
+    var byPage = {};
+    (out||[]).forEach(function(s){ byPage[Number(s.page)] = s; });
+
+    var improved = 0;
+    targets.forEach(function(p){
+      var s = byPage[p.page];
+      if(!s || !s.sheet_number) return;
+      var num = String(s.sheet_number).trim();
+      if(!_dwLooksLikeSheetNo(num.replace(/\s+/g,''))) return;
+      p.src = 'ai';
+      p.unresolved = true;          // stays in the review-carefully section
+      p.reason = 'Claude re-read with ' + examples.length + ' example' + (examples.length===1?'':'s');
+      p.num.now = num.replace(/\s+/g,'');
+      p.ttl.now = _dwIndexLookup(p.num.now) || String(s.title||'').trim() || p.ttl.was;
+      p.on = false;                 // still unticked: this remains a guess
+      improved++;
+    });
+
+    _dwPropRender();
+    showToast(improved ? ('Claude proposed a number for '+improved+' page'+(improved===1?'':'s')+' \u2014 check each against the preview.')
+                       : 'Claude could not read these pages either. They need manual entry.',
+              improved ? 'success' : 'info');
+  }catch(e){
+    showToast('Re-read failed: '+((e&&e.message)?e.message:String(e)),'error');
+    var b = g('dw-ai-btn');
+    if(b){ b.disabled = false; b.textContent = 'Ask Claude to re-read these pages'; }
+  } finally {
+    _dwPropBusy = false;
+  }
+}
+
+function dwPropApply(){
+  if(_dwPropBusy) return;
+  _dwPropBusy = true;
+  try{
+    var setRow = (db.drawingSets||[]).find(function(s){ return String(s.id)===String(_dwUpSetId); });
+    var areaId = setRow ? setRow.areaId : _dwAreaId;
+    var byNo = {};
+    _dwSheets(areaId).forEach(function(d){ byNo[_dwNormNo(d.number)] = d; });
+
+    var n = 0;
+    _dwProposals.filter(function(p){ return p.on; }).forEach(function(p){
+      var r = _dwUpRows[p.i];
+      if(!r || r.edited) return;              // never clobber a manual edit
+      r.number = p.num.now;
+      r.title  = p.ttl.now;
+      // Confidence is raised on evidence, not decorated. A positional probe
+      // reading real text, or the published index, beats the original blind
+      // pass. An AI re-read is still a guess and stays medium.
+      r.confidence = (p.src === 'ai') ? 'medium' : 'high';
+      r.proposed = true;
+      // Re-resolve the revision match — a corrected number may now stack.
+      var m = r.number ? byNo[_dwNormNo(r.number)] : null;
+      r.matchDrawingId = m ? m.id : null;
+      if(!r.discipline || r.discipline === 'Other'){
+        var guess = DW_DISC_BY_LETTER[(String(r.number)[0]||'').toUpperCase()];
+        if(guess) r.discipline = guess;
+      }
+      n++;
+    });
+    dwPropClose();
+    _dwRvRenderRail(); _dwRvRenderFields(); _dwRvRenderBanners();
+    _dwRvRenderBanner(); _dwRvRenderTable();
+    showToast('Applied to '+n+' page'+(n===1?'':'s')+'.','success');
+  } finally {
+    _dwPropBusy = false;
   }
 }
 
