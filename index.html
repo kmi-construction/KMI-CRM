@@ -39276,11 +39276,22 @@ async function _apBackfillCredits(){
     }
   });
   saveDB();
+  // Chunked: each record carries its extracted_json, so a single body for a
+  // few hundred invoices gets large. 100 at a time keeps every request modest
+  // and stops one oversized payload from failing the whole backfill.
+  // If a chunk does fail, those rows keep is_credit NULL in the cloud and the
+  // next pull simply rules on them again — the backfill is self-healing.
   if(supabaseClient){
-    try{
-      var r = await supabaseClient.from('kmi_ap_invoices').upsert(pending.map(toSBApInvoice));
-      if(r && r.error) console.warn('credit backfill push:', r.error.message);
-    }catch(e){ console.warn('credit backfill exception:', e); }
+    var okCount=0, failCount=0;
+    for(var s=0; s<pending.length; s+=100){
+      var chunk = pending.slice(s, s+100);
+      try{
+        var r = await supabaseClient.from('kmi_ap_invoices').upsert(chunk.map(toSBApInvoice));
+        if(r && r.error){ failCount+=chunk.length; console.warn('credit backfill chunk '+(s/100+1)+':', r.error.message); }
+        else okCount+=chunk.length;
+      }catch(e){ failCount+=chunk.length; console.warn('credit backfill chunk '+(s/100+1)+' exception:', e); }
+    }
+    console.log('[ap] credit backfill: '+okCount+' record(s) written'+(failCount?(', '+failCount+' failed — will retry on next pull'):''));
   }
   if(flipped.length) console.log('[ap] credit backfill: '+flipped.length+' invoice(s) re-signed as credits');
   if(stranded.length){
@@ -46348,6 +46359,11 @@ async function pushToSupabase() {
 async function pullFromSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
   setSyncStatus('syncing', 'Loading\u2026');
+  // Hold the sync lock for the whole pull. saveDB() is patched to schedule a
+  // debounced pushToSupabase(), and any saveDB that happens while the pull is
+  // still walking tables would fire that push 1.5s later — reading db.* arrays
+  // the pull is concurrently replacing. Cleared in the finally below.
+  _syncing = true;
   try {
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
@@ -46835,6 +46851,8 @@ async function pullFromSupabase() {
   } catch(e) {
     setSyncStatus('error', 'Load failed');
     showSBResult('Error: ' + e.message, false);
+  } finally {
+    _syncing = false;
   }
 }
 
