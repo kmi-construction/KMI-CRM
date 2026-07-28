@@ -16,6 +16,8 @@
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <!-- SortableJS — drag-and-drop for the Equipment board (tiles between job columns). -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.2/Sortable.min.js"></script>
+<!-- Konva — canvas engine for the drawings viewer/markup layer (Session 2+). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/konva/9.3.6/konva.min.js" onerror="window.__dwvKonvaFailed=true"></script>
 <!-- QRCode.js — generates printable scan-to-move labels for equipment units. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>if(window['pdfjsLib']){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}</script>
@@ -1220,6 +1222,67 @@ textarea{resize:vertical;min-height:72px}
 .dw-src.none{background:#f1efe8;color:#5F5E5A}
 tr.dw-unres td{background:#FFFBF0}
 .rv-rail-item.prop{border-color:var(--kmi3);background:#F4F6FC}
+
+/* ═══ DRAWINGS VIEWER — SESSION 2 (full-bleed overlay) ══════════════ */
+.dwv{position:fixed;inset:0;background:#2b2b30;z-index:900;display:flex;flex-direction:column}
+.dwv-top{height:48px;background:var(--kmi);display:flex;align-items:center;padding:0 10px;gap:10px;flex-shrink:0;color:#fff}
+.dwv-back{background:none;border:none;color:var(--stl);cursor:pointer;font-size:13px;font-family:inherit;padding:7px 9px;border-radius:6px}
+.dwv-back:hover{background:var(--kmi2);color:#fff}
+.dwv-id{display:flex;align-items:baseline;gap:9px;min-width:0}
+.dwv-num{font-family:monospace;font-size:15px;font-weight:700;letter-spacing:.5px}
+.dwv-title{font-size:12px;color:var(--stl);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+.dwv-sel{background:var(--kmi2);border:0.5px solid var(--kmi3);color:#fff;padding:5px 9px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer}
+.dwv-spacer{flex:1}
+.dwv-tbtn{background:none;border:0.5px solid transparent;color:var(--stl);cursor:pointer;font-size:12px;font-family:inherit;padding:6px 11px;border-radius:6px}
+.dwv-tbtn:hover{background:var(--kmi2);color:#fff}
+.dwv-tbtn.on{background:rgba(200,168,75,.16);color:var(--acl);border-color:var(--acd)}
+.dwv-body{flex:1;display:flex;min-height:0}
+.dwv-rail{width:150px;background:#22222a;flex-shrink:0;overflow-y:auto;border-right:1px solid #3a3a44}
+.dwv-rail-hdr{font-size:9px;text-transform:uppercase;letter-spacing:1.2px;color:#8B93B8;padding:12px 12px 6px;font-weight:600}
+.dwv-rail-item{padding:7px 10px;cursor:pointer;border-left:2px solid transparent;display:flex;gap:9px;align-items:center}
+.dwv-rail-item:hover{background:#2c2c36}
+.dwv-rail-item.active{background:rgba(200,168,75,.10);border-left-color:var(--ac)}
+.dwv-rail-thumb{width:34px;height:26px;background:#fff;border-radius:2px;flex-shrink:0;overflow:hidden}
+.dwv-rail-thumb svg{width:100%;height:100%;display:block}
+.dwv-rail-num{font-family:monospace;font-size:11px;color:#e5e5e5;font-weight:700}
+.dwv-rail-item.active .dwv-rail-num{color:var(--acl)}
+.dwv-rail-ttl{font-size:9px;color:#8B93B8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dwv-rail-badge{margin-left:auto;font-size:9px;background:#3a3a44;color:#c9c9d2;border-radius:100px;padding:1px 6px}
+.dwv-tools{width:44px;background:#22222a;flex-shrink:0;border-right:1px solid #3a3a44;padding:8px 0;display:flex;flex-direction:column;gap:2px;align-items:center;overflow-y:auto}
+.dwv-tool{width:32px;height:32px;border:0.5px solid transparent;background:none;color:#c9c9d2;cursor:pointer;border-radius:7px;font-size:14px;display:flex;align-items:center;justify-content:center}
+.dwv-tool:hover:not(.disabled){background:#33333e;color:#fff}
+.dwv-tool.on{background:rgba(200,168,75,.16);color:var(--acl);border-color:var(--acd)}
+.dwv-tool.disabled{opacity:.28;cursor:not-allowed}
+.dwv-tool-div{width:22px;height:1px;background:#3a3a44;margin:4px 0}
+.dwv-tool-soon{font-size:7px;color:#8B93B8;writing-mode:vertical-rl;letter-spacing:1px;margin-top:4px;text-transform:uppercase;opacity:.7}
+.dwv-stage-wrap{flex:1;position:relative;overflow:hidden;background:#2b2b30}
+#dwv-stage{position:absolute;inset:0}
+.dwv-stage-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#8B93B8;font-size:13px;z-index:3;text-align:center;padding:20px}
+.dwv-hud{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);background:rgba(34,34,42,.95);border:0.5px solid #3a3a44;border-radius:8px;display:flex;align-items:center;gap:2px;padding:4px;z-index:5}
+.dwv-hud button{background:none;border:none;color:#c9c9d2;cursor:pointer;font-size:13px;font-family:inherit;padding:5px 10px;border-radius:5px}
+.dwv-hud button:hover{background:#33333e;color:#fff}
+.dwv-hud .z{font-size:11px;color:#8B93B8;padding:0 8px;min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+.dwv-hud .sep{width:1px;height:16px;background:#3a3a44;margin:0 4px}
+.dwv-cmp{position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(34,34,42,.96);border:0.5px solid var(--acd);border-radius:8px;padding:8px 12px;z-index:6;display:none;align-items:center;gap:12px;color:#e5e5e5;font-size:12px}
+.dwv-cmp.show{display:flex}
+.dwv-cmp label{color:#8B93B8;font-size:11px}
+.dwv-cmp input[type=range]{width:120px;accent-color:var(--ac)}
+.dwv-cmp select{background:#33333e;border:0.5px solid #4a4a55;color:#fff;border-radius:5px;padding:3px 7px;font-size:11px;font-family:inherit}
+.dwv-seg{display:inline-flex;border:0.5px solid #4a4a55;border-radius:6px;overflow:hidden}
+.dwv-seg button{background:#2b2b30;border:none;color:#c9c9d2;padding:4px 9px;font-size:11px;cursor:pointer;font-family:inherit}
+.dwv-seg button.on{background:var(--ac);color:#3a2f00;font-weight:600}
+.dwv-cmp-x{background:none;border:none;color:#8B93B8;cursor:pointer;font-size:15px;padding:0 2px}
+.dwv-cmp-x:hover{color:#fff}
+.dwv-panel{width:250px;background:#22222a;flex-shrink:0;border-left:1px solid #3a3a44;overflow-y:auto;display:none;flex-direction:column}
+.dwv-panel.show{display:flex}
+.dwv-psec{padding:12px 14px;border-bottom:1px solid #3a3a44}
+.dwv-plbl{font-size:9px;text-transform:uppercase;letter-spacing:1.2px;color:#8B93B8;font-weight:600;margin-bottom:8px}
+.dwv-soon{font-size:9px;background:#33333e;color:#8B93B8;border-radius:100px;padding:1px 7px;margin-left:6px;letter-spacing:0;text-transform:none}
+.dwv-prow{display:flex;justify-content:space-between;font-size:12px;color:#e5e5e5;padding:4px 0}
+.dwv-prow .k{color:#8B93B8}
+.dwv-layer{display:flex;align-items:center;gap:9px;padding:7px 0;font-size:12px;color:#e5e5e5;cursor:pointer}
+.dwv-layer input{width:14px;height:14px;accent-color:var(--ac)}
+.dwv-layer .cnt{margin-left:auto;font-size:10px;color:#8B93B8}
 </style>
 </head>
 <body>
@@ -48888,16 +48951,8 @@ function dwSetLayout(v){ _dwLayout=v; _dwRenderLog(); }
 
 // Session 1: open the single-page PDF in a new tab. Session 2 replaces this
 // with the pdf.js + Konva viewer.
-async function dwOpenSheet(revId){
-  var v = (db.drawingRevisions||[]).find(function(x){ return String(x.id)===String(revId); });
-  if(!v || !v.filePath){ showToast('This revision has no file attached.','error'); return; }
-  if(!supabaseClient){ showToast('Not connected to Supabase.','error'); return; }
-  try{
-    var r = await supabaseClient.storage.from(DRAWINGS_BUCKET).createSignedUrl(v.filePath, 600);
-    if(r && r.error) throw new Error(r.error.message);
-    window.open(r.data.signedUrl, '_blank');
-  }catch(e){ showToast('Could not open sheet: '+(e&&e.message?e.message:String(e)),'error'); }
-}
+// dwOpenSheet now lives in the DRAWINGS VIEWER module (Session 2), which
+// replaces the old new-tab behaviour with the full-bleed Konva viewer.
 
 // ─── AREA CRUD ─────────────────────────────────────────────────────────
 function dwOpenArea(areaId){
@@ -50489,6 +50544,594 @@ function dwPropApply(){
     _dwPropBusy = false;
   }
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// DRAWINGS VIEWER — SESSION 2 (full-bleed overlay)
+// ═══════════════════════════════════════════════════════════════════════
+// Replaces the Session 1 "open the PDF in a new tab" behaviour with an
+// in-app viewer: pdf.js renders the sheet onto a Konva stage, a markup layer
+// sits above it in PDF-point space, and revisions can be overlaid to compare.
+//
+// The markup layer is READ-ONLY in this session. The drawing tools arrive in
+// Session 3 — but the whole coordinate + persistence pipeline is laid here
+// (shapes stored in PDF points, loaded from kmi_drawing_markups, rendered
+// through the stage transform), so Session 3 is purely additive.
+//
+// Coordinate model (decision 1-A): every shape stores its geometry in the
+// page's own PDF-point space. The stage is scaled/positioned to map that
+// space onto the screen, so one transform pins the page image AND every
+// markup together at any zoom. No per-shape rescaling, and it's the space
+// the Session 4 measurement math will want.
+
+var _dwvOpen      = false;
+var _dwvStage     = null;   // Konva.Stage
+var _dwvPageLayer = null;   // pdf.js raster as Konva.Image
+var _dwvCmpLayer  = null;   // comparison revision raster (compare mode)
+var _dwvMkLayer   = null;   // markup shapes, read-only in S2
+var _dwvZoom      = 1;
+var _dwvMinZoom   = 0.02;
+var _dwvPage      = { w:0, h:0 };   // current sheet size in PDF points
+var _dwvDrawingId = null;
+var _dwvRevId     = null;
+var _dwvAreaId    = null;
+var _dwvPdfDoc    = null;   // pdf.js doc for the current revision
+var _dwvCmpPdfDoc = null;   // pdf.js doc for the comparison revision
+var _dwvRenderTok = 0;      // cancels stale async page renders
+var _dwvReadyTok  = 0;      // cancels a pending open if the viewer is closed
+var _dwvRailList  = [];     // sheets in the current area, rail order
+var _dwvLayerVis  = { mine:true, pub:true };
+var _dwvCompare   = false;
+var _dwvCmpMode   = 'opacity';   // 'opacity' | 'swipe'
+var _dwvCmpRevId  = null;
+var _dwvCmpVal    = 50;
+var _dwvPanning   = false;
+var _dwvRerenderTimer = null;
+
+// Konva loads from a CDN <script>; it may not have arrived when the viewer is
+// first opened. Gate stage creation on it rather than assuming — a slow CDN
+// then degrades to a message instead of a thrown ReferenceError. Mirrors the
+// pattern proven in the viewer mockup.
+function _dwvKonvaReady(cb, tries){
+  tries = tries || 0;
+  if(typeof Konva !== 'undefined'){ cb(true); return; }
+  if(window.__dwvKonvaFailed || tries > 100){ cb(false); return; }
+  setTimeout(function(){ _dwvKonvaReady(cb, tries+1); }, 50);
+}
+
+// ── open / close ───────────────────────────────────────────────────────
+// Entry point, called from the log tiles/rows in place of the old new-tab
+// dwOpenSheet. revId identifies the revision; we resolve its sheet so the
+// rail and revision picker have context.
+async function dwOpenSheet(revId){
+  var v = (db.drawingRevisions||[]).find(function(x){ return String(x.id)===String(revId); });
+  if(!v){ showToast('Revision not found.','error'); return; }
+  if(!v.filePath){ showToast('This revision has no file attached.','error'); return; }
+  if(!supabaseClient){ showToast('Not connected to Supabase.','error'); return; }
+  if(!window.pdfjsLib){ showToast('PDF engine not loaded yet — try again in a moment.','error'); return; }
+
+  _dwvDrawingId = v.drawingId;
+  _dwvRevId     = v.id;
+  var d = (db.drawings||[]).find(function(x){ return String(x.id)===String(v.drawingId); });
+  _dwvAreaId = d ? d.areaId : _dwAreaId;
+
+  _dwvBuildShell();
+  var myTok = ++_dwvReadyTok;
+  _dwvKonvaReady(function(ok){
+    if(myTok !== _dwvReadyTok) return;         // viewer was closed during the wait
+    if(!ok){
+      var st = g('dwv-stage-msg');
+      if(st) st.textContent = 'Could not load the drawing engine. Check your connection and reopen.';
+      return;
+    }
+    _dwvInitStage();
+    _dwvLoadRevision(_dwvRevId, true);
+  });
+}
+
+function dwvClose(){
+  _dwvReadyTok++;                                // abort any pending open
+  _dwvOpen = false;
+  _dwvCompare = false;
+  if(_dwvStage){ try{ _dwvStage.destroy(); }catch(e){} _dwvStage=null; }
+  if(_dwvPdfDoc){ try{ _dwvPdfDoc.destroy(); }catch(e){} _dwvPdfDoc=null; }
+  if(_dwvCmpPdfDoc){ try{ _dwvCmpPdfDoc.destroy(); }catch(e){} _dwvCmpPdfDoc=null; }
+  _dwvPageLayer=_dwvCmpLayer=_dwvMkLayer=null;
+  var ov = g('dwv-overlay');
+  if(ov) ov.remove();
+  document.body.style.overflow = '';
+}
+
+// ── shell ──────────────────────────────────────────────────────────────
+function _dwvBuildShell(){
+  var d = (db.drawings||[]).find(function(x){ return String(x.id)===String(_dwvDrawingId); });
+  var v = (db.drawingRevisions||[]).find(function(x){ return String(x.id)===String(_dwvRevId); });
+  var revs = _dwRevs(_dwvDrawingId);
+
+  var ov = g('dwv-overlay');
+  if(!ov){ ov = document.createElement('div'); ov.id='dwv-overlay'; document.body.appendChild(ov); }
+  ov.className = 'dwv';
+  _dwvOpen = true;
+  document.body.style.overflow = 'hidden';
+
+  var revOpts = revs.map(function(r){
+    return '<option value="'+_dwEsc(r.id)+'"'+(String(r.id)===String(_dwvRevId)?' selected':'')+'>'+
+      'Rev '+_dwEsc(r.revLabel||r.revSeq||'0')+(r.isCurrent?' (current)':'')+
+      (r.issuedDate?' \u00b7 '+_dwFmtDate(r.issuedDate):'')+'</option>';
+  }).join('');
+
+  ov.innerHTML =
+    '<div class="dwv-top">'+
+      '<button class="dwv-back" onclick="dwvClose()">&larr; Drawing log</button>'+
+      '<div class="dwv-id"><span class="dwv-num">'+_dwEsc(d?d.number:'')+'</span>'+
+        '<span class="dwv-title">'+_dwEsc(d?d.title:'')+'</span></div>'+
+      '<select class="dwv-sel" id="dwv-rev" onchange="dwvSwitchRev(this.value)">'+revOpts+'</select>'+
+      (revs.length>1 ? '<button class="dwv-tbtn" id="dwv-cmp-btn" onclick="dwvToggleCompare()">&rlarr; Compare</button>' : '')+
+      '<div class="dwv-spacer"></div>'+
+      '<button class="dwv-tbtn" onclick="dwvFit()">&#10530; Fit</button>'+
+      '<button class="dwv-tbtn" id="dwv-info-btn" onclick="dwvTogglePanel()">&#9432; Info</button>'+
+    '</div>'+
+    '<div class="dwv-body">'+
+      '<div class="dwv-rail" id="dwv-rail"></div>'+
+      '<div class="dwv-tools">'+
+        '<button class="dwv-tool on" title="Pan">&#10021;</button>'+
+        '<div class="dwv-tool-div"></div>'+
+        '<button class="dwv-tool disabled" title="Markup tools arrive in Session 3">&#9998;</button>'+
+        '<button class="dwv-tool disabled" title="Session 3">&#9729;</button>'+
+        '<button class="dwv-tool disabled" title="Session 3">T</button>'+
+        '<button class="dwv-tool disabled" title="Session 3">&#8599;</button>'+
+        '<div class="dwv-tool-div"></div>'+
+        '<button class="dwv-tool disabled" title="Measure — Session 4">&#10231;</button>'+
+        '<div class="dwv-tool-soon">S3&ndash;4</div>'+
+      '</div>'+
+      '<div class="dwv-stage-wrap" id="dwv-wrap">'+
+        '<div class="dwv-stage-msg" id="dwv-stage-msg">Loading sheet\u2026</div>'+
+        '<div id="dwv-stage"></div>'+
+        '<div class="dwv-cmp" id="dwv-cmp">'+
+          '<span style="color:var(--acl);font-weight:600">Compare</span>'+
+          '<select id="dwv-cmp-rev" onchange="dwvCmpRev(this.value)"></select>'+
+          '<div class="dwv-seg">'+
+            '<button id="dwv-cmp-op" class="on" onclick="dwvCmpMode(\'opacity\')">Fade</button>'+
+            '<button id="dwv-cmp-sw" onclick="dwvCmpMode(\'swipe\')">Swipe</button>'+
+          '</div>'+
+          '<label id="dwv-cmp-lbl">Opacity</label>'+
+          '<input type="range" id="dwv-cmp-slider" min="0" max="100" value="50" oninput="dwvCmpSlide(this.value)">'+
+          '<button class="dwv-cmp-x" onclick="dwvToggleCompare()">&times;</button>'+
+        '</div>'+
+        '<div class="dwv-hud">'+
+          '<button onclick="dwvZoomStep(-1)">&minus;</button>'+
+          '<span class="z" id="dwv-z">&mdash;</span>'+
+          '<button onclick="dwvZoomStep(1)">+</button>'+
+          '<span class="sep"></span>'+
+          '<button onclick="dwvFit()">Fit</button>'+
+          '<button onclick="dwvSetZoom(1)">100%</button>'+
+        '</div>'+
+      '</div>'+
+      '<div class="dwv-panel" id="dwv-panel"></div>'+
+    '</div>';
+
+  _dwvRenderRail();
+  _dwvRenderPanel();
+}
+
+// ── stage ──────────────────────────────────────────────────────────────
+function _dwvInitStage(){
+  var wrap = g('dwv-wrap'); if(!wrap) return;
+  _dwvStage = new Konva.Stage({ container:'dwv-stage', width:wrap.clientWidth, height:wrap.clientHeight, draggable:true });
+  _dwvPageLayer = new Konva.Layer();
+  _dwvCmpLayer  = new Konva.Layer({ listening:false });
+  _dwvMkLayer   = new Konva.Layer({ listening:false });
+  _dwvStage.add(_dwvPageLayer);
+  _dwvStage.add(_dwvCmpLayer);
+  _dwvStage.add(_dwvMkLayer);
+  _dwvCmpLayer.visible(false);
+
+  // Cursor-anchored wheel zoom: whatever's under the pointer stays there.
+  _dwvStage.on('wheel', function(e){
+    e.evt.preventDefault();
+    if(!_dwvStage) return;
+    var old = _dwvZoom;
+    var ptr = _dwvStage.getPointerPosition(); if(!ptr) return;
+    var m = { x:(ptr.x - _dwvStage.x())/old, y:(ptr.y - _dwvStage.y())/old };
+    _dwvZoom = Math.max(_dwvMinZoom, Math.min(12, old * Math.exp(-e.evt.deltaY * 0.0015)));
+    _dwvStage.scale({ x:_dwvZoom, y:_dwvZoom });
+    _dwvStage.position({ x:ptr.x - m.x*_dwvZoom, y:ptr.y - m.y*_dwvZoom });
+    _dwvSyncCmpClip();
+    _dwvZoomLabel();
+    _dwvScheduleRerender();
+  });
+  _dwvStage.on('dragstart', function(){ _dwvPanning=true; });
+  _dwvStage.on('dragend', function(){ _dwvPanning=false; _dwvSyncCmpClip(); _dwvScheduleRerender(); });
+}
+
+// Render a revision's page into the page layer, load its markups, fit.
+async function _dwvLoadRevision(revId, refit){
+  var v = (db.drawingRevisions||[]).find(function(x){ return String(x.id)===String(revId); });
+  if(!v || !_dwvStage) return;
+  var msg = g('dwv-stage-msg'); if(msg){ msg.style.display='flex'; msg.textContent='Loading sheet\u2026'; }
+
+  try{
+    if(_dwvPdfDoc){ try{ _dwvPdfDoc.destroy(); }catch(e){} _dwvPdfDoc=null; }
+    var url = await _dwvSignedUrl(v.filePath);
+    var tok = ++_dwvRenderTok;
+    _dwvPdfDoc = await pdfjsLib.getDocument({ url:url }).promise;
+    if(tok !== _dwvRenderTok) return;
+    var pg = await _dwvPdfDoc.getPage(1);
+    var base = pg.getViewport({ scale:1 });
+    _dwvPage = { w: v.pageWidthPt || base.width, h: v.pageHeightPt || base.height };
+
+    _dwvPageLayer.destroyChildren();
+    if(refit) _dwvFit(true);
+    await _dwvRenderPageRaster(pg, _dwvPageLayer, tok);
+    if(tok !== _dwvRenderTok) return;
+
+    _dwvDrawMarkups();
+    if(msg) msg.style.display='none';
+    _dwvZoomLabel();
+  }catch(e){
+    if(msg){ msg.style.display='flex'; msg.textContent='Could not load this sheet: '+(e&&e.message?e.message:String(e)); }
+  }
+}
+
+// pdf.js renders to a 2D canvas at the current zoom tier; that canvas becomes
+// a Konva.Image sized to the page's PDF-point box. Re-rendered on zoom settle
+// (decision 3-A) so the raster stays crisp without per-frame cost.
+async function _dwvRenderPageRaster(pg, layer, tok){
+  var dpr = window.devicePixelRatio || 1;
+  // Render resolution tracks zoom, capped so a 42x30 sheet at deep zoom
+  // doesn't allocate an enormous canvas.
+  var renderScale = Math.max(0.5, Math.min(4, _dwvZoom * dpr));
+  var vp = pg.getViewport({ scale: renderScale });
+  var canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(vp.width));
+  canvas.height = Math.max(1, Math.round(vp.height));
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  await pg.render({ canvasContext:ctx, viewport:vp }).promise;
+  if(tok !== _dwvRenderTok) return;
+
+  // One image node spanning the page box in PDF points. The stage transform
+  // maps PDF points -> screen, so markups in the same space line up exactly.
+  var existing = layer.findOne('.page-img');
+  var img = new Konva.Image({
+    image: canvas, x:0, y:0, width:_dwvPage.w, height:_dwvPage.h, name:'page-img', listening:false
+  });
+  if(existing) existing.destroy();
+  layer.add(img);
+  img.moveToBottom();
+  layer.batchDraw();
+}
+
+// Re-rasterize the current page at the settled zoom, so text stays sharp when
+// you stop zooming. Debounced; cancels via the render token.
+function _dwvScheduleRerender(){
+  if(_dwvRerenderTimer) clearTimeout(_dwvRerenderTimer);
+  _dwvRerenderTimer = setTimeout(async function(){
+    if(!_dwvPdfDoc || !_dwvStage) return;
+    try{
+      var pg = await _dwvPdfDoc.getPage(1);
+      var tok = _dwvRenderTok;   // piggyback current token; a newer load bumps it
+      await _dwvRenderPageRaster(pg, _dwvPageLayer, tok);
+      if(_dwvCompare && _dwvCmpPdfDoc){
+        var cpg = await _dwvCmpPdfDoc.getPage(1);
+        await _dwvRenderPageRaster(cpg, _dwvCmpLayer, tok);
+        _dwvApplyCmp();
+      }
+    }catch(e){ /* transient; next settle re-renders */ }
+  }, 200);
+}
+
+// ── markups (read-only in S2) ──────────────────────────────────────────
+// Shapes are stored in PDF-point space, so they mount straight onto the
+// markup layer with no coordinate conversion — the stage transform does it.
+function _dwvVisibleMarkups(){
+  var uid = _dwUid();
+  return (db.drawingMarkups||[]).filter(function(m){
+    if(String(m.revisionId) !== String(_dwvRevId)) return false;
+    var mine = String(m.userId) === String(uid);
+    if(m.layer === 'private'){ return mine && _dwvLayerVis.mine; }
+    // published layers are visible to everyone; toggle groups them under "all"
+    return _dwvLayerVis.pub || (mine && _dwvLayerVis.mine);
+  });
+}
+
+function _dwvDrawMarkups(){
+  if(!_dwvMkLayer) return;
+  _dwvMkLayer.destroyChildren();
+  _dwvVisibleMarkups().forEach(function(m){
+    (m.shapes||[]).forEach(function(s){
+      var node = _dwvShapeToNode(s);
+      if(node){ node.listening(false); _dwvMkLayer.add(node); }
+    });
+  });
+  _dwvMkLayer.batchDraw();
+}
+
+// Translate a stored shape record into a Konva node. Shape schema is
+// deliberately simple and forward-compatible: { type, ... } in PDF points.
+// Session 3 writes these; Session 2 only reads them.
+function _dwvShapeToNode(s){
+  if(!s || !s.type) return null;
+  var stroke = s.stroke || '#E24B4A';
+  var sw = s.strokeWidth || 3;
+  try{
+    switch(s.type){
+      case 'rect':
+        return new Konva.Rect({ x:s.x, y:s.y, width:s.w, height:s.h, stroke:stroke, strokeWidth:sw, dash:s.dash||null, cornerRadius:s.cornerRadius||0 });
+      case 'ellipse':
+        return new Konva.Ellipse({ x:s.x, y:s.y, radiusX:s.rx, radiusY:s.ry, stroke:stroke, strokeWidth:sw });
+      case 'line':
+      case 'polyline':
+        return new Konva.Line({ points:s.points||[], stroke:stroke, strokeWidth:sw, lineCap:'round', lineJoin:'round', dash:s.dash||null });
+      case 'arrow':
+        return new Konva.Arrow({ points:s.points||[], stroke:stroke, fill:stroke, strokeWidth:sw, pointerLength:s.pointerLength||14, pointerWidth:s.pointerWidth||14 });
+      case 'cloud':
+        // Session 3 will render a true revision cloud; a dashed rounded rect
+        // is a faithful stand-in that lives in the same coordinate space.
+        return new Konva.Rect({ x:s.x, y:s.y, width:s.w, height:s.h, stroke:stroke, strokeWidth:sw||4, dash:[26,14], cornerRadius:30 });
+      case 'text':
+        return new Konva.Text({ x:s.x, y:s.y, text:s.text||'', fontSize:s.fontSize||42, fontStyle:s.fontStyle||'700', fill:stroke, width:s.width||undefined });
+      case 'highlight':
+        return new Konva.Rect({ x:s.x, y:s.y, width:s.w, height:s.h, fill:stroke, opacity:s.opacity!=null?s.opacity:0.3 });
+      default:
+        return null;
+    }
+  }catch(e){ return null; }
+}
+
+// ── zoom / fit ─────────────────────────────────────────────────────────
+function _dwvFit(silent){
+  if(!_dwvStage || !_dwvPage.w || !_dwvPage.h) return;
+  var pad = 48;
+  var aw = _dwvStage.width()-pad*2, ah = _dwvStage.height()-pad*2;
+  if(aw<=0||ah<=0) return;
+  _dwvZoom = Math.min(aw/_dwvPage.w, ah/_dwvPage.h);
+  _dwvMinZoom = _dwvZoom*0.4;
+  _dwvStage.scale({ x:_dwvZoom, y:_dwvZoom });
+  _dwvStage.position({ x:(_dwvStage.width()-_dwvPage.w*_dwvZoom)/2, y:(_dwvStage.height()-_dwvPage.h*_dwvZoom)/2 });
+  _dwvSyncCmpClip(); _dwvZoomLabel();
+  if(!silent) _dwvScheduleRerender();
+}
+function dwvFit(){ _dwvFit(false); }
+
+function dwvSetZoom(z){
+  if(!_dwvStage) return;
+  var c = { x:_dwvStage.width()/2, y:_dwvStage.height()/2 };
+  var old = _dwvZoom;
+  var pt = { x:(c.x-_dwvStage.x())/old, y:(c.y-_dwvStage.y())/old };
+  _dwvZoom = Math.max(_dwvMinZoom, Math.min(12, z));
+  _dwvStage.scale({ x:_dwvZoom, y:_dwvZoom });
+  _dwvStage.position({ x:c.x-pt.x*_dwvZoom, y:c.y-pt.y*_dwvZoom });
+  _dwvSyncCmpClip(); _dwvZoomLabel(); _dwvScheduleRerender();
+}
+function dwvZoomStep(d){ dwvSetZoom(_dwvZoom * (d>0 ? 1.25 : 0.8)); }
+function _dwvZoomLabel(){ var el=g('dwv-z'); if(el) el.textContent = Math.round(_dwvZoom*100)+'%'; }
+
+// ── revision switch ────────────────────────────────────────────────────
+function dwvSwitchRev(revId){
+  _dwvRevId = revId;
+  if(_dwvCompare) dwvToggleCompare();   // leaving the base revision; drop compare
+  _dwvLoadRevision(revId, true);
+  _dwvRenderPanel();
+  _dwvRenderRail();
+}
+
+// ── revision compare (overlay) ─────────────────────────────────────────
+function dwvToggleCompare(){
+  if(!_dwvStage) return;
+  _dwvCompare = !_dwvCompare;
+  var bar = g('dwv-cmp'), btn = g('dwv-cmp-btn');
+  if(bar) bar.classList.toggle('show', _dwvCompare);
+  if(btn) btn.classList.toggle('on', _dwvCompare);
+  _dwvCmpLayer.visible(_dwvCompare);
+
+  if(_dwvCompare){
+    // Default comparison = the revision immediately beneath the current one.
+    var revs = _dwRevs(_dwvDrawingId).filter(function(r){ return String(r.id)!==String(_dwvRevId); });
+    var sel = g('dwv-cmp-rev');
+    if(sel){
+      sel.innerHTML = revs.map(function(r){
+        return '<option value="'+_dwEsc(r.id)+'">vs Rev '+_dwEsc(r.revLabel||r.revSeq||'0')+
+          (r.issuedDate?' \u00b7 '+_dwFmtDate(r.issuedDate):'')+'</option>';
+      }).join('');
+    }
+    _dwvCmpRevId = revs.length ? revs[0].id : null;
+    _dwvLoadCompare();
+  }else{
+    if(_dwvCmpPdfDoc){ try{ _dwvCmpPdfDoc.destroy(); }catch(e){} _dwvCmpPdfDoc=null; }
+    _dwvCmpLayer.destroyChildren();
+    _dwvCmpLayer.batchDraw();
+  }
+}
+function dwvCmpRev(revId){ _dwvCmpRevId = revId; _dwvLoadCompare(); }
+
+async function _dwvLoadCompare(){
+  if(!_dwvCmpRevId || !_dwvStage) return;
+  var v = (db.drawingRevisions||[]).find(function(x){ return String(x.id)===String(_dwvCmpRevId); });
+  if(!v || !v.filePath) return;
+  try{
+    if(_dwvCmpPdfDoc){ try{ _dwvCmpPdfDoc.destroy(); }catch(e){} _dwvCmpPdfDoc=null; }
+    var url = await _dwvSignedUrl(v.filePath);
+    _dwvCmpPdfDoc = await pdfjsLib.getDocument({ url:url }).promise;
+    var pg = await _dwvCmpPdfDoc.getPage(1);
+    _dwvCmpLayer.destroyChildren();
+    await _dwvRenderPageRaster(pg, _dwvCmpLayer, _dwvRenderTok);
+    _dwvApplyCmp();
+  }catch(e){ showToast('Could not load comparison revision.','error'); }
+}
+
+function dwvCmpMode(m){
+  _dwvCmpMode = m;
+  var a=g('dwv-cmp-op'), b=g('dwv-cmp-sw'), lbl=g('dwv-cmp-lbl');
+  if(a) a.classList.toggle('on', m==='opacity');
+  if(b) b.classList.toggle('on', m==='swipe');
+  if(lbl) lbl.textContent = m==='opacity' ? 'Opacity' : 'Divider';
+  _dwvApplyCmp();
+}
+function dwvCmpSlide(v){ _dwvCmpVal = +v; _dwvApplyCmp(); }
+
+// Fade = whole comparison layer opacity. Swipe = clip the comparison layer to
+// the left of a divider at val% across the page (slider-only, per decision).
+function _dwvApplyCmp(){
+  if(!_dwvCompare || !_dwvCmpLayer) return;
+  var grp = _dwvCmpLayer.findOne('.page-img');
+  if(!grp){ _dwvCmpLayer.batchDraw(); return; }
+  if(_dwvCmpMode === 'opacity'){
+    grp.clipFunc(null);
+    _dwvCmpLayer.opacity(_dwvCmpVal/100);
+  }else{
+    _dwvCmpLayer.opacity(1);
+    _dwvSyncCmpClip();
+  }
+  _dwvCmpLayer.batchDraw();
+}
+function _dwvSyncCmpClip(){
+  if(!_dwvCompare || _dwvCmpMode!=='swipe' || !_dwvCmpLayer) return;
+  var img = _dwvCmpLayer.findOne('.page-img');
+  if(!img) return;
+  var cutX = _dwvPage.w * (_dwvCmpVal/100);
+  // Clip the comparison layer to the left of the divider. The clip rect is in
+  // the layer's own (PDF-point) coordinate space, so it tracks the page under
+  // zoom/pan with no recomputation — the stage transform handles the mapping.
+  _dwvCmpLayer.clip({ x:0, y:0, width:cutX, height:_dwvPage.h });
+  _dwvCmpLayer.batchDraw();
+}
+
+// ── sheet rail ─────────────────────────────────────────────────────────
+function _dwvRenderRail(){
+  var el = g('dwv-rail'); if(!el) return;
+  _dwvRailList = _dwSheets(_dwvAreaId).slice().sort(function(a,b){
+    return String(a.number||'').localeCompare(String(b.number||''), undefined, {numeric:true});
+  });
+  var area = (db.drawingAreas||[]).find(function(a){ return String(a.id)===String(_dwvAreaId); });
+  el.innerHTML =
+    '<div class="dwv-rail-hdr">'+_dwEsc(area?area.name:'Sheets')+' \u00b7 '+_dwvRailList.length+'</div>'+
+    _dwvRailList.map(function(d){
+      var cur = _dwvCurrentRevOf(d);
+      var active = String(d.id)===String(_dwvDrawingId);
+      var mk = cur ? _dwMarkupCount(cur.id) : 0;
+      return '<div class="dwv-rail-item'+(active?' active':'')+'" onclick="dwvGoSheet(\''+_dwEsc(d.id)+'\')">'+
+        '<div class="dwv-rail-thumb">'+_dwvRailThumb(d)+'</div>'+
+        '<div style="min-width:0"><div class="dwv-rail-num">'+_dwEsc(d.number||'\u2014')+'</div>'+
+        '<div class="dwv-rail-ttl">'+_dwEsc(d.title||'')+'</div></div>'+
+        (mk?'<span class="dwv-rail-badge">'+mk+'</span>':'')+'</div>';
+    }).join('');
+  var act = el.querySelector('.dwv-rail-item.active');
+  if(act) act.scrollIntoView({ block:'nearest' });
+}
+function _dwvCurrentRevOf(d){ return _dwCurrentRev(d); }
+function _dwvRailThumb(d){
+  // Lightweight placeholder glyph; real thumbnails are the Session 1 thumbPath
+  // and can be wired later. Kept vector so the rail stays instant.
+  return '<svg viewBox="0 0 60 46"><rect width="60" height="46" fill="#fff"/>'+
+    '<g stroke="#1E2448" stroke-width="1" fill="none" opacity=".5"><rect x="5" y="4" width="42" height="34"/></g>'+
+    '<rect x="49" y="4" width="7" height="34" fill="#fafafa" stroke="#C4C9DF" stroke-width=".5"/></svg>';
+}
+function dwvGoSheet(drawingId){
+  var d = (db.drawings||[]).find(function(x){ return String(x.id)===String(drawingId); });
+  if(!d) return;
+  var cur = _dwCurrentRev(d);
+  if(!cur){ showToast('That sheet has no revision on file.','error'); return; }
+  if(_dwvCompare) dwvToggleCompare();
+  _dwvDrawingId = d.id;
+  _dwvRevId = cur.id;
+  // Refresh the header id + revision picker for the new sheet.
+  _dwvBuildShell();
+  if(_dwvStage){ _dwvLoadRevision(_dwvRevId, true); }
+  else { _dwvKonvaReady(function(ok){ if(ok){ _dwvInitStage(); _dwvLoadRevision(_dwvRevId, true); } }); }
+}
+
+// ── info panel ─────────────────────────────────────────────────────────
+function dwvTogglePanel(){
+  var p = g('dwv-panel'); if(!p) return;
+  p.classList.toggle('show');
+  var btn = g('dwv-info-btn');
+  if(btn) btn.classList.toggle('on', p.classList.contains('show'));
+  // Panel steals width from the stage; resize and refit.
+  if(_dwvStage){
+    setTimeout(function(){
+      if(!_dwvStage) return;
+      var w = g('dwv-wrap');
+      _dwvStage.width(w.clientWidth); _dwvStage.height(w.clientHeight);
+      _dwvFit(false);
+    }, 0);
+  }
+}
+function _dwvRenderPanel(){
+  var p = g('dwv-panel'); if(!p) return;
+  var d = (db.drawings||[]).find(function(x){ return String(x.id)===String(_dwvDrawingId); });
+  var v = (db.drawingRevisions||[]).find(function(x){ return String(x.id)===String(_dwvRevId); });
+  var set = v ? (db.drawingSets||[]).find(function(s){ return String(s.id)===String(v.setId); }) : null;
+  var uid = _dwUid();
+  var mine = (db.drawingMarkups||[]).filter(function(m){
+    return String(m.revisionId)===String(_dwvRevId) && String(m.userId)===String(uid);
+  });
+  var pub = (db.drawingMarkups||[]).filter(function(m){
+    return String(m.revisionId)===String(_dwvRevId) && m.layer!=='private';
+  });
+  var mineCnt = mine.reduce(function(n,m){ return n+((m.shapes||[]).length); },0);
+  var pubCnt  = pub.reduce(function(n,m){ return n+((m.shapes||[]).length); },0);
+
+  p.innerHTML =
+    '<div class="dwv-psec"><div class="dwv-plbl">Sheet</div>'+
+      _dwvRow('Number', d?d.number:'\u2014')+
+      _dwvRow('Discipline', d?(d.discipline||'\u2014'):'\u2014')+
+      _dwvRow('Revision', v?('Rev '+(v.revLabel||v.revSeq||'0')):'\u2014')+
+      _dwvRow('Set', set?set.name:'\u2014')+
+      _dwvRow('Issued', v&&v.issuedDate?_dwFmtDate(v.issuedDate):'\u2014')+
+      _dwvRow('Sheet size', _dwvPageSizeLabel())+
+    '</div>'+
+    '<div class="dwv-psec"><div class="dwv-plbl">Layers <span class="dwv-soon">edit in S3</span></div>'+
+      '<label class="dwv-layer"><input type="checkbox"'+(_dwvLayerVis.mine?' checked':'')+
+        ' onchange="dwvToggleLayer(\'mine\',this.checked)"><span>My markups</span><span class="cnt">'+mineCnt+'</span></label>'+
+      '<label class="dwv-layer"><input type="checkbox"'+(_dwvLayerVis.pub?' checked':'')+
+        ' onchange="dwvToggleLayer(\'pub\',this.checked)"><span>Published</span><span class="cnt">'+pubCnt+'</span></label>'+
+    '</div>'+
+    '<div class="dwv-psec" style="flex:1"><div class="dwv-plbl">Markups</div>'+
+      (mineCnt+pubCnt ? '<div style="font-size:12px;color:#c9c9d2;line-height:1.6">'+
+        pubCnt+' published, '+mineCnt+' private on this revision.</div>'
+        : '<div style="font-size:12px;color:#8B93B8">No markups on this revision yet.</div>')+
+      '<div style="font-size:11px;color:#8B93B8;margin-top:12px;line-height:1.5">'+
+        'Read-only in this version. Drawing, measuring and publishing arrive in the next sessions.</div>'+
+    '</div>';
+}
+function _dwvRow(k,v){ return '<div class="dwv-prow"><span class="k">'+_dwEsc(k)+'</span><span>'+_dwEsc(v)+'</span></div>'; }
+function _dwvPageSizeLabel(){
+  if(!_dwvPage.w) return '\u2014';
+  var win = Math.round(_dwvPage.w/72), hin = Math.round(_dwvPage.h/72);
+  return win+'\u2033 \u00d7 '+hin+'\u2033';
+}
+function dwvToggleLayer(k,v){ _dwvLayerVis[k]=v; _dwvDrawMarkups(); }
+
+// ── shared helpers ─────────────────────────────────────────────────────
+async function _dwvSignedUrl(path){
+  var r = await supabaseClient.storage.from(DRAWINGS_BUCKET).createSignedUrl(path, 600);
+  if(r && r.error) throw new Error(r.error.message);
+  return r.data.signedUrl;
+}
+
+// keyboard + resize, bound once and gated on the viewer being open
+document.addEventListener('keydown', function(e){
+  if(!_dwvOpen) return;
+  var t = (e.target && e.target.tagName) || '';
+  if(t==='INPUT'||t==='SELECT'||t==='TEXTAREA') return;
+  if(e.key==='Escape'){ if(_dwvCompare) dwvToggleCompare(); else dwvClose(); }
+  else if(e.key==='ArrowDown'){ e.preventDefault(); _dwvStepSheet(1); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); _dwvStepSheet(-1); }
+  else if(e.key==='f'||e.key==='F'){ dwvFit(); }
+});
+function _dwvStepSheet(d){
+  if(!_dwvRailList.length) return;
+  var i = _dwvRailList.findIndex(function(x){ return String(x.id)===String(_dwvDrawingId); });
+  var j = Math.max(0, Math.min(_dwvRailList.length-1, (i<0?0:i)+d));
+  if(_dwvRailList[j]) dwvGoSheet(_dwvRailList[j].id);
+}
+window.addEventListener('resize', function(){
+  if(!_dwvOpen || !_dwvStage) return;
+  var w = g('dwv-wrap'); if(!w) return;
+  _dwvStage.width(w.clientWidth); _dwvStage.height(w.clientHeight);
+  _dwvFit(false);
+});
 
 </script>
 
