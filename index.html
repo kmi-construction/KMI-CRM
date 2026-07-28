@@ -38756,13 +38756,21 @@ var AP_STATUS = {
   exported: { label:'Exported', bg:'#e9e6f5', fg:'#5a4a9a' },
   completed:{ label:'Completed',bg:'#e0f0e2', fg:'#276b31' },
   rejected: { label:'Rejected', bg:'#fde4e4', fg:'#b23636' },
-  hold:     { label:'On hold',  bg:'#f0f0f0', fg:'#777' }
+  hold:     { label:'On hold',  bg:'#f0f0f0', fg:'#777' },
+  void:     { label:'Voided',   bg:'#ecedf1', fg:'#8a8a94' }
 };
 function apStatusPill(st){
   var s = AP_STATUS[st] || AP_STATUS.received;
   return '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:'+s.bg+';color:'+s.fg+'">'+s.label+'</span>';
 }
-function apMoney(n){ n = Number(n)||0; return '$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+// Credits carry negative amounts throughout the AP module. Render them in
+// accounting style — ($1,234.56) — rather than $-1,234.56, which reads as a
+// typo on a coding screen. Positive amounts are unchanged.
+function apMoney(n){
+  n = Number(n)||0;
+  var s = Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return n < 0 ? ('($'+s+')') : ('$'+s);
+}
 function apEsc(s){ return escapeHtml(String(s==null?'':s)); }
 
 function apSetBanner(kind, html){
@@ -38806,7 +38814,26 @@ function apInvoiceJobCell(i){
 // Effective status: an exported invoice that's been confirmed imported to
 // Foundation reads as its own terminal state, "completed". Exported and
 // Completed are therefore mutually exclusive everywhere they're counted.
-function _apEffStatus(i){ return (i.status==='exported' && i.importConfirmedAt) ? 'completed' : (i.status||'received'); }
+function _apEffStatus(i){
+  if(!i) return 'received';
+  if(i.voidedAt) return 'void';
+  return (i.status==='exported' && i.importConfirmedAt) ? 'completed' : (i.status||'received');
+}
+
+// ── Void (soft delete) ──────────────────────────────────────────────
+// AP invoices are never hard-deleted from the normal UI. The cloud pipeline is
+// upsert-only (pushToSupabase re-upserts the whole db.apInvoices array on every
+// debounced save), so a row deleted from Supabase is resurrected the moment any
+// OTHER open session pushes its stale copy. Marking voidedAt instead means the
+// void travels with the record through the same upsert path every other field
+// uses, which is what makes it stick. Hard purge is Admin-only and lives behind
+// the Voided filter.
+//
+// _apLive()   — every invoice the app should treat as real (excludes voided)
+// _apVoided() — the voided set, for the Voided filter box only
+function _apLive(){ return (db.apInvoices||[]).filter(function(i){ return !i.voidedAt; }); }
+function _apVoided(){ return (db.apInvoices||[]).filter(function(i){ return !!i.voidedAt; }); }
+function _apIsVoided(i){ return !!(i && i.voidedAt); }
 // Primary job number for sorting (coded job lines first, else the header job).
 function _apPrimaryJob(i){
   var jl=(db.apInvoiceLines||[]).filter(function(l){ return String(l.invoiceId)===String(i.id) && l.distType==='job' && l.jobNo; }).map(function(l){ return String(l.jobNo); });
@@ -38828,7 +38855,11 @@ function _apInboxMatch(i){
     case 'exported':  return e==='exported';   // excludes completed (1-A)
     case 'completed': return e==='completed';
     case 'rejected':  return e==='rejected';
-    default:          return true;   // 'all'
+    case 'void':      return e==='void';
+    // 'all' means all *live* invoices. Voided are reachable only via the Voided
+    // box. Enforced here as well as in _apInboxVisible so the predicate is
+    // correct standalone and can't leak voided rows through a future caller.
+    default:          return e!=='void';
   }
 }
 function apInvSort(col){
@@ -38894,20 +38925,26 @@ function _apInvColPasses(i){
 }
 // The visible inbox set: status box + column filters + current sort.
 function _apInboxVisible(){
-  var inv=(db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
+  // Voided invoices are excluded everywhere except the dedicated Voided box.
+  var src = (_apInboxFilter==='void') ? _apVoided() : _apLive();
+  var inv=src.slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
   return _apInvSortArray(inv.filter(_apInboxMatch).filter(_apInvColPasses));
 }
 function renderApInbox(){
   if (!hasRead('ap-invoices')) return;
-  var all = (db.apInvoices||[]).slice();
-  var cnt = { tocode:0, pending:0, approved:0, exported:0, completed:0, rejected:0, all:all.length };
-  all.forEach(function(i){
+  var live = _apLive();
+  var all = live.slice();
+  var cnt = { tocode:0, pending:0, approved:0, exported:0, completed:0, rejected:0, all:live.length, void:_apVoided().length };
+  live.forEach(function(i){
     var e = _apEffStatus(i);
     if(e==='received'||e==='coded') cnt.tocode++;
     else if(e==='pending'||e==='hold') cnt.pending++;
     else if(cnt[e]!=null) cnt[e]++;
   });
   var boxes=[['tocode','To code'],['pending','Pending approval'],['approved','Approved'],['exported','Exported'],['completed','Completed'],['rejected','Rejected'],['all','All']];
+  // Voided is a recovery view, not part of the normal pipeline — Admin and
+  // Accounting only, and only worth showing once something has been voided.
+  if(_apIsAcct() && cnt.void) boxes.push(['void','Voided']);
   var kpiEl = g('ap-kpis');
   if (kpiEl) kpiEl.innerHTML = boxes.map(function(b){
     var on=_apInboxFilter===b[0];
@@ -38951,15 +38988,18 @@ function renderApInbox(){
     return;
   }
   var rows = filtered.map(function(i){
+    var voided = _apIsVoided(i);
     var coded = String(i.status||'received') !== 'received';
-    var rf = (i.readFailed || (i.extractedJson && i.extractedJson._readFailed)) && !coded;
-    var dup = (i.isDuplicate && !coded) ? ' style="background:#fdf6f6;cursor:pointer"' : ' style="cursor:pointer"';
+    var rf = (i.readFailed || (i.extractedJson && i.extractedJson._readFailed)) && !coded && !voided;
+    var dup = voided ? ' style="background:#fafafc;color:#999;cursor:default"'
+                     : ((i.isDuplicate && !coded) ? ' style="background:#fdf6f6;cursor:pointer"' : ' style="cursor:pointer"');
     var stCell = rf ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fff1d6;color:#9A6A00">Read failed</span>'
-                    : ((i.isDuplicate && !coded) ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(_apEffStatus(i)));
+                    : ((i.isDuplicate && !coded && !voided) ? '<span style="display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;background:#fde4e4;color:#b23636">Duplicate?</span>' : apStatusPill(_apEffStatus(i)));
+    if(i.isCredit) stCell += ' <span style="display:inline-block;padding:2px 8px;border-radius:11px;font-size:10px;font-weight:700;background:#e6eefb;color:#1f4e79;margin-left:4px">CREDIT</span>';
     var src = i.source==='email' ? '&#128231; email' : '&#11014; upload';
     var vName = apVendorDisplayName(i);
     var vCell = rf ? '<span style="color:#9A6A00">(could not read — code manually)</span>' : ('<strong>'+apEsc(vName||'(unknown vendor)')+'</strong>');
-    return '<tr'+dup+' onclick="apOpenCode(\''+i.id+'\')">'+
+    return '<tr'+dup+(voided?'':' onclick="apOpenCode(\''+i.id+'\')"')+'>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+vCell+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+apEsc(i.invoiceDate)+'</td>'+
@@ -38967,7 +39007,12 @@ function renderApInbox(){
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apMoney(i.total)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-size:11px;color:#888">'+src+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+stCell+'</td>'+
-      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;text-align:center"><button onclick="apDeleteInvoice(\''+i.id+'\',event)" title="Delete invoice" style="border:0;background:none;color:#b23636;cursor:pointer;font-size:15px;line-height:1">&#128465;</button></td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;text-align:center;white-space:nowrap">'+
+        (voided
+          ? ('<button onclick="apUnvoidInvoice(\''+i.id+'\',event)" title="Restore this invoice to the inbox" style="border:0;background:none;color:#3B6D11;cursor:pointer;font-size:12px;line-height:1;font-family:inherit">Restore</button>'+
+             (_apIsAdmin() ? '<button onclick="apPurgeInvoice(\''+i.id+'\',event)" title="Permanently delete (Admin only)" style="border:0;background:none;color:#b23636;cursor:pointer;font-size:12px;line-height:1;margin-left:8px;font-family:inherit">Purge</button>' : ''))
+          : '<button onclick="apVoidInvoice(\''+i.id+'\',event)" title="Void invoice" style="border:0;background:none;color:#b23636;cursor:pointer;font-size:15px;line-height:1">&#128465;</button>')+
+      '</td>'+
     '</tr>';
   }).join('');
   var cols=[['vendor','Vendor'],['no','Invoice #'],['date','Date'],['job','Job'],['amount','Amount'],['source','Source'],['status','Status']];
@@ -38979,29 +39024,120 @@ function renderApInbox(){
     thead+'<tbody>'+rows+'</tbody></table>';
 }
 
-// Delete an invoice (and its lines + log) from the inbox — local + cloud.
-function apDeleteInvoice(id, ev){
+// Void an invoice (soft delete). The record stays in place with voidedAt set,
+// which is what makes the removal survive: the cloud pipeline is upsert-only,
+// so a hard-deleted row is re-inserted the moment any other open session pushes
+// its stale copy of db.apInvoices. A voided flag rides the same upsert path as
+// every other field, so it propagates instead of being fought.
+async function apVoidInvoice(id, ev){
   if(ev && ev.stopPropagation) ev.stopPropagation();
-  if(!requireFull('ap-invoices','delete AP invoices')) return;
+  if(!requireFull('ap-invoices','void AP invoices')) return;
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
-  if(!confirm('Delete invoice '+(i.invoiceNo||'(no #)')+' from '+(i.foundationVendorName||i.vendorName||'this vendor')+'?\n\nThis removes its coding and history and cannot be undone.')) return;
+  if(i.voidedAt) return;
+  if(i.status==='exported' || i.importConfirmedAt){
+    if(!confirm('This invoice has already been exported to Foundation.\n\nVoiding it here does NOT reverse anything in Foundation. Continue?')) return;
+  }
+  if(!confirm('Void invoice '+(i.invoiceNo||'(no #)')+' from '+(i.foundationVendorName||i.vendorName||'this vendor')+'?\n\nIt will be removed from the inbox, approvals, and export. Admin can restore it from the Voided filter.')) return;
+  var reason = prompt('Reason (optional) — e.g. "duplicate of INV-1042":','') || '';
   var idStr=String(id);
+  i.voidedAt   = new Date().toISOString();
+  i.voidedBy   = _currentUser ? String(_currentUser.id) : '';
+  i.voidReason = reason;
+  i.updatedAt  = i.voidedAt;
+  // Any invoice flagged as a duplicate OF this one is no longer blocked — clear
+  // the pointer so the survivor isn't stuck behind a "confirm not a duplicate"
+  // gate for a record that no longer exists in any live view.
+  var freed = [];
+  (db.apInvoices||[]).forEach(function(x){
+    if(String(x.dupOf||'')===idStr && !x.voidedAt){
+      x.isDuplicate=false; x.dupOf=null; x.updatedAt=new Date().toISOString(); freed.push(x);
+    }
+  });
+  saveDB();
+  apLog(i.id,'voided','Voided'+(reason?(' — '+reason):''));
+  if(supabaseClient){
+    try{
+      await apPushInvoice(i);
+      for(var k=0;k<freed.length;k++){ await apPushInvoice(freed[k]); }
+    }catch(e){
+      apSetBanner('error','Voided on this device, but the cloud sync failed: '+apEsc(e&&e.message?e.message:String(e))+'. It may reappear on reload — send me this message.');
+      renderApInbox();
+      return;
+    }
+  }
+  renderApInbox();
+  apSetBanner('success','Voided invoice '+apEsc(i.invoiceNo||'')+(freed.length?(' — '+freed.length+' duplicate flag'+(freed.length===1?'':'s')+' cleared'):'')+'.');
+}
+
+// Restore a voided invoice. Goes out as an explicit column update carrying the
+// __unvoid__ sentinel, because the DB trigger added by the ap_void_credit
+// migration otherwise refuses to let voided_at be cleared — that trigger is what
+// stops a stale session's full-row upsert from silently un-voiding a record.
+async function apUnvoidInvoice(id, ev){
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+  if(!_apIsAcct()){ alert('Only Admin or Accounting can restore a voided invoice.'); return; }
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i||!i.voidedAt) return;
+  if(!confirm('Restore invoice '+(i.invoiceNo||'(no #)')+' to the inbox?')) return;
+  var idStr=String(id);
+  i.voidedAt=''; i.voidedBy=''; i.voidReason=''; i.updatedAt=new Date().toISOString();
+  saveDB();
+  apLog(i.id,'unvoided','Restored from voided');
+  if(supabaseClient){
+    try{
+      var r = await supabaseClient.from('kmi_ap_invoices')
+        .update({ voided_at:null, voided_by:'', void_reason:'__unvoid__', updated_at:i.updatedAt })
+        .eq('id', idStr);
+      if(r && r.error) throw new Error(r.error.message);
+    }catch(e){
+      apSetBanner('error','Restored on this device, but the cloud update failed: '+apEsc(e&&e.message?e.message:String(e))+'. It will re-void on reload.');
+      renderApInbox();
+      return;
+    }
+  }
+  renderApInbox();
+  apSetBanner('success','Restored invoice '+apEsc(i.invoiceNo||'')+' to the inbox.');
+}
+
+// Permanent delete — Admin only, reachable only from the Voided filter.
+// Hardened against the two silent-failure modes the old delete had:
+//   1. Row deletes run FIRST and each result is error-checked. The old code ran
+//      the PDF storage remove first inside the same try, so a storage failure
+//      skipped all three table deletes and the row survived in the cloud.
+//   2. Local state is only cleared AFTER the cloud deletes confirm, so a failed
+//      purge can't leave a record that exists in the cloud but not on screen
+//      (which is precisely how it came back on the next pull).
+// The storage remove runs last and is non-fatal — an orphaned PDF is harmless.
+async function apPurgeInvoice(id, ev){
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+  if(!_apIsAdmin()){ alert('Only an Admin can permanently delete an invoice.'); return; }
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  if(!i.voidedAt){ alert('Void the invoice first, then purge it from the Voided filter.'); return; }
+  if(!confirm('PERMANENTLY delete invoice '+(i.invoiceNo||'(no #)')+'?\n\nThis erases the record, its coding, its history, and its PDF. It cannot be undone and cannot be restored.')) return;
+  var idStr=String(id);
+  if(supabaseClient){
+    try{
+      var dl = await supabaseClient.from('kmi_ap_invoice_lines').delete().eq('invoice_id', idStr);
+      if(dl && dl.error) throw new Error('lines — '+dl.error.message);
+      var dg = await supabaseClient.from('kmi_ap_invoice_log').delete().eq('invoice_id', idStr);
+      if(dg && dg.error) throw new Error('log — '+dg.error.message);
+      var di = await supabaseClient.from('kmi_ap_invoices').delete().eq('id', idStr);
+      if(di && di.error) throw new Error('invoice — '+di.error.message);
+    }catch(e){
+      apSetBanner('error','Purge failed in the cloud, nothing was removed: '+apEsc(e&&e.message?e.message:String(e))+'. The invoice is still voided — send me this message.');
+      return;
+    }
+    // Non-fatal: the row is gone either way, an orphaned PDF costs nothing.
+    if(i.pdfPath){
+      try{ await supabaseClient.storage.from('ap-invoices').remove([i.pdfPath]); }
+      catch(e){ console.warn('ap purge: pdf remove failed (row already deleted):', e); }
+    }
+  }
   db.apInvoices    = (db.apInvoices||[]).filter(function(x){return String(x.id)!==idStr;});
   db.apInvoiceLines= (db.apInvoiceLines||[]).filter(function(l){return String(l.invoiceId)!==idStr;});
   db.apInvoiceLog  = (db.apInvoiceLog||[]).filter(function(l){return String(l.invoiceId)!==idStr;});
   saveDB();
-  if(supabaseClient){
-    (async function(){
-      try{
-        if(i.pdfPath){ await supabaseClient.storage.from('ap-invoices').remove([i.pdfPath]); }
-        await supabaseClient.from('kmi_ap_invoice_lines').delete().eq('invoice_id', idStr);
-        await supabaseClient.from('kmi_ap_invoice_log').delete().eq('invoice_id', idStr);
-        await supabaseClient.from('kmi_ap_invoices').delete().eq('id', idStr);
-      }catch(e){ console.warn('ap delete sync exception:',e); }
-    })();
-  }
   renderApInbox();
-  apSetBanner('success','Deleted invoice '+apEsc(i.invoiceNo||'')+'.');
+  apSetBanner('success','Permanently deleted invoice '+apEsc(i.invoiceNo||'')+'.');
 }
 
 // Extracted vendor name → { vendorId, foundationVendorNo, foundationVendorName }.
@@ -39041,7 +39177,7 @@ function apSuggestCoding(vendorId){
   var out = { distType:'job', costCode:'', costClass:'', glNo:'' };
   if(!vendorId) return out;
   var invIds = {};
-  (db.apInvoices||[]).forEach(function(i){ if(String(i.vendorId)===String(vendorId)) invIds[String(i.id)]=1; });
+  _apLive().forEach(function(i){ if(String(i.vendorId)===String(vendorId)) invIds[String(i.id)]=1; });
   var lines = (db.apInvoiceLines||[]).filter(function(l){ return invIds[String(l.invoiceId)]; });
   if(!lines.length) return out;
   function mode(arr){ var c={},best=null,bn=0; arr.forEach(function(v){ if(!v) return; c[v]=(c[v]||0)+1; if(c[v]>bn){bn=c[v];best=v;} }); return best; }
@@ -39058,7 +39194,9 @@ function apSuggestCoding(vendorId){
 // Duplicate detection: same vendor (Foundation # or app id) + invoice #.
 function apDupOf(rec){
   var key = (rec.foundationVendorNo||rec.vendorId||'');
-  var match = (db.apInvoices||[]).find(function(i){
+  // Voided invoices must not block a legitimate re-entry — if the bad copy was
+  // voided, re-uploading the good one should come in clean.
+  var match = _apLive().find(function(i){
     if(String(i.id)===String(rec.id)) return false;
     var ik = (i.foundationVendorNo||i.vendorId||'');
     return ik && key && String(ik)===String(key) &&
@@ -39066,6 +39204,89 @@ function apDupOf(rec){
            String(i.invoiceNo).trim().toLowerCase()===String(rec.invoiceNo||'').trim().toLowerCase();
   });
   return match ? match.id : null;
+}
+
+// ── Credit memos ────────────────────────────────────────────────────
+// Credit memos almost always print their amounts unsigned, with "CREDIT MEMO"
+// as the only marker, and the reader returns exactly what it sees — so credits
+// were landing in the inbox as positives and would have exported to Foundation
+// as charges. Detection runs once, at intake. After that isCredit is sticky
+// (true or false, never null again), so a human correction is never overwritten
+// by a later re-scan.
+var _AP_CREDIT_RE = /credit\s*(memo|memorandum|note|invoice|adjustment)|\bcredit\s+bal/i;
+
+function _apDetectCredit(ex, fileName){
+  ex = ex || {};
+  // 1. The reader said so outright (available once the Edge Functions return
+  //    document_type / is_credit; harmless until then).
+  if(ex.is_credit === true) return true;
+  var dt = String(ex.document_type || ex.doc_type || ex.invoice_type || '').toLowerCase();
+  if(dt && dt.indexOf('credit') >= 0) return true;
+  // 2. Already signed negative by the reader.
+  if(Number(ex.total) < 0 || Number(ex.subtotal) < 0) return true;
+  // 3. Text markers, wherever the reader parked the document title.
+  var hay = [ex.document_title, ex.title, ex.notes, ex.invoice_no, fileName].filter(Boolean).join(' ');
+  if(Array.isArray(ex.line_items)) hay += ' ' + ex.line_items.map(function(l){ return String((l&&l.description)||''); }).join(' ');
+  if(_AP_CREDIT_RE.test(hay)) return true;
+  // 4. "CM-1234" style credit numbering.
+  if(/^\s*cm[-\s]?\d/i.test(String(ex.invoice_no||''))) return true;
+  // 5. Every extracted line is negative even though the header total came back
+  //    positive — the reader read the lines correctly and the total wrong.
+  var li = Array.isArray(ex.line_items) ? ex.line_items.filter(function(l){ return l && l.amount!=null && Number(l.amount)!==0; }) : [];
+  if(li.length && li.every(function(l){ return Number(l.amount) < 0; })) return true;
+  return false;
+}
+
+// Force every money field on a record to the given sign. Uses Math.abs on both
+// branches so it is idempotent and reversible — running it twice can't ratchet a
+// value, and the manual toggle can flip a mis-detected credit back cleanly.
+function _apApplyCreditSign(rec, negative){
+  ['subtotal','salesTax','freight','total'].forEach(function(k){
+    var v = Number(rec[k])||0;
+    if(v) rec[k] = negative ? -Math.abs(v) : Math.abs(v);
+  });
+  if(rec.extractedJson && Array.isArray(rec.extractedJson.line_items)){
+    rec.extractedJson.line_items.forEach(function(l){
+      if(l && l.amount!=null){ var v=Number(l.amount)||0; if(v) l.amount = negative ? -Math.abs(v) : Math.abs(v); }
+    });
+  }
+  return rec;
+}
+
+// Invoices that arrive by email are written straight into Supabase by the
+// inbound-ap Edge Function and never pass through apHandleUpload, so they land
+// with is_credit NULL — "never ruled on". This runs after every pull and gives
+// exactly those records a ruling. Anything already ruled on (including a manual
+// override) is skipped, so the toggle always wins.
+//
+// Invoices already exported to Foundation are marked but NOT re-signed: the
+// number is already in Foundation as a charge, and silently flipping it here
+// would put the portal and Foundation out of agreement. Those surface as a
+// warning banner instead so they can be handled as a Foundation-side correction.
+async function _apBackfillCredits(){
+  var pending = (db.apInvoices||[]).filter(function(i){ return i.isCredit==null; });
+  if(!pending.length) return;
+  var flipped = [], stranded = [];
+  pending.forEach(function(i){
+    var isC = _apDetectCredit(i.extractedJson||{}, i.sourceFile||'');
+    i.isCredit = isC;
+    if(isC){
+      if(i.exportedAt || i.status==='exported'){ stranded.push(i); }
+      else { _apApplyCreditSign(i, true); flipped.push(i); }
+    }
+  });
+  saveDB();
+  if(supabaseClient){
+    try{
+      var r = await supabaseClient.from('kmi_ap_invoices').upsert(pending.map(toSBApInvoice));
+      if(r && r.error) console.warn('credit backfill push:', r.error.message);
+    }catch(e){ console.warn('credit backfill exception:', e); }
+  }
+  if(flipped.length) console.log('[ap] credit backfill: '+flipped.length+' invoice(s) re-signed as credits');
+  if(stranded.length){
+    console.warn('[ap] credit backfill: '+stranded.length+' already-exported invoice(s) look like credits and were left signed as-is:',
+      stranded.map(function(i){ return (i.vendorName||'')+' '+(i.invoiceNo||''); }));
+  }
 }
 
 // Some vendor PDFs carry stray bytes before the %PDF header or after the final
@@ -39147,6 +39368,12 @@ async function apHandleUpload(evt){
       readFailed:readFailed, pdfPath:'',
       notes:'', createdBy:(_currentUser?_currentUser.email:''), createdAt:new Date().toISOString()
     };
+    // Credit ruling happens once, here, before dup-detection and before the
+    // record is pushed — so a credit is negative from the moment it exists.
+    // A failed read gets isCredit=false rather than null: there is nothing to
+    // detect from, and the coder will set it by hand on the coding screen.
+    rec.isCredit = readFailed ? false : _apDetectCredit(ex, file.name);
+    if(rec.isCredit) _apApplyCreditSign(rec, true);
     // store the (cleaned) PDF in Supabase Storage so the coder can show it —
     // even when the read failed, so it can be coded by hand against the PDF.
     if(bytes && supabaseClient){
@@ -39294,7 +39521,7 @@ function _apOrderedInvoices(){
   // back to the full received-order list if the open invoice was filtered out.
   var vis = (typeof _apInboxVisible==='function') ? _apInboxVisible() : null;
   if(vis && vis.some(function(x){ return String(x.id)===String(_apCodeId); })) return vis;
-  return (db.apInvoices||[]).slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
+  return _apLive().slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
 }
 function apCodeNav(dir){
   var ord = _apOrderedInvoices();
@@ -39430,6 +39657,29 @@ function apCodeClearVendor(){ _apCodeSync(); _apCodeDraft.foundationVendorNo='';
 function apCodeDismissDup(){ _apCodeSync(); _apCodeDraft.dupDismissed = true; apRenderCode(); }
 function apCodeToggleAlias(cb){ _apCodeDraft.saveAlias = cb.checked; }
 
+// Manual credit override. Detection will never be perfect on vendor PDFs, so
+// this is the safety net: one click re-signs the header and every split line
+// instead of retyping four fields and hoping nothing was missed.
+function apCodeToggleCredit(cb){
+  var want = !!cb.checked;
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(_apCodeId);});
+  if(!i){ return; }
+  _apCodeSync();                                   // capture whatever is typed in the DOM first
+  i.isCredit = want;
+  _apApplyCreditSign(i, want);                     // subtotal / tax / freight / total
+  var d=_apCodeDraft;
+  if(d && Array.isArray(d.lines)){                 // split lines follow the header sign
+    d.lines.forEach(function(ln){ var v=Number(ln.amount)||0; if(v) ln.amount = want ? -Math.abs(v) : Math.abs(v); });
+  }
+  i.updatedAt = new Date().toISOString();
+  saveDB();
+  if(supabaseClient) apPushInvoice(i);
+  apRenderCode();
+  apSetBanner('info', want
+    ? 'Marked as a credit memo — amounts are now negative and it will export as voucher type C.'
+    : 'Credit flag cleared — amounts are back to positive and it will export as voucher type R.');
+}
+
 function apRenderCode(){
   var el = g('ap-code'); if(!el) return;
   var d = _apCodeDraft;
@@ -39468,6 +39718,12 @@ function apRenderCode(){
   if(i.multiInvoiceFlag){
     warn += '<div style="background:#fff8e8;border:1px solid #efe0b8;border-left:3px solid var(--ac);border-radius:7px;padding:9px 12px;font-size:11.5px;color:#6b5a22;margin-bottom:12px">The reader flagged this PDF may contain more than one invoice — verify before submitting.</div>';
   }
+  if(i.isCredit){
+    warn += '<div style="background:#e6eefb;border:1px solid #c6d6ef;border-left:3px solid #1f4e79;border-radius:7px;padding:9px 12px;font-size:11.5px;color:#1f4e79;margin-bottom:12px"><strong>Credit memo.</strong> Amounts are held negative and this exports to Foundation as voucher type <strong>C</strong>. Distribution lines must also be negative and sum to the total.</div>';
+  }
+  if(!i.isCredit && (Number(i.total)||0) < 0){
+    warn += '<div style="background:#fff4dd;border:1px solid #efd9a8;border-left:3px solid #C8A84B;border-radius:7px;padding:9px 12px;font-size:11.5px;color:#6b5320;margin-bottom:12px">This invoice has a negative total but isn\u2019t marked as a credit memo. Tick <strong>Credit memo</strong> below if that\u2019s what it is \u2014 it changes the Foundation voucher type.</div>';
+  }
 
   // vendor section
   var vendorBox;
@@ -39490,7 +39746,10 @@ function apRenderCode(){
 
   // header fields (editable)
   function f2(lab,id,val,extra){ return '<div style="margin-bottom:10px"><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:3px">'+lab+'</label><input id="'+id+'" value="'+apEsc(val==null?'':val)+'" '+(extra||'')+' style="width:100%;padding:6px 9px;border:1px solid #d8dce6;border-radius:6px;font-size:13px"></div>'; }
-  var hdr = '<div class="card" style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-bottom:8px">Invoice header</div>'+
+  var creditToggle = '<label style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:#555;cursor:pointer;font-weight:500;text-transform:none;letter-spacing:0">'+
+    '<input type="checkbox" '+(i.isCredit?'checked':'')+' onchange="apCodeToggleCredit(this)" style="width:auto;cursor:pointer"> Credit memo'+
+    '<span style="color:#999;font-size:10.5px">(flips all amounts negative)</span></label>';
+  var hdr = '<div class="card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Invoice header</div>'+creditToggle+'</div>'+
     '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px">'+
       f2('Invoice #','apc-invno',i.invoiceNo)+f2('Invoice date','apc-invdate',i.invoiceDate)+f2('Due date','apc-due',i.dueDate)+
       f2('Terms','apc-terms',i.terms)+f2('PO #','apc-po',i.poNo)+f2('Job # (printed)','apc-jobno',i.jobNo)+
@@ -40010,6 +40269,7 @@ function apResolveJobPM(jobNo){
 function apAccountingUsers(){ return (db.users||[]).filter(function(u){ var r=normalizeRole(u.role); return r==='Accounting'||r==='Admin'; }); }
 function _apCanReassign(){ var r=normalizeRole(_currentUser&&_currentUser.role); return r==='Admin'||r==='Accounting'; }
 function _apIsAcct(){ var r=normalizeRole(_currentUser&&_currentUser.role); return r==='Admin'||r==='Accounting'; }
+function _apIsAdmin(){ return normalizeRole(_currentUser&&_currentUser.role)==='Admin'; }
 function _apCanDecide(i){ return _apIsAcct() || (_currentUser && String(i.approverId)===String(_currentUser.id)); }
 
 // Short coding summary for the queue list, derived from the saved lines.
@@ -40117,7 +40377,9 @@ function _apInvDateISO(i){
 // Scope: Accounting/Admin see everything; a PM sees only invoices routed to or
 // decided by them (any status).
 function _apRegScopedBase(){
-  var all=(db.apInvoices||[]).slice();
+  // Voided invoices never appear in the register, approvals, or export
+  // candidates — the Voided filter on the inbox is their only view.
+  var all=_apLive().slice();
   if(_apIsAcct()) return all;
   var me=_currentUser?String(_currentUser.id):'';
   return all.filter(function(i){ return String(i.approverId)===me || String(i.approvedBy)===me; });
@@ -40478,8 +40740,15 @@ function _apLineGL(l){
 function _apExportBlockers(inv){
   var out=[];
   if(!inv.foundationVendorNo) out.push('No Foundation vendor #');
+  // Sign sanity. A credit goes to Foundation as voucher type C with negative
+  // amounts; a charge as type R with positive. A record whose flag and sign
+  // disagree would post backwards, so it can't be exported until it's resolved.
+  var _t = Number(inv.total)||0;
+  if(inv.isCredit && _t > 0) out.push('Marked as a credit but the total is positive');
+  if(!inv.isCredit && _t < 0) out.push('Negative total not marked as a credit memo');
   var lines=_apInvLines(inv);
   if(!lines.length){ out.push('No coding lines'); return out; }
+  if(inv.isCredit && lines.some(function(l){ return (Number(l.amount)||0) > 0; })) out.push('Credit memo has a positive distribution line');
   lines.forEach(function(l){
     if(l.distType==='job'){
       if(!l.costClass) out.push('Job line missing cost class');
@@ -40508,7 +40777,7 @@ function apBuildFoundationCSV(invoices){
       r[7]=inv.invoiceNo||'';           // H  invoice no
       r[8]=_apCsvDate(inv.dueDate);     // I  due date
       // J retainage blank ; K PO/Sub always blank
-      r[11]='R';                        // L  voucher type
+      r[11]=inv.isCredit?'C':'R';       // L  voucher type (C = credit memo)
       // M–T blank (payment/check/terms/discount/scanned link)
     }
     function detail(r,l){
@@ -45679,6 +45948,13 @@ function toSBApInvoice(r) {
     import_confirmed_at:r.importConfirmedAt||null, import_confirmed_by:r.importConfirmedBy||'',
     decision_note:r.decisionNote||'', queued_at:r.queuedAt||null, last_reminder_at:r.lastReminderAt||null,
     eq_board_handled:!!r.eqBoardHandled,
+    // Void (soft delete) — see apVoidInvoice. Sent as null when clear so the
+    // ap_void_credit trigger can distinguish "not voided" from a stale write.
+    voided_at:r.voidedAt||null, voided_by:r.voidedBy||'', void_reason:r.voidReason||'',
+    // Credit memo. Deliberately three-state: null means "never evaluated", so
+    // _apBackfillCredits knows which pulled records still need a sign check and
+    // which ones a human has already ruled on.
+    is_credit:(r.isCredit==null ? null : !!r.isCredit),
     created_by:r.createdBy||'', updated_at:new Date().toISOString()
   };
 }
@@ -45702,6 +45978,8 @@ function fromSBApInvoice(r) {
     importConfirmedAt:r.import_confirmed_at||'', importConfirmedBy:r.import_confirmed_by||'',
     decisionNote:r.decision_note||'', queuedAt:r.queued_at||'', lastReminderAt:r.last_reminder_at||'',
     eqBoardHandled:!!r.eq_board_handled,
+    voidedAt:r.voided_at||'', voidedBy:r.voided_by||'', voidReason:r.void_reason||'',
+    isCredit:(r.is_credit==null ? null : !!r.is_credit),
     createdBy:r.created_by||'', createdAt:r.created_at||''
   };
 }
@@ -46185,6 +46463,10 @@ async function pullFromSupabase() {
     catch (e) { if (!Array.isArray(db.apInvoiceLog)) db.apInvoiceLog = []; }
     try { db.apVendorAliases = await _selAll('kmi_ap_vendor_aliases', fromSBApAlias); }
     catch (e) { if (!Array.isArray(db.apVendorAliases)) db.apVendorAliases = []; }
+    // Give any never-evaluated invoice (i.e. everything that arrived by email
+    // through inbound-ap) its credit ruling. No-op once every record is ruled.
+    try { await _apBackfillCredits(); }
+    catch (e) { console.warn('credit backfill skipped:', e && e.message); }
     // Drawings (Session 1) — paginated: a large project's revision table will
     // pass PostgREST's 1000-row select cap. Non-fatal if the tables aren't
     // there yet; a failed pull preserves whatever is already local rather
