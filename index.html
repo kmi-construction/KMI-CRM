@@ -1283,6 +1283,22 @@ tr.dw-unres td{background:#FFFBF0}
 .dwv-layer{display:flex;align-items:center;gap:9px;padding:7px 0;font-size:12px;color:#e5e5e5;cursor:pointer}
 .dwv-layer input{width:14px;height:14px;accent-color:var(--ac)}
 .dwv-layer .cnt{margin-left:auto;font-size:10px;color:#8B93B8}
+
+/* ═══ DRAWINGS — SAVE ROW & PROPAGATE PROMPT ═══════════════════════ */
+.rv-saverow{display:flex;align-items:center;gap:10px;margin-bottom:9px}
+.rv-saverow .btn{flex:1}
+.rv-savehint{font-size:11px;color:#aaa;white-space:nowrap}
+.rv-savehint.dirty{color:var(--acd);font-weight:600}
+.rv-savehint.saved{color:#3B6D11}
+.dw-pp-ov{position:fixed;inset:0;background:rgba(20,22,38,.5);z-index:960;display:none;align-items:center;justify-content:center;padding:24px}
+.dw-pp-ov.show{display:flex}
+.dw-pp-dlg{background:#fff;border-radius:12px;max-width:450px;width:100%;box-shadow:0 18px 60px rgba(0,0,0,.3);overflow:hidden}
+.dw-pp-ico{height:54px;background:linear-gradient(180deg,#FDF8E9,#FAF1D6);display:flex;align-items:center;justify-content:center;font-size:23px;border-bottom:0.5px solid var(--acd)}
+.dw-pp-body{padding:18px 20px}
+.dw-pp-body h2{font-size:16px;color:#1a1a1a;margin-bottom:8px}
+.dw-pp-body p{font-size:13px;color:#555;line-height:1.6;margin-bottom:8px}
+.dw-pp-body strong{color:var(--kmi)}
+.dw-pp-foot{padding:12px 20px;background:#fafafa;border-top:0.5px solid #eee;display:flex;gap:9px;justify-content:flex-end}
 </style>
 </head>
 <body>
@@ -49634,11 +49650,15 @@ function _dwRenderReview(){
             '<span>Include this page in the commit</span></div>'+
         '</div>'+
         '<div class="rv-f-foot">'+
+          '<div class="rv-saverow">'+
+            '<span class="rv-savehint" id="dw-f-savehint"></span>'+
+            '<button class="btn btn-p" id="dw-f-save" onclick="dwRvSave()">&#10003; Save this sheet</button>'+
+          '</div>'+
           '<div class="rv-navrow">'+
             '<button class="btn" onclick="dwRvStep(-1)">&larr; Prev</button>'+
-            '<button class="btn btn-p" onclick="dwRvStep(1)">Next &rarr;</button>'+
+            '<button class="btn" onclick="dwRvStep(1)">Next &rarr;</button>'+
           '</div>'+
-          '<div class="rv-kbd"><kbd>&larr;</kbd> <kbd>&rarr;</kbd> pages \u00b7 <kbd>Enter</kbd> next \u00b7 <kbd>Space</kbd> include<br>'+
+          '<div class="rv-kbd"><kbd>&larr;</kbd> <kbd>&rarr;</kbd> pages \u00b7 <kbd>Ctrl+Enter</kbd> save \u00b7 <kbd>Space</kbd> include<br>'+
             'scroll to zoom \u00b7 drag to pan \u00b7 double-click to fit</div>'+
         '</div>'+
       '</div>'+
@@ -49943,6 +49963,7 @@ function _dwRvRenderFields(){
   g('dw-f-disc').value  = r.discipline || 'Other';
   g('dw-f-rev').value   = r.revLabel || '';
   g('dw-f-inc').checked = !!r.include;
+  _dwRvSyncSaveBtn();
 
   _dwRvRenderMatch();
 }
@@ -49996,13 +50017,12 @@ function dwRvEdit(field, value){
   // A manual edit pins the page: no re-scan will ever overwrite it.
   r.edited = true;
   r.proposed = false;
-  if(field === 'number' || field === 'title'){
-    // If the value you typed exists in this page's text layer, we now know
-    // where this set prints that field — measured, not guessed.
-    if(_dwLearnFromEdit(r, field, value)){
-      _dwBanners.learn = false;
-      _dwRvRenderBanners();
-    }
+  // Learning is deferred to an explicit Save (dwRvSave). Typing only updates
+  // the live match/discipline feedback below; nothing is located or
+  // propagated on keystroke. Mark the page dirty so Save can light up.
+  if(field === 'number' || field === 'title' || field === 'discipline' || field === 'revLabel'){
+    r._dirty = true;
+    _dwRvSyncSaveBtn();
   }
   if(field === 'number'){
     var setRow = (db.drawingSets||[]).find(function(s){ return String(s.id)===String(_dwUpSetId); });
@@ -50029,6 +50049,109 @@ function dwRvUseNum(n){
   dwRvEdit('number', n);
   _dwRvRenderFields();
 }
+
+// Reflect the current row's saved/dirty state on the Save button + hint.
+function _dwRvSyncSaveBtn(){
+  var r = _dwRvRow();
+  var btn = g('dw-f-save'), hint = g('dw-f-savehint');
+  if(!r || !btn) return;
+  if(r._dirty){
+    btn.disabled = false;
+    btn.innerHTML = '\u2713 Save this sheet';
+    if(hint){ hint.textContent = 'Unsaved changes'; hint.className = 'rv-savehint dirty'; }
+  }else{
+    btn.disabled = !r._saved;    // nothing to save on an untouched page
+    btn.innerHTML = r._saved ? 'Saved \u2713' : '\u2713 Save this sheet';
+    if(hint){ hint.textContent = r._saved ? 'Saved' : ''; hint.className = 'rv-savehint'+(r._saved?' saved':''); }
+  }
+}
+
+// ── SAVE: commit the page, locate its text, offer to propagate ─────────
+// Explicit trigger for the learned-position engine (decisions 1-A..5-A).
+// The row was already mutated live by dwRvEdit; Save (a) confirms it,
+// (b) locates the entered number and/or title on THIS page, and (c) if a
+// position was found, prompts to read the same spot on unsaved pages.
+function dwRvSave(){
+  var r = _dwRvRow(); if(!r) return;
+  if(!r.number){ showToast('Add a sheet number before saving this page.','error'); var n=g('dw-f-num'); if(n) n.focus(); return; }
+
+  r._dirty = false;
+  r._saved = true;
+  r.edited = true;             // pinned: re-scans never overwrite a saved page
+  _dwRvSyncSaveBtn();
+  _dwRvRenderRail();
+
+  // Locate each entered value on this page. Learning only succeeds when the
+  // text is actually printed here — the anchor a probe needs on other pages.
+  var learnedNum   = _dwLearnFromEdit(r, 'number', r.number);
+  var learnedTitle = r.title ? _dwLearnFromEdit(r, 'title', r.title) : false;
+
+  if(!learnedNum && !learnedTitle){
+    // Honest no-op (decision 2-A): the edit is saved, but there's nothing to
+    // search other pages with.
+    var already = _dwLearned && (_dwLearned.num || _dwLearned.ttl);
+    showToast(already
+      ? 'Saved. That text isn\u2019t printed on this sheet, so this page didn\u2019t add a new search position.'
+      : 'Saved. Couldn\u2019t find that text on this sheet, so there\u2019s no position to search other pages with.',
+      'info');
+    _dwBanners.learn = false;
+    _dwRvRenderBanners();
+    return;
+  }
+
+  _dwBanners.learn = false;
+  _dwRvRenderBanners();
+  _dwPromptPropagate(learnedNum, learnedTitle, r);
+}
+
+// Confirm dialog (decision 4-A): offer to read the just-learned position(s)
+// on every unsaved page. "Yes" runs the existing proposal diff — nothing is
+// applied without a second confirmation there.
+function _dwPromptPropagate(gotNum, gotTitle, srcRow){
+  var pending = _dwUpRows.filter(function(x){ return !x.edited; }).length;
+  if(!pending){
+    showToast('Saved and located \u2014 but every other page is already saved.','success');
+    return;
+  }
+
+  var whatFound = [];
+  if(gotNum)   whatFound.push('the <strong>sheet number</strong>');
+  if(gotTitle) whatFound.push('the <strong>title</strong>');
+  var whatSearch = [];
+  if(gotNum)   whatSearch.push('sheet numbers');
+  if(gotTitle) whatSearch.push('titles');
+
+  // If a title was typed but not found, say so — the number still propagates.
+  var missNote = '';
+  if(gotNum && !gotTitle && srcRow.title){
+    missNote = '<div style="font-size:12px;color:#8a7a45;margin-top:8px;line-height:1.5">'+
+      'The title you entered isn\u2019t printed on this sheet, so only the number position was learned. '+
+      'Titles can only be read from text the sheet actually contains.</div>';
+  }
+
+  var body =
+    '<div class="dw-pp-ico">&#128269;</div>'+
+    '<div class="dw-pp-body">'+
+      '<h2>Found the title block on this sheet</h2>'+
+      '<p>Located '+whatFound.join(' and ')+' on page '+srcRow.page+'. '+
+        'This is where this set prints '+whatSearch.join(' and ')+'.</p>'+
+      '<p>Read the same position on the <strong>'+pending+' page'+(pending===1?'':'s')+
+        ' you haven\u2019t saved</strong> and propose '+whatSearch.join(' and ')+' for them? '+
+        'Nothing is applied until you confirm in the review that follows, and saved pages are never touched.</p>'+
+      missNote+
+    '</div>'+
+    '<div class="dw-pp-foot">'+
+      '<button class="btn" onclick="_dwPromptClose()">Not now</button>'+
+      '<button class="btn btn-gold" onclick="_dwPromptRun()">Search '+pending+' page'+(pending===1?'':'s')+'</button>'+
+    '</div>';
+
+  var ov = g('dw-pp-ov');
+  if(!ov){ ov = document.createElement('div'); ov.id='dw-pp-ov'; ov.className='dw-pp-ov'; document.body.appendChild(ov); }
+  ov.innerHTML = '<div class="dw-pp-dlg">'+body+'</div>';
+  ov.classList.add('show');
+}
+function _dwPromptClose(){ var ov=g('dw-pp-ov'); if(ov) ov.classList.remove('show'); }
+function _dwPromptRun(){ _dwPromptClose(); dwRescan(); }
 
 // ── navigation ─────────────────────────────────────────────────────────
 // Zoom and crop deliberately persist across pages: clearing a run of flagged
@@ -50100,6 +50223,11 @@ document.addEventListener('keydown', function(e){
   if(_dwView !== 'review' || _dwRvMode !== 'split') return;
   var t = (e.target && e.target.tagName) || '';
   if(t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA'){
+    if(e.key === 'Enter' && (e.ctrlKey || e.metaKey)){
+      e.preventDefault();
+      dwRvSave();
+      return;
+    }
     if(e.key === 'Enter'){
       e.preventDefault();
       dwRvStep(1);
