@@ -16,8 +16,30 @@
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <!-- SortableJS — drag-and-drop for the Equipment board (tiles between job columns). -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.2/Sortable.min.js"></script>
-<!-- Konva — canvas engine for the drawings viewer/markup layer (Session 2+). -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/konva/9.3.6/konva.min.js" onerror="window.__dwvKonvaFailed=true"></script>
+<!-- Konva — canvas engine for the drawings viewer/markup layer (Session 2+).
+     Loaded via a fallback chain: jsdelivr mirrors npm exactly (always has
+     the pinned version), with cdnjs and unpkg as backups. If every mirror
+     fails, __dwvKonvaFailed lets the viewer show a message instead of a
+     thrown ReferenceError. -->
+<script>
+(function(){
+  var srcs = [
+    "https://cdn.jsdelivr.net/npm/konva@9.3.6/konva.min.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/konva/9.3.6/konva.min.js",
+    "https://unpkg.com/konva@9.3.6/konva.min.js"
+  ];
+  var i = 0;
+  function next(){
+    if(i >= srcs.length){ window.__dwvKonvaFailed = true; return; }
+    var s = document.createElement("script");
+    s.src = srcs[i++];
+    s.async = false;
+    s.onerror = next;                 // try the next mirror
+    document.head.appendChild(s);
+  }
+  next();
+})();
+</script>
 <!-- QRCode.js — generates printable scan-to-move labels for equipment units. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>if(window['pdfjsLib']){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}</script>
@@ -39943,6 +39965,10 @@ async function apCodeSave(submit){
   _apCodeSync();
   var d=_apCodeDraft;
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(_apCodeId);}); if(!i) return;
+  // Same stale-DOM hazard as the decision actions: re-submitting an already
+  // exported invoice sets status='pending' while leaving the export stamps in
+  // place, which is exactly the regression this guard exists to stop.
+  if(_apIsLocked(i)){ alert(_apLockedMsg(i)); return; }
   if(i.isDuplicate && !d.dupDismissed){ alert('This invoice is flagged as a possible duplicate. Confirm it isn\u2019t a duplicate before coding.'); return; }
   if(!d.foundationVendorNo){ alert('Pick the Foundation payee before saving.'); return; }
   // build lines
@@ -40318,7 +40344,25 @@ function apAccountingUsers(){ return (db.users||[]).filter(function(u){ var r=no
 function _apCanReassign(){ var r=normalizeRole(_currentUser&&_currentUser.role); return r==='Admin'||r==='Accounting'; }
 function _apIsAcct(){ var r=normalizeRole(_currentUser&&_currentUser.role); return r==='Admin'||r==='Accounting'; }
 function _apIsAdmin(){ return normalizeRole(_currentUser&&_currentUser.role)==='Admin'; }
-function _apCanDecide(i){ return _apIsAcct() || (_currentUser && String(i.approverId)===String(_currentUser.id)); }
+// An invoice past the approval decision point. Once it's approved, exported,
+// or confirmed imported to Foundation, the approve/hold/reject actions must be
+// dead: re-deciding one rewrites status='approved' while exported_at,
+// export_batch_id and import_confirmed_at stay intact, so _apEffStatus stops
+// reading it as Completed and it reappears as awaiting export. Recoding or
+// re-exporting a locked invoice goes through apRevertExport, which clears the
+// export stamps properly.
+function _apIsLocked(i){
+  if(!i) return false;
+  var s = String(i.status||'');
+  return s==='approved' || s==='exported' || !!i.importConfirmedAt;
+}
+function _apLockedMsg(i){
+  var s = String(i.status||'');
+  if(i.importConfirmedAt) return 'This invoice was exported and confirmed imported to Foundation. It can no longer be re-decided \u2014 use "Import failed \u2014 revert to Approved" if it genuinely needs to go back.';
+  if(s==='exported')      return 'This invoice has already been exported to Foundation. It can no longer be re-decided \u2014 use "Import failed \u2014 revert to Approved" if it genuinely needs to go back.';
+  return 'This invoice has already been approved and is waiting to be exported. It can no longer be re-decided.';
+}
+function _apCanDecide(i){ if(_apIsLocked(i)) return false; return _apIsAcct() || (_currentUser && String(i.approverId)===String(_currentUser.id)); }
 
 // Short coding summary for the queue list, derived from the saved lines.
 function _apCodingSummary(i){
@@ -40699,6 +40743,10 @@ function _apReviewNextId(){
 }
 function apApprove(id){
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  // Re-check at call time, not just at render time. A tab left open from before
+  // the export still has a live Approve button in its DOM; clicking it lands
+  // here with a stale view of the record.
+  if(_apIsLocked(i)){ alert(_apLockedMsg(i)); apRenderReview(); return; }
   if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can approve this.'); return; }
   if(Math.abs(((db.apInvoiceLines||[]).filter(function(l){return String(l.invoiceId)===String(i.id);}).reduce(function(t,l){return t+(Number(l.amount)||0);},0))-(Number(i.total)||0))>=0.01){
     if(!confirm('The coding lines don\u2019t tie out to the invoice total. Approve anyway?')) return;
@@ -40706,6 +40754,7 @@ function apApprove(id){
   var note=(g('apr-note')&&g('apr-note').value.trim())||'';
   var nextId=_apReviewNextId();
   i.status='approved'; i.approvedBy=(_currentUser?String(_currentUser.id):''); i.approvedAt=new Date().toISOString(); i.decisionNote=note; i.updatedAt=i.approvedAt;
+  i.queuedAt=''; i.lastReminderAt='';   // out of the approval queue \u2014 stop the overdue clock
   saveDB();
   apLog(i.id,'approved','Approved for export'+(note?(' \u2014 '+note):''));
   if(supabaseClient) apPushInvoice(i);
@@ -40714,6 +40763,7 @@ function apApprove(id){
 }
 function apHold(id){
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  if(_apIsLocked(i)){ alert(_apLockedMsg(i)); apRenderReview(); return; }
   if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can hold this.'); return; }
   var note=(g('apr-note')&&g('apr-note').value.trim())||'';
   if(!note){ alert('Add a note explaining why it\u2019s on hold.'); return; }
@@ -40727,6 +40777,7 @@ function apHold(id){
 }
 async function apReject(id){
   var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(id);}); if(!i) return;
+  if(_apIsLocked(i)){ alert(_apLockedMsg(i)); apRenderReview(); return; }
   if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can reject this.'); return; }
   var note=(g('apr-note')&&g('apr-note').value.trim())||'';
   if(!note){ alert('A rejection reason is required (it\u2019s emailed to Accounting and shown to the coder).'); return; }
@@ -40903,6 +40954,7 @@ async function apDoExport(){
   invoices.forEach(function(i){
     i.status='exported'; i.exportedAt=stamp.toISOString(); i.exportedBy=meId; i.exportBatchId=batchId;
     i.importConfirmedAt=''; i.importConfirmedBy=''; i.updatedAt=i.exportedAt;
+    i.queuedAt=''; i.lastReminderAt='';   // belt-and-suspenders: clock is already clear from approve
     apLog(i.id,'exported','Exported to Foundation batch '+batchId);
   });
   saveDB();
@@ -49501,16 +49553,16 @@ async function _dwExtractPageText(bytes, onProgress){
     // makes the learned-position re-scan possible: a correction can be
     // located on its own page, and that position read on every other page.
     // Never sent to the API — only the joined crop text below is.
-    _dwCapturePageText(i, tc.items, W, H);
-    var parts = [];
-    tc.items.forEach(function(it){
-      if(!it.str || !it.str.trim()) return;
-      var tr = it.transform || [];
-      var x = tr[4], y = tr[5];
-      if(x == null || y == null) return;
-      // pdf.js y-origin is bottom-left. Right 28% or bottom 18%.
-      if(x >= W*0.72 || y <= H*0.18) parts.push(it.str.trim());
-    });
+    _dwCapturePageText(i, tc.items, vp);
+    // Build the extractor text from the rotation-corrected display coords. The
+    // title block sits in a corner: the bottom strip (full width, catches
+    // bottom title bars) plus the lower-right block (catches right-edge title
+    // blocks) — without the notes/boilerplate that fills the top of a right
+    // strip. Falls back to the whole-page text if the corner is empty.
+    var _cap = (_dwPageText[i] && _dwPageText[i].items) || [];
+    var parts = _cap.filter(function(t){
+      return t.cy >= 0.80 || (t.cx >= 0.84 && t.cy >= 0.55);
+    }).map(function(t){ return t.s; });
     var text = parts.join(' | ').replace(/\s{2,}/g,' ').slice(0, 1400);
     if(!text){
       // No text in the title-block region — likely a scanned sheet.
@@ -50482,25 +50534,46 @@ function _dwLooksLikeSheetNo(s){
   var t = String(s||'').trim().toUpperCase();
   if(t.length < 2 || t.length > 14) return false;
   if(!/\d/.test(t)) return false;
-  return /^[A-Z]{1,3}[\s\-.]?\d{1,4}(\.\d{1,2})?[A-Z]?$/.test(t);
+  // Lettered: A-101, D.1, S2.1, M-401A.  Numeric-dotted: 0.0, 1.0, 10.2 —
+  // common on shop sets (Coldspring et al.) that don't use discipline letters.
+  // Numeric-dotted values also appear as grid bubbles, so callers that scan a
+  // whole page (the index parser) must position-gate; the probe and
+  // area-select are already gated by where they read.
+  return /^[A-Z]{1,3}[\s\-.]?\d{1,4}(\.\d{1,2})?[A-Z]?$/.test(t) ||
+         /^\d{1,2}\.\d{1,2}[A-Z]?$/.test(t);
 }
 
 // ── capture ────────────────────────────────────────────────────────────
 // Called by _dwExtractPageText for every page. Stores all text with
 // geometry so the probe and the index parser have something to work with.
-function _dwCapturePageText(pageNo, items, W, H){
+// viewport = pdf.js page viewport { width, height, transform }. transform
+// maps PDF user space -> device (display) space, encoding page rotation and
+// the top-origin y-flip.
+function _dwApplyXf(m, x, y){ return [ m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5] ]; }
+
+function _dwCapturePageText(pageNo, items, viewport){
+  var W = viewport.width, H = viewport.height, T = viewport.transform;
   var out = [];
   for(var i=0; i<items.length && out.length < 3000; i++){
     var it = items[i];
     if(!it.str || !it.str.trim()) continue;
-    var tr = it.transform || [];
-    var x = tr[4], y = tr[5];
-    if(x == null || y == null) continue;
+    var t = it.transform || [];
+    if(t[4] == null || t[5] == null) continue;
     var w = it.width  || 0;
     var h = it.height || 10;
-    // pdf.js origin is bottom-left; flip to top-origin so "12% from the
-    // bottom" reads as y≈0.88 and stays intuitive everywhere downstream.
-    var nx = x / W, ny = (H - y - h) / H, nw = w / W, nh = h / H;
+    // Text runs along (t[0],t[1]); cap height rises along (t[2],t[3]). Build
+    // the run's four corners in user space, map each through the viewport
+    // transform, then take the display-space bounding box. This is correct at
+    // any rotation; for rotate:0 it reduces to the old nx=x/W, ny=(H-y-h)/H.
+    var al = Math.hypot(t[0], t[1]) || 1, hl = Math.hypot(t[2], t[3]) || 1;
+    var ux = t[0]/al, uy = t[1]/al, vx = t[2]/hl, vy = t[3]/hl;
+    var c0 = _dwApplyXf(T, t[4],           t[5]);
+    var c1 = _dwApplyXf(T, t[4]+ux*w,      t[5]+uy*w);
+    var c2 = _dwApplyXf(T, t[4]+vx*h,      t[5]+vy*h);
+    var c3 = _dwApplyXf(T, t[4]+ux*w+vx*h, t[5]+uy*w+vy*h);
+    var xmin = Math.min(c0[0],c1[0],c2[0],c3[0]), xmax = Math.max(c0[0],c1[0],c2[0],c3[0]);
+    var ymin = Math.min(c0[1],c1[1],c2[1],c3[1]), ymax = Math.max(c0[1],c1[1],c2[1],c3[1]);
+    var nx = xmin/W, ny = ymin/H, nw = (xmax-xmin)/W, nh = (ymax-ymin)/H;
     out.push({ s: it.str.trim().slice(0,80), x:nx, y:ny, w:nw, h:nh,
                cx: nx + nw/2, cy: ny + nh/2 });
   }
@@ -50589,29 +50662,54 @@ function _dwProbeAt(pageNo, pos){
 // Most GC sets open with a sheet index: a column of sheet numbers with
 // titles to their right. It's authoritative — it's what the architect
 // published — and it's the only thing that can tell us a sheet is missing.
+// Is this a plausible sheet TITLE (vs a dimension string or a notes
+// sentence)? Guards the index parser against grid bubbles grabbing whatever
+// prose sits to their right.
+function _dwTitleLike(s){
+  if(!s) return false;
+  var t = String(s).trim();
+  if(t.length < 3 || t.length > 60) return false;
+  if(!/[A-Za-z]/.test(t)) return false;
+  if(/^\d/.test(t)) return false;                       // starts with a digit -> dimension
+  if(/['"\u2032\u2033]/.test(t)) return false;         // feet/inch marks -> dimension
+  if(t.split(/\s+/).length > 8) return false;           // long -> a notes sentence
+  return true;
+}
+
 function _dwParseDrawingIndex(){
   var best = null;
   Object.keys(_dwPageText).forEach(function(pno){
     var pt = _dwPageText[pno];
     if(!pt || pt.items.length < 10) return;
-    var map = {}, pairs = 0;
+    // Collect candidate (number, title) pairs anywhere on the page.
+    var cands = [];
     pt.items.forEach(function(it){
       if(!_dwLooksLikeSheetNo(it.s)) return;
-      // Title = nearest run to the right on the same baseline.
-      var cands = pt.items.filter(function(o){
+      var t = pt.items.filter(function(o){
         return o !== it && Math.abs(o.cy - it.cy) <= 0.006 &&
-               o.x > it.x + it.w*0.5 && (o.x - (it.x+it.w)) < 0.30 &&
-               o.s.length > 3 && !_dwLooksLikeSheetNo(o.s);
+               o.x > it.x + it.w*0.5 && (o.x - (it.x+it.w)) < 0.22 &&
+               _dwTitleLike(o.s) && !_dwLooksLikeSheetNo(o.s);
       }).sort(function(a,b){ return a.x - b.x; });
-      if(!cands.length) return;
-      var num = it.s.trim().toUpperCase().replace(/\s+/g,'');
-      if(map[num]) return;
-      map[num] = cands[0].s.trim().replace(/\s{2,}/g,' ');
-      pairs++;
+      if(t.length) cands.push({ num:it.s.trim().toUpperCase().replace(/\s+/g,''),
+                                title:t[0].s.trim().replace(/\s{2,}/g,' '), nx:it.x });
     });
-    // A real index lists most of the set. A random plan sheet with a few
-    // detail callouts will not clear this bar.
-    if(pairs >= 5 && (!best || pairs > best.pairs)){
+    if(cands.length < 3) return;
+    // Keep the largest cluster whose number column is left-aligned (within
+    // 0.03 of page width) AND whose titles are all distinct. Scattered grid
+    // bubbles don't form an aligned column, and where they do grab adjacent
+    // prose they grab the SAME repeated sentence — a real drawing list never
+    // repeats a title, so the distinct-title test rejects those clusters.
+    var group = [];
+    cands.forEach(function(seed){
+      var grp = cands.filter(function(c){ return Math.abs(c.nx - seed.nx) <= 0.03; });
+      var titles = grp.map(function(c){ return c.title.toUpperCase(); });
+      var distinct = (new Set(titles)).size === grp.length;
+      if(distinct && grp.length > group.length) group = grp;
+    });
+    var map = {}, pairs = 0;
+    group.forEach(function(c){ if(!map[c.num]){ map[c.num] = c.title; pairs++; } });
+    // A real drawing list is at least 3 aligned rows.
+    if(pairs >= 3 && (!best || pairs > best.pairs)){
       best = { page:Number(pno), map:map, pairs:pairs };
     }
   });
