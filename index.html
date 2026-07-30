@@ -14873,39 +14873,49 @@ function _ntmMaterialPickerHtml(r) {
 // and update the hidden description field.
 function onNtmMaterialPick(sel) {
   var tr = sel.closest('tr'); if (!tr) return;
-  var firstCellHtml;
   var val = sel.value;
   var pid = g('ntm-project').value;
   var p = pid ? db.projects.find(function(x){ return String(x.id) === String(pid); }) : null;
   var list = (p && p.materialList) || [];
+  var cell = sel.parentNode;
+
+  // Remove whatever description field currently follows the select, without
+  // touching the select itself. Re-serializing the <select> (the old
+  // approach) dropped its live selection, because outerHTML doesn't encode a
+  // select's runtime value — so the choice snapped back to blank.
+  var old = cell.querySelector('[data-fld="description"]');
+  if (old) old.parentNode.removeChild(old);
 
   if (val === '__custom__') {
-    // Show selector + free-text input below it
-    var keep = sel.outerHTML;
-    sel.parentNode.innerHTML = keep +
-      '<input style="width:100%;padding:5px 7px;font-size:12px;margin-top:4px" data-fld="description" data-fld-source="custom" value="" placeholder="Custom description" autofocus>';
-    // re-bind the new select's onchange
-    var newSel = sel.parentNode.querySelector('select');
-    if (newSel) newSel.onchange = function(){ onNtmMaterialPick(newSel); };
-    setTimeout(function(){
-      var inp = sel.parentNode.querySelector('input[data-fld="description"]');
-      if (inp) inp.focus();
-    }, 30);
+    // Free-text input for a one-off not in the list.
+    var ci = document.createElement('input');
+    ci.style.cssText = 'width:100%;padding:5px 7px;font-size:12px;margin-top:4px';
+    ci.setAttribute('data-fld', 'description');
+    ci.setAttribute('data-fld-source', 'custom');
+    ci.value = '';
+    ci.placeholder = 'Custom description';
+    cell.appendChild(ci);
+    setTimeout(function(){ ci.focus(); }, 30);
   } else if (!val) {
-    // Cleared selection — replace with empty hidden description
-    var keepBlank = sel.outerHTML;
-    sel.parentNode.innerHTML = keepBlank + '<input type="hidden" data-fld="description" data-fld-source="dropdown" value="">';
-    var newSel2 = sel.parentNode.querySelector('select');
-    if (newSel2) newSel2.onchange = function(){ onNtmMaterialPick(newSel2); };
+    // Cleared selection — empty hidden description.
+    var he = document.createElement('input');
+    he.type = 'hidden';
+    he.setAttribute('data-fld', 'description');
+    he.setAttribute('data-fld-source', 'dropdown');
+    he.value = '';
+    cell.appendChild(he);
   } else {
-    // Mapped to a list item — set hidden description to the canonical value
+    // Mapped to a list item — hidden description carries the canonical value.
     var matchedRow = list.find(function(m){ return String(m.id) === String(val); });
-    var keepSel = sel.outerHTML;
-    sel.parentNode.innerHTML = keepSel +
-      '<input type="hidden" data-fld="description" data-fld-source="dropdown" value="' + tmEsc(matchedRow ? matchedRow.description : '') + '">';
-    var newSel3 = sel.parentNode.querySelector('select');
-    if (newSel3) newSel3.onchange = function(){ onNtmMaterialPick(newSel3); };
+    var hd = document.createElement('input');
+    hd.type = 'hidden';
+    hd.setAttribute('data-fld', 'description');
+    hd.setAttribute('data-fld-source', 'dropdown');
+    hd.value = matchedRow ? matchedRow.description : '';
+    cell.appendChild(hd);
   }
+  // The select is never rebuilt, so its onchange binding and selected value
+  // both survive — no re-bind needed.
 }
 
 function ntmRemoveRow(btn, kind) {
@@ -47973,7 +47983,7 @@ function _mmVisibleProjects(weekKey){
     if(items.some(function(it){ return String(it.projectId) === pid && !it.done && it.source !== 'task'; })) return true;
     if(m && m.discussion && String(m.discussion[pid]||'').trim()) return true;
     return items.some(function(it){ return String(it.projectId) === pid && it.source !== 'task' && (String(it.createdWeek) === String(weekKey) || String(it.completedWeek) === String(weekKey)); });
-  }).sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
+  }).sort(function(a,b){ return String(a.number||'').localeCompare(String(b.number||''), undefined, {numeric:true}); });
 }
 function _mmHiddenProjects(weekKey){
   var m = _mmGetMeeting(weekKey);
@@ -49002,7 +49012,7 @@ function _dwVisibleProjects(){
     return _canAccessProject(p);                                // foreman sees only assigned jobs
   });
   return list.sort(function(a,b){
-    return String(b.projectNumber||'').localeCompare(String(a.projectNumber||''));
+    return String(a.number||'').localeCompare(String(b.number||''), undefined, {numeric:true});
   });
 }
 
@@ -49023,9 +49033,12 @@ function _dwRenderLog(){
 
   var canEdit = canAccess('edit-drawings')==='full';
 
-  var projOpts = projs.map(function(p){
+  var projOpts = projs.slice().sort(function(a,b){
+    // Lowest project number to highest, natural/numeric order.
+    return String(a.number||'').localeCompare(String(b.number||''), undefined, {numeric:true});
+  }).map(function(p){
     return '<option value="'+_dwEsc(p.id)+'"'+(String(p.id)===String(_dwProjectId)?' selected':'')+'>'+
-      _dwEsc((p.projectNumber?p.projectNumber+' — ':'')+(p.name||'Untitled'))+'</option>';
+      _dwEsc((p.number?p.number+' \u2014 ':'')+(p.name||'Untitled'))+'</option>';
   }).join('');
 
   var html =
