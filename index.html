@@ -40836,8 +40836,49 @@ function _apLineGL(l){
   return l.glNo||'';
 }
 // Reasons an approved invoice can't be exported yet (blank = exportable)
+// Ordering key for a log entry. Rows pulled from Supabase carry ts; rows
+// created locally by apLog don't have one until the next pull, but their id is
+// 'aplog-<epochMillis>-<rand>', so the stamp is recoverable either way.
+function _apLogTs(e){
+  if(!e) return 0;
+  if(e.ts){ var t=Date.parse(e.ts); if(!isNaN(t)) return t; }
+  var m=String(e.id||'').match(/^aplog-(\d+)/);
+  return m?Number(m[1]):0;
+}
+
+// Has this invoice already gone to Foundation and not been properly pulled back?
+// Deliberately reads kmi_ap_invoice_log rather than the invoice header: the
+// header is what a stale bulk push overwrites, and on 2026-07-22 that is exactly
+// what happened \u2014 23 invoices lost their export stamps, reappeared in the
+// export queue looking untouched, and were sent to Foundation a second time.
+// The log is append-only, so it still remembers. A legitimate re-export goes
+// through apRevertExport, which writes an 'export_reverted' entry; any revert
+// at or after the last export clears the block.
+// Returns {batchId, when} when the invoice is already out, or null.
+function _apPriorExport(inv){
+  if(!inv) return null;
+  var idStr=String(inv.id), lastExp=null, lastRev=null;
+  (db.apInvoiceLog||[]).forEach(function(e){
+    if(String(e.invoiceId)!==idStr) return;
+    var t=_apLogTs(e);
+    if(e.action==='exported'){ if(!lastExp || t>lastExp.t) lastExp={t:t,e:e}; }
+    else if(e.action==='export_reverted'){ if(!lastRev || t>lastRev.t) lastRev={t:t,e:e}; }
+  });
+  if(!lastExp) return null;
+  if(lastRev && lastRev.t>=lastExp.t) return null;   // reverted \u2014 fair game
+  var m=String(lastExp.e.detail||'').match(/batch ([A-Za-z0-9]+)/);
+  return { batchId:(m?m[1]:''), when:(lastExp.t?new Date(lastExp.t):null) };
+}
+
 function _apExportBlockers(inv){
   var out=[];
+  var _prior=_apPriorExport(inv);
+  if(_prior){
+    out.push('Already exported to Foundation'+
+      (_prior.batchId?(' in batch '+_prior.batchId):'')+
+      (_prior.when?(' on '+_prior.when.toLocaleDateString()):'')+
+      ' \u2014 exporting again would create a duplicate voucher. Use \u201cImport failed \u2014 revert to Approved\u201d first if it genuinely needs to go again.');
+  }
   if(!inv.foundationVendorNo) out.push('No Foundation vendor #');
   // Sign sanity. A credit goes to Foundation as voucher type C with negative
   // amounts; a charge as type R with positive. A record whose flag and sign
@@ -40938,7 +40979,7 @@ async function apDoExport(){
     .filter(Boolean)
     .sort(function(a,b){ return String(_apInvDateISO(a)).localeCompare(String(_apInvDateISO(b))); });
   // final guard
-  for(var k=0;k<invoices.length;k++){ if(_apExportBlockers(invoices[k]).length){ alert('“'+(apVendorDisplayName(invoices[k])||invoices[k].vendorName)+' '+invoices[k].invoiceNo+'” is blocked and can\u2019t be exported.'); return; } }
+  for(var k=0;k<invoices.length;k++){ if(_apExportBlockers(invoices[k]).length){ alert('“'+(apVendorDisplayName(invoices[k])||invoices[k].vendorName)+' '+invoices[k].invoiceNo+'” can\u2019t be exported:\n\n\u2022 '+_apExportBlockers(invoices[k]).join('\n\u2022 ')); return; } }
 
   var csv=apBuildFoundationCSV(invoices);
   var stamp=new Date();
