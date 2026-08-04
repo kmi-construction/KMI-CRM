@@ -17172,6 +17172,38 @@ function corResolveHours(laborRow, corType) {
   }
 }
 
+// Reverse index: which live COR (if any) claims this ticket.
+//
+// The ticket->COR relationship is stored twice — ticket.corId points at
+// the COR, and cor.rolledUpTicketIds lists the ticket. Two copies of one
+// fact means they can diverge: a wholesale `kmi_tm_tickets` upsert from a
+// session holding pre-rollup state will null cor_id while leaving the COR
+// row untouched, and a ticket upsert that fails after the COR upsert
+// succeeds leaves the same split. Either way the ticket shows on the COR
+// but reads as free, and can be rolled onto a second COR — i.e. the same
+// labor billed twice on the same job.
+//
+// So eligibility derives from the COR array, which is the side that
+// doesn't get clobbered, rather than trusting the pointer alone.
+// Voided CORs are skipped: voidCor() deliberately releases its tickets
+// back into the pool, so a null pointer there is correct state.
+function corTicketClaimedBy(ticketId, ignoreCorId) {
+  var tid = String(ticketId);
+  var cors = db.cors || [];
+  for (var i = 0; i < cors.length; i++) {
+    var c = cors[i];
+    if ((c.status || 'Draft') === 'Voided') continue;
+    if (ignoreCorId !== undefined && ignoreCorId !== null &&
+        String(c.id) === String(ignoreCorId)) continue;
+    var ids = c.rolledUpTicketIds;
+    if (!Array.isArray(ids)) continue;
+    for (var j = 0; j < ids.length; j++) {
+      if (String(ids[j]) === tid) return c;
+    }
+  }
+  return null;
+}
+
 // Ticket-eligibility for rollup. A ticket is eligible if it's signed +
 // KMI-approved + not already on another COR + has hours that match the
 // COR type's needs (e.g. Premium Time OT requires OT > 0).
@@ -17186,6 +17218,9 @@ function corTicketEligible(ticket, corType) {
   if (eligibleStatuses.indexOf(s) === -1) return false;
   // Already locked to another COR? Not eligible.
   if (ticket.corId) return false;
+  // Belt-and-braces: the pointer above can be lost without the COR row
+  // knowing (see corTicketClaimedBy). Check the COR side too.
+  if (corTicketClaimedBy(ticket.id)) return false;
   // Premium Time CORs need premium hours present
   if (corType === 'Premium Time OT' || corType === 'Premium Time DT') {
     var rows = Array.isArray(ticket.laborRows) ? ticket.laborRows : [];
@@ -18405,15 +18440,30 @@ async function saveCor() {
     saveDB();
     try {
       if (supabaseClient) {
-        var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(existingCor));
-        if (upRes && upRes.error) console.warn('COR sync error:', upRes.error.message);
-        // Push tickets whose lock state changed
+        // Ticket lock state goes up FIRST. If only one of these two writes
+        // lands, we want it to be the ticket lock: an over-locked ticket is
+        // visible and unlockable from the COR, whereas a COR that lists
+        // tickets the cloud still considers free is silent and can lead to
+        // the same labor being rolled onto a second COR.
         var tixToSync = addedIds.concat(removedIds)
           .map(function(tid){ return (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); }); })
           .filter(Boolean);
         if (tixToSync.length) {
           var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(tixToSync.map(toSBTmTicket));
-          if (tixRes && tixRes.error) console.warn('Ticket sync error:', tixRes.error.message);
+          if (tixRes && tixRes.error) {
+            console.warn('Ticket lock sync error:', tixRes.error.message);
+            alert('WARNING \u2014 ticket lock changes did not reach the cloud:\n\n' +
+                  tixRes.error.message +
+                  '\n\n' + tixToSync.length + ' ticket(s) may still show as available on other CORs. ' +
+                  'Run Sync \u2192 Push, then re-open this COR to confirm the ticket list.');
+          }
+        }
+        var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(existingCor));
+        if (upRes && upRes.error) {
+          console.warn('COR sync error:', upRes.error.message);
+          alert('WARNING \u2014 this COR saved locally but did not reach the cloud:\n\n' +
+                upRes.error.message +
+                '\n\nRun Sync \u2192 Push before anyone else pulls.');
         }
       }
     } catch (e) { console.warn('COR sync exception:', e); }
@@ -18496,6 +18546,24 @@ async function saveCor() {
   // Push to Supabase
   try {
     if (supabaseClient) {
+      // Ticket locks go up FIRST — see the edit path above for why the
+      // order matters. Over-locking is recoverable and visible; a COR
+      // whose tickets read as free in the cloud is neither.
+      if (newRolledIds.length) {
+        var tixToSync = newRolledIds
+          .map(function(tid){ return (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); }); })
+          .filter(Boolean);
+        if (tixToSync.length) {
+          var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(tixToSync.map(toSBTmTicket));
+          if (tixRes && tixRes.error) {
+            console.warn('Ticket lock sync error:', tixRes.error.message);
+            alert('WARNING \u2014 ticket locks did not reach the cloud:\n\n' +
+                  tixRes.error.message +
+                  '\n\n' + tixToSync.length + ' ticket(s) may still show as available on other CORs. ' +
+                  'Run Sync \u2192 Push, then re-open this COR to confirm the ticket list.');
+          }
+        }
+      }
       var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(newCor));
       if (upRes && upRes.error) {
         console.warn('COR sync error:', upRes.error.message);
@@ -18504,16 +18572,6 @@ async function saveCor() {
       // Push the project so nextCorSeq survives a fresh device pull
       var prjRes = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
       if (prjRes && prjRes.error) console.warn('Project sync error:', prjRes.error.message);
-      // Push the locked tickets
-      if (newRolledIds.length) {
-        var tixToSync = newRolledIds
-          .map(function(tid){ return (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); }); })
-          .filter(Boolean);
-        if (tixToSync.length) {
-          var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(tixToSync.map(toSBTmTicket));
-          if (tixRes && tixRes.error) console.warn('Ticket sync error:', tixRes.error.message);
-        }
-      }
     }
   } catch (e) {
     console.warn('COR sync exception:', e);
@@ -21583,8 +21641,15 @@ function ncorShowAddTicketsModal() {
   var pid = w.projectId;
   var corType = w.corType;
 
+  // Tickets already staged on this COR (saved or not) are not offered
+  // again. corTicketEligible() catches the saved ones via the reverse
+  // index; this covers ones added in the current unsaved editing session.
+  var staged = {};
+  (w.rolledUpTicketIds || []).forEach(function(id){ staged[String(id)] = true; });
+
   var eligible = (db.tmTickets || []).filter(function(t){
     if (String(t.projectId) !== String(pid)) return false;
+    if (staged[String(t.id)]) return false;
     return corTicketEligible(t, corType);
   }).sort(function(a, b){
     return String(a.ticketDate || '').localeCompare(String(b.ticketDate || ''))
