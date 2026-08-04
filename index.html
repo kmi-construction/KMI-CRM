@@ -41099,7 +41099,19 @@ function apRevertExport(id){
   if(!confirm('Revert this invoice to Approved so it can be re-exported? This clears its export stamp.')) return;
   i.status='approved'; i.exportedAt=''; i.exportedBy=''; i.exportBatchId=''; i.importConfirmedAt=''; i.importConfirmedBy=''; i.updatedAt=new Date().toISOString();
   saveDB(); apLog(i.id,'export_reverted','Import failed \u2014 reverted to Approved for re-export');
-  if(supabaseClient) apPushInvoice(i);
+  // Must go through the RPC. trg_kmi_ap_protect_export refuses to let any
+  // ordinary UPDATE blank an export stamp \u2014 that rule is what stops a stale
+  // session's bulk push from reverting exported invoices. The RPC sets the
+  // one session flag the trigger honors, so this deliberate revert still works.
+  if(supabaseClient){
+    supabaseClient.rpc('kmi_ap_revert_export',{ p_id:String(i.id), p_actor:(_currentUser?(_currentUser.email||_currentUser.name||''):'') })
+      .then(function(res){
+        if(res && res.error){
+          console.error('revert RPC failed',res.error);
+          apSetApprBanner('warn','Revert saved locally but the cloud rejected it \u2014 reload and try again.');
+        }
+      });
+  }
   if(_apReviewId && String(_apReviewId)===String(id)){ var nx=_apReviewNextId(); if(nx) apOpenReview(nx); else apCloseReview(); } else renderApApprovals();
   apSetApprBanner('info','Reverted '+apEsc(i.invoiceNo)+' to Approved \u2014 ready to re-export.');
 }
