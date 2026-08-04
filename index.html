@@ -18390,13 +18390,24 @@ async function saveCor() {
     var removedIds = oldIds.filter(function(id){ return newRolledIds.indexOf(id) === -1; });
 
     // Apply ticket lock changes
+    // updatedAt is bumped on every lock/unlock: locking a ticket IS a change
+    // to that ticket, and leaving the timestamp untouched made the write
+    // invisible to any freshness comparison (and to the dirty-table check).
+    var _lockNowIso = new Date().toISOString();
+    var _lockUserId = _currentUser ? _currentUser.id : null;
     addedIds.forEach(function(tid){
       var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
-      if (t && !t.corId) { t.corId = existingCor.id; t.corNumber = existingCor.corNumber; }
+      if (t && !t.corId) {
+        t.corId = existingCor.id; t.corNumber = existingCor.corNumber;
+        t.updatedAt = _lockNowIso; t.updatedByUserId = _lockUserId;
+      }
     });
     removedIds.forEach(function(tid){
       var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
-      if (t && String(t.corId) === String(existingCor.id)) { t.corId = null; t.corNumber = null; }
+      if (t && String(t.corId) === String(existingCor.id)) {
+        t.corId = null; t.corNumber = null;
+        t.updatedAt = _lockNowIso; t.updatedByUserId = _lockUserId;
+      }
     });
 
     // Persist all section state on the COR
@@ -18536,7 +18547,10 @@ async function saveCor() {
   // Lock all rolled-up tickets onto the new COR
   newRolledIds.forEach(function(tid){
     var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
-    if (t) { t.corId = newCor.id; t.corNumber = newCor.corNumber; }
+    if (t) {
+      t.corId = newCor.id; t.corNumber = newCor.corNumber;
+      t.updatedAt = nowIso; t.updatedByUserId = _currentUser ? _currentUser.id : null;
+    }
   });
 
   db.cors = db.cors || [];
@@ -46272,6 +46286,55 @@ function fromSBProjBudget(r) {
   };
 }
 
+// ── Per-table change detection for the debounced auto-push ───────────
+// saveDB() is patched to fire a full pushToSupabase() 1.5s after ANY save,
+// which re-upserts every table whether or not this session touched it. A
+// tab holding data from an earlier pull therefore overwrites other people's
+// newer rows across tables it never opened — that is how COR ticket locks
+// were being reset to null, and the same mechanism sits under the AP issues.
+//
+// Fix: hash each table after every pull and every clean push, and skip any
+// table whose contents are byte-identical to that baseline. A stale tab that
+// edits one project now pushes only db.projects; everything else is left
+// alone. Tables the session genuinely changed still push exactly as before,
+// so nothing can silently stop syncing.
+//
+// Unknown baseline (first push of a session, unhashable payload) counts as
+// dirty — the safe direction is to push.
+var _tblHash = {};
+
+function _cheapHash(s) {
+  var h = 5381, i = s.length;
+  while (i) h = (h * 33 ^ s.charCodeAt(--i)) >>> 0;
+  return h.toString(36) + ':' + s.length;
+}
+
+function _tblSnapshot(key) {
+  try { return _cheapHash(JSON.stringify(db[key] || [])); }
+  catch (e) { return null; }
+}
+
+// True if db[key] differs from the last pulled/pushed baseline.
+function _tblDirty(key) {
+  var h = _tblSnapshot(key);
+  if (h === null) return true;
+  if (!Object.prototype.hasOwnProperty.call(_tblHash, key)) return true;
+  return _tblHash[key] !== h;
+}
+
+// Re-baseline every array on db. Called after a successful pull (local now
+// matches cloud) and after a clean push (cloud now matches local). Walks db
+// generically so a table added later is covered without touching this code.
+function _tblBaselineAll() {
+  try {
+    Object.keys(db).forEach(function(k){
+      if (!Array.isArray(db[k])) return;
+      var h = _tblSnapshot(k);
+      if (h !== null) _tblHash[k] = h;
+    });
+  } catch (e) { /* non-fatal — worst case everything reads dirty */ }
+}
+
 // ── Push all data to Supabase ────────────────────────────────────
 async function pushToSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
@@ -46281,50 +46344,50 @@ async function pushToSupabase() {
     var errs = [];
 
     // Customers
-    if (db.customers.length) {
+    if (db.customers.length && _tblDirty('customers')) {
       var r = await supabaseClient.from('kmi_customers').upsert(db.customers.map(toSBCustomer));
       if (r.error) errs.push('customers: ' + r.error.message);
     }
     // PMs
-    if (db.pms.length) {
+    if (db.pms.length && _tblDirty('pms')) {
       var r = await supabaseClient.from('kmi_project_managers').upsert(db.pms.map(toSBPM));
       if (r.error) errs.push('pms: ' + r.error.message);
     }
     // Vendors
-    if ((db.vendors || []).length) {
+    if ((db.vendors || []).length && _tblDirty('vendors')) {
       var r = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
       if (r.error) errs.push('vendors: ' + r.error.message);
     }
     // Vendor contacts
-    if ((db.vendorContacts || []).length) {
+    if ((db.vendorContacts || []).length && _tblDirty('vendorContacts')) {
       var r = await supabaseClient.from('kmi_vendor_contacts').upsert(db.vendorContacts.map(toSBVendorContact));
       if (r.error) errs.push('vendor_contacts: ' + r.error.message);
     }
     // Product Library (Round 1) — non-fatal if tables missing on older
     // Supabase projects (they get created via the round1 migration).
-    if ((db.manufacturers || []).length) {
+    if ((db.manufacturers || []).length && _tblDirty('manufacturers')) {
       var r = await supabaseClient.from('kmi_manufacturers').upsert(db.manufacturers.map(toSBManufacturer));
       if (r && r.error) errs.push('manufacturers: ' + r.error.message);
     }
-    if ((db.products || []).length) {
+    if ((db.products || []).length && _tblDirty('products')) {
       var r = await supabaseClient.from('kmi_products').upsert(db.products.map(toSBProduct));
       if (r && r.error) errs.push('products: ' + r.error.message);
     }
-    if ((db.productDocuments || []).length) {
+    if ((db.productDocuments || []).length && _tblDirty('productDocuments')) {
       var r = await supabaseClient.from('kmi_product_documents').upsert(db.productDocuments.map(toSBProductDocument));
       if (r && r.error) errs.push('product_documents: ' + r.error.message);
     }
     // Submittals (Round 2A) — non-fatal if table missing
-    if ((db.submittals || []).length) {
+    if ((db.submittals || []).length && _tblDirty('submittals')) {
       var r = await supabaseClient.from('kmi_submittals').upsert(db.submittals.map(toSBSubmittal));
       if (r && r.error) errs.push('submittals: ' + r.error.message);
     }
     // Meeting Minutes (Round 1) — non-fatal if tables missing
-    if ((db.meetings || []).length) {
+    if ((db.meetings || []).length && _tblDirty('meetings')) {
       var r = await supabaseClient.from('kmi_meetings').upsert(db.meetings.map(toSBMeeting));
       if (r && r.error) errs.push('meetings: ' + r.error.message);
     }
-    if ((db.meetingActionItems || []).length) {
+    if ((db.meetingActionItems || []).length && _tblDirty('meetingActionItems')) {
       var r = await supabaseClient.from('kmi_meeting_action_items').upsert(db.meetingActionItems.map(toSBMeetingItem));
       if (r && r.error) errs.push('meeting_action_items: ' + r.error.message);
     }
@@ -46332,52 +46395,52 @@ async function pushToSupabase() {
     // fresh push: areas before sets before sheets before revisions, so a
     // partial failure never leaves a revision pointing at a sheet that
     // hasn't landed.
-    if ((db.drawingAreas || []).length) {
+    if ((db.drawingAreas || []).length && _tblDirty('drawingAreas')) {
       var r = await supabaseClient.from('kmi_drawing_areas').upsert(db.drawingAreas.map(toSBDrawingArea));
       if (r && r.error) errs.push('drawing_areas: ' + r.error.message);
     }
-    if ((db.drawingSets || []).length) {
+    if ((db.drawingSets || []).length && _tblDirty('drawingSets')) {
       var r = await supabaseClient.from('kmi_drawing_sets').upsert(db.drawingSets.map(toSBDrawingSet));
       if (r && r.error) errs.push('drawing_sets: ' + r.error.message);
     }
-    if ((db.drawings || []).length) {
+    if ((db.drawings || []).length && _tblDirty('drawings')) {
       var r = await supabaseClient.from('kmi_drawings').upsert(db.drawings.map(toSBDrawing));
       if (r && r.error) errs.push('drawings: ' + r.error.message);
     }
-    if ((db.drawingRevisions || []).length) {
+    if ((db.drawingRevisions || []).length && _tblDirty('drawingRevisions')) {
       var r = await supabaseClient.from('kmi_drawing_revisions').upsert(db.drawingRevisions.map(toSBDrawingRevision));
       if (r && r.error) errs.push('drawing_revisions: ' + r.error.message);
     }
-    if ((db.drawingMarkups || []).length) {
+    if ((db.drawingMarkups || []).length && _tblDirty('drawingMarkups')) {
       var r = await supabaseClient.from('kmi_drawing_markups').upsert(db.drawingMarkups.map(toSBDrawingMarkup));
       if (r && r.error) errs.push('drawing_markups: ' + r.error.message);
     }
     // Transmittals (autonumber history) — non-fatal if table missing
-    if ((db.transmittals || []).length) {
+    if ((db.transmittals || []).length && _tblDirty('transmittals')) {
       var r = await supabaseClient.from('kmi_transmittals').upsert(db.transmittals.map(toSBTransmittal));
       if (r && r.error) errs.push('transmittals: ' + r.error.message);
     }
     // Spec sections (Round 5) — non-fatal if table missing
-    if ((db.specSections || []).length) {
+    if ((db.specSections || []).length && _tblDirty('specSections')) {
       var r = await supabaseClient.from('kmi_spec_sections').upsert(db.specSections.map(toSBSpecSection));
       if (r && r.error) errs.push('spec_sections: ' + r.error.message);
     }
     // Product Library lists (Product Lists Round 1) — non-fatal if tables missing
-    if ((db.productDocTypes || []).length) {
+    if ((db.productDocTypes || []).length && _tblDirty('productDocTypes')) {
       var r = await supabaseClient.from('kmi_product_doc_types').upsert(db.productDocTypes.map(toSBProductDocType));
       if (r && r.error) errs.push('product_doc_types: ' + r.error.message);
     }
-    if ((db.productCategories || []).length) {
+    if ((db.productCategories || []).length && _tblDirty('productCategories')) {
       var r = await supabaseClient.from('kmi_product_categories').upsert(db.productCategories.map(toSBProductCategory));
       if (r && r.error) errs.push('product_categories: ' + r.error.message);
     }
     // Project parameters (Form-fill Round 1) — non-fatal if table missing
-    if ((db.projectParameters || []).length) {
+    if ((db.projectParameters || []).length && _tblDirty('projectParameters')) {
       var r = await supabaseClient.from('kmi_project_parameters').upsert(db.projectParameters.map(toSBProjectParameter));
       if (r && r.error) errs.push('project_parameters: ' + r.error.message);
     }
     // Users
-    if (db.users.length) {
+    if (db.users.length && _tblDirty('users')) {
       var r = await supabaseClient.from('kmi_users').upsert(db.users.map(toSBUser));
       if (r.error) errs.push('users: ' + r.error.message);
     }
@@ -46386,7 +46449,7 @@ async function pushToSupabase() {
     // statement ("ON CONFLICT DO UPDATE command cannot affect row a second
     // time"), so every record in the table silently stops syncing. Detect it here
     // and surface a message that names the offending ID instead.
-    if (db.opportunities.length) {
+    if (db.opportunities.length && _tblDirty('opportunities')) {
       var dupOpp = _findDupIds(db.opportunities);
       if (dupOpp.length) {
         errs.push('opportunities: duplicate ID(s) ' + dupOpp.join(', ') + ' \u2014 upsert skipped until resolved');
@@ -46397,7 +46460,7 @@ async function pushToSupabase() {
       }
     }
     // Proposals
-    if (db.proposals.length) {
+    if (db.proposals.length && _tblDirty('proposals')) {
       var dupProp = _findDupIds(db.proposals);
       if (dupProp.length) {
         errs.push('proposals: duplicate ID(s) ' + dupProp.join(', ') + ' \u2014 upsert skipped until resolved');
@@ -46408,17 +46471,17 @@ async function pushToSupabase() {
       }
     }
     // Projects
-    if (db.projects.length) {
+    if (db.projects.length && _tblDirty('projects')) {
       var r = await supabaseClient.from('kmi_projects').upsert(db.projects.map(toSBProject));
       if (r.error) errs.push('projects: ' + r.error.message);
     }
     // T&M Tickets (Round 1) — non-fatal if table missing on older Supabase projects
-    if ((db.tmTickets || []).length) {
+    if ((db.tmTickets || []).length && _tblDirty('tmTickets')) {
       var r = await supabaseClient.from('kmi_tm_tickets').upsert(db.tmTickets.map(toSBTmTicket));
       if (r && r.error) errs.push('tm_tickets: ' + r.error.message);
     }
     // Production weekly data (Phase 1) — non-fatal if table missing
-    if ((db.prodWeekly || []).length) {
+    if ((db.prodWeekly || []).length && _tblDirty('prodWeekly')) {
       var r = await supabaseClient.from('kmi_prod_weekly').upsert(db.prodWeekly.map(toSBProdWeekly));
       if (r && r.error) errs.push('prod_weekly: ' + r.error.message);
     }
@@ -46426,16 +46489,16 @@ async function pushToSupabase() {
     // if the tables are missing on an older Supabase project (created by the
     // prod_catalog_round1 migration). These are now the sole source of truth
     // for categories/items; they are no longer written to kmi_settings.
-    if ((db.prodCategories || []).length) {
+    if ((db.prodCategories || []).length && _tblDirty('prodCategories')) {
       var r = await supabaseClient.from('kmi_prod_categories').upsert(db.prodCategories.map(toSBProdCategory));
       if (r && r.error) errs.push('prod_categories: ' + r.error.message);
     }
-    if ((db.prodItems || []).length) {
+    if ((db.prodItems || []).length && _tblDirty('prodItems')) {
       var r = await supabaseClient.from('kmi_prod_items').upsert(db.prodItems.map(toSBProdItem));
       if (r && r.error) errs.push('prod_items: ' + r.error.message);
     }
     // CORs (Round 4.1) — non-fatal if table missing on older Supabase projects
-    if ((db.cors || []).length) {
+    if ((db.cors || []).length && _tblDirty('cors')) {
       var r = await supabaseClient.from('kmi_cors').upsert(db.cors.map(toSBCor));
       if (r && r.error) errs.push('cors: ' + r.error.message);
     }
@@ -46443,39 +46506,39 @@ async function pushToSupabase() {
     // Supabase projects; the kmi_purchase_orders table is created by the
     // po_round1 migration. Without the table, POs only persist in
     // localStorage on this device.
-    if ((db.purchaseOrders || []).length) {
+    if ((db.purchaseOrders || []).length && _tblDirty('purchaseOrders')) {
       var r = await supabaseClient.from('kmi_purchase_orders').upsert(db.purchaseOrders.map(toSBPurchaseOrder));
       if (r && r.error) errs.push('purchase_orders: ' + r.error.message);
     }
     // RFQ / Vendor Pricing — non-fatal if tables missing on older Supabase
     // projects (created by the rfq_round1 migration). Without the tables,
     // RFQs only persist in localStorage on this device.
-    if ((db.rfqs || []).length) {
+    if ((db.rfqs || []).length && _tblDirty('rfqs')) {
       var r = await supabaseClient.from('kmi_rfqs').upsert(db.rfqs.map(toSBRfq));
       if (r && r.error) errs.push('rfqs: ' + r.error.message);
     }
-    if ((db.rfqResponses || []).length) {
+    if ((db.rfqResponses || []).length && _tblDirty('rfqResponses')) {
       var r = await supabaseClient.from('kmi_rfq_responses').upsert(db.rfqResponses.map(toSBRfqResponse));
       if (r && r.error) errs.push('rfq_responses: ' + r.error.message);
     }
     // AP invoices (Session 2) — non-fatal if tables missing (ap_s2 migration).
-    if ((db.foundationVendors || []).length) {
+    if ((db.foundationVendors || []).length && _tblDirty('foundationVendors')) {
       var r = await supabaseClient.from('kmi_foundation_vendors').upsert(db.foundationVendors.map(toSBFoundationVendor));
       if (r && r.error) errs.push('foundation_vendors: ' + r.error.message);
     }
-    if ((db.apInvoices || []).length) {
+    if ((db.apInvoices || []).length && _tblDirty('apInvoices')) {
       var r = await supabaseClient.from('kmi_ap_invoices').upsert(db.apInvoices.map(toSBApInvoice));
       if (r && r.error) errs.push('ap_invoices: ' + r.error.message);
     }
-    if ((db.apInvoiceLines || []).length) {
+    if ((db.apInvoiceLines || []).length && _tblDirty('apInvoiceLines')) {
       var r = await supabaseClient.from('kmi_ap_invoice_lines').upsert(db.apInvoiceLines.map(toSBApLine));
       if (r && r.error) errs.push('ap_invoice_lines: ' + r.error.message);
     }
-    if ((db.apInvoiceLog || []).length) {
+    if ((db.apInvoiceLog || []).length && _tblDirty('apInvoiceLog')) {
       var r = await supabaseClient.from('kmi_ap_invoice_log').upsert(db.apInvoiceLog.map(toSBApLog));
       if (r && r.error) errs.push('ap_invoice_log: ' + r.error.message);
     }
-    if ((db.apVendorAliases || []).length) {
+    if ((db.apVendorAliases || []).length && _tblDirty('apVendorAliases')) {
       var r = await supabaseClient.from('kmi_ap_vendor_aliases').upsert(db.apVendorAliases.map(toSBApAlias));
       if (r && r.error) errs.push('ap_vendor_aliases: ' + r.error.message);
     }
@@ -46483,28 +46546,28 @@ async function pushToSupabase() {
     // These are populated by CSV import on the Templates page; if local is
     // empty we don't push (avoids wiping a populated cloud copy on a fresh
     // device that hasn't pulled yet).
-    if ((db.costCodes || []).length) {
+    if ((db.costCodes || []).length && _tblDirty('costCodes')) {
       var r = await supabaseClient.from('kmi_cost_codes').upsert(db.costCodes.map(toSBCostCode));
       if (r && r.error) errs.push('cost_codes: ' + r.error.message);
     }
-    if ((db.costClasses || []).length) {
+    if ((db.costClasses || []).length && _tblDirty('costClasses')) {
       var r = await supabaseClient.from('kmi_cost_classes').upsert(db.costClasses.map(toSBCostClass));
       if (r && r.error) errs.push('cost_classes: ' + r.error.message);
     }
-    if ((db.customersFoundation || []).length) {
+    if ((db.customersFoundation || []).length && _tblDirty('customersFoundation')) {
       var r = await supabaseClient.from('kmi_customers_foundation').upsert(db.customersFoundation.map(toSBCustFnd));
       if (r && r.error) errs.push('customers_foundation: ' + r.error.message);
     }
-    if ((db.budgetTemplate || []).length) {
+    if ((db.budgetTemplate || []).length && _tblDirty('budgetTemplate')) {
       var r = await supabaseClient.from('kmi_budget_template_lines').upsert(db.budgetTemplate.map(toSBBudgetTmpl));
       if (r && r.error) errs.push('budget_template: ' + r.error.message);
     }
-    if ((db.projectBudgets || []).length) {
+    if ((db.projectBudgets || []).length && _tblDirty('projectBudgets')) {
       var r = await supabaseClient.from('kmi_project_budgets').upsert(db.projectBudgets.map(toSBProjBudget));
       if (r && r.error) errs.push('project_budgets: ' + r.error.message);
     }
     // Activity (insert new ones — get current max id first)
-    if (db.activity.length) {
+    if (db.activity.length && _tblDirty('activity')) {
       var actRows = db.activity.slice(0, 50).map(function(a) { return {text:a.text||'', type:a.type||'', time:a.time||''}; });
       // Delete all and re-insert to keep in sync
       await supabaseClient.from('kmi_activity').delete().gte('id', 0);
@@ -46538,6 +46601,10 @@ async function pushToSupabase() {
       setSyncStatus('error', 'Sync error');
       showSBResult('Sync errors: ' + errs.join('; '), false);
     } else {
+      // Clean push — cloud now matches local, so re-baseline. On an errored
+      // push we deliberately leave the old baseline in place so the affected
+      // tables still read dirty and retry on the next save.
+      _tblBaselineAll();
       setSyncStatus('connected', 'Connected \u2022 Synced');
       showSBResult('\u2714 All data synced to Supabase', true);
     }
@@ -47035,6 +47102,10 @@ async function pullFromSupabase() {
       }).map(function(o){ return o.id + ' \u2192 ' + o.proposalId; });
       if (crossed.length) console.error('[integrity] crossed opportunity\u2192proposal link(s):', crossed);
     })();
+
+    // Local state now matches cloud — baseline every table so the next
+    // auto-push only carries what this session actually changes from here.
+    _tblBaselineAll();
 
     // Re-render current page
     var activePg = document.querySelector('.pg.active');
