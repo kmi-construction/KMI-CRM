@@ -39407,7 +39407,7 @@ async function _apBackfillCredits(){
   var flipped = [], stranded = [];
   pending.forEach(function(i){
     var isC = _apDetectCredit(i.extractedJson||{}, i.sourceFile||'');
-    i.isCredit = isC;
+    i.isCredit = isC; i.updatedAt = new Date().toISOString();
     if(isC){
       if(i.exportedAt || i.status==='exported'){ stranded.push(i); }
       else { _apApplyCreditSign(i, true); flipped.push(i); }
@@ -46175,7 +46175,12 @@ function toSBApInvoice(r) {
     // _apBackfillCredits knows which pulled records still need a sign check and
     // which ones a human has already ruled on.
     is_credit:(r.isCredit==null ? null : !!r.isCredit),
-    created_by:r.createdBy||'', updated_at:new Date().toISOString()
+    created_by:r.createdBy||'',
+    // Send the RECORD'S timestamp, never new Date(). Stamping "now" here made
+    // every push look fresh, so the kmi_reject_stale_update trigger could never
+    // tell a stale session's snapshot from a current one and waved all of them
+    // through \u2014 which is how exported invoices kept reverting to approved.
+    updated_at:r.updatedAt||new Date().toISOString()
   };
 }
 function fromSBApInvoice(r) {
