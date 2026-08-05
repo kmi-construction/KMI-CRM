@@ -46121,6 +46121,8 @@ function toSBMeeting(r) {
     week_key:           r.weekKey || null,
     discussion:         (r.discussion && typeof r.discussion === 'object') ? r.discussion : {},
     hidden_project_ids: Array.isArray(r.hiddenProjectIds) ? r.hiddenProjectIds : [],
+    // Sticky-hide unhide markers (decision 4-A) — see _mmIsHiddenAt().
+    unhidden_project_ids: Array.isArray(r.unhiddenProjectIds) ? r.unhiddenProjectIds : [],
     added_project_ids:  Array.isArray(r.addedProjectIds)  ? r.addedProjectIds  : [],
     created_at:         r.createdAt || null,
     created_by:         r.createdBy || null,
@@ -46133,6 +46135,7 @@ function fromSBMeeting(r) {
     weekKey:          r.week_key || '',
     discussion:       (r.discussion && typeof r.discussion === 'object') ? r.discussion : {},
     hiddenProjectIds: Array.isArray(r.hidden_project_ids) ? r.hidden_project_ids : [],
+    unhiddenProjectIds: Array.isArray(r.unhidden_project_ids) ? r.unhidden_project_ids : [],
     addedProjectIds:  Array.isArray(r.added_project_ids)  ? r.added_project_ids  : [],
     createdAt:        r.created_at || '',
     createdBy:        r.created_by || '',
@@ -48766,7 +48769,7 @@ function _mmGetMeeting(k){ return (db.meetings||[]).find(function(m){ return Str
 function _mmGetOrCreateMeeting(k){
   var m = _mmGetMeeting(k);
   if(!m){
-    m = { id:'mtg-' + Date.now() + '-' + Math.random().toString(36).slice(2,7), weekKey:k, discussion:{}, hiddenProjectIds:[], addedProjectIds:[], createdAt:new Date().toISOString(), createdBy:(_currentUser?String(_currentUser.id):''), updatedAt:new Date().toISOString() };
+    m = { id:'mtg-' + Date.now() + '-' + Math.random().toString(36).slice(2,7), weekKey:k, discussion:{}, hiddenProjectIds:[], addedProjectIds:[], unhiddenProjectIds:[], createdAt:new Date().toISOString(), createdBy:(_currentUser?String(_currentUser.id):''), updatedAt:new Date().toISOString() };
     db.meetings = db.meetings || [];
     db.meetings.push(m);
   }
@@ -48798,31 +48801,46 @@ async function _mmDeleteItemCloud(id){
 
 // Projects to show this week (decision 3-C: auto-list all, allow per-week hide,
 // plus an explicit add for anything that fell off).
+// Is this project active? Decision 2-B: `status` is authoritative and the old
+// endDate-derived check is retired. Legacy rows with no status read as active
+// (the SQL backfill sets the real value; this is a client-side safety net).
+function _mmProjectIsActive(p){ return String((p && p.status) || 'active') !== 'inactive'; }
+
+// Sticky hide (decision 4-A). A hide recorded in week W applies to W and every
+// later week until an explicit unhide is recorded. Both markers live on the
+// meeting row of the week the action was taken, so past weeks — and any PDF
+// already exported from them — never change retroactively.
+//
+// Resolution: walk weeks <= weekKey newest-first and take the first marker
+// found. Within a single week an unhide wins (the handlers keep the two arrays
+// mutually exclusive, so that case should not arise in practice).
+function _mmIsHiddenAt(pid, weekKey){
+  pid = String(pid);
+  var rows = (db.meetings || []).filter(function(m){
+    return m && m.weekKey && String(m.weekKey) <= String(weekKey);
+  }).sort(function(a,b){ return String(b.weekKey).localeCompare(String(a.weekKey)); });
+  for(var i = 0; i < rows.length; i++){
+    var m = rows[i];
+    if(Array.isArray(m.unhiddenProjectIds) && m.unhiddenProjectIds.map(String).indexOf(pid) >= 0) return false;
+    if(Array.isArray(m.hiddenProjectIds)   && m.hiddenProjectIds.map(String).indexOf(pid)   >= 0) return true;
+  }
+  return false;
+}
+
 function _mmVisibleProjects(weekKey){
-  var m = _mmGetMeeting(weekKey);
-  var hidden = (m && Array.isArray(m.hiddenProjectIds)) ? m.hiddenProjectIds.map(String) : [];
-  var added  = (m && Array.isArray(m.addedProjectIds))  ? m.addedProjectIds.map(String)  : [];
-  var today  = _mmDateStr(_mmToday());
-  var items  = db.meetingActionItems || [];
+  // Decision 3-A: strict. An inactive project never appears, regardless of open
+  // action items or recorded discussion. Those items remain on the Tasks board.
   return _projectsOnly().filter(function(p){
-    var pid = String(p.id);
-    if(hidden.indexOf(pid) >= 0) return false;
-    if(added.indexOf(pid) >= 0) return true;
-    var active = !p.endDate || String(p.endDate) >= today;
-    if(active) return true;
-    // A completed project stays visible while it still has open action items,
-    // or if it has content recorded for this week.
-    if(items.some(function(it){ return String(it.projectId) === pid && !it.done && it.source !== 'task'; })) return true;
-    if(m && m.discussion && String(m.discussion[pid]||'').trim()) return true;
-    return items.some(function(it){ return String(it.projectId) === pid && it.source !== 'task' && (String(it.createdWeek) === String(weekKey) || String(it.completedWeek) === String(weekKey)); });
+    if(!_mmProjectIsActive(p)) return false;
+    return !_mmIsHiddenAt(String(p.id), weekKey);
   }).sort(function(a,b){ return String(a.number||'').localeCompare(String(b.number||''), undefined, {numeric:true}); });
 }
 function _mmHiddenProjects(weekKey){
-  var m = _mmGetMeeting(weekKey);
-  var hidden = (m && Array.isArray(m.hiddenProjectIds)) ? m.hiddenProjectIds.map(String) : [];
-  if(!hidden.length) return [];
-  return _projectsOnly().filter(function(p){ return hidden.indexOf(String(p.id)) >= 0; })
-    .sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
+  // Inactive projects drop off the hidden bar entirely — they are out of the
+  // meeting by status, so offering to unhide them would be misleading.
+  return _projectsOnly().filter(function(p){
+    return _mmProjectIsActive(p) && _mmIsHiddenAt(String(p.id), weekKey);
+  }).sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
 }
 // Items visible for a project in a given week (Model A visibility rule).
 function _mmItemsFor(projectId, weekKey){
@@ -48981,7 +48999,11 @@ function renderMeetings(){
 
   // Footer: hidden-project chips + add-a-project
   var hiddenProjs = _mmHiddenProjects(wk);
-  var addable = _projectsOnly().filter(function(p){ return visible.indexOf(p) < 0 && hiddenProjs.indexOf(p) < 0; })
+  // Decision 3-A: inactive projects are never offered here. Note this list is
+  // normally empty now — every active, non-hidden project appears automatically,
+  // so the dropdown self-hides via the canEdit && (...) guard below. Restoring a
+  // hidden project is done with the chips to its left.
+  var addable = _projectsOnly().filter(function(p){ return _mmProjectIsActive(p) && visible.indexOf(p) < 0 && hiddenProjs.indexOf(p) < 0; })
     .sort(function(a,b){ return String(b.number||'').localeCompare(String(a.number||'')); });
   if(canEdit && (hiddenProjs.length || addable.length)){
     html += '<div class="mm-foot">';
@@ -49093,18 +49115,26 @@ function mmDeleteItem(itemId){
 function mmHideProject(pid){
   if(!_mmCanEdit()) return;
   var m = _mmGetOrCreateMeeting(_mmWeek);
-  m.hiddenProjectIds = Array.isArray(m.hiddenProjectIds) ? m.hiddenProjectIds : [];
-  m.addedProjectIds  = Array.isArray(m.addedProjectIds)  ? m.addedProjectIds  : [];
+  m.hiddenProjectIds   = Array.isArray(m.hiddenProjectIds)   ? m.hiddenProjectIds   : [];
+  m.addedProjectIds    = Array.isArray(m.addedProjectIds)    ? m.addedProjectIds    : [];
+  m.unhiddenProjectIds = Array.isArray(m.unhiddenProjectIds) ? m.unhiddenProjectIds : [];
   pid = String(pid);
   if(m.hiddenProjectIds.map(String).indexOf(pid) < 0) m.hiddenProjectIds.push(pid);
-  m.addedProjectIds = m.addedProjectIds.filter(function(x){ return String(x) !== pid; });
+  // Clear any opposing marker on this same week so the sticky scan is unambiguous.
+  m.unhiddenProjectIds = m.unhiddenProjectIds.filter(function(x){ return String(x) !== pid; });
+  m.addedProjectIds    = m.addedProjectIds.filter(function(x){ return String(x) !== pid; });
   _mmPersistMeeting(m);
   renderMeetings();
 }
 function mmUnhideProject(pid){
   if(!_mmCanEdit()) return;
   var m = _mmGetOrCreateMeeting(_mmWeek);
+  m.unhiddenProjectIds = Array.isArray(m.unhiddenProjectIds) ? m.unhiddenProjectIds : [];
   pid = String(pid);
+  // An explicit unhide marker is required, not just clearing this week's hide:
+  // the hide may have been recorded in an earlier week and would still win the
+  // sticky scan otherwise.
+  if(m.unhiddenProjectIds.map(String).indexOf(pid) < 0) m.unhiddenProjectIds.push(pid);
   m.hiddenProjectIds = (m.hiddenProjectIds||[]).filter(function(x){ return String(x) !== pid; });
   _mmPersistMeeting(m);
   renderMeetings();
@@ -49112,10 +49142,13 @@ function mmUnhideProject(pid){
 function mmAddProject(pid){
   if(!_mmCanEdit() || !pid) return;
   var m = _mmGetOrCreateMeeting(_mmWeek);
-  m.addedProjectIds  = Array.isArray(m.addedProjectIds)  ? m.addedProjectIds  : [];
-  m.hiddenProjectIds = Array.isArray(m.hiddenProjectIds) ? m.hiddenProjectIds : [];
+  m.addedProjectIds    = Array.isArray(m.addedProjectIds)    ? m.addedProjectIds    : [];
+  m.hiddenProjectIds   = Array.isArray(m.hiddenProjectIds)   ? m.hiddenProjectIds   : [];
+  m.unhiddenProjectIds = Array.isArray(m.unhiddenProjectIds) ? m.unhiddenProjectIds : [];
   pid = String(pid);
   if(m.addedProjectIds.map(String).indexOf(pid) < 0) m.addedProjectIds.push(pid);
+  // Same reasoning as mmUnhideProject — clear the sticky hide, wherever it was set.
+  if(m.unhiddenProjectIds.map(String).indexOf(pid) < 0) m.unhiddenProjectIds.push(pid);
   m.hiddenProjectIds = m.hiddenProjectIds.filter(function(x){ return String(x) !== pid; });
   _mmPersistMeeting(m);
   renderMeetings();
@@ -49212,8 +49245,9 @@ function _tskColsFor(vis){
   var today = _tskTodayStr();
   var withTasks = {}; vis.forEach(function(it){ if(it.projectId) withTasks[String(it.projectId)] = 1; });
   var cols = _projectsOnly().filter(function(p){
-    var active = !p.endDate || String(p.endDate) >= today;
-    return active || withTasks[String(p.id)];
+    // Decision 2-B: status is authoritative. A column still shows for an
+    // inactive job that has tasks on it, so nothing is orphaned.
+    return _mmProjectIsActive(p) || withTasks[String(p.id)];
   }).sort(function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); })
     .map(function(p){ return { id:String(p.id), kind:'job', number:p.number||'', name:p.name||'' }; });
   cols.push({ id:'__gen', kind:'gen', number:'', name:'General / Office' });
@@ -49390,7 +49424,7 @@ function _tskOpenAdd(preProj){
   var today = _tskTodayStr();
   var descNum = function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); };
   var sel = (preProj == null) ? '' : String(preProj);
-  var projList = _projectsOnly().filter(function(p){ return (!p.endDate || String(p.endDate) >= today) || String(p.id) === sel; }).sort(descNum);
+  var projList = _projectsOnly().filter(function(p){ return _mmProjectIsActive(p) || String(p.id) === sel; }).sort(descNum);
   var projOpts = '<option value="__gen"' + (sel === '__gen' ? ' selected' : '') + '>General / Office</option>' +
     projList.map(function(p){ var s = (String(p.id) === sel) ? ' selected' : ''; return '<option value="' + _tskEsc(p.id) + '"' + s + '>' + _tskEsc((p.number||'') + ' — ' + (p.name||'')) + '</option>'; }).join('');
   var meId = _currentUser ? String(_currentUser.id) : '';
@@ -49473,7 +49507,7 @@ function _tskOpenEdit(id){
   var descNum = function(a, b){ return String(b.number||'').localeCompare(String(a.number||'')); };
   var cur = (it.projectId == null) ? '__gen' : String(it.projectId);
   // Keep the task's own job selectable even if it has ended.
-  var projList = _projectsOnly().filter(function(p){ return (!p.endDate || String(p.endDate) >= today) || String(p.id) === cur; }).sort(descNum);
+  var projList = _projectsOnly().filter(function(p){ return _mmProjectIsActive(p) || String(p.id) === cur; }).sort(descNum);
   var projOpts = '<option value="__gen"' + (cur === '__gen' ? ' selected' : '') + '>General / Office</option>' +
     projList.map(function(p){ var s = (String(p.id) === cur) ? ' selected' : ''; return '<option value="' + _tskEsc(p.id) + '"' + s + '>' + _tskEsc((p.number||'') + ' — ' + (p.name||'')) + '</option>'; }).join('');
   var asg = it.assigneeUserId ? String(it.assigneeUserId) : '';
