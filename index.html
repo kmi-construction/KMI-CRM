@@ -2532,6 +2532,7 @@ tr.dw-unres td{background:#FFFBF0}
       <div class="fgr" style="margin:0"><label style="font-size:11px">Bank account</label>
         <input id="ap-chk-bank" value="1002" style="width:110px"></div>
       <button class="btn btn-p" onclick="apChkPreview()">Preview</button>
+      <button class="btn" onclick="apChkRematch()" title="Re-check already-imported lines against current AP invoices">Re-match imported lines</button>
     </div>
     <div id="ap-chk-preview" style="margin-top:14px"></div>
   </div>
@@ -5418,7 +5419,7 @@ function nav(page) {
     import:           renderImport,
     'supabase-setup': renderSupabaseSetup,
     templates:        renderTemplates,
-    'ap-invoices':    renderApInbox,
+    'ap-invoices':    function(){ apLoadPayments(true).then(function(){ renderApInbox(); }); },
     'ap-approvals':   renderApApprovals,
     'ap-checks':      renderApChecks,
     projects:         renderProjects,
@@ -39108,6 +39109,110 @@ function _apInboxVisible(){
   var inv=src.slice().sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); });
   return _apInvSortArray(inv.filter(_apInboxMatch).filter(_apInvColPasses));
 }
+// ── AP payment overlay ──────────────────────────────────────────────
+// Payment data lives ONLY in Supabase (kmi_ap_check_lines). It is
+// deliberately kept out of db/localStorage so it can never ride the
+// wholesale pushToSupabase array \u2014 a stale tab has nothing to clobber
+// here. Refreshed on render; the register degrades gracefully to blank
+// Paid cells if the fetch fails.
+var _apPayMap = null;        // { invoiceId: {paid, balance, status, checks, lastDate} }
+var _apPayLoading = false;
+
+async function apLoadPayments(force){
+  if(!supabaseClient) return null;
+  if(_apPayMap && !force) return _apPayMap;
+  if(_apPayLoading) return _apPayMap;
+  _apPayLoading = true;
+  try{
+    var m = {};
+    var from = 0, page = 1000;
+    while(true){
+      var r = await supabaseClient
+        .from('kmi_ap_invoice_payments')
+        .select('invoice_id,paid,balance,pay_status,check_numbers,last_check_date,payment_count')
+        .gt('payment_count', 0)
+        .range(from, from + page - 1);
+      if(r.error) throw r.error;
+      var d = r.data || [];
+      d.forEach(function(x){
+        m[String(x.invoice_id)] = {
+          paid:Number(x.paid)||0, balance:Number(x.balance)||0,
+          status:x.pay_status||'unpaid', checks:x.check_numbers||'',
+          lastDate:x.last_check_date||'', count:Number(x.payment_count)||0
+        };
+      });
+      if(d.length < page) break;
+      from += page;
+    }
+    _apPayMap = m;
+  }catch(e){
+    console.warn('payment overlay unavailable:', e && e.message);
+    if(!_apPayMap) _apPayMap = {};
+  }
+  _apPayLoading = false;
+  return _apPayMap;
+}
+
+function _apPayFor(id){ return (_apPayMap||{})[String(id)] || null; }
+
+function _apPayCell(i){
+  var p=_apPayFor(i.id);
+  if(!p) return '<span style="color:#c9ccd4">\u2014</span>';
+  var col = p.status==='paid' ? '#3B6D11' : (p.status==='partial' ? '#9A6A00' : '#888');
+  var lbl = p.status==='paid' ? 'Paid' : (p.status==='partial' ? 'Partial' : '');
+  var chk = String(p.checks||'').split(',')[0].trim();
+  return '<span style="color:'+col+';font-weight:600;font-size:11px">'+lbl+'</span>'
+       + (chk ? '<div style="font-size:10px;color:#888;font-family:ui-monospace,monospace">#'+apEsc(chk)+'</div>' : '');
+}
+
+// Re-run matching over check lines already imported. Needed after coding a
+// vendor number onto an invoice, or after importing invoices that arrived
+// later than the register that paid them.
+async function apChkRematch(){
+  if(!supabaseClient){ alert('Not connected.'); return; }
+  if(!confirm('Re-check every imported check line against current AP invoices?\n\nThis only fills in matches that are currently blank \u2014 existing matches are left alone.')) return;
+  try{
+    var r = await supabaseClient.from('kmi_ap_check_lines')
+      .select('id,invoice_no,check_id,matched_invoice_id')
+      .is('matched_invoice_id', null);
+    if(r.error) throw r.error;
+    var lines = (r.data||[]).filter(function(l){ return String(l.invoice_no||'').trim(); });
+    if(!lines.length){ alert('No unmatched lines with an invoice number.'); return; }
+
+    var ck = await supabaseClient.from('kmi_ap_checks').select('id,vendor_no');
+    if(ck.error) throw ck.error;
+    var vend={}; (ck.data||[]).forEach(function(c){ vend[String(c.id)]=String(c.vendor_no||'').trim().toUpperCase(); });
+
+    var byKey={}, byInv={};
+    (db.apInvoices||[]).forEach(function(i){
+      if(i.voidedAt) return;
+      var inv=String(i.invoiceNo||'').trim().toUpperCase(); if(!inv) return;
+      var vn=String(i.foundationVendorNo||'').trim().toUpperCase();
+      if(vn) byKey[vn+'|'+inv]=i;
+      (byInv[inv]=byInv[inv]||[]).push(i);
+    });
+
+    var me=(_currentUser?(_currentUser.email||String(_currentUser.id)):''), upd=[];
+    lines.forEach(function(l){
+      var inv=String(l.invoice_no||'').trim().toUpperCase();
+      var cvn=vend[String(l.check_id)]||'';
+      var hit = cvn ? byKey[cvn+'|'+inv] : null;
+      if(!hit){ var c=byInv[inv]||[]; if(c.length===1) hit=c[0]; }
+      if(hit) upd.push({ id:l.id, matched_invoice_id:String(hit.id), match_method:'exact',
+                         matched_at:new Date().toISOString(), matched_by:me,
+                         updated_at:new Date().toISOString() });
+    });
+    if(!upd.length){ alert('Checked '+lines.length+' unmatched line(s) \u2014 no new matches found.'); return; }
+    for(var i=0;i<upd.length;i+=200){
+      var rr=await supabaseClient.from('kmi_ap_check_lines').upsert(upd.slice(i,i+200));
+      if(rr.error) throw rr.error;
+    }
+    alert('Matched '+upd.length+' additional line(s) of '+lines.length+' checked.');
+    await apLoadPayments(true);
+    renderApInbox();
+  }catch(e){ alert('Re-match failed: '+(e && e.message ? e.message : e)); }
+}
+
 function renderApInbox(){
   if (!hasRead('ap-invoices')) return;
   var live = _apLive();
@@ -39185,6 +39290,7 @@ function renderApInbox(){
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apMoney(i.total)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;font-size:11px;color:#888">'+src+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4">'+stCell+'</td>'+
+      '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;white-space:nowrap">'+_apPayCell(i)+'</td>'+
       '<td style="padding:8px 9px;border-bottom:1px solid #eef0f4;text-align:center;white-space:nowrap">'+
         (voided
           ? ('<button onclick="apUnvoidInvoice(\''+i.id+'\',event)" title="Restore this invoice to the inbox" style="border:0;background:none;color:#3B6D11;cursor:pointer;font-size:12px;line-height:1;font-family:inherit">Restore</button>'+
@@ -39193,7 +39299,7 @@ function renderApInbox(){
       '</td>'+
     '</tr>';
   }).join('');
-  var cols=[['vendor','Vendor'],['no','Invoice #'],['date','Date'],['job','Job'],['amount','Amount'],['source','Source'],['status','Status']];
+  var cols=[['vendor','Vendor'],['no','Invoice #'],['date','Date'],['job','Job'],['amount','Amount'],['source','Source'],['status','Status'],['paid','Paid']];
   var thead='<thead><tr>'+cols.map(function(h){
     var cls='sortable'+(_apInvSort&&_apInvSort.col===h[0]?' '+_apInvSort.dir:'');
     return '<th class="'+cls+'" onclick="apInvSort(\''+h[0]+'\')" style="text-align:left;padding:7px 9px;background:#f6f7fa;color:#555;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e3e6ee">'+h[1]+'</th>';
@@ -39897,8 +40003,22 @@ function apRenderCode(){
     '</div>'+
   '</div>';
 
-  // duplicate / multi warnings
+  // Payment status, from the imported check register. Read-only \u2014 payment
+  // is derived from kmi_ap_check_lines, never stored on the invoice, so a
+  // voided check un-pays it automatically.
   var warn = '';
+  var _pay = _apPayFor(i.id);
+  if(_pay){
+    var _pc = _pay.status==='paid' ? ['#eef7e6','#cfe4bb','#3B6D11','#2c5210']
+            : ['#fff4dd','#efd9a8','#C8A84B','#6b5320'];
+    warn += '<div style="background:'+_pc[0]+';border:1px solid '+_pc[1]+';border-left:3px solid '+_pc[2]+';border-radius:7px;padding:10px 12px;font-size:12px;color:'+_pc[3]+';margin-bottom:12px">'
+      + '<strong>'+(_pay.status==='paid'?'Paid':'Partially paid')+'</strong> \u2014 '
+      + apMoney(_pay.paid)+' of '+apMoney(i.total)
+      + (_pay.status!=='paid' ? (' &middot; balance '+apMoney(_pay.balance)) : '')
+      + (_pay.checks ? (' &middot; check '+apEsc(_pay.checks)) : '')
+      + (_pay.lastDate ? (' &middot; '+apEsc(_pay.lastDate)) : '')
+      + '</div>';
+  }
   if(String(i.status)==='rejected' && i.decisionNote){
     warn += '<div style="background:#fde4e4;border:1px solid #f3c9c9;border-left:3px solid #b23636;border-radius:7px;padding:10px 12px;font-size:12px;color:#8a2a2a;margin-bottom:12px"><strong>Rejected'+(i.approvedBy?(' by '+apEsc(apApproverName(i.approvedBy))):'')+':</strong> '+apEsc(i.decisionNote)+'<br><span style="color:#a05050">Recode as needed and re-submit to send it back for approval.</span></div>';
   }
