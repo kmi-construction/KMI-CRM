@@ -2053,6 +2053,10 @@ tr.dw-unres td{background:#FFFBF0}
         <div class="fgr"><label>Contract amount ($)</label><input type="number" id="nprj-amt" placeholder="0"></div>
         <div class="fgr"><label>Start date <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional)</span></label><input type="date" id="nprj-start-date"></div>
         <div class="fgr"><label>End date <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(optional)</span></label><input type="date" id="nprj-end-date"></div>
+        <!-- Project status — authoritative for Meeting Minutes and the Tasks board
+             (replaces the old endDate-derived "active" check). Overhead is NOT a
+             status: overhead/equipment cost jobs live on category (see _isCostJob). -->
+        <div class="fgr"><label>Status</label><select id="nprj-status"><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
         <div class="fgr full">
           <label>Project types <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(select all that apply)</span></label>
           <div id="nprj-type-checks" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px"></div>
@@ -31106,6 +31110,7 @@ function initNewProject() {
   // A/P Tax Exempt defaults to unchecked (most projects are taxable).
   if (g('nprj-start-date'))    g('nprj-start-date').value    = '';
   if (g('nprj-end-date'))      g('nprj-end-date').value      = '';
+  if (g('nprj-status'))        g('nprj-status').value        = 'active';
   if (g('nprj-ap-tax-exempt')) g('nprj-ap-tax-exempt').checked = false;
   populateFoundationCustomerDropdown(prefill ? prefill.foundationCustomerNo : '');
   populateProjectCustDropdown(prefill ? prefill.customerId : '');
@@ -31199,6 +31204,7 @@ function saveProject(closeAfterSave) {
     // and other consumers can read it directly without translation.
     startDate:   g('nprj-start-date') ? (g('nprj-start-date').value || '') : '',
     endDate:     g('nprj-end-date')   ? (g('nprj-end-date').value   || '') : '',
+    status:      g('nprj-status')     ? (g('nprj-status').value     || 'active') : 'active',
     apTaxExempt: (g('nprj-ap-tax-exempt') && g('nprj-ap-tax-exempt').checked) ? 'Y' : 'N',
     matEqMarkupPct: matEqMarkup,
     subMarkupPct:   subMarkup,
@@ -31392,6 +31398,9 @@ function editProject(id, initialTab) {
   // Project Kickoff fields
   if (g('nprj-start-date'))   g('nprj-start-date').value   = p.startDate || '';
   if (g('nprj-end-date'))     g('nprj-end-date').value     = p.endDate   || '';
+  // Legacy rows predating the status column read as 'active'; the SQL backfill
+  // sets the real value, this is only a client-side safety net.
+  if (g('nprj-status'))       g('nprj-status').value       = (p.status === 'inactive') ? 'inactive' : 'active';
   // A/P Tax Exempt — stored as 'Y'/'N' on the project record (Foundation format).
   // The checkbox is checked iff the stored value normalises to 'Y'.
   if (g('nprj-ap-tax-exempt')) {
@@ -46038,6 +46047,8 @@ function toSBProject(r) {
     // show "Last sent" indicators next to the Send Project Kickoff button.
     start_date:                    r.startDate                 || null,
     end_date:                      r.endDate                   || null,
+    // 'active' | 'inactive'. Authoritative for Meeting Minutes / Tasks visibility.
+    status:                        (r.status === 'inactive') ? 'inactive' : 'active',
     kickoff_sent_at:               r.kickoffSentAt             || null,
     kickoff_sent_by_user_id:       r.kickoffSentByUserId       || null
   };
@@ -46095,6 +46106,7 @@ function fromSBProject(r) {
     // pass-through with empty-string default is enough for the form binding.
     startDate:                 r.start_date || '',
     endDate:                   r.end_date   || '',
+    status:                    (r.status === 'inactive') ? 'inactive' : 'active',
     kickoffSentAt:             r.kickoff_sent_at         || null,
     kickoffSentByUserId:       r.kickoff_sent_by_user_id || null
   };
