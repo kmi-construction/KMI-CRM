@@ -39407,7 +39407,13 @@ async function _apBackfillCredits(){
   var flipped = [], stranded = [];
   pending.forEach(function(i){
     var isC = _apDetectCredit(i.extractedJson||{}, i.sourceFile||'');
-    i.isCredit = isC; i.updatedAt = new Date().toISOString();
+    // Do NOT stamp updatedAt here. This loop touches every invoice whose
+    // is_credit is still null, so stamping "now" across the batch makes a stale
+    // session's whole array look freshly edited and defeats the stale-write
+    // guard \u2014 which is exactly how 88 invoices reverted to 'received' on
+    // 2026-08-05. is_credit is a derived backfill; it must not advance the
+    // record's version.
+    i.isCredit = isC;
     if(isC){
       if(i.exportedAt || i.status==='exported'){ stranded.push(i); }
       else { _apApplyCreditSign(i, true); flipped.push(i); }
