@@ -3536,6 +3536,18 @@ tr.dw-unres td{background:#FFFBF0}
     <div id="sb-test-result" style="margin-top:12px;font-size:13px"></div>
   </div>
 
+  <div class="card">
+    <div class="ch" style="display:flex;align-items:center;gap:10px">
+      <span class="ct">Active sessions</span>
+      <button class="btn btn-sm" onclick="kmiRenderSessions()" style="margin-left:auto">Refresh</button>
+    </div>
+    <div style="font-size:11px;color:#888;margin:-4px 0 10px">
+      Every open tab reports in once a minute. A tab on an older build can overwrite
+      current data, so anything flagged here should hard-refresh.
+    </div>
+    <div id="kmi-sessions-body"><div style="color:#888;font-size:12px">Click Refresh to load.</div></div>
+  </div>
+
   <div class="card" style="background:#fafafa;border-style:dashed">
     <div class="ch"><span class="ct" style="color:#888">Data migration</span></div>
     <div style="font-size:12px;color:#888;line-height:1.7">
@@ -44662,6 +44674,102 @@ async function sendEmail(payload) {
 }
 
 // ── Status UI ────────────────────────────────────────────────────
+// ── Session presence (heartbeat) ─────────────────────────────────────
+// Bump KMI_BUILD on every deploy. Sessions report it, and the panel flags
+// any tab running something older than the newest build seen \u2014 which is
+// exactly the condition that let stale tabs silently overwrite AP data.
+var KMI_BUILD = '2026-08-05-a';
+
+var _kmiSessionId = (function(){
+  try {
+    var k='kmi_session_id', v=sessionStorage.getItem(k);
+    if(!v){ v='sess-'+Date.now()+'-'+Math.random().toString(36).slice(2,8); sessionStorage.setItem(k,v); }
+    return v;
+  } catch(e){ return 'sess-'+Date.now()+'-'+Math.random().toString(36).slice(2,8); }
+})();
+
+function _kmiBrowserName(){
+  var u=navigator.userAgent;
+  if(/Edg\//.test(u))                    return 'Edge';
+  if(/OPR\//.test(u))                    return 'Opera';
+  if(/Chrome\//.test(u))                 return 'Chrome';
+  if(/Safari\//.test(u)&&/Version\//.test(u)) return 'Safari';
+  if(/Firefox\//.test(u))                return 'Firefox';
+  return 'Other';
+}
+
+var _kmiHbTimer = null;
+
+async function kmiHeartbeat(){
+  if(!supabaseClient) return;
+  try{
+    var nm = _currentUser ? (((_currentUser.firstName||'')+' '+(_currentUser.lastName||'')).trim() || _currentUser.email || '') : '';
+    await supabaseClient.from('kmi_sessions').upsert({
+      id:         _kmiSessionId,
+      user_id:    _currentUser ? String(_currentUser.id) : '',
+      user_name:  nm,
+      user_email: _currentUser ? (_currentUser.email||'') : '',
+      build_id:   KMI_BUILD,
+      user_agent: String(navigator.userAgent||'').slice(0,300),
+      browser:    _kmiBrowserName(),
+      last_seen:  new Date().toISOString()
+    });
+  }catch(e){ /* presence is best-effort; never disrupt the app */ }
+}
+
+function kmiStartHeartbeat(){
+  if(_kmiHbTimer) return;
+  kmiHeartbeat();
+  _kmiHbTimer = setInterval(kmiHeartbeat, 60000);
+  // Refresh immediately when a backgrounded tab comes forward \u2014 that is the
+  // dangerous case: a tab reopened after hours still holding old state.
+  document.addEventListener('visibilitychange', function(){
+    if(document.visibilityState==='visible') kmiHeartbeat();
+  });
+  window.addEventListener('beforeunload', function(){
+    try{ if(supabaseClient) supabaseClient.from('kmi_sessions').delete().eq('id',_kmiSessionId); }catch(e){}
+  });
+}
+
+// Render the active-session panel on the Supabase settings page.
+async function kmiRenderSessions(){
+  var el=g('kmi-sessions-body'); if(!el) return;
+  if(!supabaseClient){ el.innerHTML='<div style="color:#888;font-size:12px">Not connected.</div>'; return; }
+  el.innerHTML='<div style="color:#888;font-size:12px">Loading\u2026</div>';
+  try{
+    var r = await supabaseClient.from('kmi_sessions_active').select('*');
+    if(r.error) throw r.error;
+    var rows = r.data||[];
+    if(!rows.length){ el.innerHTML='<div style="color:#888;font-size:12px">No active sessions.</div>'; return; }
+    var stale = rows.filter(function(x){ return x.build_mismatch; }).length;
+    var h='';
+    if(stale){
+      h+='<div style="background:rgba(226,75,74,.10);border:1px solid rgba(226,75,74,.35);border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:12px;color:#A32D2D">'
+       + '<strong>'+stale+' session'+(stale>1?'s are':' is')+' running an older build.</strong> '
+       + 'Ask them to hard-refresh (Ctrl+Shift+R). Older tabs can overwrite current data.</div>';
+    }
+    h+='<table style="width:100%;border-collapse:collapse;font-size:12px">'
+     + '<tr style="text-align:left;color:#888;border-bottom:1px solid #e5e5e5">'
+     + '<th style="padding:5px 6px">User</th><th style="padding:5px 6px">Browser</th>'
+     + '<th style="padding:5px 6px">Build</th><th style="padding:5px 6px">Open</th>'
+     + '<th style="padding:5px 6px">Last seen</th></tr>';
+    rows.forEach(function(s){
+      var bad = !!s.build_mismatch;
+      h+='<tr style="border-bottom:1px solid #f0f0f0'+(bad?';background:rgba(226,75,74,.05)':'')+'">'
+       + '<td style="padding:5px 6px">'+esc(s.user_name||s.user_email||'\u2014')+'</td>'
+       + '<td style="padding:5px 6px;color:#666">'+esc(s.browser||'\u2014')+'</td>'
+       + '<td style="padding:5px 6px;font-family:monospace;color:'+(bad?'#A32D2D':'#639922')+'">'+esc(s.build_id||'\u2014')+(bad?' \u26a0':'')+'</td>'
+       + '<td style="padding:5px 6px;color:#666">'+(s.hours_open!=null?s.hours_open+'h':'\u2014')+'</td>'
+       + '<td style="padding:5px 6px;color:#666">'+(s.minutes_since_seen===0?'now':(s.minutes_since_seen+'m ago'))+'</td>'
+       + '</tr>';
+    });
+    h+='</table>';
+    el.innerHTML=h;
+  }catch(e){
+    el.innerHTML='<div style="color:#A32D2D;font-size:12px">Could not load sessions: '+esc(String(e.message||e))+'</div>';
+  }
+}
+
 function setSyncStatus(state, msg) {
   // state: 'connected' | 'syncing' | 'error' | 'offline'
   var colors = {connected:'#639922', syncing:'#C8A84B', error:'#E24B4A', offline:'#888'};
@@ -46629,6 +46737,7 @@ async function pushToSupabase() {
       // tables still read dirty and retry on the next save.
       _tblBaselineAll();
       setSyncStatus('connected', 'Connected \u2022 Synced');
+      kmiStartHeartbeat();   // an idle tab that never saves must still report in
       showSBResult('\u2714 All data synced to Supabase', true);
     }
     var el = g('save-indicator');
@@ -47264,6 +47373,7 @@ saveDB = function() {
       pushToSupabase();
     }, 1500);
   }
+  if (supabaseClient) kmiStartHeartbeat();
 };
 
 // ── Auto-connect on startup if creds saved ────────────────────────────────
