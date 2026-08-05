@@ -1537,6 +1537,7 @@ tr.dw-unres td{background:#FFFBF0}
     <div class="sb-group-items">
       <div class="ni" onclick="nav('ap-invoices')"><span class="nico">▦</span>AP Invoices</div>
       <div class="ni" onclick="nav('ap-approvals')"><span class="nico">✓</span>AP Approvals</div>
+      <div class="ni" onclick="nav('ap-checks')"><span class="nico">▤</span>Check Register</div>
     </div>
   </div>
   <div class="sb-group" data-group="resources">
@@ -2512,6 +2513,30 @@ tr.dw-unres td{background:#FFFBF0}
     <div class="card" style="padding:0;overflow:hidden"><div id="ap-list"></div></div>
   </div>
   <div id="ap-code" style="display:none"></div>
+</div>
+
+<!-- AP CHECK REGISTER -->
+<div class="pg" id="pg-ap-checks">
+  <div class="ph"><div><h1>Check Register</h1><div class="sub">Import the Foundation A/P Check Register and tie check payments back to AP invoices.</div><div class="stripe"></div></div></div>
+  <div id="ap-chk-banner" style="display:none"></div>
+
+  <div class="card">
+    <div class="ch"><span class="ct">Import register</span></div>
+    <div style="font-size:12px;color:#666;line-height:1.7;margin-bottom:10px">
+      In Foundation, run <strong>A/P &gt; Check Register</strong> and export to CSV. Re-importing the
+      same register updates the existing rows rather than duplicating them, so a corrected export
+      is safe to run again.
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <input type="file" id="ap-chk-file" accept=".csv,text/csv" style="font-size:12px">
+      <div class="fgr" style="margin:0"><label style="font-size:11px">Bank account</label>
+        <input id="ap-chk-bank" value="1002" style="width:110px"></div>
+      <button class="btn btn-p" onclick="apChkPreview()">Preview</button>
+    </div>
+    <div id="ap-chk-preview" style="margin-top:14px"></div>
+  </div>
+
+  <div id="ap-chk-list"></div>
 </div>
 
 <!-- AP APPROVALS (Session 3) -->
@@ -3951,6 +3976,7 @@ var PERMISSIONS = {
   'templates': ['full','read','none','none','none','none','none'],
   'ap-invoices': ['full','none','none','full','none','none','none'],
   'ap-approvals': ['full','full','none','full','none','none','full'],
+  'ap-checks': ['full','none','none','full','none','none','none'],
   'email-log': ['full','none','none','none','none','none','none'],
   'email-settings': ['full','none','none','none','none','none','none'],
   // Projects module: the project record itself + its workspace. view-project
@@ -4109,6 +4135,7 @@ var PAGE_ACTION_MAP = {
   'templates':      'templates',
   'ap-invoices':    'ap-invoices',
   'ap-approvals':   'ap-approvals',
+  'ap-checks':      'ap-checks',
   'budget':         'view_project_budget',
   'tm-tickets':     'view-tm-tickets',
   'new-tm-ticket':  'create-tm-ticket',
@@ -5393,6 +5420,7 @@ function nav(page) {
     templates:        renderTemplates,
     'ap-invoices':    renderApInbox,
     'ap-approvals':   renderApApprovals,
+    'ap-checks':      renderApChecks,
     projects:         renderProjects,
     'new-project':    initNewProject,
     budget:           renderBudget,
@@ -40671,6 +40699,305 @@ function _apRegRender(){
       return '<th class="'+cls+'" onclick="apRegSort(\''+h[0]+'\')" style="'+base+'">'+h[1]+'</th>';
     }).join('')+
     '</tr></thead><tbody>'+list.map(_apRegRow).join('')+'</tbody></table>';
+}
+
+// ══ AP CHECK REGISTER ═══════════════════════════════════════════════
+// Imports the Foundation A/P Check Register CSV and matches check lines to
+// AP invoices.
+//
+// Every write here is a TARGETED per-row upsert. These tables are
+// deliberately excluded from pushToSupabase's wholesale array push, which
+// is the mechanism behind the AP clobbers: a stale session can overwrite
+// only rows it actually touched, not the whole table.
+
+var _apChkParsed = null;   // preview payload awaiting confirmation
+
+function _apChkClean(v){
+  v = String(v==null?'':v).trim();
+  // Foundation writes text-preserving cells as ="0001234   ". The CSV reader
+  // already consumes the quote characters, so what arrives here is =0001234
+  // with the padding intact \u2014 strip the leading '=' first, then any quotes
+  // that survived (which happens when the file is opened without CSV parsing).
+  if(v.charAt(0)==='=') v = v.slice(1);
+  var m = v.match(/^"(.*)"$/);
+  if(m) v = m[1];
+  return v.trim();
+}
+function _apChkNum(v){
+  var n = parseFloat(String(v==null?'':v).replace(/[$,\s]/g,''));
+  return isNaN(n) ? 0 : n;
+}
+function _apChkMoney(n){
+  n = Number(n)||0;
+  return (n<0?'-$':'$') + Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function _apChkDate(v){
+  v=_apChkClean(v); if(!v) return null;
+  var m=v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if(!m) return null;
+  var y=m[3].length===2 ? ('20'+m[3]) : m[3];
+  return y+'-'+('0'+m[1]).slice(-2)+'-'+('0'+m[2]).slice(-2);
+}
+
+// Minimal CSV reader: handles quoted fields, embedded commas, CRLF.
+function _apChkParseCSV(text){
+  var rows=[], row=[], cell='', q=false, i=0;
+  text = String(text||'').replace(/^\uFEFF/,'');
+  while(i<text.length){
+    var c=text[i];
+    if(q){
+      if(c==='"'){ if(text[i+1]==='"'){ cell+='"'; i+=2; continue; } q=false; i++; continue; }
+      cell+=c; i++; continue;
+    }
+    if(c==='"'){ q=true; i++; continue; }
+    if(c===','){ row.push(cell); cell=''; i++; continue; }
+    if(c==='\r'){ i++; continue; }
+    if(c==='\n'){ row.push(cell); rows.push(row); row=[]; cell=''; i++; continue; }
+    cell+=c; i++;
+  }
+  if(cell.length||row.length){ row.push(cell); rows.push(row); }
+  return rows.filter(function(r){ return r.some(function(x){ return String(x).trim()!==''; }); });
+}
+
+function apChkPreview(){
+  var f = g('ap-chk-file');
+  if(!f || !f.files || !f.files[0]){ apChkBanner('warn','Choose a CSV file first.'); return; }
+  var file = f.files[0];
+  var rd = new FileReader();
+  rd.onload = function(){
+    try { _apChkBuildPreview(file.name, String(rd.result||'')); }
+    catch(e){ apChkBanner('err','Could not read that file: '+escapeHtml(String(e.message||e))); }
+  };
+  rd.onerror = function(){ apChkBanner('err','Could not read that file.'); };
+  rd.readAsText(file);
+}
+
+function _apChkBuildPreview(filename, text){
+  var rows = _apChkParseCSV(text);
+  if(rows.length < 2){ apChkBanner('err','That file has no data rows.'); return; }
+  var hdr = rows[0].map(function(h){ return _apChkClean(h).toLowerCase(); });
+  function col(name){ return hdr.indexOf(name); }
+  var iNo=col('check no'), iDt=col('check date'), iVn=col('vendor no'), iVnm=col('vendor name'),
+      iTrx=col('invoice trx no'), iDesc=col('description'), iPay=col('payment'),
+      iDisc=col('discount'), iInv=col('invoice no'), iIdt=col('invoice date'),
+      iPt=col('pay type'), iTyp=col('type'), iVoid=col('void');
+  if(iNo<0 || iPay<0){
+    apChkBanner('err','This does not look like a Foundation check register \u2014 no "Check No" / "Payment" columns found.');
+    return;
+  }
+  var bank = (g('ap-chk-bank')||{}).value || '';
+  bank = String(bank).trim() || '1002';
+
+  var checks = {}, order = [], skipped = 0;
+  for(var r=1;r<rows.length;r++){
+    var row = rows[r];
+    // Drop the trailing "Account Totals" row and anything that is not a check.
+    var typ = iTyp>=0 ? _apChkClean(row[iTyp]) : 'Check';
+    if(iTyp>=0 && typ.toLowerCase()!=='check'){ skipped++; continue; }
+    var cno = _apChkClean(row[iNo]);
+    if(!cno){ skipped++; continue; }
+    var cid = 'chk-'+bank+'-'+cno;
+    if(!checks[cid]){
+      checks[cid] = {
+        id:cid, bankAccount:bank, checkNo:cno,
+        checkDate:_apChkDate(row[iDt]),
+        vendorNo:(iVn>=0?_apChkClean(row[iVn]):''),
+        vendorName:(iVnm>=0?_apChkClean(row[iVnm]):''),
+        payType:(iPt>=0?_apChkClean(row[iPt]):''),
+        voided:(iVoid>=0 && /^(y|yes|true|1|v)$/i.test(_apChkClean(row[iVoid]))),
+        gross:0, discount:0, lines:[]
+      };
+      order.push(cid);
+    }
+    var c=checks[cid];
+    var voucher=(iTrx>=0?_apChkClean(row[iTrx]):'');
+    var invNo  =(iInv>=0?_apChkClean(row[iInv]):'');
+    var pay=_apChkNum(row[iPay]), disc=(iDisc>=0?_apChkNum(row[iDisc]):0);
+    c.gross += pay; c.discount += disc;
+    c.lines.push({
+      id:'chkl-'+cid+'-'+(voucher||('r'+r)),
+      checkId:cid, voucherNo:voucher, invoiceNo:invNo,
+      invoiceDate:_apChkDate(row[iIdt]),
+      description:(iDesc>=0?_apChkClean(row[iDesc]):''),
+      payment:pay, discount:disc,
+      matchedInvoiceId:null, matchMethod:'unmatched'
+    });
+  }
+
+  var list = order.map(function(k){ return checks[k]; });
+  _apChkMatch(list);
+
+  var nLines=0, nMatch=0, total=0;
+  list.forEach(function(c){
+    nLines += c.lines.length; total += c.gross;
+    c.lines.forEach(function(l){ if(l.matchedInvoiceId) nMatch++; });
+  });
+
+  _apChkParsed = { filename:filename, bank:bank, checks:list,
+                   counts:{checks:list.length, lines:nLines, matched:nMatch, total:total, skipped:skipped} };
+  _apChkRenderPreview();
+}
+
+// Exact match only: Foundation vendor code + invoice number. Amount-based
+// fallbacks are deliberately omitted \u2014 a wrong auto-match on a payment
+// record is worse than an unmatched line a human can resolve.
+function _apChkMatch(list){
+  var byKey = {}, byInv = {};
+  (db.apInvoices||[]).forEach(function(i){
+    if(i.voidedAt) return;
+    var inv=String(i.invoiceNo||'').trim().toUpperCase();
+    if(!inv) return;
+    var vn=String(i.foundationVendorNo||'').trim().toUpperCase();
+    if(vn) byKey[vn+'|'+inv]=i;
+    (byInv[inv]=byInv[inv]||[]).push(i);
+  });
+  list.forEach(function(c){
+    var cvn=String(c.vendorNo||'').trim().toUpperCase();
+    c.lines.forEach(function(l){
+      var inv=String(l.invoiceNo||'').trim().toUpperCase();
+      if(!inv) return;
+      var hit = cvn ? byKey[cvn+'|'+inv] : null;
+      if(hit){ l.matchedInvoiceId=String(hit.id); l.matchMethod='exact'; return; }
+      var cands=byInv[inv]||[];
+      if(cands.length===1){ l.matchedInvoiceId=String(cands[0].id); l.matchMethod='exact'; }
+    });
+  });
+}
+
+function apChkBanner(kind, html){
+  var el=g('ap-chk-banner'); if(!el) return;
+  var m={ok:['#f2f8ec','#639922','#3f6415'],warn:['#fdf8e8','#C8A84B','#7a6420'],err:['#fdeceb','#E24B4A','#A32D2D']}[kind]||['#f5f5f5','#ccc','#555'];
+  el.style.display='block';
+  el.style.cssText='display:block;background:'+m[0]+';border:1px solid '+m[1]+';color:'+m[2]+';border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px';
+  el.innerHTML=html;
+}
+
+function _apChkRenderPreview(){
+  var el=g('ap-chk-preview'); if(!el||!_apChkParsed) return;
+  var c=_apChkParsed.counts;
+  var unmatched=c.lines-c.matched;
+  var h='<div style="background:#fafafa;border:1px solid #e5e5e5;border-radius:6px;padding:12px">'
+   + '<div style="font-size:13px;margin-bottom:10px"><strong>'+escapeHtml(_apChkParsed.filename)+'</strong></div>'
+   + '<div style="display:flex;gap:22px;flex-wrap:wrap;font-size:12px;margin-bottom:12px">'
+   + '<div><div style="color:#888">Checks</div><div style="font-size:17px">'+c.checks+'</div></div>'
+   + '<div><div style="color:#888">Lines</div><div style="font-size:17px">'+c.lines+'</div></div>'
+   + '<div><div style="color:#888">Matched</div><div style="font-size:17px;color:#639922">'+c.matched+'</div></div>'
+   + '<div><div style="color:#888">Unmatched</div><div style="font-size:17px;color:'+(unmatched?'#C8A84B':'#888')+'">'+unmatched+'</div></div>'
+   + '<div><div style="color:#888">Total</div><div style="font-size:17px">'+_apChkMoney(c.total)+'</div></div>'
+   + '</div>';
+  if(c.skipped) h+='<div style="font-size:11px;color:#888;margin-bottom:8px">'+c.skipped+' non-check row(s) ignored (totals line, blanks).</div>';
+  h+='<table style="width:100%;border-collapse:collapse;font-size:12px">'
+   + '<tr style="text-align:left;color:#888;border-bottom:1px solid #e5e5e5">'
+   + '<th style="padding:5px 6px">Check</th><th style="padding:5px 6px">Date</th>'
+   + '<th style="padding:5px 6px">Vendor</th><th style="padding:5px 6px">Lines</th>'
+   + '<th style="padding:5px 6px;text-align:right">Amount</th><th style="padding:5px 6px">Matched</th></tr>';
+  _apChkParsed.checks.slice(0,12).forEach(function(ck){
+    var m=ck.lines.filter(function(l){return l.matchedInvoiceId;}).length;
+    h+='<tr style="border-bottom:1px solid #f2f2f2">'
+     + '<td style="padding:5px 6px;font-family:monospace">'+escapeHtml(ck.checkNo)+'</td>'
+     + '<td style="padding:5px 6px;color:#666">'+escapeHtml(ck.checkDate||'\u2014')+'</td>'
+     + '<td style="padding:5px 6px">'+escapeHtml(ck.vendorName||ck.vendorNo||'\u2014')+'</td>'
+     + '<td style="padding:5px 6px;color:#666">'+ck.lines.length+'</td>'
+     + '<td style="padding:5px 6px;text-align:right">'+_apChkMoney(ck.gross)+'</td>'
+     + '<td style="padding:5px 6px;color:'+(m===ck.lines.length?'#639922':'#C8A84B')+'">'+m+'/'+ck.lines.length+'</td></tr>';
+  });
+  h+='</table>';
+  if(_apChkParsed.checks.length>12) h+='<div style="font-size:11px;color:#888;margin-top:6px">\u2026and '+(_apChkParsed.checks.length-12)+' more.</div>';
+  h+='<div style="margin-top:14px;display:flex;gap:8px">'
+   + '<button class="btn btn-p" onclick="apChkCommit()">Import '+c.checks+' check'+(c.checks===1?'':'s')+'</button>'
+   + '<button class="btn" onclick="apChkCancel()">Cancel</button></div></div>';
+  el.innerHTML=h;
+}
+
+function apChkCancel(){ _apChkParsed=null; var e=g('ap-chk-preview'); if(e) e.innerHTML=''; }
+
+async function apChkCommit(){
+  if(!_apChkParsed){ return; }
+  if(!supabaseClient){ apChkBanner('err','Not connected to the cloud \u2014 cannot import.'); return; }
+  var p=_apChkParsed, me=(_currentUser?(_currentUser.email||String(_currentUser.id)):'');
+  var impId='imp-'+p.bank+'-'+(p.checks[0]?p.checks[0].checkNo:'x')+'-'+_cheapHash(p.filename+p.counts.lines);
+  apChkBanner('warn','Importing\u2026');
+  try{
+    var r1=await supabaseClient.from('kmi_ap_check_imports').upsert({
+      id:impId, filename:p.filename, bank_account:p.bank,
+      check_count:p.counts.checks, line_count:p.counts.lines,
+      total_amount:p.counts.total, matched_count:p.counts.matched,
+      imported_by:me, updated_at:new Date().toISOString()
+    });
+    if(r1.error) throw r1.error;
+
+    var ckRows=p.checks.map(function(c){ return {
+      id:c.id, import_id:impId, bank_account:c.bankAccount, check_no:c.checkNo,
+      check_date:c.checkDate, vendor_no:c.vendorNo, vendor_name:c.vendorName,
+      pay_type:c.payType, gross_amount:c.gross, discount:c.discount,
+      voided:!!c.voided, updated_at:new Date().toISOString() }; });
+    var lnRows=[];
+    p.checks.forEach(function(c){ c.lines.forEach(function(l){ lnRows.push({
+      id:l.id, check_id:l.checkId, voucher_no:l.voucherNo, invoice_no:l.invoiceNo,
+      invoice_date:l.invoiceDate, description:l.description,
+      payment:l.payment, discount:l.discount,
+      matched_invoice_id:l.matchedInvoiceId, match_method:l.matchMethod,
+      matched_at:(l.matchedInvoiceId?new Date().toISOString():null),
+      matched_by:(l.matchedInvoiceId?me:null),
+      updated_at:new Date().toISOString() }); }); });
+
+    // Chunked so one oversized body can't fail the whole import.
+    for(var i=0;i<ckRows.length;i+=100){
+      var rc=await supabaseClient.from('kmi_ap_checks').upsert(ckRows.slice(i,i+100));
+      if(rc.error) throw rc.error;
+    }
+    for(var j=0;j<lnRows.length;j+=200){
+      var rl=await supabaseClient.from('kmi_ap_check_lines').upsert(lnRows.slice(j,j+200));
+      if(rl.error) throw rl.error;
+    }
+    apChkBanner('ok','Imported '+p.counts.checks+' checks, '+p.counts.lines+' lines \u2014 '
+      +p.counts.matched+' matched to AP invoices.');
+    _apChkParsed=null;
+    var pv=g('ap-chk-preview'); if(pv) pv.innerHTML='';
+    var fi=g('ap-chk-file'); if(fi) fi.value='';
+    renderApChecks();
+  }catch(e){
+    apChkBanner('err','Import failed: '+escapeHtml(String(e.message||e))+' \u2014 nothing was partially applied beyond completed chunks; re-running is safe.');
+  }
+}
+
+async function renderApChecks(){
+  var el=g('ap-chk-list'); if(!el) return;
+  if(!supabaseClient){ el.innerHTML='<div class="card"><div style="color:#888;font-size:12px">Not connected.</div></div>'; return; }
+  el.innerHTML='<div class="card"><div style="color:#888;font-size:12px">Loading\u2026</div></div>';
+  try{
+    var r=await supabaseClient.from('kmi_ap_checks').select('*').order('check_date',{ascending:false}).limit(300);
+    if(r.error) throw r.error;
+    var rows=r.data||[];
+    if(!rows.length){ el.innerHTML='<div class="card"><div style="color:#888;font-size:12px">No checks imported yet.</div></div>'; return; }
+    var dup=await supabaseClient.from('kmi_ap_duplicate_payments').select('*').limit(50);
+    var h='';
+    if(dup && !dup.error && (dup.data||[]).length){
+      h+='<div style="background:#fdeceb;border:1px solid #E24B4A;color:#A32D2D;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px">'
+       + '<strong>'+dup.data.length+' invoice(s) appear to have been paid more than once.</strong><br>';
+      dup.data.slice(0,8).forEach(function(d){
+        h+='<div style="font-size:12px;margin-top:4px">'+escapeHtml(d.vendor_no||'')+' '+escapeHtml(d.invoice_no||'')+' \u2014 '+_apChkMoney(d.total_paid)+' on checks '+escapeHtml(d.detail||'')+'</div>';
+      });
+      h+='</div>';
+    }
+    h+='<div class="card" style="padding:0;overflow:hidden"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+     + '<tr style="text-align:left;color:#888;background:#fafafa;border-bottom:1px solid #e5e5e5">'
+     + '<th style="padding:8px 10px">Check</th><th style="padding:8px 10px">Date</th>'
+     + '<th style="padding:8px 10px">Vendor</th><th style="padding:8px 10px">Type</th>'
+     + '<th style="padding:8px 10px;text-align:right">Amount</th></tr>';
+    rows.forEach(function(c){
+      h+='<tr style="border-bottom:1px solid #f2f2f2'+(c.voided?';opacity:.5':'')+'">'
+       + '<td style="padding:7px 10px;font-family:monospace">'+escapeHtml(c.check_no)+(c.voided?' <span style="color:#A32D2D">VOID</span>':'')+'</td>'
+       + '<td style="padding:7px 10px;color:#666">'+escapeHtml(c.check_date||'\u2014')+'</td>'
+       + '<td style="padding:7px 10px">'+escapeHtml(c.vendor_name||c.vendor_no||'\u2014')+'</td>'
+       + '<td style="padding:7px 10px;color:#666">'+escapeHtml(c.pay_type||'\u2014')+'</td>'
+       + '<td style="padding:7px 10px;text-align:right">'+_apChkMoney(c.gross_amount)+'</td></tr>';
+    });
+    h+='</table></div>';
+    el.innerHTML=h;
+  }catch(e){
+    el.innerHTML='<div class="card"><div style="color:#A32D2D;font-size:12px">Could not load checks: '+escapeHtml(String(e.message||e))+'</div></div>';
+  }
 }
 
 function renderApApprovals(){
