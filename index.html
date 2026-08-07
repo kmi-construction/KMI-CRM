@@ -12645,9 +12645,12 @@ function onSubmittalResponseChange() {
 // Replaces the "open the project file folder, find each PDF, drag them
 // into Acrobat in the right order, prepend the cover" manual workflow.
 //
-// We reuse the existing jsPDF + pdf.js stack already in use by T&M
-// tickets and CORs — no pdf-lib dependency. Source PDFs are rasterised
-// to JPEG pages at 2x scale and concatenated; images are added directly.
+// The KMI cover sheet is drawn with jsPDF, then handed to pdf-lib as the
+// merge target. Source PDFs are copied in page-for-page with copyPages()
+// — vector content, text layer, page size and rotation all survive intact.
+// pdf.js rasterization is retained only as a per-document fallback for
+// files pdf-lib cannot parse. See the LOSSLESS PDF MERGE section for the
+// helpers and the reasoning behind the fallback ladder.
 //
 // Source documents come from two buckets:
 //   • kmi-product-library      — for library-linked items (productDocuments)
@@ -12674,25 +12677,27 @@ async function _fetchAnyBucketFileBytes(bucket, path) {
 //   • product document (filePath + bucket=kmi-product-library)
 //   • custom document  (filePath + bucket=kmi-project-files)
 //   • response document (not relevant here — those are incoming)
-// Returns the number of pages added (0 on skip/failure).
+//
+// Returns { kind, bytes, contentType, fileName } for the merge loop, or
+// null if the file could not be fetched. This used to append straight
+// into a jsPDF doc; it now only stages bytes, because the merge target
+// is a pdf-lib document that can't exist until the cover is finished.
 //
 // Form-fill Round 4: when `submittal` is supplied and the doc is a
 // configured fillable PDF, the bytes are first fed through pdf-lib to
-// fill the form fields based on submittal.formValues, then flattened,
-// before being handed to the existing rasterize-and-merge path. The
-// visual style of the compiled package is unchanged — pdf.js still
-// renders pages to JPEG at 2× scale; the only difference is that those
-// rendered pages now show the filled values.
-async function _appendCompileDocToJsPdf(doc, docRec, bucket, submittal) {
-  if (!docRec || !docRec.filePath) return 0;
+// fill the form fields based on submittal.formValues, then flattened.
+// Those filled pages now reach the package losslessly rather than being
+// re-photographed at 144 DPI on the way in.
+async function _prepareCompileDocBytes(docRec, bucket, submittal) {
+  if (!docRec || !docRec.filePath) return null;
   var ab;
   try {
     ab = await _fetchAnyBucketFileBytes(bucket, docRec.filePath);
   } catch (e) {
     console.warn('Compile: failed to fetch', docRec.filePath, e);
-    return 0;
+    return null;
   }
-  if (!ab) return 0;
+  if (!ab) return null;
   var ct = (docRec.contentType || '').toLowerCase();
   var nm = (docRec.fileName || '').toLowerCase();
   var isPdf   = ct.indexOf('pdf')    !== -1 || /\.pdf$/i.test(nm);
@@ -12703,6 +12708,10 @@ async function _appendCompileDocToJsPdf(doc, docRec, bucket, submittal) {
   // if the user never opened the form values panel — the helper falls
   // back to Project Parameter pre-fill internally, mirroring Round 3's
   // lazy render behavior at compile time.
+  //
+  // Note: _fillPdfForSubmittal already flattens, so these bytes copy
+  // through the lossless merge cleanly — and the filled values are no
+  // longer re-photographed on the way into the package.
   if (isPdf && submittal && docRec.isFillable && docRec.formSchema &&
       Array.isArray(docRec.formSchema.questions) && docRec.formSchema.questions.length) {
     try {
@@ -12713,22 +12722,14 @@ async function _appendCompileDocToJsPdf(doc, docRec, bucket, submittal) {
     }
   }
 
-  try {
-    if (isPdf)   return await _appendPdfBytesToJsPdf(doc, ab);
-    if (isImage) return await _appendImageBytesToJsPdf(doc, ab, ct || 'image/jpeg');
-    // Unknown extension — try PDF first, then image
-    try { return await _appendPdfBytesToJsPdf(doc, ab); }
-    catch (e) {
-      try { return await _appendImageBytesToJsPdf(doc, ab, 'image/jpeg'); }
-      catch (e2) {
-        console.warn('Compile: unrecognised format, skipped:', docRec.fileName);
-        return 0;
-      }
-    }
-  } catch (e) {
-    console.warn('Compile: append threw for', docRec.fileName, e);
-    return 0;
-  }
+  // 'auto' means the extension told us nothing — the merge loop tries
+  // PDF first, then image, mirroring the old dispatcher's fallback order.
+  return {
+    kind:        isPdf ? 'pdf' : (isImage ? 'image' : 'auto'),
+    bytes:       ab,
+    contentType: ct || (isImage ? 'image/jpeg' : 'application/pdf'),
+    fileName:    docRec.fileName || '?'
+  };
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -13856,39 +13857,48 @@ async function compileSubmittalPackage() {
       printedOn:      printedOn
     };
 
+    if (!window.PDFLib) {
+      throw new Error('PDF merge library still loading — wait a moment and try again.');
+    }
+
     _renderCompileCoverSheet(doc, ctx);
     // Snapshot how many pages the cover used so the post-pass only
     // paints the KMI footer on cover pages, not on appended source PDFs.
     var coverPageCount = doc.internal.getNumberOfPages();
 
-    // Append every checked item's docs in order
-    var totalAppendedPages = 0;
+    // ── Phase 1: fetch and prepare every attachment's bytes ───────────
+    // Nothing is appended yet. The cover has to be finished and sealed
+    // before pdf-lib can take over as the merge target, so attachments
+    // are staged in order first.
+    var queue   = [];
     var skipped = [];
     for (var i = 0; i < allInPkg.length; i++) {
       var s = allInPkg[i];
       if (!includedSet[String(s.id)]) continue;
       var docs = _gatherCompileDocsForSubmittal(s);
+      var sLabel = (s.kmiSubmittalNo || '#' + s.id);
       if (!docs.length) {
-        skipped.push((s.kmiSubmittalNo || '#' + s.id) + ' (no docs)');
+        skipped.push(sLabel + ' (no docs)');
         continue;
       }
-      if (status) status.innerHTML = '<span style="color:#666">Adding docs for ' + subEsc(s.kmiSubmittalNo || s.itemName) + '…</span>';
+      if (status) status.innerHTML = '<span style="color:#666">Fetching docs for ' + subEsc(s.kmiSubmittalNo || s.itemName) + '…</span>';
       for (var j = 0; j < docs.length; j++) {
         var entry = docs[j];
         // Form-fill Round 4: pass the submittal so fillable docs can be
-        // filled from submittal.formValues before rasterization.
-        var pages = await _appendCompileDocToJsPdf(doc, entry.doc, entry.bucket, s);
-        totalAppendedPages += pages;
-        if (pages === 0) {
-          skipped.push((s.kmiSubmittalNo || '#' + s.id) + ' / ' + (entry.doc.fileName || '?'));
+        // filled from submittal.formValues before merging.
+        var prep = await _prepareCompileDocBytes(entry.doc, entry.bucket, s);
+        if (!prep) {
+          skipped.push(sLabel + ' / ' + (entry.doc.fileName || '?'));
+          continue;
         }
+        prep.label = sLabel + ' / ' + prep.fileName;
+        queue.push(prep);
       }
     }
 
-    // After everything, walk every cover page and paint a "Page X of Y"
-    // footer where Y is the cover page count (not the entire merged
-    // doc — the appended source PDFs have their own pagination).
-    var totalPages = doc.internal.getNumberOfPages();
+    // ── Phase 2: cover footers, painted before the cover is sealed ────
+    // "Page X of Y" counts cover pages only — the appended source PDFs
+    // carry their own pagination.
     for (var p = 1; p <= coverPageCount; p++) {
       doc.setPage(p);
       doc.setDrawColor(220, 220, 220);
@@ -13902,32 +13912,60 @@ async function compileSubmittalPackage() {
       doc.text('Printed On: ' + printedOn, 558, 756, {align: 'right'});
     }
 
-    // If anything was skipped, append a final summary page
+    // ── Phase 3: seal the cover, merge attachments losslessly ─────────
+    if (status) status.innerHTML = '<span style="color:#666">Merging ' + queue.length + ' document(s)…</span>';
+    var mergedDoc = await window.PDFLib.PDFDocument.load(
+      doc.output('arraybuffer'), { ignoreEncryption: true }
+    );
+
+    var totalAppendedPages = 0;
+    var rasterizedCount    = 0;
+    for (var q = 0; q < queue.length; q++) {
+      var prepQ = queue[q];
+      if (status) {
+        status.innerHTML = '<span style="color:#666">Merging ' + (q + 1) + ' of ' + queue.length +
+                           ' — ' + subEsc(prepQ.fileName) + '…</span>';
+      }
+      var res = await _mergeAppendPrepared(mergedDoc, prepQ);
+      totalAppendedPages += res.pages;
+      if (res.pages === 0)            skipped.push(prepQ.label);
+      else if (res.mode === 'raster') rasterizedCount++;
+    }
+
+    // ── Phase 4: "Items not appended" summary, still the final page ───
+    // Built as its own one-page jsPDF and merged last, since the cover
+    // doc was sealed back in Phase 3.
     if (skipped.length) {
-      doc.addPage();
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(12);
-      doc.setTextColor(154, 122, 46);
-      doc.text('Items not appended', 54, 80);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      doc.setTextColor(0, 0, 0);
+      var skDoc = new jsPDF({unit: 'pt', format: 'letter'});
+      skDoc.setFont('helvetica', 'bold');
+      skDoc.setFontSize(12);
+      skDoc.setTextColor(154, 122, 46);
+      skDoc.text('Items not appended', 54, 80);
+      skDoc.setFont('helvetica', 'normal');
+      skDoc.setFontSize(10);
+      skDoc.setTextColor(0, 0, 0);
       var yy = 100;
       for (var sk = 0; sk < skipped.length && yy < 700; sk++) {
-        doc.text('• ' + skipped[sk], 54, yy);
+        skDoc.text('• ' + skipped[sk], 54, yy);
         yy += 14;
       }
-      // Add footer to this last page too
-      var totalP = doc.internal.getNumberOfPages();
-      doc.setDrawColor(220, 220, 220);
-      doc.setLineWidth(0.4);
-      doc.line(54, 748, 558, 748);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9);
-      doc.setTextColor(110, 110, 110);
-      doc.text('KMI Construction LLC', 54, 756);
-      doc.text('Page ' + totalP + ' of ' + totalP, 306, 756, {align: 'center'});
-      doc.text('Printed On: ' + printedOn, 558, 756, {align: 'right'});
+      // This page's number is known arithmetically now that the merge is
+      // done: cover pages + everything appended + this page.
+      var skPageNo = coverPageCount + totalAppendedPages + 1;
+      skDoc.setDrawColor(220, 220, 220);
+      skDoc.setLineWidth(0.4);
+      skDoc.line(54, 748, 558, 748);
+      skDoc.setFont('helvetica', 'normal');
+      skDoc.setFontSize(9);
+      skDoc.setTextColor(110, 110, 110);
+      skDoc.text('KMI Construction LLC', 54, 756);
+      skDoc.text('Page ' + skPageNo + ' of ' + skPageNo, 306, 756, {align: 'center'});
+      skDoc.text('Printed On: ' + printedOn, 558, 756, {align: 'right'});
+      try {
+        await _mergeAppendPdfBytes(mergedDoc, skDoc.output('arraybuffer'));
+      } catch (e) {
+        console.warn('Compile: could not append skipped-items page:', e);
+      }
     }
 
     // Round 10: filename = "<kmiSubmittalNo> - <packageName>.pdf"
@@ -13947,7 +13985,10 @@ async function compileSubmittalPackage() {
     else if (_subNo)           fname = _subNo + '.pdf';
     else if (_pkgNm)           fname = _pkgNm + '.pdf';
     else                       fname = 'KMI_Submittal_' + (new Date()).toISOString().slice(0, 10) + '.pdf';
-    doc.save(fname);
+
+    if (status) status.innerHTML = '<span style="color:#666">Writing PDF…</span>';
+    var outBytes = await mergedDoc.save();
+    _downloadPdfBytes(outBytes, fname);
 
     // ── Persist this transmittal (autonumber history) ───────────────
     // Recorded only after a successful generate, so cancelled dialogs
@@ -13981,6 +14022,9 @@ async function compileSubmittalPackage() {
 
     if (status) {
       var msg = '<span style="color:#3B6D11">Generated ' + docItems.length + ' transmittal item(s), ' + totalAppendedPages + ' attached page(s)</span>';
+      if (rasterizedCount) {
+        msg += ' <span style="color:#9A7A2E">— ' + rasterizedCount + ' doc(s) could not be merged losslessly and were rasterized (see console)</span>';
+      }
       if (skipped.length) msg += ' <span style="color:#9A7A2E">— ' + skipped.length + ' not appended (see last page)</span>';
       status.innerHTML = msg;
     }
@@ -15267,9 +15311,11 @@ function deleteTmTicket(id) {
 // to attach the original Smart Upload source file (or any uploadedSignedFile)
 // as additional pages on the end of a jsPDF-built document.
 //
-// PDF sources are rasterised with pdf.js (already loaded for other features)
-// and added as JPEG images at 2x scale — this avoids a pdf-lib dependency
-// and keeps everything in one stack. Image sources (JPG/PNG) are added
+// PDF sources are rasterised with pdf.js and added as JPEG images at 2x
+// scale (144 DPI). NOTE: this is the legacy lossy path — it still backs
+// T&M and COR documents, which are internal backup rather than something
+// a GC stamps. Submittal packages moved to the pdf-lib lossless merge
+// below; porting these two is a follow-up. Image sources (JPG/PNG) are added
 // directly via doc.addImage(). Aspect ratio is preserved; pages are
 // letter-sized (612x792 pt).
 
@@ -15370,6 +15416,187 @@ async function _appendImageBytesToJsPdf(doc, arrayBuffer, contentType) {
   doc.addPage([fit.pageW, fit.pageH], fit.orientation);
   doc.addImage(dataUrl, format, fit.x, fit.y, fit.w, fit.h);
   return 1;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// LOSSLESS PDF MERGE (Submittal Compile — pdf-lib)
+// ════════════════════════════════════════════════════════════════════
+// The raster helpers above (_appendPdfBytesToJsPdf) turn every source
+// page into a 144 DPI JPEG. That was fine for internal T&M / COR backup
+// but it visibly degraded submittal packages: vector line work went
+// fuzzy, small callout text got JPEG ringing, and the output had no
+// searchable text layer.
+//
+// The submittal compile path now merges with pdf-lib's copyPages()
+// instead, which carries the source page objects across byte-for-byte —
+// vector stays vector, MediaBox and /Rotate come through natively, and
+// merged files are typically SMALLER than the rasterized equivalent.
+//
+// The raster path is retained as a per-document fallback: pdf-lib is
+// stricter than pdf.js and rejects some encrypted / malformed-XRef files
+// that pdf.js renders happily. When that happens we rasterize that one
+// document rather than dropping it from the package — a fuzzy page beats
+// a missing page on something an architect has to stamp.
+//
+// Scope note: COR and T&M PDFs still use the raster path via
+// _appendUploadedFileToJsPdf below. Porting those is a follow-up.
+
+// Flatten a source PDF's AcroForm if it has one.
+//
+// WHY: pdf-lib's copyPages() copies widget annotations but does NOT merge
+// the source's AcroForm dictionary into the target. A manufacturer PDF
+// with a live (unflattened) form therefore arrives in the package with
+// blank fields — silently. Flattening first bakes the field appearances
+// into the page content so they survive the copy.
+//
+// Docs that came through _fillPdfForSubmittal are already flattened, so
+// getFields() returns [] and this is a no-op for them.
+// Returns the original bytes unchanged on any failure.
+async function _pdfFlattenIfForm(arrayBuffer) {
+  if (!arrayBuffer || !window.PDFLib) return arrayBuffer;
+  try {
+    var src = await window.PDFLib.PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+    var form = src.getForm();
+    var fields = form.getFields();
+    if (!fields || !fields.length) return arrayBuffer;
+    // Regenerate appearances before flattening — same pdf-lib gotcha the
+    // form-fill path hits (fields flatten blank without this).
+    try { form.updateFieldAppearances(); } catch (e) { /* best effort */ }
+    form.flatten();
+    var out = await src.save();
+    return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
+  } catch (e) {
+    console.warn('[merge] AcroForm flatten failed — copying as-is:', e);
+    return arrayBuffer;
+  }
+}
+
+// Copy every page of a source PDF into a pdf-lib target document.
+// Returns the page count added. Throws if pdf-lib can't parse the source
+// (caller is expected to fall back to the raster path).
+async function _mergeAppendPdfBytes(mergedDoc, arrayBuffer) {
+  var flat = await _pdfFlattenIfForm(arrayBuffer);
+  var src = await window.PDFLib.PDFDocument.load(flat, { ignoreEncryption: true });
+  var idxs = src.getPageIndices();
+  if (!idxs.length) return 0;
+  var copied = await mergedDoc.copyPages(src, idxs);
+  for (var i = 0; i < copied.length; i++) mergedDoc.addPage(copied[i]);
+  return copied.length;
+}
+
+// Embed a single image as one new page in a pdf-lib target document.
+// JPEG and PNG embed directly (no re-encode). Anything else the browser
+// can decode (GIF, WebP) is converted to PNG via canvas first — lossless
+// for the flat graphics these usually are.
+async function _mergeAppendImageBytes(mergedDoc, arrayBuffer, contentType) {
+  var ct = (contentType || '').toLowerCase();
+  var bytes = new Uint8Array(arrayBuffer);
+  var img = null;
+
+  if (ct.indexOf('png') !== -1) {
+    img = await mergedDoc.embedPng(bytes);
+  } else if (ct.indexOf('jpeg') !== -1 || ct.indexOf('jpg') !== -1) {
+    img = await mergedDoc.embedJpg(bytes);
+  } else {
+    // Unknown/unsupported by pdf-lib — round-trip through canvas to PNG.
+    var binary = '';
+    var CHUNK = 0x8000;
+    for (var i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    var dataUrl = 'data:' + (ct || 'image/png') + ';base64,' + btoa(binary);
+    var el = await new Promise(function(resolve, reject) {
+      var im = new Image();
+      im.onload  = function(){ resolve(im); };
+      im.onerror = function(){ reject(new Error('Image decode failed')); };
+      im.src = dataUrl;
+    });
+    var cv = document.createElement('canvas');
+    cv.width = el.naturalWidth || el.width;
+    cv.height = el.naturalHeight || el.height;
+    cv.getContext('2d').drawImage(el, 0, 0);
+    var pngUrl = cv.toDataURL('image/png');
+    img = await mergedDoc.embedPng(pngUrl);
+  }
+
+  var fit = _orientedLetterFit(img.width, img.height);
+  var page = mergedDoc.addPage([fit.pageW, fit.pageH]);
+  // pdf-lib's origin is bottom-left, same as _orientedLetterFit's y.
+  page.drawImage(img, { x: fit.x, y: fit.y, width: fit.w, height: fit.h });
+  return 1;
+}
+
+// Merge one prepared attachment into the target document, degrading
+// gracefully. Returns { pages, mode } where mode is one of:
+//   'lossless' — copyPages(), vector preserved (the happy path)
+//   'image'    — embedded JPEG/PNG, source was an image to begin with
+//   'raster'   — pdf-lib rejected the source, pdf.js rendered it instead
+//   'failed'   — nothing worked; caller adds it to the skipped list
+async function _mergeAppendPrepared(mergedDoc, prep) {
+  if (prep.kind === 'image') {
+    try {
+      return { pages: await _mergeAppendImageBytes(mergedDoc, prep.bytes, prep.contentType), mode: 'image' };
+    } catch (e) {
+      console.warn('[merge] image embed failed for', prep.fileName, e);
+      return { pages: 0, mode: 'failed' };
+    }
+  }
+
+  // 'pdf' or 'auto' — try the lossless copy first.
+  try {
+    var n = await _mergeAppendPdfBytes(mergedDoc, prep.bytes);
+    if (n > 0) return { pages: n, mode: 'lossless' };
+  } catch (e) {
+    console.warn('[merge] lossless copy rejected', prep.fileName, '— rasterizing instead:', e);
+  }
+
+  // Fallback 1: pdf.js can render plenty of files pdf-lib refuses to
+  // parse (encryption, damaged XRef tables). Rasterize that one file.
+  try {
+    var rasterBytes = await _rasterizeToStandalonePdfBytes(prep.bytes);
+    var rn = await _mergeAppendPdfBytes(mergedDoc, rasterBytes);
+    if (rn > 0) return { pages: rn, mode: 'raster' };
+  } catch (e2) {
+    console.warn('[merge] raster fallback failed for', prep.fileName, e2);
+  }
+
+  // Fallback 2: extension lied and it's actually an image.
+  if (prep.kind === 'auto') {
+    try {
+      return { pages: await _mergeAppendImageBytes(mergedDoc, prep.bytes, prep.contentType), mode: 'image' };
+    } catch (e3) {
+      console.warn('[merge] image fallback failed for', prep.fileName, e3);
+    }
+  }
+
+  return { pages: 0, mode: 'failed' };
+}
+
+// Fallback: rasterize a PDF the lossless path rejected, and hand back
+// standalone PDF bytes the merge loop can copyPages() normally.
+// jsPDF always opens with an implicit blank page; _appendPdfBytesToJsPdf
+// addPage()s every source page after it, so page 1 is deleted afterward.
+async function _rasterizeToStandalonePdfBytes(arrayBuffer) {
+  if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('jsPDF not loaded.');
+  var tmp = new window.jspdf.jsPDF({ unit: 'pt', format: 'letter' });
+  var n = await _appendPdfBytesToJsPdf(tmp, arrayBuffer);
+  if (n > 0) tmp.deletePage(1);
+  return tmp.output('arraybuffer');
+}
+
+// Save raw PDF bytes to the user's machine. pdf-lib has no equivalent of
+// jsPDF's doc.save(), so this mirrors the blob-anchor pattern used by the
+// CSV exports elsewhere in the app.
+function _downloadPdfBytes(bytes, filename) {
+  var blob = new Blob([bytes], { type: 'application/pdf' });
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'document.pdf';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
 }
 
 // Top-level dispatcher — given an uploadedSignedFile / smartUploadedFile
@@ -45138,7 +45365,7 @@ async function sendEmail(payload) {
 // Bump KMI_BUILD on every deploy. Sessions report it, and the panel flags
 // any tab running something older than the newest build seen \u2014 which is
 // exactly the condition that let stale tabs silently overwrite AP data.
-var KMI_BUILD = '2026-08-06-p6';
+var KMI_BUILD = '2026-08-07-p1';
 
 var _kmiSessionId = (function(){
   try {
