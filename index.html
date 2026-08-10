@@ -3560,6 +3560,19 @@ tr.gc-line:hover td{background:#fafafa}
     <div id="esb-custom-docs-section"></div>
   </div>
 
+  <!-- Listed items (no attachment) — free-text rows that print on the
+       transmittal cover without a file. Physical samples, color samples,
+       anything hand-delivered under separate cover. Shown for ANY saved
+       submittal (custom or library-linked). Data rides on
+       submittal.lineItems (JSONB line_items). -->
+  <div class="card" id="esb-line-items-card" style="display:none">
+    <div class="ch">
+      <span class="ct">Listed items (no attachment)</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Physical samples and anything sent under separate cover — appears on the transmittal cover with no file</span>
+    </div>
+    <div id="esb-line-items-section"></div>
+  </div>
+
   <!-- Response from customer (Round 2C) — stamped / marked-up versions we
        receive back. Visible for any saved submittal regardless of source. -->
   <div class="card" id="esb-response-docs-card" style="display:none">
@@ -11183,6 +11196,8 @@ function renderEditSubmittalPage() {
   renderSubmittalCustomDocs();
   // Response documents card — for any saved submittal
   renderSubmittalResponseDocs();
+  // Listed items (no attachment) — for any saved submittal
+  renderSubmittalLineItems();
   // Revision context banner (Round 3) — shows parent link and/or
   // "Create revision" prompt depending on the current response.
   renderSubmittalRevisionBanner();
@@ -12150,6 +12165,7 @@ async function confirmSubmittalImport() {
       notes:               '',
       customDocuments:     [],
       responseDocuments:   [],
+      lineItems:           [],
       prevSubmittalId:     null,
       createdAt:           nowIso,
       createdByUserId:     _currentUser ? _currentUser.id : null,
@@ -12369,6 +12385,275 @@ async function rmSubmittalCustomDoc(docId) {
   }
 
   renderSubmittalCustomDocs();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// LISTED ITEMS (no attachment)
+// ════════════════════════════════════════════════════════════════════
+// Free-text rows that print on the transmittal cover with no file
+// behind them — custom CMU colors, physical samples, anything handed
+// over once under separate cover. Stored on submittal.lineItems, a
+// JSONB array of { id, description, format, copies }. These never
+// enter the compile fetch/merge queue; they only produce cover rows.
+
+var SUBMITTAL_LINE_FORMATS = ['Sample', 'Color Sample', 'Shop Drawing', 'Product Data', 'Test Report', 'Other'];
+
+// Session-monotonic counter. Bulk paste creates N ids inside one tight
+// loop, where Date.now() alone collides.
+var _sbLineItemSeq = 0;
+function _newSubmittalLineItemId() {
+  _sbLineItemSeq++;
+  return 'sli' + Date.now() + '_' + _sbLineItemSeq + '_' + Math.random().toString(36).slice(2, 6);
+}
+
+function _submittalLineItems(r) {
+  return (r && Array.isArray(r.lineItems)) ? r.lineItems : [];
+}
+
+function _sbLineFormatOptions(current) {
+  return SUBMITTAL_LINE_FORMATS.map(function(f){
+    return '<option value="' + subEsc(f) + '"' + (f === current ? ' selected' : '') + '>' + subEsc(f) + '</option>';
+  }).join('');
+}
+
+function renderSubmittalLineItems() {
+  var card = g('esb-line-items-card');
+  var sec  = g('esb-line-items-section');
+  if (!card || !sec) return;
+
+  // Any saved submittal — custom or library-linked. A library product
+  // can still ship a physical sample that needs listing.
+  var r = _editSubmittalId ? getSubmittal(_editSubmittalId) : null;
+  if (!r) {
+    card.style.display = 'none';
+    sec.innerHTML = '';
+    return;
+  }
+  card.style.display = '';
+
+  var items   = _submittalLineItems(r);
+  var canEdit = canAccess('edit-submittals') === 'full';
+
+  var html = '';
+  if (canEdit) {
+    html += '<div style="font-size:12px;color:#888;margin-bottom:12px">' +
+      'Each line becomes its own row in the Transmittal Items table. Use this for anything you deliver once and don\'t want to photograph.' +
+    '</div>' +
+
+    '<div style="display:grid;grid-template-columns:1fr 190px 90px auto;gap:10px;align-items:end;margin-bottom:14px">' +
+      '<div class="fgr"><label>Description</label>' +
+        '<input id="esb-li-desc" placeholder="e.g. Custom CMU — Autumn Blend, split face" onkeydown="onSubmittalLineItemKey(event)">' +
+      '</div>' +
+      '<div class="fgr"><label>Format</label>' +
+        '<select id="esb-li-fmt">' + _sbLineFormatOptions('Color Sample') + '</select>' +
+      '</div>' +
+      '<div class="fgr"><label>Copies</label>' +
+        '<input id="esb-li-copies" type="number" min="1" step="1" value="1" onkeydown="onSubmittalLineItemKey(event)">' +
+      '</div>' +
+      '<div><button type="button" class="btn btn-p" onclick="addSubmittalLineItem()">+ Add</button></div>' +
+    '</div>' +
+
+    '<div style="margin-bottom:14px">' +
+      '<button type="button" class="btn btn-pdf btn-sm" onclick="toggleSubmittalLinePaste()">&dArr; Paste a list</button>' +
+      '<span style="font-size:11px;color:#888;margin-left:8px">One item per line — format and copies apply to the whole paste.</span>' +
+    '</div>' +
+
+    '<div id="esb-li-paste" style="display:none;border:0.5px solid #ddd;border-radius:8px;padding:14px 16px;margin-bottom:14px;background:#fafafa">' +
+      '<div class="fg">' +
+        '<div class="fgr full"><label>One item per line</label>' +
+          '<textarea id="esb-li-paste-text" rows="5" placeholder="Custom CMU — Autumn Blend, split face&#10;Custom CMU — Slate Gray, ground face&#10;Custom CMU — Harvest Tan, smooth"></textarea>' +
+        '</div>' +
+        '<div class="fgr"><label>Format for all</label>' +
+          '<select id="esb-li-paste-fmt">' + _sbLineFormatOptions('Color Sample') + '</select>' +
+        '</div>' +
+        '<div class="fgr"><label>Copies for all</label>' +
+          '<input id="esb-li-paste-copies" type="number" min="1" step="1" value="1">' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">' +
+        '<button type="button" class="btn" onclick="toggleSubmittalLinePaste()">Cancel</button>' +
+        '<button type="button" class="btn btn-p" onclick="addSubmittalLineItemsBulk()">Add items</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  if (!items.length) {
+    html += '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'No listed items yet.' + (canEdit ? ' Add one above, or paste a list.' : '') + '</div>';
+    sec.innerHTML = html;
+    return;
+  }
+
+  html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+    '<th style="padding:6px 8px;text-align:left;width:30px">#</th>' +
+    '<th style="padding:6px 8px;text-align:left">Description</th>' +
+    '<th style="padding:6px 8px;text-align:left;width:170px">Format</th>' +
+    '<th style="padding:6px 8px;text-align:left;width:80px">Copies</th>' +
+    '<th style="padding:6px 8px;text-align:right;width:110px"></th>' +
+    '</tr></thead><tbody>';
+  items.forEach(function(it, idx){
+    var sid = subEsc(it.id);
+    html += '<tr>' +
+      '<td style="padding:6px 8px;font-family:monospace;color:#888">' + (idx + 1) + '</td>' +
+      '<td style="padding:6px 8px">' +
+        (canEdit
+          ? '<input value="' + subEsc(it.description) + '" onchange="editSubmittalLineItem(\'' + sid + '\',\'description\',this.value)">'
+          : subEsc(it.description)) +
+      '</td>' +
+      '<td style="padding:6px 8px">' +
+        (canEdit
+          ? '<select onchange="editSubmittalLineItem(\'' + sid + '\',\'format\',this.value)">' + _sbLineFormatOptions(it.format) + '</select>'
+          : subEsc(it.format || '')) +
+      '</td>' +
+      '<td style="padding:6px 8px">' +
+        (canEdit
+          ? '<input type="number" min="1" step="1" value="' + (parseInt(it.copies, 10) || 1) + '" onchange="editSubmittalLineItem(\'' + sid + '\',\'copies\',this.value)">'
+          : String(parseInt(it.copies, 10) || 1)) +
+      '</td>' +
+      '<td style="padding:6px 8px;text-align:right;white-space:nowrap">' +
+        (canEdit
+          ? '<button type="button" class="btn btn-sm" title="Move up" onclick="moveSubmittalLineItem(\'' + sid + '\',-1)">&uarr;</button> ' +
+            '<button type="button" class="btn btn-sm" title="Move down" onclick="moveSubmittalLineItem(\'' + sid + '\',1)">&darr;</button> ' +
+            '<button type="button" class="btn btn-sm" style="color:#A32D2D" title="Remove" onclick="rmSubmittalLineItem(\'' + sid + '\')">&times;</button>'
+          : '') +
+      '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+  sec.innerHTML = html;
+}
+
+// Enter in the description or copies field adds the row — avoids a
+// mouse trip when typing several in a row.
+function onSubmittalLineItemKey(ev) {
+  if (ev && ev.key === 'Enter') {
+    ev.preventDefault();
+    addSubmittalLineItem();
+  }
+}
+
+function toggleSubmittalLinePaste() {
+  var p = g('esb-li-paste');
+  if (!p) return;
+  p.style.display = (p.style.display === 'none') ? '' : 'none';
+}
+
+// Shared persistence for every line-item mutation. Targeted upsert on
+// kmi_submittals only — never touches the wholesale push pipeline.
+async function _persistSubmittalLineItems(r) {
+  r.updatedAt = new Date().toISOString();
+  r.updatedByUserId = _currentUser ? _currentUser.id : null;
+  saveDB();
+  if (supabaseClient) {
+    try {
+      var resp = await supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(r));
+      if (resp && resp.error) console.warn('submittal lineItems push warning:', resp.error.message);
+    } catch (e) {
+      console.warn('submittal lineItems push threw:', e);
+    }
+  }
+  renderSubmittalLineItems();
+}
+
+async function addSubmittalLineItem() {
+  if (!requireFull('edit-submittals', 'add listed items')) return;
+  if (!_editSubmittalId) { alert('Save the submittal first.'); return; }
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+
+  var descEl = g('esb-li-desc');
+  var desc = (descEl && descEl.value || '').trim();
+  if (!desc) { alert('Enter a description.'); if (descEl) descEl.focus(); return; }
+
+  var fmtEl = g('esb-li-fmt');
+  var copEl = g('esb-li-copies');
+  r.lineItems = _submittalLineItems(r);
+  r.lineItems.push({
+    id:          _newSubmittalLineItemId(),
+    description: desc,
+    format:      (fmtEl && fmtEl.value) || 'Sample',
+    copies:      Math.max(1, parseInt(copEl && copEl.value, 10) || 1)
+  });
+
+  await _persistSubmittalLineItems(r);
+  // Re-render blew the inputs away — put focus back for the next entry
+  var again = g('esb-li-desc');
+  if (again) again.focus();
+}
+
+async function addSubmittalLineItemsBulk() {
+  if (!requireFull('edit-submittals', 'add listed items')) return;
+  if (!_editSubmittalId) { alert('Save the submittal first.'); return; }
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+
+  var txtEl = g('esb-li-paste-text');
+  var fmtEl = g('esb-li-paste-fmt');
+  var copEl = g('esb-li-paste-copies');
+  var raw   = (txtEl && txtEl.value) || '';
+  var fmt   = (fmtEl && fmtEl.value) || 'Sample';
+  var cop   = Math.max(1, parseInt(copEl && copEl.value, 10) || 1);
+
+  var lines = raw.split('\n').map(function(x){ return x.trim(); }).filter(Boolean);
+  if (!lines.length) { alert('Nothing to add — paste one item per line.'); return; }
+
+  r.lineItems = _submittalLineItems(r);
+  lines.forEach(function(l){
+    r.lineItems.push({
+      id:          _newSubmittalLineItemId(),
+      description: l,
+      format:      fmt,
+      copies:      cop
+    });
+  });
+
+  await _persistSubmittalLineItems(r);
+  showToast(lines.length + ' listed item' + (lines.length === 1 ? '' : 's') + ' added');
+}
+
+async function editSubmittalLineItem(itemId, field, val) {
+  if (!requireFull('edit-submittals', 'edit listed items')) return;
+  if (!_editSubmittalId) return;
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+  var it = _submittalLineItems(r).find(function(x){ return String(x.id) === String(itemId); });
+  if (!it) return;
+
+  if (field === 'copies') {
+    it.copies = Math.max(1, parseInt(val, 10) || 1);
+  } else if (field === 'description') {
+    var d = String(val || '').trim();
+    if (!d) { alert('Description cannot be blank.'); renderSubmittalLineItems(); return; }
+    it.description = d;
+  } else if (field === 'format') {
+    it.format = String(val || '');
+  } else {
+    return;
+  }
+
+  await _persistSubmittalLineItems(r);
+}
+
+async function moveSubmittalLineItem(itemId, dir) {
+  if (!requireFull('edit-submittals', 'reorder listed items')) return;
+  if (!_editSubmittalId) return;
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+  var arr = _submittalLineItems(r);
+  var i = -1;
+  for (var k = 0; k < arr.length; k++) { if (String(arr[k].id) === String(itemId)) { i = k; break; } }
+  var j = i + dir;
+  if (i < 0 || j < 0 || j >= arr.length) return;
+  var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+  r.lineItems = arr;
+  await _persistSubmittalLineItems(r);
+}
+
+async function rmSubmittalLineItem(itemId) {
+  if (!requireFull('edit-submittals', 'remove listed items')) return;
+  if (!_editSubmittalId) return;
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+  var it = _submittalLineItems(r).find(function(x){ return String(x.id) === String(itemId); });
+  if (!it) return;
+  if (!confirm('Remove "' + (it.description || 'this item') + '" from the listed items?')) return;
+  r.lineItems = _submittalLineItems(r).filter(function(x){ return String(x.id) !== String(itemId); });
+  await _persistSubmittalLineItems(r);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -12669,6 +12954,17 @@ async function createSubmittalRevision(originalId) {
     notes:               '',
     customDocuments:     [],
     responseDocuments:   [],
+    // Listed items carry forward — a resubmittal of the same CMU colors
+    // shouldn't make you retype them. Fresh ids so edits on the revision
+    // never mutate the parent's array.
+    lineItems:           (Array.isArray(orig.lineItems) ? orig.lineItems : []).map(function(li){
+                           return {
+                             id:          _newSubmittalLineItemId(),
+                             description: String(li.description || ''),
+                             format:      String(li.format || 'Sample'),
+                             copies:      Math.max(1, parseInt(li.copies, 10) || 1)
+                           };
+                         }),
     prevSubmittalId:     orig.id,
     createdAt:           nowIso,
     createdByUserId:     _currentUser ? _currentUser.id : null,
@@ -13260,8 +13556,10 @@ function _gatherCompileDocsForSubmittal(s) {
         fileName:    d.fileName || '—',
         // Round 10: productName drives the Description column on the
         // cover. Custom submittals have no product linkage, so fall
-        // back to the submittal title.
-        productName: String(s.title || '').trim(),
+        // back to the submittal item name. (Was reading s.title, which
+        // is not a field on the record — every custom row fell through
+        // to the raw filename.)
+        productName: String(s.itemName || '').trim(),
         // Custom docs have no "issue date" concept — use upload date so
         // the items table has something meaningful in the Date column.
         dateStr:     _formatProcoreDate(d.uploadedAt) || _formatProcoreDate(new Date().toISOString())
@@ -13299,6 +13597,23 @@ function _gatherCompileDocsForSubmittal(s) {
     });
   }
   return out;
+}
+
+// Listed items (no attachment) for a submittal, normalized into the
+// same {format, description, copies} shape the cover's Items table
+// consumes. Deliberately separate from _gatherCompileDocsForSubmittal:
+// these have no bytes to fetch and must never reach the merge queue.
+function _gatherLineItemsForSubmittal(s) {
+  if (!s || !Array.isArray(s.lineItems)) return [];
+  return s.lineItems
+    .filter(function(it){ return it && String(it.description || '').trim(); })
+    .map(function(it){
+      return {
+        format:      String(it.format || 'Sample'),
+        description: String(it.description).trim(),
+        copies:      String(Math.max(1, parseInt(it.copies, 10) || 1))
+      };
+    });
 }
 
 // Format an ISO date as "Mon DD, YYYY" to match Procore. Returns ''
@@ -13513,16 +13828,29 @@ function showSubmittalPackageCompile(submittalId) {
   // Read-only summary of the documents that will be pulled into this
   // submittal's transmittal. Compile is per-submittal, so there is no
   // include/exclude checklist — every document on this submittal is used.
-  var _anchorDocs = _gatherCompileDocsForSubmittal(anchor);
-  var itemRows = _anchorDocs.length
-    ? _anchorDocs.map(function(entry){
-        var nm = (entry.productName && entry.productName.length) ? entry.productName : (entry.fileName || '—');
-        return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:0.5px solid #eee">' +
-          '<span style="font-size:12px">' + subEsc(nm) + '</span>' +
-          '<span style="color:#888;font-size:11px">' + subEsc(entry.format || 'file') + '</span>' +
-        '</div>';
-      }).join('')
-    : '<div style="padding:8px;color:#9A7A2E;font-size:12px">⚠ No documents are attached to this submittal.</div>';
+  var _anchorDocs  = _gatherCompileDocsForSubmittal(anchor);
+  var _anchorLines = _gatherLineItemsForSubmittal(anchor);
+  var _anchorTotal = _anchorDocs.length + _anchorLines.length;
+
+  function _cmpRow(nm, fmt, tagText, tagBg, tagFg) {
+    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:0.5px solid #eee">' +
+      '<span style="font-size:12px;flex:1;min-width:0">' + subEsc(nm) + '</span>' +
+      '<span style="color:#888;font-size:11px">' + subEsc(fmt) + '</span>' +
+      '<span class="bdg" style="background:' + tagBg + ';color:' + tagFg + '">' + tagText + '</span>' +
+    '</div>';
+  }
+
+  var itemRows = '';
+  _anchorDocs.forEach(function(entry){
+    var nm = (entry.productName && entry.productName.length) ? entry.productName : (entry.fileName || '—');
+    itemRows += _cmpRow(nm, entry.format || 'file', 'file', '#EAF3DE', '#3B6D11');
+  });
+  _anchorLines.forEach(function(li){
+    itemRows += _cmpRow(li.description, li.format, 'no file', '#faf1d6', '#9A7A2E');
+  });
+  if (!_anchorTotal) {
+    itemRows = '<div style="padding:8px;color:#9A7A2E;font-size:12px">⚠ Nothing attached and nothing listed — the cover will print one row using the item name.</div>';
+  }
 
   // Project contact dropdown options
   var contactOpts = '<option value="">— Pick a recipient —</option>' +
@@ -13586,11 +13914,11 @@ function showSubmittalPackageCompile(submittalId) {
       '</div>' +
     '</div>' +
 
-    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Documents on this submittal (' + _anchorDocs.length + ')</div>' +
+    '<div style="margin-top:14px"><div style="font-size:12px;color:#444;margin-bottom:6px;font-weight:600">Items on this submittal (' + _anchorTotal + ')</div>' +
       '<div style="border:0.5px solid #ddd;border-radius:4px;max-height:200px;overflow-y:auto">' +
         itemRows +
       '</div>' +
-      '<div style="font-size:11px;color:#888;margin-top:6px">Each <em>document</em> becomes its own row in the Transmittal Items table on the cover.</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:6px">Each row here becomes a row in the Transmittal Items table on the cover. Rows tagged <em>no file</em> are listed only — nothing is appended to the PDF for them.</div>' +
     '</div>' +
 
     '<div id="cmp-status" style="margin-top:10px;font-size:12px;color:#888;min-height:18px"></div>' +
@@ -13931,7 +14259,31 @@ async function compileSubmittalPackage() {
         copies:      '1'
       });
     });
+    // Listed items print after this submittal's attachments, in the
+    // order the user arranged them on the edit page. No bytes are
+    // fetched or merged for these — cover rows only.
+    _gatherLineItemsForSubmittal(s).forEach(function(li){
+      docItems.push({
+        format:      li.format,
+        description: li.description,
+        date:        _submittalDateStr,
+        copies:      li.copies
+      });
+    });
   });
+
+  // Fallback: a submittal with no attachments and no listed items would
+  // otherwise print an empty Items table. Emit one row from the item
+  // name so the transmittal always says what it covers.
+  if (!docItems.length) {
+    var _fbAnchor = allInPkg.length ? allInPkg[0] : null;
+    docItems.push({
+      format:      'Documents',
+      description: (_fbAnchor && (_fbAnchor.itemName || _fbAnchor.packageName)) || 'Submittal',
+      date:        _submittalDateStr,
+      copies:      '1'
+    });
+  }
 
   // Project info for the header
   var anchor = allInPkg[0];
@@ -14006,7 +14358,12 @@ async function compileSubmittalPackage() {
       var docs = _gatherCompileDocsForSubmittal(s);
       var sLabel = (s.kmiSubmittalNo || '#' + s.id);
       if (!docs.length) {
-        skipped.push(sLabel + ' (no docs)');
+        // A submittal carrying only listed items is not a failure —
+        // there was never a file to append. Only warn when it has
+        // nothing at all.
+        if (!_gatherLineItemsForSubmittal(s).length) {
+          skipped.push(sLabel + ' (no docs)');
+        }
         continue;
       }
       if (status) status.innerHTML = '<span style="color:#666">Fetching docs for ' + subEsc(s.kmiSubmittalNo || s.itemName) + '…</span>';
@@ -47523,7 +47880,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-10-sched2';
+var KMI_BUILD = '2026-08-10-sbli1';
 
 var _kmiSessionId = (function(){
   try {
@@ -47868,6 +48225,8 @@ function toSBSubmittal(r) {
     notes:r.notes||'',
     custom_documents: Array.isArray(r.customDocuments) ? r.customDocuments : [],
     response_documents: Array.isArray(r.responseDocuments) ? r.responseDocuments : [],
+    // Listed items (no attachment) — [{id, description, format, copies}]
+    line_items: Array.isArray(r.lineItems) ? r.lineItems : [],
     // Form-fill Round 3 — per-submittal answers to the form questions on
     // each included fillable document. Shape:
     //   { "<documentId>": { "<questionId>": <value>, ... }, ... }
@@ -47917,6 +48276,8 @@ function fromSBSubmittal(r) {
     notes:r.notes||'',
     customDocuments: Array.isArray(r.custom_documents) ? r.custom_documents : [],
     responseDocuments: Array.isArray(r.response_documents) ? r.response_documents : [],
+    // Listed items (no attachment) — see toSBSubmittal
+    lineItems: Array.isArray(r.line_items) ? r.line_items : [],
     // Form-fill Round 3 — see toSBSubmittal
     formValues: (r.form_values && typeof r.form_values === 'object') ? r.form_values : {},
     createdAt:r.created_at||null,
