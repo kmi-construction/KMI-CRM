@@ -1416,6 +1416,42 @@ th.sch-mp{color:#9A7A2E}
 .sch-inh.ovr{background:#FFF8E6;border-color:#E6D59F;color:#9A7A2E}
 .sch-impact{font-size:12px;color:#666;background:#fafafa;border:0.5px dashed #e0e0e0;border-radius:8px;padding:10px 13px;margin-top:14px;line-height:1.6}
 .sch-impact strong{color:#1a1a1a}
+/* ── GC SCHEDULE IMPORT (Phase 2) ──────────────────────────────────── */
+.gc-filters{display:flex;gap:6px;flex-wrap:wrap}
+.gc-fchip{padding:5px 12px;border-radius:100px;font-size:12px;font-weight:600;border:0.5px solid #e2e2e2;background:#fff;color:#888;cursor:pointer;font-family:inherit}
+.gc-fchip:hover{border-color:var(--stl)}
+.gc-fchip.on{background:var(--kmi);border-color:var(--kmi);color:#fff}
+.gc-fchip .c{opacity:.65;font-weight:500;margin-left:3px}
+.gc-fchip.warn.on{background:#A32D2D;border-color:#A32D2D}
+.gc-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.gc-tbl td{padding:6px 10px;border-bottom:0.5px solid #eee;vertical-align:middle}
+.gc-tbl th{padding:9px 10px}
+tr.gc-wbs td{background:#f6f7fb;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--kmi);padding:7px 10px;border-bottom:0.5px solid #e2e5ef}
+tr.gc-line.kmi td{background:#FAFDF6}
+tr.gc-line.kmi:hover td{background:#F3F9EA}
+tr.gc-line:hover td{background:#fafafa}
+.sch-cell.gc-bad{border-color:#E2A5A5;background:#FDF2F2;color:#A32D2D;font-weight:600}
+.gc-sw{position:relative;display:inline-block;width:36px;height:20px;flex-shrink:0}
+.gc-sw input{opacity:0;width:0;height:0;position:absolute}
+.gc-sw .sl{position:absolute;inset:0;background:#ddd;border-radius:20px;transition:.16s;cursor:pointer}
+.gc-sw .sl:before{content:"";position:absolute;height:14px;width:14px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.16s}
+.gc-sw input:checked + .sl{background:#639922}
+.gc-sw input:checked + .sl:before{transform:translateX(16px)}
+.gc-sw input:disabled + .sl{opacity:.5;cursor:default}
+.gc-why{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:4px;font-size:10.5px;font-weight:600;max-width:240px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.gc-why.prior{background:#EAF3DE;color:#3B6D11;border:0.5px solid #C1DBAB}
+.gc-why.prod{background:#EEF0F8;color:var(--kmi3);border:0.5px solid var(--stl)}
+.gc-why.ai{background:#FFF8E6;color:#9A7A2E;border:0.5px solid #E6D59F}
+.gc-why.low{background:#FDF2F2;color:#A32D2D;border:0.5px solid #E2A5A5}
+.gc-why.none{background:#fafafa;color:#bbb;border:0.5px solid #eee;font-weight:500}
+.gc-conf{display:inline-block;width:42px;height:5px;border-radius:3px;background:#eee;overflow:hidden;vertical-align:middle}
+.gc-conf i{display:block;height:100%;border-radius:3px}
+.gc-foot{position:sticky;bottom:0;background:#fff;border-top:2px solid var(--kmi);padding:13px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;box-shadow:0 -3px 12px rgba(0,0,0,.05)}
+.gc-learn{font-size:11.5px;color:#3B6D11;background:#EAF3DE;border:0.5px solid #C1DBAB;border-radius:7px;padding:9px 13px;margin-bottom:14px;line-height:1.55}
+.gc-delta{font-weight:700;font-size:12px}
+.gc-delta.late{color:#A32D2D}
+.gc-delta.early{color:#3B6D11}
+.gc-delta.same{color:#bbb}
 @media (max-width:768px){
   .sch-gleft{flex:0 0 190px}
   .sch-glhdr,.sch-glrow{grid-template-columns:1fr;gap:0}
@@ -45675,7 +45711,11 @@ function _schFromSB(r) {
     ex: (r.exceptions && typeof r.exceptions === 'object') ? r.exceptions : {},
     predecessors: Array.isArray(r.predecessors) ? r.predecessors : [],
     isKmiScope: (r.is_kmi_scope !== false),
-    notes: r.notes || ''
+    notes: r.notes || '',
+    gcTaskId: r.gc_task_id || null,
+    gcLastSeenRev: r.gc_last_seen_rev || null,
+    gcLastAction: r.gc_last_action || null,
+    gcLastActionAt: r.gc_last_action_at || null
   };
 }
 function _schToSB(t) {
@@ -45696,6 +45736,10 @@ function _schToSB(t) {
     predecessors: Array.isArray(t.predecessors) ? t.predecessors : [],
     is_kmi_scope: (t.isKmiScope !== false),
     notes: t.notes || '',
+    gc_task_id: t.gcTaskId || null,
+    gc_last_seen_rev: t.gcLastSeenRev || null,
+    gc_last_action: t.gcLastAction || null,
+    gc_last_action_at: t.gcLastActionAt || null,
     updated_at: new Date().toISOString(),
     updated_by_user_id: me
   };
@@ -45793,6 +45837,22 @@ async function schLoad(force) {
     } else {
       _schTasks = [];
     }
+    // Hydrate the GC dates for linked tasks. gc_start/gc_finish are NOT columns
+    // on kmi_schedule_tasks by design (no denormalization) — they are read from
+    // kmi_gc_tasks so the variance display always reflects the imported record.
+    var gids = _schTasks.map(function(t){ return t.gcTaskId; }).filter(Boolean);
+    if (gids.length) {
+      var gRes = await supabaseClient.from('kmi_gc_tasks')
+        .select('id,activity_id,start_date,finish_date').in('id', gids);
+      if (!gRes.error) {
+        var gmap = {};
+        (gRes.data || []).forEach(function(x){ gmap[x.id] = x; });
+        _schTasks.forEach(function(t){
+          var x = t.gcTaskId ? gmap[t.gcTaskId] : null;
+          if (x) { t.gcActivityId = x.activity_id || ''; t.gcStart = x.start_date || ''; t.gcFinish = x.finish_date || ''; }
+        });
+      }
+    }
     _schLoadedFor = String(p.id);
     _schUndo = [];
   } catch (e) {
@@ -45860,7 +45920,7 @@ async function renderProjectSchedule() {
 }
 function _schRender() {
   var host = g('nprj-schedule-section'); if (!host) return;
-  var tabs = [['schedule', 'Schedule', 0], ['calendar', 'Calendar', 0],
+  var tabs = [['schedule', 'Schedule', 0], ['calendar', 'Calendar', 0], ['gc', 'GC Schedule', 0],
               ['lookahead', 'Look-Aheads', 3], ['manpower', 'Manpower', 4]];
   var sub = '<div style="display:flex;gap:4px;border-bottom:1px solid #e5e5e5;margin-bottom:18px">' +
     tabs.map(function(x){
@@ -45873,7 +45933,8 @@ function _schRender() {
     }).join('') + '</div>';
 
   var body;
-  if (_schSubTab === 'calendar')       body = _schCalendarHtml();
+  if (_schSubTab === 'gc')             body = _gcHtml();
+  else if (_schSubTab === 'calendar')  body = _schCalendarHtml();
   else if (_schSubTab === 'lookahead') body = _schFutureHtml(3);
   else if (_schSubTab === 'manpower')  body = _schFutureHtml(4);
   else                                 body = _schScheduleHtml();
@@ -45881,7 +45942,11 @@ function _schRender() {
   host.innerHTML = sub + body;
   if (_schSubTab === 'schedule' && _schView === 'gantt') _schDrawGantt();
 }
-function schGo(t) { _schSubTab = t; _schRender(); }
+function schGo(t) {
+  _schSubTab = t;
+  if (t === 'gc') { renderGcTab(); return; }   // async load, renders itself
+  _schRender();
+}
 function schSetView(v) { _schView = v; _schRender(); }
 function schSetZoom(z) { _schZoom = z; _schRender(); }
 function schToggleMp(v) { _schShowMp = !!v; _schRender(); }
@@ -46663,7 +46728,802 @@ function _schFutureHtml(phase) {
     'defaulting to 3.</div></div>';
 }
 
-var KMI_BUILD = '2026-08-07-sched1';
+// ════════════════════════════════════════════════════════════════════════
+// GC SCHEDULE IMPORT — Schedule module, Phase 2
+// ────────────────────────────────────────────────────────────────────────
+// Import the GC's schedule PDF, review every extracted line, assign the ones
+// that are KMI scope, and copy those into the native schedule with a pointer
+// back to the GC activity so later revisions can be diffed.
+//
+// Decisions locked with Mike (Aug 2026):
+//   1-C  Read the PDF text layer first (pdf.js). Rasterize only pages with
+//        no text layer. Text is cheaper AND more accurate than vision on a
+//        dense Gantt, and it sidesteps page-count limits for most files.
+//   2-C  Flagged lines are COPIED into the native schedule with gc_task_id.
+//        Later revisions produce an accept/reject diff, never a duplicate.
+//   3    Every import is kept as its own kmi_schedules row (source=imported).
+//   4    Extract activity id, name, start, finish, duration, WBS, % complete
+//        and predecessors (parked, per decision 5 of Phase 1).
+//   5-C  Learn across projects. Confirmations AND rejections are written to
+//        kmi_schedule_import_hints. A line seen 3+ times with no dissent is
+//        "decisive" and is pre-flagged WITHOUT calling the model at all.
+//   7    The model normalizes to ISO. Anything that will not parse is left
+//        NULL and surfaces in the review queue — never silently guessed.
+//   8    Variance view (kmi_schedule_variance).
+//
+// Targeted writes only — nothing here touches db.* or saveDB().
+// ════════════════════════════════════════════════════════════════════════
+
+var _gcScreen    = 'revisions';   // 'revisions' | 'review' | 'variance'
+var _gcRevs      = [];            // kmi_schedules rows, source='imported'
+var _gcCurRev    = null;
+var _gcLines     = [];            // kmi_gc_tasks rows for _gcCurRev
+var _gcHints     = [];            // decisive rows from kmi_schedule_hint_verdicts
+var _gcFilter    = 'all';
+var _gcLoadedFor = null;
+var _gcBusy      = false;
+var _gcDiff      = [];            // computed prev-rev -> cur-rev movement
+
+var GC_MAX_CHARS_PER_CALL = 45000;   // headroom under the model's input budget
+var GC_MAX_RASTER_PAGES   = 20;      // vision fallback is expensive; cap it
+var GC_MIN_PAGE_CHARS     = 40;      // below this a page is treated as image-only
+
+// ── Normalization ───────────────────────────────────────────────────────
+// MUST mirror the generated column in kmi_schedule_import_hints:
+//   btrim(regexp_replace(lower(name_sample), '[^a-z0-9]+', ' ', 'g'))
+// The database owns the STORED value, so the corpus cannot split even if
+// this drifts. This copy is used only to look a hint up; worst case on drift
+// is a missed pre-flag, never a corrupted corpus.
+function _gcNorm(s) {
+  return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function _gcEsc(s) { return (typeof escapeHtml === 'function') ? escapeHtml(s) : String(s == null ? '' : s); }
+function _gcISO(s) { return /^\d{4}-\d{2}-\d{2}$/.test(s || ''); }
+
+// ── Load ────────────────────────────────────────────────────────────────
+async function gcLoad(force) {
+  var p = _schCurrentProject(); if (!p || !supabaseClient) return;
+  if (!force && String(_gcLoadedFor) === String(p.id)) return;
+  try {
+    var rRes = await supabaseClient.from('kmi_schedules')
+      .select('*').eq('project_id', String(p.id)).eq('source', 'imported')
+      .order('imported_at', { ascending: false });
+    if (rRes.error) throw rRes.error;
+    _gcRevs = rRes.data || [];
+    _gcCurRev = _gcRevs[0] || null;
+    _gcLines = [];
+    if (_gcCurRev) await gcLoadLines(_gcCurRev.id);
+    var hRes = await supabaseClient.from('kmi_schedule_hint_verdicts')
+      .select('*').eq('decisive', true).limit(2000);
+    if (hRes.error) throw hRes.error;
+    _gcHints = hRes.data || [];
+    _gcLoadedFor = String(p.id);
+  } catch (e) { _schErr(e, 'Could not load GC schedules'); }
+}
+async function gcLoadLines(schedId) {
+  try {
+    var t = await supabaseClient.from('kmi_gc_tasks')
+      .select('*').eq('schedule_id', schedId).order('seq');
+    if (t.error) throw t.error;
+    _gcLines = (t.data || []).map(function(r){
+      return { id: r.id, scheduleId: r.schedule_id, projectId: r.project_id,
+               activityId: r.activity_id || '', wbs: r.wbs_path || '(ungrouped)',
+               name: r.name || '', seq: Number(r.seq) || 0, page: r.page_no || null,
+               s: r.start_date || '', f: r.finish_date || '',
+               rawS: r.raw_start || '', rawF: r.raw_finish || '',
+               dur: r.duration_days == null ? '' : Number(r.duration_days),
+               pct: r.percent_complete == null ? 0 : Number(r.percent_complete),
+               predecessors: Array.isArray(r.predecessors) ? r.predecessors : [],
+               kmi: !!r.is_kmi_scope, why: r.flag_reason || 'none',
+               conf: r.flag_confidence == null ? 0 : Number(r.flag_confidence),
+               match: r.flag_match || '', reviewed: !!r.reviewed };
+    });
+  } catch (e) { _schErr(e, 'Could not load GC lines'); }
+}
+
+// ── Entry ───────────────────────────────────────────────────────────────
+async function renderGcTab() {
+  var p = _schCurrentProject();
+  if (!p || !supabaseClient) { _schRender(); return; }
+  if (String(_gcLoadedFor) !== String(p.id)) await gcLoad(false);
+  _schRender();
+}
+function gcGo(s) { _gcScreen = s; _schRender(); }
+function gcSetFilter(f) { _gcFilter = f; _schRender(); }
+
+function _gcHtml() {
+  if (_gcBusy) {
+    return '<div class="card"><div style="padding:34px;text-align:center;color:#888;font-size:13px">' +
+      _gcEsc(_gcBusy) + '</div></div>';
+  }
+  if (_gcScreen === 'review')   return _gcReviewHtml();
+  if (_gcScreen === 'variance') return _gcVarianceHtml();
+  return _gcRevisionsHtml();
+}
+
+// ── Revisions list ──────────────────────────────────────────────────────
+function _gcRevisionsHtml() {
+  var ed = _schCanEdit();
+  var rows = _gcRevs.length ? _gcRevs.map(function(r, i){
+    var meth = r.extraction_method || '\u2014';
+    var col = (meth === 'text') ? '#3B6D11' : (meth === 'raster' ? '#9A7A2E' : '#666');
+    return '<tr><td><strong>' + _gcEsc(r.rev || r.name || 'Import') + '</strong>' +
+      (i === 0 ? ' <span class="tbdg">Current</span>' : '') + '</td>' +
+      '<td style="color:#666;font-size:12px">' + _gcEsc(r.source_filename || '\u2014') +
+        ' <span style="font-size:11px;color:#aaa">' + (r.page_count || '?') + 'p</span></td>' +
+      '<td>' + _schFmt(r.data_date) + '</td>' +
+      '<td>' + (r.imported_at ? _schFmt(r.imported_at.slice(0, 10)) : '\u2014') + '</td>' +
+      '<td style="font-size:12px;color:' + col + '">' + _gcEsc(meth) + '</td>' +
+      '<td style="text-align:right">' + (r.line_count || 0) + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + (r.kmi_line_count || 0) + '</td>' +
+      '<td style="text-align:right"><button class="btn btn-sm" onclick="gcOpenRev(\'' + r.id + '\')">Open</button></td></tr>';
+  }).join('')
+  : '<tr><td colspan="8" style="text-align:center;padding:26px;color:#aaa;font-size:12px">' +
+    'No GC schedule imported yet.</td></tr>';
+
+  var head = '<div class="sch-bar">' +
+    '<span class="src-chip imported">\u25cf GC schedule of record</span>' +
+    '<div style="flex:1"></div>' +
+    (_gcRevs.length ? '<button class="btn btn-sm" onclick="gcGo(\'variance\')">Variance vs my schedule</button>' : '') +
+    (ed ? '<button class="btn btn-pdf btn-sm" onclick="gcStartImport()">\u21d3 Import GC schedule PDF</button>' : '') +
+    '</div>';
+
+  var diff = (_gcDiff && _gcDiff.length) ? _gcDiffCard() : '';
+
+  return head +
+    '<div class="card" style="padding:0;overflow:hidden"><table><thead><tr>' +
+    '<th>Revision</th><th>File</th><th style="width:110px">Data date</th>' +
+    '<th style="width:110px">Imported</th><th style="width:150px">Method</th>' +
+    '<th style="width:70px;text-align:right">Lines</th><th style="width:70px;text-align:right">KMI</th>' +
+    '<th style="width:80px"></th></tr></thead><tbody>' + rows + '</tbody></table></div>' + diff +
+    '<div style="font-size:12px;color:#888;line-height:1.6">Every revision is kept. The text layer is read first; ' +
+    'only pages without one are rendered as images.</div>';
+}
+async function gcOpenRev(id) {
+  _gcCurRev = _gcRevs.filter(function(r){ return String(r.id) === String(id); })[0] || null;
+  if (_gcCurRev) { await gcLoadLines(_gcCurRev.id); _gcScreen = 'review'; _schRender(); }
+}
+
+// ── Import: pick an attachment ──────────────────────────────────────────
+function gcStartImport() {
+  if (location.protocol === 'file:') {
+    alert('AI extraction requires the app to be served from a web URL.'); return;
+  }
+  if (!db.anthropic_api_key) { alert('No Anthropic API key is configured in kmi_settings.'); return; }
+  if (!window.pdfjsLib) { alert('PDF reader library failed to load. Refresh and try again.'); return; }
+  var p = _schCurrentProject(); if (!p) { alert('No project loaded.'); return; }
+  var atts = (p.attachments || []).filter(function(a){
+    var n = String(a.name || '').toLowerCase(), ct = String(a.contentType || '').toLowerCase();
+    return n.endsWith('.pdf') || ct.indexOf('pdf') !== -1;
+  });
+  if (!atts.length) {
+    alert('No PDF attachments on this project.\n\nUpload the GC schedule on the Project Details tab first.');
+    return;
+  }
+  var html = '<button class="xbtn" onclick="closeModal()">&times;</button>' +
+    '<div class="mt">Import a GC schedule</div>' +
+    '<div class="msb">Pick the GC\u2019s schedule PDF. Every line is extracted, then you decide which are KMI scope.</div>' +
+    '<div class="fgr" style="margin-bottom:14px"><label>Revision label</label>' +
+      '<input id="gc-rev-label" placeholder="e.g. Rev 5"></div>' +
+    '<div class="fgr" style="margin-bottom:16px"><label>Data date (as printed on the schedule)</label>' +
+      '<input type="date" id="gc-rev-date"></div>' +
+    '<div class="stl-div">Attached PDFs</div>' +
+    '<div style="max-height:280px;overflow-y:auto;border:1px solid #eee;border-radius:7px">';
+  atts.forEach(function(a){
+    html += '<div style="padding:10px 14px;border-bottom:1px solid #f3f3f3;display:flex;' +
+      'justify-content:space-between;align-items:center">' +
+      '<div><div style="font-weight:600;font-size:13px">' + _gcEsc(a.name) + '</div>' +
+      '<div style="font-size:11px;color:#888">' + _gcEsc(a.uploadedByName || '') +
+        (a.uploadedAt ? ' \u2014 ' + _gcEsc(a.uploadedAt.slice(0, 10)) : '') + '</div></div>' +
+      '<button class="btn btn-sm btn-p" onclick="gcRunExtract(\'' + _gcEsc(a.id) + '\')">Extract</button></div>';
+  });
+  html += '</div><div class="mf"><button class="btn" onclick="closeModal()">Cancel</button></div>';
+  showModal(html);
+}
+
+// ── Extraction pipeline ─────────────────────────────────────────────────
+function _gcProgress(msg) {
+  _gcBusy = msg;
+  var host = g('nprj-schedule-section');
+  if (host) _schRender();
+}
+async function _gcPageTexts(buffer) {
+  var pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  var pages = [];
+  for (var i = 1; i <= pdf.numPages; i++) {
+    var page = await pdf.getPage(i);
+    var content = await page.getTextContent();
+    var txt = content.items.map(function(it){ return it.str; }).join(' ').replace(/\s+/g, ' ').trim();
+    pages.push({ n: i, text: txt, hasText: txt.length >= GC_MIN_PAGE_CHARS });
+  }
+  return { pdf: pdf, pages: pages };
+}
+async function _gcRasterPage(pdf, n) {
+  var page = await pdf.getPage(n);
+  var vp = page.getViewport({ scale: 1.6 });
+  var canvas = document.createElement('canvas');
+  canvas.width = vp.width; canvas.height = vp.height;
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+function _gcSchemaPrompt(ctx) {
+  return 'You are reading a construction project schedule exported to PDF (Primavera P6, ' +
+    'MS Project or similar). Extract EVERY activity row you can see \u2014 all trades, not just masonry.\n\n' +
+    'For each activity return: activity_id (the schedule\u2019s own ID if shown, else null), ' +
+    'wbs_path (the WBS or grouping heading the row sits under, as "Parent > Child"), ' +
+    'name (activity description as written), start and finish as ISO yyyy-mm-dd, ' +
+    'raw_start and raw_finish (the date EXACTLY as printed, before any conversion), ' +
+    'duration (integer days if shown else null), percent_complete (0-100 if shown else null), ' +
+    'predecessors (array of activity ids if shown else []).\n\n' +
+    'CRITICAL DATE RULE: if a date cannot be converted to a real calendar date with certainty ' +
+    '(for example "TBD", a blank, or an ambiguous fragment), set start or finish to null and still ' +
+    'put the printed text in raw_start / raw_finish. Do NOT guess a date. A null is expected and useful.\n' +
+    'Note that P6 prints an "A" suffix for actual dates (e.g. "08/31/2026 A") \u2014 that IS a valid ' +
+    'date, convert it and keep the suffix in the raw field.\n\n' +
+    'Also classify whether each activity is likely the scope of a MASONRY subcontractor ' +
+    '(CMU, block, brick veneer, stone, shaft walls, masonry cleaning/sealing, lintels, ' +
+    'reinforced masonry). Return is_masonry (true/false) and confidence (0.00-1.00), plus a ' +
+    'short reason. Be honest about ambiguity: air barriers, thru-wall flashing, caulking, ' +
+    'scaffolding and dampproofing are SOMETIMES the mason and sometimes another trade \u2014 ' +
+    'give those a middling confidence rather than committing.\n\n' +
+    ctx +
+    'Return STRICT JSON only. No markdown, no code fences, no commentary. Schema:\n' +
+    '{"activities":[{"activity_id":<string|null>,"wbs_path":<string|null>,"name":<string>,' +
+    '"start":<string|null>,"finish":<string|null>,"raw_start":<string|null>,"raw_finish":<string|null>,' +
+    '"duration":<number|null>,"percent_complete":<number|null>,"predecessors":[<string>],' +
+    '"is_masonry":<boolean>,"confidence":<number>,"reason":<string>}]}';
+}
+function _gcContext() {
+  // Feed the project's own production estimate lines to the model (decision 5).
+  var p = _schCurrentProject();
+  var lines = (p && p.prodEstimate && Array.isArray(p.prodEstimate.lines)) ? p.prodEstimate.lines : [];
+  var descs = lines.map(function(l){ return l.description || l.name || ''; })
+                   .filter(Boolean).slice(0, 40);
+  var ctx = '';
+  if (descs.length) {
+    ctx += 'For reference, KMI\u2019s own production estimate on THIS project contains these ' +
+      'scope lines. An activity matching one of these is very likely KMI scope:\n' +
+      descs.map(function(d){ return '  - ' + d; }).join('\n') + '\n\n';
+  }
+  // A sample of settled history, so the model matches past judgement (decision 5-C).
+  var yes = _gcHints.filter(function(h){ return h.suggest_kmi; }).slice(0, 25);
+  var no  = _gcHints.filter(function(h){ return !h.suggest_kmi; }).slice(0, 25);
+  if (yes.length || no.length) {
+    ctx += 'On previous jobs KMI has consistently CONFIRMED these activity names as their scope:\n' +
+      (yes.length ? yes.map(function(h){ return '  - ' + h.name_sample; }).join('\n') : '  (none yet)') +
+      '\nand consistently REJECTED these as another trade\u2019s:\n' +
+      (no.length ? no.map(function(h){ return '  - ' + h.name_sample; }).join('\n') : '  (none yet)') + '\n\n';
+  }
+  return ctx;
+}
+async function _gcCallAI(contentBlocks) {
+  var resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': db.anthropic_api_key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 8000,
+      messages: [{ role: 'user', content: contentBlocks }]
+    })
+  });
+  if (!resp.ok) {
+    var t = await resp.text();
+    throw new Error('Anthropic API ' + resp.status + ': ' + t.substring(0, 300));
+  }
+  var data = await resp.json();
+  var reply = '';
+  (data.content || []).forEach(function(b){ if (b.type === 'text') reply += b.text; });
+  reply = reply.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+  var parsed;
+  try { parsed = JSON.parse(reply); }
+  catch (e) { throw new Error('Model did not return valid JSON: ' + reply.substring(0, 240)); }
+  return (parsed && Array.isArray(parsed.activities)) ? parsed.activities : [];
+}
+
+async function gcRunExtract(attId) {
+  var p = _schCurrentProject(); if (!p) return;
+  var label = (g('gc-rev-label') && g('gc-rev-label').value.trim()) || 'Import';
+  var dataDate = (g('gc-rev-date') && g('gc-rev-date').value) || null;
+  var att = (p.attachments || []).filter(function(a){ return String(a.id) === String(attId); })[0];
+  if (!att) { alert('Attachment not found.'); return; }
+  closeModal();
+
+  try {
+    _gcProgress('Downloading ' + att.name + '\u2026');
+    var signed = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).createSignedUrl(att.path, 300);
+    if (signed.error) throw new Error('Storage error: ' + signed.error.message);
+    var dl = await fetch(signed.data.signedUrl);
+    if (!dl.ok) throw new Error('Download failed: HTTP ' + dl.status);
+    var buffer = await dl.arrayBuffer();
+
+    _gcProgress('Reading the PDF text layer\u2026');
+    var res = await _gcPageTexts(buffer);
+    var pages = res.pages;
+    var withText = pages.filter(function(x){ return x.hasText; });
+    var noText   = pages.filter(function(x){ return !x.hasText; });
+    var method = withText.length === pages.length ? 'text'
+               : (withText.length === 0 ? 'raster' : 'mixed');
+
+    var ctx = _gcContext();
+    var acts = [];
+
+    // Text-layer pages, batched to stay under the input budget.
+    if (withText.length) {
+      var batches = [], cur = [], curLen = 0;
+      withText.forEach(function(pg){
+        var block = '\n--- PAGE ' + pg.n + ' ---\n' + pg.text;
+        if (curLen + block.length > GC_MAX_CHARS_PER_CALL && cur.length) { batches.push(cur); cur = []; curLen = 0; }
+        cur.push(block); curLen += block.length;
+      });
+      if (cur.length) batches.push(cur);
+      for (var b = 0; b < batches.length; b++) {
+        _gcProgress('Extracting activities \u2014 batch ' + (b + 1) + ' of ' + batches.length + '\u2026');
+        var got = await _gcCallAI([{ type: 'text',
+          text: _gcSchemaPrompt(ctx) + '\n\nSCHEDULE TEXT:\n' + batches[b].join('\n') }]);
+        acts = acts.concat(got);
+      }
+    }
+    // Image-only pages fall back to vision, capped.
+    if (noText.length) {
+      var take = noText.slice(0, GC_MAX_RASTER_PAGES);
+      if (noText.length > GC_MAX_RASTER_PAGES) {
+        showToast(noText.length + ' pages had no text layer; reading the first ' +
+          GC_MAX_RASTER_PAGES + '.', 'info');
+      }
+      for (var k = 0; k < take.length; k++) {
+        _gcProgress('Reading page ' + take[k].n + ' as an image (' + (k + 1) + ' of ' + take.length + ')\u2026');
+        var b64 = await _gcRasterPage(res.pdf, take[k].n);
+        var got2 = await _gcCallAI([
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } },
+          { type: 'text', text: _gcSchemaPrompt(ctx) }
+        ]);
+        acts = acts.concat(got2);
+      }
+    }
+    if (!acts.length) throw new Error('No activities were extracted from this PDF.');
+
+    _gcProgress('Matching against previous imports\u2026');
+    var rows = _gcBuildRows(acts, p);
+
+    _gcProgress('Saving ' + rows.length + ' lines\u2026');
+    await _gcSaveImport(rows, { label: label, dataDate: dataDate, file: att.name,
+      pages: pages.length, method: method, projectId: String(p.id) });
+
+    _gcBusy = false;
+    _gcScreen = 'review';
+    showToast('Extracted ' + rows.length + ' lines from ' + att.name + '.', 'success');
+    _schRender();
+  } catch (e) {
+    _gcBusy = false;
+    _schErr(e, 'Import failed');
+    _schRender();
+  }
+}
+
+// Apply the learning corpus BEFORE trusting the model (decision 5-C).
+// A decisive hint overrides the model outright — that is the whole point of
+// keeping the corpus: settled questions stop being re-litigated.
+function _gcBuildRows(acts, p) {
+  var hintMap = {};
+  _gcHints.forEach(function(h){ hintMap[h.name_norm] = h; });
+  var prodLines = (p.prodEstimate && Array.isArray(p.prodEstimate.lines)) ? p.prodEstimate.lines : [];
+  var prodMap = {};
+  prodLines.forEach(function(l){
+    var d = l.description || l.name || '';
+    if (d) prodMap[_gcNorm(d)] = d;
+  });
+
+  return acts.map(function(a, i){
+    var name = String(a.name || '').trim();
+    var norm = _gcNorm(name);
+    var hint = hintMap[norm];
+    var prod = prodMap[norm];
+    var kmi, why, conf, match = '';
+
+    if (hint) {                       // settled history wins
+      kmi = !!hint.suggest_kmi; why = 'prior';
+      conf = Number(hint.agreement) || 1;
+      match = hint.confirm_count + ' confirmed / ' + hint.reject_count + ' rejected';
+    } else if (prod) {                // matches this project's own estimate
+      kmi = true; why = 'prod'; conf = 0.95; match = prod;
+    } else {
+      conf = Math.max(0, Math.min(1, Number(a.confidence) || 0));
+      kmi = !!a.is_masonry && conf >= 0.8;
+      why = (conf >= 0.4 && conf < 0.8) ? 'low' : (conf >= 0.05 ? 'ai' : 'none');
+      match = String(a.reason || '');
+    }
+    return {
+      id: _schNewId('gct'), projectId: String(p.id),
+      activityId: String(a.activity_id || ''), wbs: String(a.wbs_path || '(ungrouped)'),
+      name: name, seq: (i + 1) * 10, page: null,
+      s: _gcISO(a.start) ? a.start : '', f: _gcISO(a.finish) ? a.finish : '',
+      rawS: String(a.raw_start == null ? '' : a.raw_start),
+      rawF: String(a.raw_finish == null ? '' : a.raw_finish),
+      dur: (a.duration == null ? '' : Number(a.duration)),
+      pct: (a.percent_complete == null ? 0 : Number(a.percent_complete)),
+      predecessors: Array.isArray(a.predecessors) ? a.predecessors : [],
+      kmi: kmi, why: why, conf: conf, match: match, reviewed: false
+    };
+  });
+}
+function _gcToSB(l, schedId) {
+  return {
+    id: l.id, schedule_id: schedId, project_id: l.projectId,
+    activity_id: l.activityId || null, wbs_path: l.wbs || null, name: l.name,
+    seq: l.seq, page_no: l.page,
+    start_date: _gcISO(l.s) ? l.s : null,      // NULL = did not parse (decision 7)
+    finish_date: _gcISO(l.f) ? l.f : null,
+    raw_start: l.rawS || null, raw_finish: l.rawF || null,
+    duration_days: (l.dur === '' || l.dur == null) ? null : Number(l.dur),
+    percent_complete: l.pct == null ? null : Number(l.pct),
+    predecessors: l.predecessors || [],
+    is_kmi_scope: !!l.kmi, flag_reason: l.why, flag_confidence: l.conf,
+    flag_match: l.match || null, reviewed: !!l.reviewed,
+    updated_at: new Date().toISOString()
+  };
+}
+async function _gcSaveImport(rows, meta) {
+  var me = (typeof _currentUser !== 'undefined' && _currentUser)
+    ? (_currentUser.email || String(_currentUser.id)) : null;
+  var schedId = _schNewId('gcsch');
+  var hdr = {
+    id: schedId, project_id: meta.projectId, name: 'GC Schedule ' + meta.label,
+    source: 'imported', rev: meta.label, data_date: meta.dataDate, is_active: true,
+    source_filename: meta.file, page_count: meta.pages, extraction_method: meta.method,
+    line_count: rows.length, kmi_line_count: rows.filter(function(r){ return r.kmi; }).length,
+    imported_at: new Date().toISOString(),
+    created_by_user_id: me, updated_at: new Date().toISOString(), updated_by_user_id: me
+  };
+  var h = await supabaseClient.from('kmi_schedules').upsert(hdr);
+  if (h.error) throw h.error;
+  var sb = rows.map(function(r){ return _gcToSB(r, schedId); });
+  for (var i = 0; i < sb.length; i += 100) {
+    var r2 = await supabaseClient.from('kmi_gc_tasks').upsert(sb.slice(i, i + 100));
+    if (r2.error) throw r2.error;
+  }
+  _gcRevs.unshift(hdr);
+  _gcCurRev = hdr;
+  _gcLines = rows.map(function(r){ r.scheduleId = schedId; return r; });
+}
+
+// ── Review screen ───────────────────────────────────────────────────────
+function _gcCounts() {
+  var c = { all: _gcLines.length, kmi: 0, review: 0, bad: 0 };
+  _gcLines.forEach(function(l){
+    if (l.kmi) c.kmi++;
+    var bad = !_gcISO(l.s) || !_gcISO(l.f);
+    if (bad) c.bad++;
+    else if (l.why === 'low') c.review++;
+  });
+  return c;
+}
+function _gcVisible() {
+  return _gcLines.filter(function(l){
+    var bad = !_gcISO(l.s) || !_gcISO(l.f);
+    if (_gcFilter === 'kmi')    return l.kmi;
+    if (_gcFilter === 'review') return !bad && l.why === 'low';
+    if (_gcFilter === 'bad')    return bad;
+    return true;
+  });
+}
+function _gcFchip(k, lbl, n, warn) {
+  return '<button class="gc-fchip' + (_gcFilter === k ? ' on' : '') + (warn ? ' warn' : '') +
+    '" onclick="gcSetFilter(\'' + k + '\')">' + lbl + '<span class="c">' + n + '</span></button>';
+}
+function _gcWhy(l) {
+  if (l.why === 'prior') return '<span class="gc-why prior" title="Settled on previous imports">\u21ba Prior \u00b7 ' +
+    _gcEsc(l.match) + '</span>';
+  if (l.why === 'prod')  return '<span class="gc-why prod" title="Matches this project\u2019s production estimate">' +
+    '\u25c8 Estimate: ' + _gcEsc(l.match) + '</span>';
+  if (l.why === 'low')   return '<span class="gc-why low">? Unsure \u2014 ' + _gcEsc(l.match) + '</span>';
+  if (l.why === 'ai')    return '<span class="gc-why ai">AI ' + l.conf.toFixed(2) +
+    (l.match ? ' \u2014 ' + _gcEsc(l.match) : '') + '</span>';
+  return '<span class="gc-why none">\u2014</span>';
+}
+function _gcConf(v) {
+  var col = v >= 0.8 ? '#639922' : (v >= 0.5 ? 'var(--ac)' : '#C97A7A');
+  return '<span class="gc-conf"><i style="width:' + Math.round(v * 100) + '%;background:' + col + '"></i></span>';
+}
+function _gcReviewHtml() {
+  if (!_gcCurRev) return _gcRevisionsHtml();
+  var c = _gcCounts(), ed = _schCanEdit();
+  var prior = _gcLines.filter(function(l){ return l.why === 'prior'; }).length;
+
+  var mets = '<div class="mets" style="grid-template-columns:repeat(4,1fr)">' +
+    _schMc('Lines extracted', c.all, (_gcCurRev.page_count || '?') + ' pages \u00b7 ' +
+      (_gcCurRev.extraction_method || '\u2014')) +
+    _schMc('Assigned to KMI', c.kmi, 'toggle any row to change', 'gn') +
+    _schMc('Needs review', c.review, 'model was unsure', c.review ? 'am' : '') +
+    _schMc('Date problems', c.bad, c.bad ? 'fix before importing' : 'all dates parsed', c.bad ? 'rd' : 'gn') +
+    '</div>';
+
+  var learn = prior ? '<div class="gc-learn"><strong>' + prior + ' lines were pre-assigned from previous imports.</strong> ' +
+    'Activity names already settled on earlier jobs are applied without asking the model. Whatever you confirm ' +
+    'below is remembered for next time \u2014 including the ones you switch <em>off</em>.</div>' : '';
+
+  var bar = '<div class="sch-bar">' +
+    '<span class="src-chip imported">\u25cf ' + _gcEsc(_gcCurRev.rev || 'Import') +
+      (_gcCurRev.data_date ? ' \u00b7 data date ' + _schFmt(_gcCurRev.data_date) : '') + '</span>' +
+    '<span style="font-size:11px;color:#aaa">' + _gcEsc(_gcCurRev.source_filename || '') + '</span>' +
+    '<div style="flex:1"></div>' +
+    '<div class="gc-filters">' + _gcFchip('all', 'All', c.all) + _gcFchip('kmi', 'KMI scope', c.kmi) +
+      _gcFchip('review', 'Needs review', c.review) + _gcFchip('bad', 'Date problems', c.bad, true) +
+    '</div></div>';
+
+  var bulk = '<div class="sch-bar" style="margin-bottom:10px">' +
+    '<span style="font-size:11px;color:#aaa">Showing ' + _gcVisible().length + ' of ' + c.all + '</span>' +
+    '<div style="flex:1"></div>' +
+    '<button class="btn btn-sm" onclick="gcGo(\'revisions\')">\u2190 Revisions</button>' +
+    (ed ? '<button class="btn btn-sm" onclick="gcBulk(true)">Assign all shown</button>' +
+          '<button class="btn btn-sm" onclick="gcBulk(false)">Clear all shown</button>' : '') +
+    '</div>';
+
+  return mets + learn + bar + bulk +
+    '<div class="card" style="padding:0;overflow:hidden">' + _gcLineTable(ed) + _gcFoot(c, ed) + '</div>';
+}
+function _gcLineTable(ed) {
+  var rows = '', cur = null;
+  _gcVisible().forEach(function(l){
+    if (l.wbs !== cur) {
+      cur = l.wbs;
+      rows += '<tr class="gc-wbs"><td colspan="8">' + _gcEsc(cur) + '</td></tr>';
+    }
+    var badS = !_gcISO(l.s), badF = !_gcISO(l.f);
+    rows += '<tr class="gc-line' + (l.kmi ? ' kmi' : '') + '">' +
+      '<td style="width:48px"><label class="gc-sw"><input type="checkbox" ' + (l.kmi ? 'checked' : '') +
+        (ed ? ' onchange="gcFlip(\'' + l.id + '\',this.checked)"' : ' disabled') +
+        '><span class="sl"></span></label></td>' +
+      '<td style="width:74px;color:#888;font-family:ui-monospace,Menlo,monospace;font-size:11px">' +
+        _gcEsc(l.activityId) + '</td>' +
+      '<td>' + (ed ? '<input class="sch-cell" value="' + _gcEsc(l.name) +
+        '" onchange="gcSetName(\'' + l.id + '\',this.value)">' : _gcEsc(l.name)) + '</td>' +
+      '<td style="width:126px"><input class="sch-cell dt' + (badS ? ' gc-bad' : '') + '" value="' +
+        _gcEsc(badS ? (l.rawS || '') : l.s) + '"' + (ed ? ' onchange="gcSetDate(\'' + l.id + '\',\'s\',this.value)"' : ' readonly') +
+        ' title="' + (badS ? 'Printed as \u201c' + _gcEsc(l.rawS) + '\u201d \u2014 could not read as a date' : '') + '"></td>' +
+      '<td style="width:126px"><input class="sch-cell dt' + (badF ? ' gc-bad' : '') + '" value="' +
+        _gcEsc(badF ? (l.rawF || '') : l.f) + '"' + (ed ? ' onchange="gcSetDate(\'' + l.id + '\',\'f\',this.value)"' : ' readonly') + '></td>' +
+      '<td style="width:50px;text-align:right;color:#888">' + (l.dur === '' ? '\u2014' : l.dur) + '</td>' +
+      '<td style="width:250px">' + _gcWhy(l) + '</td>' +
+      '<td style="width:56px;text-align:right">' + _gcConf(l.conf) + '</td></tr>';
+  });
+  if (!rows) rows = '<tr><td colspan="8" style="text-align:center;padding:26px;color:#aaa;font-size:12px">' +
+    'Nothing matches this filter.</td></tr>';
+  return '<table class="gc-tbl"><thead><tr><th style="width:48px">KMI</th><th>Act ID</th>' +
+    '<th>Activity name</th><th>GC start</th><th>GC finish</th><th style="text-align:right">Dur</th>' +
+    '<th>Why flagged</th><th style="text-align:right">Conf</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+function _gcFoot(c, ed) {
+  var blocked = _gcLines.some(function(l){ return l.kmi && (!_gcISO(l.s) || !_gcISO(l.f)); });
+  return '<div class="gc-foot">' +
+    '<div><strong style="font-size:15px">' + c.kmi + '</strong> <span style="font-size:13px;color:#666">of ' +
+      c.all + ' lines assigned to KMI</span>' +
+      (blocked ? '<div style="font-size:11.5px;color:#A32D2D;margin-top:3px">\u26a0 Fix the date problems on ' +
+        'assigned lines first.</div>'
+      : '<div style="font-size:11px;color:#aaa;margin-top:3px">Creates tasks linked back to this revision.</div>') +
+    '</div><div style="flex:1"></div>' +
+    (ed ? '<button class="btn btn-p" ' + (blocked ? 'disabled style="opacity:.45;cursor:default"'
+      : 'onclick="gcDoImport()"') + '>Import ' + c.kmi + ' lines to schedule</button>' : '') +
+    '</div>';
+}
+function _gcFind(id) {
+  for (var i = 0; i < _gcLines.length; i++) if (String(_gcLines[i].id) === String(id)) return _gcLines[i];
+  return null;
+}
+async function gcFlip(id, v) {
+  var l = _gcFind(id); if (!l) return;
+  l.kmi = v; l.reviewed = true; _schRender();
+  await _gcPush([l]);
+}
+async function gcSetName(id, v) {
+  var l = _gcFind(id); if (!l) return;
+  l.name = v; await _gcPush([l]);
+}
+async function gcSetDate(id, k, v) {
+  var l = _gcFind(id); if (!l) return;
+  l[k] = _gcISO(v) ? v : '';
+  if (!_gcISO(v)) { l[k === 's' ? 'rawS' : 'rawF'] = v; }
+  _schRender();
+  await _gcPush([l]);
+}
+async function gcBulk(v) {
+  var vis = _gcVisible();
+  vis.forEach(function(l){ l.kmi = v; l.reviewed = true; });
+  _schRender();
+  await _gcPush(vis);
+}
+async function _gcPush(list) {
+  if (!supabaseClient || !list.length || !_gcCurRev) return;
+  try {
+    var sb = list.map(function(l){ return _gcToSB(l, _gcCurRev.id); });
+    for (var i = 0; i < sb.length; i += 100) {
+      var r = await supabaseClient.from('kmi_gc_tasks').upsert(sb.slice(i, i + 100));
+      if (r.error) throw r.error;
+    }
+  } catch (e) { _schErr(e, 'Could not save review'); }
+}
+
+// ── Import into the native schedule (decision 2-C) ──────────────────────
+async function gcDoImport() {
+  if (!_schCanEdit()) return;
+  var picked = _gcLines.filter(function(l){ return l.kmi; });
+  if (!picked.length) { showToast('No lines assigned to KMI.', 'error'); return; }
+  var hdr = await _schEnsureHeader(); if (!hdr) return;
+  var p = _schCurrentProject();
+
+  // Already linked from an earlier revision? Those become a diff, not copies.
+  var linked = {};
+  _schTasks.forEach(function(t){ if (t.gcTaskId) linked[t.gcTaskId] = t; });
+  var byActivity = {};
+  _schTasks.forEach(function(t){ if (t.gcActivityId) byActivity[t.gcActivityId] = t; });
+
+  var fresh = [], diffs = [];
+  picked.forEach(function(l){
+    var existing = byActivity[l.activityId];
+    if (existing) diffs.push({ task: existing, line: l });
+    else fresh.push(l);
+  });
+
+  if (!fresh.length && diffs.length) {
+    _gcDiff = diffs.map(function(d){
+      return { taskId: d.task.id, gcId: d.line.id, name: d.line.name,
+               oldS: d.task.gcStart || '', oldF: d.task.gcFinish || '',
+               newS: d.line.s, newF: d.line.f,
+               mineS: d.task.start, mineF: _schTaskFinish(d.task), act: null };
+    });
+    _gcScreen = 'revisions'; _schRender();
+    showToast('All ' + diffs.length + ' lines were already linked \u2014 review the changes below.', 'info');
+    return;
+  }
+
+  _schSnapshot();
+  // Group by the GC's WBS so imported work lands as phases, not a flat list.
+  var wbsGroups = {};
+  fresh.forEach(function(l){ (wbsGroups[l.wbs] = wbsGroups[l.wbs] || []).push(l); });
+
+  var created = [];
+  Object.keys(wbsGroups).forEach(function(w){
+    var phase = { id: _schNewId('st'), scheduleId: hdr.id, projectId: String(p.id), parentId: null,
+                  seq: _schNextSeq(), name: w, start: null, dur: 1, finish: null, pct: 0, md: 0,
+                  prodLineId: null, ex: {}, predecessors: [], isKmiScope: true, notes: '' };
+    _schTasks.push(phase); created.push(phase);
+    wbsGroups[w].forEach(function(l, ix){
+      var t = { id: _schNewId('st'), scheduleId: hdr.id, projectId: String(p.id), parentId: phase.id,
+                seq: (ix + 1) * 10, name: l.name,
+                start: _gcISO(l.s) ? schNextWorkDay(l.s, null) : null,
+                dur: 1, finish: null, pct: Number(l.pct) || 0, md: 0,
+                prodLineId: null, ex: {}, predecessors: [], isKmiScope: true, notes: '',
+                gcTaskId: l.id, gcActivityId: l.activityId,
+                gcStart: l.s, gcFinish: l.f, gcLastSeenRev: _gcCurRev.id };
+      // Duration recomputes against OUR calendar, not the GC's.
+      t.dur = (_gcISO(l.s) && _gcISO(l.f)) ? Math.max(1, schWorkDaysBetween(t.start, l.f, t)) : 1;
+      t.finish = _schTaskFinish(t);
+      _schTasks.push(t); created.push(t);
+    });
+  });
+
+  await schPushTasks(created);
+  await _gcWriteHints();
+  showToast('Imported ' + fresh.length + ' lines into the schedule.', 'success');
+  _schSubTab = 'schedule'; _schRender();
+}
+
+// Write the corpus (decision 5-C). Rejections count as much as confirmations.
+// NOTE: read-modify-write, so two people importing the same activity name at
+// the same moment can lose one increment. Acceptable for a hint corpus — it
+// self-corrects on the next import — but it is why counts are advisory, not
+// authoritative.
+async function _gcWriteHints() {
+  if (!supabaseClient || !_gcLines.length) return;
+  try {
+    var reviewed = _gcLines.filter(function(l){ return l.name && (l.reviewed || l.kmi); });
+    if (!reviewed.length) return;
+    var norms = {};
+    reviewed.forEach(function(l){ norms[_gcNorm(l.name)] = l; });
+    var keys = Object.keys(norms).filter(Boolean);
+
+    var existing = {};
+    for (var i = 0; i < keys.length; i += 200) {
+      var r = await supabaseClient.from('kmi_schedule_import_hints')
+        .select('id,name_norm,confirm_count,reject_count').in('name_norm', keys.slice(i, i + 200));
+      if (r.error) throw r.error;
+      (r.data || []).forEach(function(h){ existing[h.name_norm] = h; });
+    }
+    var p = _schCurrentProject();
+    var rows = keys.map(function(k){
+      var l = norms[k], prev = existing[k];
+      return {
+        id: prev ? prev.id : _schNewId('hint'),
+        name_sample: l.name,
+        confirm_count: (prev ? prev.confirm_count : 0) + (l.kmi ? 1 : 0),
+        reject_count:  (prev ? prev.reject_count  : 0) + (l.kmi ? 0 : 1),
+        last_project_id: String(p.id), last_verdict: !!l.kmi,
+        last_seen_at: new Date().toISOString()
+      };
+    });
+    for (var j = 0; j < rows.length; j += 100) {
+      var r2 = await supabaseClient.from('kmi_schedule_import_hints').upsert(rows.slice(j, j + 100));
+      if (r2.error) throw r2.error;
+    }
+  } catch (e) { _schErr(e, 'Could not update import hints'); }
+}
+
+// ── Revision diff ───────────────────────────────────────────────────────
+function _gcDayDiff(a, b) {
+  if (!_gcISO(a) || !_gcISO(b)) return null;
+  return Math.round((_schD(b) - _schD(a)) / 86400000);
+}
+function _gcDiffCard() {
+  var rows = _gcDiff.map(function(d, i){
+    var dl = _gcDayDiff(d.oldS, d.newS);
+    var cls = (dl === null) ? 'same' : (dl > 0 ? 'late' : (dl < 0 ? 'early' : 'same'));
+    var txt = (dl === null) ? '\u2014' : (dl > 0 ? '+' + dl + 'd later' : (dl < 0 ? dl + 'd earlier' : 'no change'));
+    return '<tr><td>' + _gcEsc(d.name) + '</td>' +
+      '<td style="color:#888">' + _schFmt(d.oldS) + ' \u2192 ' + _schFmt(d.oldF) + '</td>' +
+      '<td><strong>' + _schFmt(d.newS) + ' \u2192 ' + _schFmt(d.newF) + '</strong></td>' +
+      '<td><span class="gc-delta ' + cls + '">' + txt + '</span></td>' +
+      '<td style="color:#666">' + _schFmt(d.mineS) + ' \u2192 ' + _schFmt(d.mineF) + '</td>' +
+      '<td style="text-align:right">' + (d.act
+        ? '<span class="gc-why ' + (d.act === 'accepted' ? 'prior' : 'ai') + '">\u2713 ' +
+          (d.act === 'accepted' ? 'Accepted' : 'Kept mine') + '</span>'
+        : (dl === 0 ? '<span style="font-size:11px;color:#aaa">\u2014</span>'
+          : '<button class="btn btn-sm" onclick="gcAct(' + i + ',\'accepted\')">Accept</button> ' +
+            '<button class="btn btn-sm" onclick="gcAct(' + i + ',\'kept\')">Keep mine</button>')) +
+      '</td></tr>';
+  }).join('');
+  return '<div class="card"><div class="ch"><div class="ct">What moved on your scope</div>' +
+    '<span class="tbdg">' + _gcDiff.length + ' linked tasks</span></div>' +
+    '<table><thead><tr><th>Task</th><th style="width:180px">Previous</th><th style="width:180px">This revision</th>' +
+    '<th style="width:105px">Move</th><th style="width:180px">Your schedule</th>' +
+    '<th style="width:190px;text-align:right">Action</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.6">Accepting moves your task to the ' +
+    'GC\u2019s new dates. Keeping yours records the gap, which is what shows in the variance view.</div></div>';
+}
+async function gcAct(i, action) {
+  var d = _gcDiff[i]; if (!d) return;
+  var t = _schFindT(d.taskId); if (!t) return;
+  _schSnapshot();
+  t.gcTaskId = d.gcId; t.gcStart = d.newS; t.gcFinish = d.newF;
+  t.gcLastSeenRev = _gcCurRev ? _gcCurRev.id : null;
+  t.gcLastAction = action; t.gcLastActionAt = new Date().toISOString();
+  if (action === 'accepted' && _gcISO(d.newS)) {
+    t.start = schNextWorkDay(d.newS, t);
+    if (_gcISO(d.newF)) t.dur = Math.max(1, schWorkDaysBetween(t.start, d.newF, t));
+    t.finish = _schTaskFinish(t);
+    d.mineS = t.start; d.mineF = t.finish;
+  }
+  d.act = action;
+  _schRender();
+  await schPushTasks([t]);
+}
+
+// ── Variance ────────────────────────────────────────────────────────────
+function _gcVarianceHtml() {
+  var linked = _schTasks.filter(function(t){ return t.parentId && t.gcStart; });
+  var rows = linked.map(function(t){
+    var dl = _gcDayDiff(t.gcStart, t.start);
+    var cls = (dl === null) ? 'same' : (dl > 0 ? 'late' : (dl < 0 ? 'early' : 'same'));
+    var txt = (dl === null) ? '\u2014'
+      : (dl === 0 ? 'on GC dates' : (dl > 0 ? '+' + dl + 'd behind GC' : Math.abs(dl) + 'd ahead of GC'));
+    return '<tr><td>' + _gcEsc(t.name) + (t.gcActivityId
+        ? '<div style="font-size:11px;color:#aaa">' + _gcEsc(t.gcActivityId) + '</div>' : '') + '</td>' +
+      '<td>' + _schFmt(t.gcStart) + '</td><td>' + _schFmt(t.start) + '</td>' +
+      '<td><span class="gc-delta ' + cls + '">' + txt + '</span></td>' +
+      '<td style="font-size:11px;color:#aaa">' + (t.gcLastAction || '\u2014') + '</td></tr>';
+  }).join('');
+  return '<div class="sch-bar"><button class="btn btn-sm" onclick="gcGo(\'revisions\')">\u2190 Revisions</button></div>' +
+    '<div class="card"><div class="ch"><div class="ct">Your schedule vs the GC</div></div>' +
+    '<table><thead><tr><th>Task</th><th style="width:120px">GC start</th><th style="width:120px">Your start</th>' +
+    '<th style="width:180px">Variance</th><th style="width:110px">Last action</th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="5" style="text-align:center;padding:24px;color:#aaa;font-size:12px">' +
+      'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
+}
+
+var KMI_BUILD = '2026-08-10-sched2';
 
 var _kmiSessionId = (function(){
   try {
