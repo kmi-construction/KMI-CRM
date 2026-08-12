@@ -33468,6 +33468,8 @@ async function deleteProductListItem(kind, id) {
 var PROC_UNLINK_SENTINEL = '__procunlinked__';
 var _procDrawerOpen = {};      // itemId -> bool, tracks expanded drawer rows
 var _procVarianceOn = false;   // variance columns toggle
+var _procMergeMode  = false;   // multi-select merge mode toggle
+var _procMergeSel   = {};      // itemId -> checked, for multi-select merge
 // Mobile-only: collapse state for cost-code section bands on the
 // view-only procurement card view (≤768px). Keyed by cost-code string
 // (or '__uncategorized__'). In-memory only — state resets on page
@@ -33671,6 +33673,9 @@ function renderProjectProcurement() {
           (hasFull('edit-procurement') ?
             '<button type="button" class="btn btn-sm proc-desktop-only" onclick="procOpenFromMatListPicker()"' + (matListCount ? '' : ' disabled title="No material list rows on this project yet"') + '>+ From material list</button>' +
             '<button type="button" class="btn btn-sm proc-desktop-only" onclick="procOpenBprFlow()" title="' + (p.bprMaterials && p.bprMaterials.length ? 'Import items from the Bid Price Report' : 'Upload the Bid Price Report PDF to extract material quantities') + '">+ From BPR' + (p.bprMaterials && p.bprMaterials.length ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
+            (items.length >= 2
+              ? '<button type="button" class="btn btn-sm proc-desktop-only' + (_procMergeMode ? ' btn-p' : '') + '" onclick="procToggleMergeMode()" title="Select two or more items with the same unit and merge them into one">' + (_procMergeMode ? 'Done merging' : '⊕ Merge items') + '</button>'
+              : '') +
             '<button type="button" class="btn btn-sm btn-p proc-desktop-only" onclick="procOpenCustomItemModal(null)">+ Custom item</button>'
           : '') +
           '<button type="button" class="btn btn-sm" onclick="procGeneratePdf()" title="Generate a printable PDF of the procurement list">📄 Print PDF</button>' +
@@ -33695,9 +33700,10 @@ function renderProjectProcurement() {
     return;
   }
 
-  var totalCols = _procVarianceOn ? 10 : 7;
+  var totalCols = (_procVarianceOn ? 10 : 7) + (_procMergeMode ? 1 : 0);
   var tableHead =
     '<thead style="background:#fafafa"><tr>' +
+      (_procMergeMode ? '<th style="padding:8px;width:30px"></th>' : '') +
       '<th style="padding:8px;text-align:left">Description</th>' +
       '<th style="padding:8px;text-align:left;width:160px">Vendor</th>' +
       '<th style="padding:8px;text-align:right;width:90px">Qty</th>' +
@@ -33737,6 +33743,27 @@ function renderProjectProcurement() {
     });
   }
 
+  // Merge action bar — only while multi-select merge mode is on. Mirrors
+  // the Production estimate merge bar: shows the checked count, validates a
+  // shared unit, and enables the merge when 2+ compatible items are picked.
+  var mergeBar = '';
+  if (_procMergeMode) {
+    var pickedItems = items.filter(function(it){ return _procMergeSel[String(it.id)]; });
+    var pickedUnits = {}; pickedItems.forEach(function(it){ pickedUnits[(it.unit || '')] = 1; });
+    var unitClash = pickedItems.length >= 2 && Object.keys(pickedUnits).length > 1;
+    var canMerge = pickedItems.length >= 2 && !unitClash;
+    var hint;
+    if (unitClash) hint = 'Selected items span more than one unit — merge one unit at a time';
+    else if (canMerge) hint = pickedItems.length + ' items selected';
+    else hint = 'Check 2 or more items that share the same unit to merge them into one';
+    mergeBar =
+      '<div class="card proc-desktop-only" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#F0F4FB;border:1px solid #cdddf0;margin-bottom:12px">' +
+        '<button type="button" class="btn btn-sm btn-p" onclick="procMergeSelected()"' + (canMerge ? '' : ' disabled') + '>⊕ Merge selected' + (canMerge ? (' (' + pickedItems.length + ')') : '') + '</button>' +
+        '<span style="font-size:12px;color:' + (unitClash ? '#A32D2D' : '#666') + '">' + hint + '</span>' +
+        '<button type="button" class="btn btn-sm" style="margin-left:auto" onclick="procToggleMergeMode()">Done</button>' +
+      '</div>';
+  }
+
   var tableHtml =
     '<div class="card proc-desktop-only" style="padding:0;overflow:hidden">' +
       '<div style="overflow-x:auto">' +
@@ -33764,7 +33791,7 @@ function renderProjectProcurement() {
 
   el.innerHTML = headerHtml +
     '<div class="proc-desktop-only">' + renderBprWorklist(p) + '</div>' +
-    tableHtml + hintHtml + mobileHtml;
+    mergeBar + tableHtml + hintHtml + mobileHtml;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -34224,8 +34251,13 @@ function _procRenderItemRow(item, entries) {
     vendorCell = '<span style="color:#aaa">—</span>';
   }
 
+  var mergeChkCell = _procMergeMode
+    ? '<td style="padding:8px;text-align:center;vertical-align:top"><input type="checkbox" ' + (_procMergeSel[itemId] ? 'checked ' : '') + 'onchange="procMergeToggleSel(\'' + _procEsc(itemId) + '\',this.checked)"></td>'
+    : '';
+
   var html =
     '<tr style="border-top:1px solid #eee;' + rowBg + '">' +
+      mergeChkCell +
       '<td style="padding:8px">' +
         '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">' +
           '<strong>' + _procEsc(item.description || '(no description)') + '</strong>' +
@@ -34266,7 +34298,7 @@ function _procRenderItemRow(item, entries) {
     '</tr>';
 
   if (canExpand && isOpen) {
-    var totalCols = _procVarianceOn ? 10 : 7;
+    var totalCols = (_procVarianceOn ? 10 : 7) + (_procMergeMode ? 1 : 0);
     html += '<tr><td colspan="' + totalCols + '" style="padding:0;background:#FAFAFA">' +
       _procRenderDrawer(item, entries) +
     '</td></tr>';
@@ -34393,6 +34425,7 @@ function _procRenderGhostRow(entry) {
   }
 
   return '<tr style="border-top:1px solid #eee;background:#FFFBF0">' +
+    (_procMergeMode ? '<td style="padding:8px"></td>' : '') +
     '<td style="padding:8px">' +
       '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
         '<em>' + _procEsc(entry.line.description || '(no description)') + '</em>' +
@@ -36425,7 +36458,14 @@ function prodOpenBprPicker(preserveState){
       _prodBprCat[id]  = r.categoryId || '';
     });
   }
+  // Preserve the row-list scroll position across state-preserving re-renders
+  // (checkbox toggle, link/category change, grouping). Without this the modal
+  // HTML is rebuilt and the scrollable list jumps back to the top — cumbersome
+  // when adding and linking rows far down the report.
+  var _bprScrollTop = null;
+  if (preserveState) { var _bprSc = g('prod-bpr-scroll'); if (_bprSc) _bprScrollTop = _bprSc.scrollTop; }
   showModal(_prodBprPickerHtml(p, bpr, imported));
+  if (_bprScrollTop != null) { var _bprSc2 = g('prod-bpr-scroll'); if (_bprSc2) _bprSc2.scrollTop = _bprScrollTop; }
 }
 
 function _prodBprImportCount(p){
@@ -36516,7 +36556,7 @@ function _prodBprPickerHtml(p, bpr, imported){
     html += '</div>';
   }
 
-  html += '<div style="max-height:48vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin-bottom:10px">';
+  html += '<div id="prod-bpr-scroll" style="max-height:48vh;overflow-y:auto;border:1px solid #eee;border-radius:6px;margin-bottom:10px">';
   order.forEach(function(cls){
     var list = groups[cls];
     var firstDesc = (list[0] && list[0].classDescription) || cls;
@@ -37292,19 +37332,13 @@ function procOpenMergeDialog(itemId) {
   );
 }
 
-function procDoMerge(sourceId) {
-  if (!_editProjectId) return;
-  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
-  var sel = g('proc-merge-target');
-  var targetId = sel && sel.value;
-  if (!targetId) { alert('Pick a target.'); return; }
-
-  var items = p.procurementItems || [];
-  var source = items.find(function(x){ return String(x.id) === String(sourceId); });
-  var target = items.find(function(x){ return String(x.id) === String(targetId); });
-  if (!source || !target) { alert('Source or target item missing.'); return; }
-  if (String(source.id) === String(target.id)) { alert('Cannot merge into itself.'); return; }
-
+// Core combine: fold `source` procurement item into `target` in-place on
+// project `p`. Combines BPR assignments (summing shared lines), recomputes
+// the weighted-average unit cost, carries over manualQty / rod length /
+// class, unions planned vendors, and reassigns PO lines from source → target.
+// Does NOT remove the source, save, or re-render — the caller handles those.
+// Shared by the single-item ⊕ merge and the multi-select merge.
+function _procCombineItemInto(p, source, target) {
   // Combine BPR assignments. If the same bprMaterialId already exists on the
   // target, add the qty rather than duplicating the row.
   var existing = {};
@@ -37370,8 +37404,8 @@ function procDoMerge(sourceId) {
   // Reassign PO lines pointing to source → target (preserves linkage)
   (p.poList || []).forEach(function(po){
     (po.lines || []).forEach(function(L){
-      if (L.procurementItemId && String(L.procurementItemId) === String(sourceId)) {
-        L.procurementItemId = String(targetId);
+      if (L.procurementItemId && String(L.procurementItemId) === String(source.id)) {
+        L.procurementItemId = String(target.id);
       }
     });
   });
@@ -37380,6 +37414,22 @@ function procDoMerge(sourceId) {
   // alone — they reference the source item, but since the source is going
   // away, they no longer have meaning. The PO line will be re-evaluated
   // against the target's auto-match index on next render.
+}
+
+function procDoMerge(sourceId) {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var sel = g('proc-merge-target');
+  var targetId = sel && sel.value;
+  if (!targetId) { alert('Pick a target.'); return; }
+
+  var items = p.procurementItems || [];
+  var source = items.find(function(x){ return String(x.id) === String(sourceId); });
+  var target = items.find(function(x){ return String(x.id) === String(targetId); });
+  if (!source || !target) { alert('Source or target item missing.'); return; }
+  if (String(source.id) === String(target.id)) { alert('Cannot merge into itself.'); return; }
+
+  _procCombineItemInto(p, source, target);
 
   // Remove source item
   p.procurementItems = items.filter(function(x){ return String(x.id) !== String(sourceId); });
@@ -37389,6 +37439,96 @@ function procDoMerge(sourceId) {
   renderProjectProcurement();
   if (typeof showToast === 'function') {
     showToast('Merged into "' + (target.description || '(unnamed)') + '".', 'success');
+  }
+}
+
+// ── Multi-select merge (Production-style: check rows, merge into one) ──
+function procToggleMergeMode() {
+  if (!requireFull('edit-procurement','edit procurement')) return;
+  _procMergeMode = !_procMergeMode;
+  if (!_procMergeMode) _procMergeSel = {};
+  renderProjectProcurement();
+}
+
+function procMergeToggleSel(itemId, checked) {
+  _procMergeSel[String(itemId)] = checked;
+  renderProjectProcurement();
+}
+
+// Step 1 of the multi-select merge: validate the checked set (2+, one unit),
+// then open a small dialog to pick which of them the others fold into.
+function procMergeSelected() {
+  if (!requireFull('edit-procurement','edit procurement')) return;
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) return;
+  var items = p.procurementItems || [];
+  var picked = items.filter(function(it){ return _procMergeSel[String(it.id)]; });
+  if (picked.length < 2) { alert('Check at least 2 items to merge.'); return; }
+  var units = {}; picked.forEach(function(it){ units[(it.unit || '')] = 1; });
+  if (Object.keys(units).length > 1) {
+    alert('All merged items must share the same unit. Selected units: ' +
+      Object.keys(units).map(function(u){ return u || '(none)'; }).join(', '));
+    return;
+  }
+
+  var opts = picked.map(function(it){
+    var bprCount = (it.bprAssignments || []).length;
+    var manualQty = it.manualQty != null && it.manualQty !== '' ? ' · manual qty: ' + it.manualQty : '';
+    return '<option value="' + _procEsc(String(it.id)) + '">' +
+      _procEsc(it.description || '(unnamed)') +
+      ' (' + bprCount + ' BPR line' + (bprCount === 1 ? '' : 's') + manualQty + ')' +
+    '</option>';
+  }).join('');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Merge ' + picked.length + ' items</div>' +
+    '<div class="msb">' +
+      'Combine the ' + picked.length + ' checked items into one. Pick which item the others merge into — ' +
+      'their BPR assignments combine on it, unit cost is recomputed as a weighted average by BPR extended-cost, ' +
+      'and the merged-away items are removed.' +
+      '<br><br><span style="font-size:11px;color:#9A7A2E">Note: Any POs linked to the merged-away items move to the item you keep.</span>' +
+    '</div>' +
+    '<div class="fgr full" style="margin-bottom:14px">' +
+      '<label>Merge into</label>' +
+      '<select id="proc-merge-multi-target">' + opts + '</select>' +
+    '</div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="procDoMergeSelected()">Merge</button>' +
+    '</div>'
+  );
+}
+
+// Step 2: fold every other checked item into the chosen target.
+function procDoMergeSelected() {
+  if (!_editProjectId) return;
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var sel = g('proc-merge-multi-target');
+  var targetId = sel && sel.value;
+  if (!targetId) { alert('Pick an item to merge into.'); return; }
+  var items = p.procurementItems || [];
+  var target = items.find(function(x){ return String(x.id) === String(targetId); });
+  if (!target) { alert('Target item missing.'); return; }
+  var sources = items.filter(function(it){
+    return _procMergeSel[String(it.id)] && String(it.id) !== String(targetId);
+  });
+  if (!sources.length) { alert('Select at least one other item to merge in.'); return; }
+
+  sources.forEach(function(src){ _procCombineItemInto(p, src, target); });
+
+  var removeIds = {};
+  sources.forEach(function(s){ removeIds[String(s.id)] = true; });
+  p.procurementItems = items.filter(function(x){ return !removeIds[String(x.id)]; });
+
+  _procMergeMode = false;
+  _procMergeSel = {};
+
+  saveDB();
+  closeModal();
+  renderProjectProcurement();
+  if (typeof showToast === 'function') {
+    showToast('Merged ' + (sources.length + 1) + ' items into "' + (target.description || '(unnamed)') + '".', 'success');
   }
 }
 
