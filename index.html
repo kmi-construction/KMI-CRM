@@ -46418,7 +46418,7 @@ async function renderProjectSchedule() {
 function _schRender() {
   var host = g('nprj-schedule-section'); if (!host) return;
   var tabs = [['schedule', 'Schedule', 0], ['calendar', 'Calendar', 0], ['gc', 'GC Schedule', 0],
-              ['lookahead', 'Look-Aheads', 3], ['manpower', 'Manpower', 4]];
+              ['lookahead', 'Look-Aheads', 0], ['manpower', 'Manpower', 4]];
   var sub = '<div style="display:flex;gap:4px;border-bottom:1px solid #e5e5e5;margin-bottom:18px">' +
     tabs.map(function(x){
       var on = (_schSubTab === x[0]);
@@ -46432,7 +46432,7 @@ function _schRender() {
   var body;
   if (_schSubTab === 'gc')             body = _gcHtml();
   else if (_schSubTab === 'calendar')  body = _schCalendarHtml();
-  else if (_schSubTab === 'lookahead') body = _schFutureHtml(3);
+  else if (_schSubTab === 'lookahead') body = _laHtml();
   else if (_schSubTab === 'manpower')  body = _schFutureHtml(4);
   else                                 body = _schScheduleHtml();
 
@@ -47224,6 +47224,403 @@ function _schFutureHtml(phase) {
     '<strong>Generated</strong>: a rolling look-ahead built from the schedule, configurable 1\u20136 weeks, ' +
     'defaulting to 3.</div></div>';
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// LOOK-AHEADS — Schedule module, Phase 3 (Generated)
+// ────────────────────────────────────────────────────────────────────────
+// A rolling look-ahead built live from the native schedule. Two-tier
+// week/day grid resolved on the project work-calendar (weekends, holidays,
+// and shutdowns block; per-task exceptions honored via schIsWorkDay).
+// Configurable 1-6 weeks, default 3, anchored to a chosen Monday. Scope
+// filter (KMI-only default, with show-all). Each "Issue" freezes the window
+// to kmi_lookaheads (decision 7-B) so the field record survives later
+// schedule edits. Crew/day is a read-only stub until Phase 4. On-screen +
+// PDF (decision 6-B). Horizontal scroll at all horizons (decision a).
+// ════════════════════════════════════════════════════════════════════════
+var _laWeekStart = null;      // 'YYYY-MM-DD' Monday
+var _laHorizon   = 3;         // 1..6
+var _laScope     = 'kmi';     // 'kmi' | 'all'
+var _laIssued    = [];        // loaded kmi_lookaheads rows for this project
+var _laLoadedFor = null;      // project id the issued list was loaded for
+var LA_DOW = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']; // index by getDay()
+
+function _laMD(s) { var d = _schD(s); return (d.getMonth() + 1) + '/' + d.getDate(); }
+function _laMondayOf(s) {
+  var back = (_schDow(s) + 6) % 7;      // days since Monday (getDay 0=Sun)
+  return _schAddDays(s, -back);
+}
+function _laDefaultWeek() { return _laMondayOf(_schToday()); }
+function _laFirstWorkDay(t) { return schNextWorkDay(t.start, t); }
+function _laScheduleId() {
+  for (var i = 0; i < _schTasks.length; i++) if (_schTasks[i].scheduleId) return _schTasks[i].scheduleId;
+  return null;
+}
+function _laClip(s, w, doc) {
+  s = String(s || ''); if (doc.getTextWidth(s) <= w) return s;
+  var out = s, guard = 0;
+  while (out.length && guard++ < 300 && doc.getTextWidth(out + '\u2026') > w) out = out.slice(0, -1);
+  return out + '\u2026';
+}
+
+// Visible tasks for the current window+scope, grouped by phase.
+function _laGroups() {
+  if (!_laWeekStart) _laWeekStart = _laDefaultWeek();
+  var winStart = _laWeekStart, winEnd = _schAddDays(_laWeekStart, _laHorizon * 7 - 1);
+  var out = [];
+  _schPhases().forEach(function(ph){
+    var tasks = _schChildren(ph.id).filter(function(t){
+      if (!t.start) return false;
+      if (_laScope === 'kmi' && !t.isKmiScope) return false;
+      var fin = _schTaskFinish(t);
+      if (!fin || fin < winStart || t.start > winEnd) return false;
+      var s = t.start > winStart ? t.start : winStart;
+      var e = fin < winEnd ? fin : winEnd, d = s, guard = 0;
+      while (d <= e && guard++ < 400) { if (schIsWorkDay(d, t)) return true; d = _schAddDays(d, 1); }
+      return false;
+    });
+    if (tasks.length) out.push({ phase: ph, tasks: tasks });
+  });
+  return out;
+}
+
+// Row objects frozen into a snapshot (and reused by the PDF builder).
+function _laBuildRows() {
+  var rows = [];
+  _laGroups().forEach(function(gp){
+    gp.tasks.forEach(function(t){
+      rows.push({
+        phase: gp.phase.name || '', name: t.name || '',
+        start: t.start, finish: _schTaskFinish(t),
+        dur: Number(t.dur) || 0, pct: Number(t.pct) || 0,
+        md: Number(t.md) || 0, isKmiScope: (t.isKmiScope !== false),
+        prodLineId: t.prodLineId || null
+      });
+    });
+  });
+  return rows;
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────
+function _laStyle() {
+  return '<style id="la-css">' +
+    '.la-ctrls{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:flex-end;margin-bottom:6px}' +
+    '.la-fld{display:flex;flex-direction:column;gap:5px}' +
+    '.la-fld label{font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:#7c8794}' +
+    '.la-fld input,.la-fld select{font:inherit;padding:7px 9px;border:1px solid #e4e8ee;border-radius:7px;background:#fff;color:#243244}' +
+    '.la-seg{display:inline-flex;border:1px solid #e4e8ee;border-radius:7px;overflow:hidden}' +
+    '.la-seg button{border:0;background:#fff;padding:7px 12px;font:inherit;color:#7c8794;cursor:pointer}' +
+    '.la-seg button.on{background:var(--ac);color:#fff;font-weight:600}' +
+    '.la-btn{border:1px solid #e4e8ee;background:#fff;color:#243244;padding:8px 14px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer}' +
+    '.la-btn:hover{border-color:var(--ac);color:var(--ac)}' +
+    '.la-btn-p{background:var(--kmi);border-color:var(--kmi);color:#fff}' +
+    '.la-actions{display:flex;gap:10px}' +
+    '.la-sub{font-size:12px;color:#7c8794;margin-top:2px}' +
+    '.la-range{font-size:13px;color:#7c8794;margin:12px 0 8px}.la-range b{color:#243244}' +
+    '.la-gridwrap{overflow-x:auto;border:1px solid #e4e8ee;border-radius:9px}' +
+    '.la-grid{border-collapse:collapse;width:100%}' +
+    '.la-grid th,.la-grid td{padding:0}' +
+    '.la-grid th.la-task,.la-grid td.la-taskcell{position:sticky;left:0;z-index:2;background:#fff;text-align:left;min-width:210px;max-width:230px}' +
+    '.la-grid th.la-task{z-index:4}' +
+    '.la-grid thead th{background:#fafbfc;color:#7c8794;font-weight:700;border-bottom:1px solid #e4e8ee}' +
+    '.la-wk{font-size:11px;color:#243244;font-weight:700;text-align:center;padding:8px 4px;border-left:2px solid #c9d1da}' +
+    '.la-task,.la-crew{padding:8px 10px;font-size:11px;letter-spacing:.03em;text-transform:uppercase;vertical-align:middle}' +
+    '.la-crew{text-align:center;min-width:56px;width:56px}' +
+    '.la-d2{font-size:10px;font-weight:700;color:#7c8794;text-align:center;padding:4px 0 5px;border-left:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee;min-width:30px;width:30px;background:#fafbfc}' +
+    '.la-d2 small{display:block;font-size:9px;color:#aab2bc;font-weight:600;margin-top:1px}' +
+    '.la-d2.la-wstart{border-left:2px solid #c9d1da}' +
+    '.la-d2.la-block{color:#c2c9d1;background:#eef1f4}.la-d2.la-block small{color:#c9cfd6}' +
+    '.la-h{color:#b06a2c;font-size:8px;font-weight:700}' +
+    '.la-phrow td{background:#f2f5f8;padding:8px 12px;font-weight:700;color:var(--kmi);font-size:13px;position:sticky;left:0;border-top:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee}' +
+    '.la-taskcell{padding:9px 10px;border-bottom:1px solid #e4e8ee}' +
+    '.la-tname{font-weight:600;color:#243244;font-size:13px}' +
+    '.la-gcbadge{font-size:10px;color:#9aa4b0;font-weight:700}' +
+    '.la-tmeta{font-size:11px;color:#7c8794;margin-top:2px}' +
+    '.la-gc .la-tname{color:#9aa4b0;font-style:italic}' +
+    '.la-crewcell{text-align:center;color:#b8c0ca;font-size:12px;border-left:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee;background:repeating-linear-gradient(45deg,#fff,#fff 5px,#fafbfc 5px,#fafbfc 10px)}' +
+    '.la-p4{display:block;font-size:9px;letter-spacing:.05em;color:#c7cdd5}' +
+    '.la-day{position:relative;height:40px;min-width:30px;width:30px;border-left:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee}' +
+    '.la-day.la-wstart{border-left:2px solid #c9d1da}' +
+    '.la-day.la-block{background:repeating-linear-gradient(45deg,#eef1f4,#eef1f4 4px,#e6eaef 4px,#e6eaef 8px)}' +
+    '.la-bar{position:absolute;top:9px;bottom:9px;left:0;right:0;background:var(--ac);display:flex;align-items:center;justify-content:center;color:#fff;font-size:9px;font-weight:700;overflow:hidden}' +
+    '.la-bar.la-start{left:3px;border-top-left-radius:11px;border-bottom-left-radius:11px}' +
+    '.la-bar.la-end{right:3px;border-top-right-radius:11px;border-bottom-right-radius:11px}' +
+    '.la-bar.la-done{background:#3f7f5b}' +
+    '.la-gc .la-bar{background:#9aa4b0}' +
+    '.la-empty{color:#aaa;text-align:center;padding:18px;font-size:13px}' +
+    '.la-legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:#7c8794;margin-top:12px}' +
+    '.la-legend i{display:inline-block;width:22px;height:10px;border-radius:5px;vertical-align:middle;margin-right:5px}' +
+    '.la-lg-block{background:repeating-linear-gradient(45deg,#eef1f4,#eef1f4 3px,#e6eaef 3px,#e6eaef 6px)}' +
+    '.la-lg-crew{background:repeating-linear-gradient(45deg,#fff,#fff 3px,#eef1f4 3px,#eef1f4 6px);border:1px solid #e4e8ee}' +
+    '.la-issued .la-irow{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #e4e8ee}' +
+    '.la-issued .la-irow:last-child{border-bottom:0}' +
+    '.la-imeta{color:#7c8794;font-size:12px}' +
+    '</style>';
+}
+
+function _laGridHtml() {
+  if (!_laWeekStart) _laWeekStart = _laDefaultWeek();
+  var n = _laHorizon, anchor = _laWeekStart, groups = _laGroups(), totalCols = n * 7 + 2;
+
+  var h1 = '<tr><th class="la-task" rowspan="2">Phase / Task</th><th class="la-crew" rowspan="2">Crew<br>/day</th>';
+  var h2 = '<tr>';
+  for (var w = 0; w < n; w++) {
+    var ws = _schAddDays(anchor, w * 7);
+    h1 += '<th class="la-wk" colspan="7">Wk of ' + _laMD(ws) + '</th>';
+    for (var di = 0; di < 7; di++) {
+      var dd = _schAddDays(ws, di), work = schIsWorkDay(dd, null), hol = _schHolidayOn(dd);
+      var cls = 'la-d2' + (di === 0 ? ' la-wstart' : '') + (work ? '' : ' la-block');
+      var mark = hol ? '<sup class="la-h" title="' + escapeHtml(hol.name || hol.holiday_name || 'Holiday') + '">H</sup>' : '';
+      h2 += '<td class="' + cls + '">' + LA_DOW[_schDow(dd)] + mark + '<small>' + _schD(dd).getDate() + '</small></td>';
+    }
+  }
+  h1 += '</tr>'; h2 += '</tr>';
+
+  var body = '';
+  if (!groups.length) {
+    body = '<tr><td class="la-empty" colspan="' + totalCols + '">No activities fall in this window. ' +
+           'Try a different week or widen the horizon.</td></tr>';
+  }
+  groups.forEach(function(gp){
+    body += '<tr class="la-phrow"><td colspan="' + totalCols + '">' + escapeHtml(gp.phase.name || '(phase)') + '</td></tr>';
+    gp.tasks.forEach(function(t){
+      var fin = _schTaskFinish(t), firstWd = _laFirstWorkDay(t), done = (Number(t.pct) || 0) >= 100, gc = !t.isKmiScope;
+      body += '<tr class="' + (gc ? 'la-gc' : '') + '">';
+      body += '<td class="la-taskcell"><div class="la-tname">' + escapeHtml(t.name || '') +
+              (gc ? '<span class="la-gcbadge"> \u00b7 GC</span>' : '') + '</div>' +
+              '<div class="la-tmeta">' + _laMD(t.start) + '\u2013' + _laMD(fin) + ' \u00b7 ' +
+              (Number(t.dur) || 0) + 'wd \u00b7 ' + (Number(t.pct) || 0) + '%</div></td>';
+      body += '<td class="la-crewcell">' + (!gc && t.md ? Number(t.md) : '\u2014') + '<span class="la-p4">P4</span></td>';
+      for (var w2 = 0; w2 < n; w2++) {
+        for (var d2 = 0; d2 < 7; d2++) {
+          var dd2 = _schAddDays(anchor, w2 * 7 + d2), block = !schIsWorkDay(dd2, null);
+          var cls2 = 'la-day' + (d2 === 0 ? ' la-wstart' : '') + (block ? ' la-block' : '');
+          var active = (dd2 >= t.start && dd2 <= fin && schIsWorkDay(dd2, t));
+          if (active) {
+            var bcls = 'la-bar' + (dd2 === firstWd ? ' la-start' : '') + (dd2 === fin ? ' la-end' : '') + (done ? ' la-done' : '');
+            var lbl = (dd2 === firstWd) ? (done ? '\u2713' : (Number(t.pct) || 0) + '%') : '';
+            body += '<td class="' + cls2 + '"><div class="' + bcls + '">' + lbl + '</div></td>';
+          } else {
+            body += '<td class="' + cls2 + '"></td>';
+          }
+        }
+      }
+      body += '</tr>';
+    });
+  });
+
+  return '<div class="la-gridwrap"><table class="la-grid"><thead>' + h1 + h2 + '</thead><tbody>' + body + '</tbody></table></div>';
+}
+
+function _laIssuedHtml() {
+  if (!_laIssued.length) return '<div class="la-empty" style="padding:16px">Nothing issued yet. Issue the current window to snapshot it for the field.</div>';
+  return '<div class="la-issued">' + _laIssued.map(function(x){
+    var wk = x.week_start ? _schFmt(x.week_start) : '\u2014';
+    var at = x.issued_at ? _laFmtDT(x.issued_at) : '';
+    return '<div class="la-irow"><div><b>Week of ' + wk + '</b> \u00b7 ' + (x.horizon_weeks || '?') + ' wk' +
+      '<div class="la-imeta">' + (x.row_count || 0) + ' activities' + (x.scope === 'all' ? ' \u00b7 all' : '') + '</div></div>' +
+      '<div class="la-imeta" style="text-align:right">' + escapeHtml(x.issued_by_name || x.issued_by_user_id || '') +
+      '<br>' + at + '</div></div>';
+  }).join('') + '</div>';
+}
+function _laFmtDT(iso) {
+  var d = new Date(iso); if (isNaN(d.getTime())) return escapeHtml(String(iso));
+  return (d.getMonth() + 1) + '/' + d.getDate() + '/' + String(d.getFullYear()).slice(2) + ' ' +
+    String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function _laHtml() {
+  if (!_laWeekStart) _laWeekStart = _laDefaultWeek();
+  var p = _schCurrentProject();
+  setTimeout(_laLoadIfNeeded, 0);
+
+  var rangeEnd = _schAddDays(_laWeekStart, _laHorizon * 7 - 1);
+  var hOpts = '';
+  for (var k = 1; k <= 6; k++) hOpts += '<option value="' + k + '"' + (k === _laHorizon ? ' selected' : '') + '>' + k + ' week' + (k > 1 ? 's' : '') + '</option>';
+
+  var controls =
+    '<div class="la-ctrls">' +
+      '<div class="la-fld"><label>Week starting (Mon)</label>' +
+        '<input type="date" id="la-wk" value="' + _laWeekStart + '" onchange="laSetWeek(this.value)"></div>' +
+      '<div class="la-fld"><label>Horizon</label>' +
+        '<select id="la-hz" onchange="laSetHorizon(this.value)">' + hOpts + '</select></div>' +
+      '<div class="la-fld"><label>Scope</label><div class="la-seg">' +
+        '<button class="' + (_laScope === 'kmi' ? 'on' : '') + '" onclick="laSetScope(\'kmi\')">KMI scope</button>' +
+        '<button class="' + (_laScope === 'all' ? 'on' : '') + '" onclick="laSetScope(\'all\')">Show all</button>' +
+      '</div></div>' +
+      '<div style="flex:1"></div>' +
+      '<div class="la-actions"><button class="la-btn" onclick="laExportPdf()">Export PDF</button>' +
+        (_schCanEdit() ? '<button class="la-btn la-btn-p" onclick="laIssue()">Issue look-ahead</button>' : '') +
+      '</div>' +
+    '</div>';
+
+  var rangeLbl = '<div class="la-range">Window: <b>' + _schFmt(_laWeekStart) + ' \u2013 ' + _schFmt(rangeEnd) +
+    '</b> \u00b7 ' + _laHorizon + ' week' + (_laHorizon > 1 ? 's' : '') + ' \u00b7 ' +
+    (_laScope === 'kmi' ? 'KMI scope only' : 'all activities') + ' \u00b7 Mon\u2013Fri</div>';
+
+  var legend = '<div class="la-legend">' +
+    '<span><i style="background:var(--ac)"></i>KMI activity</span>' +
+    '<span><i style="background:#3f7f5b"></i>Complete</span>' +
+    '<span><i style="background:#9aa4b0"></i>GC activity</span>' +
+    '<span><i class="la-lg-block"></i>Non-work day</span>' +
+    '<span><i class="la-lg-crew"></i>Crew/day \u2014 Phase 4</span></div>';
+
+  return _laStyle() +
+    '<div class="card"><div class="ch"><div>' +
+      '<div class="ct">Generated Look-Ahead</div>' +
+      '<div class="la-sub">Rolling window built from the schedule \u00b7 resolved on the ' +
+      (p ? escapeHtml(p.name || 'project') : 'project') + ' work calendar</div></div></div>' +
+      '<div style="padding:16px 18px">' + controls + rangeLbl +
+      '<div id="la-grid-host">' + _laGridHtml() + '</div>' + legend + '</div></div>' +
+    '<div class="card"><div class="ch"><div>' +
+      '<div class="ct">Issued look-aheads</div>' +
+      '<div class="la-sub">Each issue is snapshotted \u2014 what the field was handed, and when</div>' +
+      '</div></div><div style="padding:8px 18px 16px" id="la-issued-host">' + _laIssuedHtml() + '</div></div>';
+}
+
+// ── Interaction ─────────────────────────────────────────────────────────
+function _laRerender() { if (typeof _schRender === 'function') _schRender(); }
+function laSetWeek(v) { if (!v) return; _laWeekStart = _laMondayOf(v); _laRerender(); }
+function laSetHorizon(v) { _laHorizon = Math.max(1, Math.min(6, Number(v) || 3)); _laRerender(); }
+function laSetScope(s) { _laScope = (s === 'all' ? 'all' : 'kmi'); _laRerender(); }
+
+function _laLoadIfNeeded() {
+  var p = _schCurrentProject(); if (!p) return;
+  if (String(_laLoadedFor) === String(p.id)) return;
+  _laLoad(p.id);
+}
+async function _laLoad(pid) {
+  if (!supabaseClient) { _laLoadedFor = pid; return; }
+  try {
+    var r = await supabaseClient.from('kmi_lookaheads').select('*')
+      .eq('project_id', String(pid)).order('issued_at', { ascending: false }).limit(50);
+    if (r.error) throw r.error;
+    _laIssued = r.data || [];
+    _laLoadedFor = String(pid);
+    var host = g('la-issued-host'); if (host) host.innerHTML = _laIssuedHtml();
+  } catch (e) { _schErr(e, 'Look-aheads not loaded'); }
+}
+
+async function laIssue() {
+  if (!_schCanEdit()) { if (typeof showToast === 'function') showToast('You do not have permission to issue look-aheads', 'error'); return; }
+  var p = _schCurrentProject(); if (!p) return;
+  if (!supabaseClient) { if (typeof showToast === 'function') showToast('Not connected to the database', 'error'); return; }
+  var rows = _laBuildRows();
+  if (!rows.length) { if (typeof showToast === 'function') showToast('Nothing in this window to issue', 'error'); return; }
+  var me = (typeof _currentUser !== 'undefined' && _currentUser) ? (_currentUser.email || String(_currentUser.id)) : null;
+  var nm = (typeof _currentUser !== 'undefined' && _currentUser) ? (_currentUser.name || _currentUser.email || '') : '';
+  var rec = {
+    id: _schNewId('la'), project_id: String(p.id), schedule_id: _laScheduleId(),
+    week_start: _laWeekStart, horizon_weeks: _laHorizon, scope: _laScope,
+    rows: rows, row_count: rows.length,
+    build_stamp: (typeof KMI_BUILD !== 'undefined' ? KMI_BUILD : null),
+    issued_by_user_id: me, issued_by_name: nm, issued_at: new Date().toISOString()
+  };
+  try {
+    var r = await supabaseClient.from('kmi_lookaheads').upsert(rec);
+    if (r.error) throw r.error;
+    _laIssued.unshift(rec);
+    var host = g('la-issued-host'); if (host) host.innerHTML = _laIssuedHtml();
+    if (typeof showToast === 'function') showToast('Look-ahead issued \u00b7 ' + rows.length + ' activities snapshotted', 'success');
+  } catch (e) { _schErr(e, 'Look-ahead not issued'); }
+}
+
+// ── PDF export (decision 6-B) ─────────────────────────────────────────────
+function laExportPdf() {
+  if (typeof window.jspdf === 'undefined' || !window.jspdf || !window.jspdf.jsPDF) {
+    alert('PDF library is still loading. Wait a moment and try again.'); return;
+  }
+  try { _laBuildPdf(); } catch (e) { _schErr(e, 'PDF export failed'); }
+}
+function _laBuildPdf() {
+  var JS = window.jspdf.jsPDF;
+  var doc = new JS({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+  var PW = 792, PH = 612, M = 28;
+  var p = _schCurrentProject();
+  var n = _laHorizon, anchor = _laWeekStart, rangeEnd = _schAddDays(anchor, n * 7 - 1);
+  var groups = _laGroups();
+  var AC = [47, 111, 143], DONE = [63, 127, 91], GC = [154, 164, 176],
+      BLOCK = [236, 239, 242], LINE = [212, 216, 222], PH_ = [242, 245, 248],
+      INK = [36, 50, 68], MUT = [124, 135, 148];
+
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(18, 35, 59);
+  doc.text((p && p.name ? p.name : 'Project') + ' \u2014 Look-Ahead', M, M + 4);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(MUT[0], MUT[1], MUT[2]);
+  doc.text(_schFmt(anchor) + ' \u2013 ' + _schFmt(rangeEnd) + '    \u00b7    ' + n + ' week' + (n > 1 ? 's' : '') +
+    '    \u00b7    ' + (_laScope === 'kmi' ? 'KMI scope' : 'all activities') + '    \u00b7    Mon\u2013Fri' +
+    '    \u00b7    generated ' + _schFmt(_schToday()), M, M + 18);
+
+  var taskW = 150, crewW = 30, gridX = M + taskW + crewW, dayCount = n * 7;
+  var dayW = (PW - M - gridX) / dayCount, rowH = 15, top = M + 32;
+  function dayX(i) { return gridX + i * dayW; }
+
+  function drawHead(y) {
+    doc.setDrawColor(LINE[0], LINE[1], LINE[2]); doc.setLineWidth(0.5);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(INK[0], INK[1], INK[2]);
+    doc.text('Phase / Task', M + 2, y + 13);
+    doc.setFontSize(6.5); doc.text('Crew/d', M + taskW + 2, y + 13);
+    for (var w = 0; w < n; w++) {
+      var wx = dayX(w * 7);
+      doc.setFontSize(7.5); doc.setTextColor(INK[0], INK[1], INK[2]);
+      doc.text('Wk ' + _laMD(_schAddDays(anchor, w * 7)), wx + (7 * dayW) / 2, y + 9, { align: 'center' });
+      for (var di = 0; di < 7; di++) {
+        var idx = w * 7 + di, dd = _schAddDays(anchor, idx), work = schIsWorkDay(dd, null), cx = dayX(idx);
+        if (!work) { doc.setFillColor(BLOCK[0], BLOCK[1], BLOCK[2]); doc.rect(cx, y + 11, dayW, rowH, 'F'); }
+        doc.setFontSize(6);
+        if (work) doc.setTextColor(MUT[0], MUT[1], MUT[2]); else doc.setTextColor(190, 196, 203);
+        doc.text(LA_DOW[_schDow(dd)] + ' ' + _schD(dd).getDate(), cx + dayW / 2, y + 20, { align: 'center' });
+        doc.setDrawColor(LINE[0], LINE[1], LINE[2]); doc.line(cx, y + 11, cx, y + 11 + rowH);
+      }
+    }
+    doc.line(M, y + 11 + rowH, PW - M, y + 11 + rowH);
+    return y + 11 + rowH;
+  }
+
+  var y = drawHead(top);
+  function ensure(yy) { if (yy + rowH > PH - M) { doc.addPage(); return drawHead(M + 6); } return yy; }
+
+  groups.forEach(function(gp){
+    y = ensure(y);
+    doc.setFillColor(PH_[0], PH_[1], PH_[2]); doc.rect(M, y, PW - 2 * M, rowH, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(18, 35, 59);
+    doc.text(_laClip(gp.phase.name || '(phase)', taskW + crewW - 4, doc), M + 2, y + 10);
+    doc.setDrawColor(LINE[0], LINE[1], LINE[2]); doc.line(M, y + rowH, PW - M, y + rowH);
+    y += rowH;
+    gp.tasks.forEach(function(t){
+      y = ensure(y);
+      var fin = _schTaskFinish(t), firstWd = _laFirstWorkDay(t), done = (Number(t.pct) || 0) >= 100, gc = !t.isKmiScope;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5);
+      if (gc) doc.setTextColor(GC[0], GC[1], GC[2]); else doc.setTextColor(INK[0], INK[1], INK[2]);
+      doc.text(_laClip((t.name || '') + (gc ? ' (GC)' : ''), taskW - 4, doc), M + 2, y + 7);
+      doc.setFontSize(5.8); doc.setTextColor(MUT[0], MUT[1], MUT[2]);
+      doc.text(_laMD(t.start) + '\u2013' + _laMD(fin) + ' \u00b7 ' + (Number(t.dur) || 0) + 'wd \u00b7 ' + (Number(t.pct) || 0) + '%', M + 2, y + 13);
+      doc.setFontSize(6.5); doc.setTextColor(184, 192, 202);
+      doc.text((!gc && t.md ? String(Number(t.md)) : '\u2014'), M + taskW + crewW / 2, y + 9, { align: 'center' });
+      for (var i = 0; i < dayCount; i++) {
+        var dd = _schAddDays(anchor, i), cx = dayX(i), work = schIsWorkDay(dd, null);
+        if (!work) { doc.setFillColor(BLOCK[0], BLOCK[1], BLOCK[2]); doc.rect(cx, y, dayW, rowH, 'F'); }
+        var active = (dd >= t.start && dd <= fin && schIsWorkDay(dd, t));
+        if (active) {
+          var col = done ? DONE : (gc ? GC : AC);
+          doc.setFillColor(col[0], col[1], col[2]); doc.rect(cx, y + 2, dayW, rowH - 4, 'F');
+          if (dd === firstWd) { doc.setFontSize(5.2); doc.setTextColor(255, 255, 255);
+            doc.text(done ? '\u2713' : ((Number(t.pct) || 0) + '%'), cx + dayW / 2, y + 9, { align: 'center' }); }
+        }
+        doc.setDrawColor(LINE[0], LINE[1], LINE[2]); doc.line(cx, y, cx, y + rowH);
+      }
+      doc.setDrawColor(LINE[0], LINE[1], LINE[2]); doc.line(M, y + rowH, PW - M, y + rowH);
+      y += rowH;
+    });
+  });
+
+  if (!groups.length) {
+    doc.setFontSize(9); doc.setTextColor(MUT[0], MUT[1], MUT[2]);
+    doc.text('No activities fall in this window.', M + 2, y + 14);
+  }
+
+  var fn = 'LookAhead_' + ((p && p.name) ? p.name.replace(/[^A-Za-z0-9]+/g, '_') : 'project') + '_' + anchor + '.pdf';
+  doc.save(fn);
+}
+
 
 // ════════════════════════════════════════════════════════════════════════
 // GC SCHEDULE IMPORT — Schedule module, Phase 2
@@ -48020,7 +48417,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-10-sbli1';
+var KMI_BUILD = '2026-08-13-la1';
 
 var _kmiSessionId = (function(){
   try {
