@@ -47464,7 +47464,9 @@ function _laHtml() {
     '<span><i class="la-lg-block"></i>Non-work day</span>' +
     '<span><i class="la-lg-crew"></i>Crew/day \u2014 Phase 4</span></div>';
 
-  return _laStyle() +
+  var _laTgl = _laToggleHtml();
+  if (_laMode === 'rec') return _laStyle() + _rlaStyle() + _laTgl + _rlaHtml();
+  return _laStyle() + _rlaStyle() + _laTgl +
     '<div class="card"><div class="ch"><div>' +
       '<div class="ct">Generated Look-Ahead</div>' +
       '<div class="la-sub">Rolling window built from the schedule \u00b7 resolved on the ' +
@@ -47620,6 +47622,443 @@ function _laBuildPdf() {
   var fn = 'LookAhead_' + ((p && p.name) ? p.name.replace(/[^A-Za-z0-9]+/g, '_') : 'project') + '_' + anchor + '.pdf';
   doc.save(fn);
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// RECEIVED LOOK-AHEADS — Schedule module, Phase 3b
+// ────────────────────────────────────────────────────────────────────────
+// The GC's look-ahead, imported (PDF or Excel) and matched to KMI tasks,
+// kept as its OWN artifact in kmi_gc_lookaheads — separate from the GC
+// schedule of record (decision 2-A). Reuses the Phase-2 pipeline wholesale:
+// pdf.js text/raster read, AI extraction (_gcCallAI/_gcSchemaPrompt), the
+// hint corpus + prod-estimate classifier (_gcBuildRows), and the day-diff
+// (_gcDayDiff). Adds a SheetJS branch for Excel (decision 1-B, with AI
+// fallback when the layout is unclear), a native-task matcher, and a
+// variance view: behind / ahead / added / dropped (decision 4-B, display
+// only). Entered via the Generated | Received toggle on the Look-Aheads tab.
+// ════════════════════════════════════════════════════════════════════════
+var _laMode       = 'gen';   // 'gen' | 'rec'  — Look-Aheads sub-tab mode
+var _rlaScreen    = 'list';  // 'list' | 'review' | 'variance'
+var _rlaList      = [];       // kmi_gc_lookaheads rows for the project
+var _rlaCur       = null;     // opened received look-ahead (header + lines)
+var _rlaLines     = [];       // working copy of _rlaCur.lines
+var _rlaFilter    = 'all';    // review filter: all | matched | unmatched
+var _rlaVarFilter = 'all';    // variance filter: all | off
+var _rlaBusy      = '';       // progress message
+var _rlaLoadedFor = null;
+
+function _laToggleHtml() {
+  return '<div class="la-seg" style="margin-bottom:16px">' +
+    '<button class="' + (_laMode === 'gen' ? 'on' : '') + '" onclick="laSetMode(\'gen\')">Generated</button>' +
+    '<button class="' + (_laMode === 'rec' ? 'on' : '') + '" onclick="laSetMode(\'rec\')">Received</button></div>';
+}
+function laSetMode(m) { _laMode = (m === 'rec' ? 'rec' : 'gen'); if (_laMode === 'rec') _rlaScreen = 'list'; _laRerender(); }
+
+function _rlaStyle() {
+  return '<style id="rla-css">' +
+    '.rla-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}' +
+    '.rla-chip{font-size:12px;font-weight:600;padding:4px 11px;border-radius:20px;border:1px solid #e4e8ee;background:#fff;color:#5a6672;cursor:pointer}' +
+    '.rla-chip.on{background:var(--kmi);color:#fff;border-color:var(--kmi)}' +
+    '.rla-fmt{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:6px;vertical-align:middle}' +
+    '.rla-fmt.pdf{background:#f7e9e6;color:#b5442e}.rla-fmt.xls{background:#eaf3ee;color:#3f7f5b}' +
+    '.rla-tbl{border-collapse:collapse;width:100%}' +
+    '.rla-tbl th,.rla-tbl td{padding:9px 12px;text-align:left;border-bottom:1px solid #e4e8ee;font-size:13px;vertical-align:middle}' +
+    '.rla-tbl thead th{background:#fafbfc;color:#7c8794;font-size:11px;letter-spacing:.03em;text-transform:uppercase;font-weight:700}' +
+    '.rla-non td{color:#9aa4b0}' +
+    '.rla-conf{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px}' +
+    '.rla-conf.hi{background:#eaf3ee;color:#3f7f5b}.rla-conf.md{background:#fff5e6;color:#9a7a2e}.rla-conf.no{background:#f3f4f6;color:#9aa4b0}' +
+    '.rla-tog{width:38px;height:22px;border-radius:20px;background:#d4dae1;position:relative;cursor:pointer;transition:.15s;flex:none}' +
+    '.rla-tog.on{background:var(--ac)}' +
+    '.rla-tog:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.15s}' +
+    '.rla-tog.on:after{left:18px}' +
+    '.rla-delta{font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}' +
+    '.rla-delta.late{background:#f7e9e6;color:#b5442e}.rla-delta.early{background:#eaf3ee;color:#3f7f5b}' +
+    '.rla-delta.same{background:#f1f3f5;color:#6a7481}.rla-delta.added{background:#e8f0f5;color:#2f6f8f}' +
+    '.rla-delta.dropped{background:#fbf1df;color:#9a7a2e}' +
+    '</style>';
+}
+
+// ── Dispatch ──────────────────────────────────────────────────────────────
+function _rlaHtml() {
+  setTimeout(_rlaLoadIfNeeded, 0);
+  if (_rlaBusy) return '<div class="card"><div style="padding:34px;text-align:center;color:#888;font-size:13px">' + escapeHtml(_rlaBusy) + '</div></div>';
+  if (_rlaScreen === 'review')   return _rlaReviewHtml();
+  if (_rlaScreen === 'variance') return _rlaVarianceHtml();
+  return _rlaListHtml();
+}
+function rlaGo(s) { _rlaScreen = s; _laRerender(); }
+function rlaSetFilter(f) { _rlaFilter = f; _laRerender(); }
+function rlaSetVar(f) { _rlaVarFilter = f; _laRerender(); }
+
+// ── List ──────────────────────────────────────────────────────────────────
+function _rlaListHtml() {
+  var ed = _schCanEdit();
+  var rows = _rlaList.length ? _rlaList.map(function(r){
+    var fmt = String(r.source_format || '').toLowerCase();
+    var fchip = fmt ? '<span class="rla-fmt ' + (fmt === 'pdf' ? 'pdf' : 'xls') + '">' + escapeHtml(fmt.toUpperCase()) + '</span>' : '';
+    return '<tr><td><strong>' + (r.week_start ? 'Wk of ' + _laMD(r.week_start) : _schFmt(r.data_date)) + '</strong></td>' +
+      '<td style="color:#666;font-size:12px">' + escapeHtml(r.source_filename || '\u2014') + fchip + '</td>' +
+      '<td>' + _schFmt(r.data_date) + '</td>' +
+      '<td style="font-size:12px;color:#3f7f5b">' + escapeHtml(r.extraction_method || '\u2014') + '</td>' +
+      '<td style="text-align:right">' + (r.line_count || 0) + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + (r.matched_count || 0) + '</td>' +
+      '<td style="text-align:right"><button class="btn btn-sm" onclick="rlaOpen(\'' + r.id + '\')">Open</button></td></tr>';
+  }).join('') : '<tr><td colspan="7" style="text-align:center;padding:26px;color:#aaa;font-size:12px">No look-aheads received yet.</td></tr>';
+
+  var head = '<div class="sch-bar"><span class="src-chip imported">\u25cf Received from GC</span><div style="flex:1"></div>' +
+    (_rlaList.length ? '<button class="btn btn-sm" onclick="rlaGo(\'variance\')">Variance vs my schedule</button>' : '') +
+    (ed ? '<button class="btn btn-pdf btn-sm" onclick="rlaStartImport()">\u21d3 Import look-ahead</button>' : '') + '</div>';
+
+  return head + '<div class="card" style="padding:0;overflow:hidden"><table><thead><tr>' +
+    '<th>Received</th><th>File</th><th style="width:110px">Data date</th><th style="width:130px">Method</th>' +
+    '<th style="width:60px;text-align:right">Lines</th><th style="width:75px;text-align:right">Matched</th><th style="width:70px"></th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<div style="font-size:12px;color:#888;line-height:1.6">Each received look-ahead is archived and kept as its own artifact, separate from the GC schedule of record.</div>';
+}
+function rlaOpen(id) {
+  var r = _rlaList.filter(function(x){ return String(x.id) === String(id); })[0];
+  if (!r) return;
+  _rlaCur = r; _rlaLines = Array.isArray(r.lines) ? r.lines.slice() : [];
+  _rlaScreen = 'review'; _laRerender();
+}
+
+// ── Import ────────────────────────────────────────────────────────────────
+function rlaStartImport() {
+  if (location.protocol === 'file:') { alert('Extraction requires the app served from a web URL.'); return; }
+  var p = _schCurrentProject(); if (!p) { alert('No project loaded.'); return; }
+  var atts = (p.attachments || []).filter(function(a){
+    var n = String(a.name || '').toLowerCase(), ct = String(a.contentType || '').toLowerCase();
+    return n.endsWith('.pdf') || n.endsWith('.xlsx') || n.endsWith('.xls') ||
+           ct.indexOf('pdf') !== -1 || ct.indexOf('sheet') !== -1 || ct.indexOf('excel') !== -1;
+  });
+  if (!atts.length) { alert('No PDF or Excel attachments on this project.\n\nUpload the GC look-ahead on the Project Details tab first.'); return; }
+  var html = '<button class="xbtn" onclick="closeModal()">&times;</button>' +
+    '<div class="mt">Import a received look-ahead</div>' +
+    '<div class="msb">Pick the GC\u2019s look-ahead (PDF or Excel). Lines are extracted and matched to your tasks.</div>' +
+    '<div class="fgr" style="margin-bottom:14px"><label>Data date (week the look-ahead covers)</label>' +
+      '<input type="date" id="rla-date"></div>' +
+    '<div class="fgr" style="margin-bottom:16px"><label>Horizon (weeks)</label>' +
+      '<select id="rla-hz"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></div>' +
+    '<div class="stl-div">Attached files</div>' +
+    '<div style="max-height:280px;overflow-y:auto;border:1px solid #eee;border-radius:7px">';
+  atts.forEach(function(a){
+    var n = String(a.name || '').toLowerCase(), isX = n.endsWith('.xlsx') || n.endsWith('.xls');
+    html += '<div style="padding:10px 14px;border-bottom:1px solid #f3f3f3;display:flex;justify-content:space-between;align-items:center">' +
+      '<div><div style="font-weight:600;font-size:13px">' + _gcEsc(a.name) + ' <span class="rla-fmt ' + (isX ? 'xls' : 'pdf') + '">' + (isX ? 'XLSX' : 'PDF') + '</span></div>' +
+      '<div style="font-size:11px;color:#888">' + _gcEsc(a.uploadedByName || '') + (a.uploadedAt ? ' \u2014 ' + _gcEsc(a.uploadedAt.slice(0, 10)) : '') + '</div></div>' +
+      '<button class="btn btn-sm btn-p" onclick="rlaRunExtract(\'' + _gcEsc(a.id) + '\')">Extract</button></div>';
+  });
+  html += '</div><div class="mf"><button class="btn" onclick="closeModal()">Cancel</button></div>';
+  showModal(html);
+}
+function _rlaProgress(msg) { _rlaBusy = msg; var host = g('nprj-schedule-section'); if (host) _schRender(); }
+
+function _rlaParseExcel(buffer) {
+  if (typeof XLSX === 'undefined') throw new Error('Spreadsheet library not loaded.');
+  var wb = XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true });
+  var sheet = wb.Sheets[wb.SheetNames[0]];
+  var csv = XLSX.utils.sheet_to_csv(sheet);
+  var aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+  function col(cells, res) {
+    for (var i = 0; i < cells.length; i++) {
+      var c = String(cells[i] == null ? '' : cells[i]).toLowerCase();
+      for (var j = 0; j < res.length; j++) if (res[j].test(c)) return i;
+    }
+    return -1;
+  }
+  var hdr = -1, map = null;
+  for (var r = 0; r < Math.min(aoa.length, 15); r++) {
+    var cells = aoa[r] || [];
+    var ci = {
+      name:   col(cells, [/activity name/, /description/, /task name/, /\bname\b/, /^activity$/]),
+      start:  col(cells, [/start/]),
+      finish: col(cells, [/finish/, /end date/, /\bend\b/]),
+      id:     col(cells, [/activity id/, /act id/, /\bid\b/]),
+      pct:    col(cells, [/%/, /complete/, /\bpct\b/]),
+      wbs:    col(cells, [/wbs/, /phase/, /\barea\b/, /group/])
+    };
+    if (ci.name !== -1 && ci.start !== -1 && ci.finish !== -1) { hdr = r; map = ci; break; }
+  }
+  if (hdr === -1 || !map) return { acts: [], csv: csv };
+  function iso(v) {
+    if (v == null || v === '') return null;
+    if (v instanceof Date && !isNaN(v.getTime())) return _schS(v);
+    var d = new Date(String(v)); return isNaN(d.getTime()) ? null : _schS(d);
+  }
+  var acts = [];
+  for (var rr = hdr + 1; rr < aoa.length; rr++) {
+    var row = aoa[rr] || [];
+    var nm = String(row[map.name] == null ? '' : row[map.name]).trim();
+    if (!nm) continue;
+    acts.push({
+      activity_id: map.id !== -1 ? (String(row[map.id] == null ? '' : row[map.id]).trim() || null) : null,
+      wbs_path:    map.wbs !== -1 ? (String(row[map.wbs] == null ? '' : row[map.wbs]).trim() || null) : null,
+      name: nm, start: iso(row[map.start]), finish: iso(row[map.finish]),
+      raw_start:  map.start  !== -1 ? String(row[map.start]  == null ? '' : row[map.start])  : '',
+      raw_finish: map.finish !== -1 ? String(row[map.finish] == null ? '' : row[map.finish]) : '',
+      duration: null,
+      percent_complete: map.pct !== -1 ? (parseFloat(String(row[map.pct]).replace('%', '')) || null) : null,
+      predecessors: [], is_masonry: false, confidence: 0, reason: 'from spreadsheet'
+    });
+  }
+  return { acts: acts, csv: csv };
+}
+
+async function rlaRunExtract(attId) {
+  var p = _schCurrentProject(); if (!p) return;
+  var dataDate = (g('rla-date') && g('rla-date').value) || null;
+  var horizon = parseInt((g('rla-hz') && g('rla-hz').value) || '3', 10) || 3;
+  var att = (p.attachments || []).filter(function(a){ return String(a.id) === String(attId); })[0];
+  if (!att) { alert('Attachment not found.'); return; }
+  closeModal();
+  var nameLc = String(att.name || '').toLowerCase();
+  var isExcel = nameLc.endsWith('.xlsx') || nameLc.endsWith('.xls');
+  try {
+    _rlaProgress('Downloading ' + att.name + '\u2026');
+    var signed = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).createSignedUrl(att.path, 300);
+    if (signed.error) throw new Error('Storage error: ' + signed.error.message);
+    var dl = await fetch(signed.data.signedUrl);
+    if (!dl.ok) throw new Error('Download failed: HTTP ' + dl.status);
+    var buffer = await dl.arrayBuffer();
+
+    var acts = [], method;
+    if (isExcel) {
+      _rlaProgress('Reading the spreadsheet\u2026');
+      var parsed = _rlaParseExcel(buffer);
+      if (parsed.acts.length) { acts = parsed.acts; method = 'excel'; }
+      else {
+        if (!db.anthropic_api_key) throw new Error('Could not detect columns and no Anthropic API key is configured for fallback.');
+        _rlaProgress('Layout unclear \u2014 using AI on the sheet\u2026');
+        acts = await _gcCallAI([{ type: 'text',
+          text: _gcSchemaPrompt(_gcContext()) + '\n\nSCHEDULE ROWS (CSV):\n' + parsed.csv.slice(0, GC_MAX_CHARS_PER_CALL) }]);
+        method = 'ai';
+      }
+    } else {
+      if (!db.anthropic_api_key) throw new Error('No Anthropic API key is configured in kmi_settings.');
+      if (!window.pdfjsLib) throw new Error('PDF reader library failed to load.');
+      _rlaProgress('Reading the PDF text layer\u2026');
+      var res = await _gcPageTexts(buffer);
+      var pages = res.pages;
+      var withText = pages.filter(function(x){ return x.hasText; });
+      var noText = pages.filter(function(x){ return !x.hasText; });
+      method = (withText.length === pages.length) ? 'text' : (withText.length === 0 ? 'raster' : 'text');
+      var ctx = _gcContext();
+      if (withText.length) {
+        var batches = [], cur = [], cl = 0;
+        withText.forEach(function(pg){
+          var block = '\n--- PAGE ' + pg.n + ' ---\n' + pg.text;
+          if (cl + block.length > GC_MAX_CHARS_PER_CALL && cur.length) { batches.push(cur); cur = []; cl = 0; }
+          cur.push(block); cl += block.length;
+        });
+        if (cur.length) batches.push(cur);
+        for (var b = 0; b < batches.length; b++) {
+          _rlaProgress('Extracting \u2014 batch ' + (b + 1) + ' of ' + batches.length + '\u2026');
+          acts = acts.concat(await _gcCallAI([{ type: 'text',
+            text: _gcSchemaPrompt(ctx) + '\n\nSCHEDULE TEXT:\n' + batches[b].join('\n') }]));
+        }
+      }
+      if (noText.length) {
+        var take = noText.slice(0, GC_MAX_RASTER_PAGES);
+        for (var k = 0; k < take.length; k++) {
+          _rlaProgress('Reading page ' + take[k].n + ' as an image\u2026');
+          var b64 = await _gcRasterPage(res.pdf, take[k].n);
+          acts = acts.concat(await _gcCallAI([
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } },
+            { type: 'text', text: _gcSchemaPrompt(ctx) }]));
+        }
+      }
+    }
+    if (!acts.length) throw new Error('No activities were extracted.');
+
+    _rlaProgress('Matching to your tasks\u2026');
+    var lines = _gcBuildRows(acts, p);   // hint corpus + prod-estimate → KMI flag
+    _rlaMatchTasks(lines);               // link each line to a native task
+
+    var wkStart = dataDate ? _laMondayOf(dataDate) : _laDefaultWeek();
+    var me = (typeof _currentUser !== 'undefined' && _currentUser) ? (_currentUser.email || String(_currentUser.id)) : null;
+    var nm = (typeof _currentUser !== 'undefined' && _currentUser) ? (_currentUser.name || _currentUser.email || '') : '';
+    var rec = {
+      id: _schNewId('gla'), project_id: String(p.id), schedule_id: _laScheduleId(),
+      source_gc: null, data_date: dataDate, week_start: wkStart, horizon_weeks: horizon,
+      source_filename: att.name, source_format: (isExcel ? (nameLc.endsWith('.xls') ? 'xls' : 'xlsx') : 'pdf'),
+      storage_bucket: PROJECT_FILES_BUCKET, storage_path: att.path,
+      extraction_method: method, page_count: null,
+      lines: lines, line_count: lines.length,
+      matched_count: lines.filter(function(l){ return l.matchedTaskId; }).length,
+      kmi_line_count: lines.filter(function(l){ return l.kmi; }).length,
+      imported_by_user_id: me, imported_by_name: nm, imported_at: new Date().toISOString()
+    };
+    _rlaProgress('Saving\u2026');
+    var r = await supabaseClient.from('kmi_gc_lookaheads').upsert(rec);
+    if (r.error) throw r.error;
+    _rlaList.unshift(rec); _rlaCur = rec; _rlaLines = rec.lines.slice();
+    _rlaBusy = ''; _rlaScreen = 'review';
+    if (typeof showToast === 'function') showToast('Extracted ' + lines.length + ' lines from ' + att.name + '.', 'success');
+    _schRender();
+  } catch (e) {
+    _rlaBusy = ''; _schErr(e, 'Look-ahead import failed'); _schRender();
+  }
+}
+
+function _rlaMatchTasks(lines) {
+  var leafs = _schLeafTasks();
+  var byAct = {}, byName = {};
+  leafs.forEach(function(t){
+    if (t.gcActivityId) byAct[String(t.gcActivityId)] = t;
+    var nm = _gcNorm(t.name || ''); if (nm && !byName[nm]) byName[nm] = t;
+  });
+  lines.forEach(function(l){
+    var t = null, via = '', conf = 0;
+    if (l.activityId && byAct[String(l.activityId)]) { t = byAct[String(l.activityId)]; via = 'linked \u00b7 activityId'; conf = 1; }
+    else { var nm = byName[_gcNorm(l.name || '')]; if (nm) { t = nm; via = 'name match'; conf = 0.7; } }
+    l.matchedTaskId = t ? String(t.id) : null;
+    l.matchedTaskName = t ? (t.name || '') : '';
+    l.matchVia = via; l.matchConf = conf;
+  });
+}
+
+// ── Review / match ────────────────────────────────────────────────────────
+function _rlaReviewHtml() {
+  var cur = _rlaCur;
+  var matched = _rlaLines.filter(function(l){ return l.matchedTaskId; }).length;
+  var unmatched = _rlaLines.length - matched;
+  var head = '<div class="sch-bar"><button class="btn btn-sm" onclick="rlaGo(\'list\')">\u2190 Received list</button>' +
+    '<span class="tbdg">' + _gcEsc(cur ? (cur.source_filename || '') : '') + ' \u00b7 ' + _rlaLines.length + ' lines</span>' +
+    '<div style="flex:1"></div><button class="btn btn-p btn-sm" onclick="rlaGo(\'variance\')">Continue to variance \u2192</button></div>';
+  var chips = '<div class="rla-bar" style="margin:0">' +
+    '<span class="rla-chip' + (_rlaFilter === 'all' ? ' on' : '') + '" onclick="rlaSetFilter(\'all\')">All ' + _rlaLines.length + '</span>' +
+    '<span class="rla-chip' + (_rlaFilter === 'matched' ? ' on' : '') + '" onclick="rlaSetFilter(\'matched\')">Matched ' + matched + '</span>' +
+    '<span class="rla-chip' + (_rlaFilter === 'unmatched' ? ' on' : '') + '" onclick="rlaSetFilter(\'unmatched\')">Unmatched ' + unmatched + '</span></div>';
+  return head + '<div class="card"><div class="ch"><div class="ct">Match received lines to your tasks</div>' + chips + '</div>' +
+    _rlaLineTable() +
+    '<div style="font-size:12px;color:#888;line-height:1.6;padding:12px 0 2px">Exact activity-ID links match first; the rest fall to name similarity. ' +
+    'Toggle KMI scope and assign a task for anything unmatched \u2014 changes persist to this look-ahead.</div></div>';
+}
+function _rlaLineTable() {
+  var leafs = _schLeafTasks();
+  var vis = _rlaLines.filter(function(l){
+    if (_rlaFilter === 'matched')   return !!l.matchedTaskId;
+    if (_rlaFilter === 'unmatched') return !l.matchedTaskId;
+    return true;
+  });
+  var rows = vis.map(function(l){
+    var idx = _rlaLines.indexOf(l);
+    var mcell;
+    if (l.matchedTaskId) {
+      mcell = '<div style="font-weight:600">' + _gcEsc(l.matchedTaskName || '') + '</div>' +
+              '<div style="font-size:11px;color:#aab2bc">' + _gcEsc(l.matchVia || '') + '</div>';
+    } else {
+      var opts = '<option value="">\u2014 unmatched \u2014</option>' +
+        leafs.map(function(t){ return '<option value="' + _gcEsc(String(t.id)) + '">' + _gcEsc(t.name || '') + '</option>'; }).join('');
+      mcell = '<select onchange="rlaAssign(' + idx + ',this.value)">' + opts + '</select>';
+    }
+    var conf = l.matchedTaskId
+      ? (l.matchConf >= 1 ? '<span class="rla-conf hi">Linked</span>' : '<span class="rla-conf md">Name</span>')
+      : '<span class="rla-conf no">\u2014</span>';
+    var sTxt = _gcISO(l.s) ? _schFmt(l.s) : (l.rawS || '\u2014');
+    var fTxt = _gcISO(l.f) ? _schFmt(l.f) : (l.rawF || '\u2014');
+    return '<tr class="' + (l.kmi ? '' : 'rla-non') + '">' +
+      '<td><div class="rla-tog' + (l.kmi ? ' on' : '') + '" onclick="rlaFlip(' + idx + ')"></div></td>' +
+      '<td><div>' + _gcEsc(l.name || '') + '</div><div style="font-size:11px;color:#aab2bc">' + _gcEsc(l.activityId || '') + '</div></td>' +
+      '<td>' + sTxt + ' \u2192 ' + fTxt + '</td>' +
+      '<td>' + mcell + '</td><td>' + conf + '</td></tr>';
+  }).join('');
+  return '<table class="rla-tbl"><thead><tr><th style="width:44px">KMI</th><th>GC activity</th>' +
+    '<th style="width:150px">GC dates</th><th style="width:230px">Matched KMI task</th><th style="width:80px">Match</th></tr></thead>' +
+    '<tbody>' + (rows || '<tr><td colspan="5" style="text-align:center;color:#aaa;padding:18px;font-size:12px">Nothing in this filter.</td></tr>') + '</tbody></table>';
+}
+function rlaFlip(i) { var l = _rlaLines[i]; if (!l) return; l.kmi = !l.kmi; l.reviewed = true; _rlaPersist(); _laRerender(); }
+function rlaAssign(i, taskId) {
+  var l = _rlaLines[i]; if (!l) return;
+  if (taskId) {
+    var t = _schFindT(taskId);
+    l.matchedTaskId = String(taskId); l.matchedTaskName = t ? (t.name || '') : '';
+    l.matchVia = 'manual assign'; l.matchConf = 0.9; l.kmi = true;
+  } else {
+    l.matchedTaskId = null; l.matchedTaskName = ''; l.matchVia = ''; l.matchConf = 0;
+  }
+  l.reviewed = true; _rlaPersist(); _laRerender();
+}
+async function _rlaPersist() {
+  if (!_rlaCur || !supabaseClient) return;
+  _rlaCur.lines = _rlaLines;
+  _rlaCur.matched_count = _rlaLines.filter(function(l){ return l.matchedTaskId; }).length;
+  _rlaCur.kmi_line_count = _rlaLines.filter(function(l){ return l.kmi; }).length;
+  _rlaCur.updated_at = new Date().toISOString();
+  try { var r = await supabaseClient.from('kmi_gc_lookaheads').upsert(_rlaCur); if (r.error) throw r.error; }
+  catch (e) { _schErr(e, 'Could not save review'); }
+}
+
+// ── Variance (decision 4-B) ───────────────────────────────────────────────
+function _rlaVarianceHtml() {
+  var cur = _rlaCur, lines = _rlaLines;
+  var head = '<div class="sch-bar"><button class="btn btn-sm" onclick="rlaGo(\'review\')">\u2190 Review</button>' +
+    '<span class="tbdg">' + (cur && cur.week_start ? 'Wk of ' + _laMD(cur.week_start) : '') + ' \u00b7 ' + (cur ? (cur.horizon_weeks || '?') : '?') + '-week</span></div>';
+
+  var matchedIds = {}; lines.forEach(function(l){ if (l.matchedTaskId) matchedIds[String(l.matchedTaskId)] = true; });
+  var out = [];
+  lines.forEach(function(l){
+    if (!l.matchedTaskId) return;
+    var t = _schFindT(l.matchedTaskId); if (!t) return;
+    var dl = _gcDayDiff(l.s, t.start);
+    var state = (dl === null) ? 'same' : (dl > 0 ? 'late' : (dl < 0 ? 'early' : 'same'));
+    var label = (dl === null) ? '\u2014' : (dl === 0 ? 'on GC dates' : (dl > 0 ? '+' + dl + 'd behind GC' : Math.abs(dl) + 'd ahead of GC'));
+    out.push({ name: t.name, aid: l.activityId,
+      gc: (_gcISO(l.s) ? _schFmt(l.s) : '\u2014') + ' \u2192 ' + (_gcISO(l.f) ? _schFmt(l.f) : '\u2014'),
+      mine: _schFmt(t.start) + ' \u2192 ' + _schFmt(_schTaskFinish(t)), state: state, label: label });
+  });
+  lines.forEach(function(l){
+    if (l.matchedTaskId || !l.kmi) return;
+    out.push({ name: l.name, aid: l.activityId,
+      gc: (_gcISO(l.s) ? _schFmt(l.s) : '\u2014') + ' \u2192 ' + (_gcISO(l.f) ? _schFmt(l.f) : '\u2014'),
+      mine: '\u2014', state: 'added', label: 'added by GC' });
+  });
+  if (cur && cur.week_start) {
+    var ws = cur.week_start, we = _schAddDays(cur.week_start, (cur.horizon_weeks || 3) * 7 - 1);
+    _schLeafTasks().forEach(function(t){
+      if (!t.isKmiScope || !t.start || matchedIds[String(t.id)]) return;
+      var fin = _schTaskFinish(t); if (!fin || fin < ws || t.start > we) return;
+      out.push({ name: t.name, aid: '(ours)', gc: '\u2014',
+        mine: _schFmt(t.start) + ' \u2192 ' + _schFmt(fin), state: 'dropped', label: 'dropped from LA' });
+    });
+  }
+
+  var visible = out.filter(function(o){ return _rlaVarFilter === 'all' || o.state !== 'same'; });
+  var rows = visible.map(function(o){
+    return '<tr><td><div style="font-weight:600">' + _gcEsc(o.name) + '</div>' +
+      '<div style="font-size:11px;color:#aab2bc">' + _gcEsc(o.aid) + '</div></td>' +
+      '<td>' + o.gc + '</td><td>' + o.mine + '</td>' +
+      '<td><span class="rla-delta ' + o.state + '">' + o.label + '</span></td></tr>';
+  }).join('');
+  var chips = '<div class="rla-bar" style="margin:0">' +
+    '<span class="rla-chip' + (_rlaVarFilter === 'all' ? ' on' : '') + '" onclick="rlaSetVar(\'all\')">All</span>' +
+    '<span class="rla-chip' + (_rlaVarFilter === 'off' ? ' on' : '') + '" onclick="rlaSetVar(\'off\')">Off-plan</span></div>';
+  return head + '<div class="card"><div class="ch"><div class="ct">Your schedule vs the GC\u2019s look-ahead</div>' + chips + '</div>' +
+    '<table class="rla-tbl"><thead><tr><th>Task / activity</th><th style="width:150px">GC look-ahead</th>' +
+    '<th style="width:150px">Your schedule</th><th style="width:170px">Variance</th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="4" style="text-align:center;color:#aaa;padding:22px;font-size:12px">No linked tasks in this look-ahead.</td></tr>') +
+    '</tbody></table>' +
+    '<div style="font-size:12px;color:#888;line-height:1.6;padding:12px 0 2px">Behind / ahead compare matched dates; ' +
+    'added = on the GC look-ahead with no task our side; dropped = an in-window KMI task the GC left off. Display-only.</div></div>';
+}
+
+// ── Load ──────────────────────────────────────────────────────────────────
+function _rlaLoadIfNeeded() {
+  var p = _schCurrentProject(); if (!p) return;
+  if (String(_rlaLoadedFor) === String(p.id)) return;
+  _rlaLoad(p.id);
+}
+async function _rlaLoad(pid) {
+  if (!supabaseClient) { _rlaLoadedFor = pid; return; }
+  try {
+    var r = await supabaseClient.from('kmi_gc_lookaheads').select('*')
+      .eq('project_id', String(pid)).order('data_date', { ascending: false }).limit(50);
+    if (r.error) throw r.error;
+    _rlaList = r.data || [];
+    _rlaLoadedFor = String(pid);
+    if (_laMode === 'rec' && _rlaScreen === 'list' && !_rlaBusy) { var host = g('nprj-schedule-section'); if (host) _schRender(); }
+  } catch (e) { _schErr(e, 'Received look-aheads not loaded'); }
+}
+
 
 
 // ════════════════════════════════════════════════════════════════════════
@@ -48417,7 +48856,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-13-la2';
+var KMI_BUILD = '2026-08-13-la3';
 
 var _kmiSessionId = (function(){
   try {
