@@ -46566,7 +46566,7 @@ function _schTableHtml() {
       var chip = t.prodLineId
         ? '<span class="sch-link-chip">\u{1F517} ' + escapeHtml(_schProdLineLabel(t.prodLineId)) + '</span>'
         : '<span class="sch-link-chip none">Not linked</span>';
-      var mpd = _schMenPerDay(t);
+      var mpd = _schMenPerDay(t), crew = _taskCrewPerDay(t), crewOv = (t.crewOverride != null && t.crewOverride !== '');
       rows += '<tr class="sch-task-row">' +
         '<td><div style="padding-left:22px">' +
           (ed ? '<input class="sch-cell" value="' + escapeHtml(t.name) + '" onchange="schSetName(\'' + t.id + '\',this.value)">'
@@ -46581,8 +46581,8 @@ function _schTableHtml() {
         (mp ? '<td class="sch-mp">' + chip + '</td>' +
               '<td class="sch-mp" style="text-align:right">' + (ed ? '<input class="sch-cell num" type="number" min="0" value="' +
                 t.md + '" onchange="schSetMd(\'' + t.id + '\',this.value)">' : t.md) + '</td>' +
-              '<td class="sch-mp" style="text-align:right;font-weight:600;color:' + (mpd > 8 ? '#A32D2D' : '#1a1a1a') + '">' +
-                (mpd ? mpd.toFixed(1) : '\u2014') + '</td>' : '') +
+              '<td class="sch-mp" style="text-align:right">' +
+                (ed ? '<input class="sch-cell num" type="number" min="0" step="0.5" value="' + (crew || '') + '"' + (crewOv ? ' style="color:#A32D2D;font-weight:600"' : '') + ' title="' + (crewOv ? 'Manual override' : 'Calculated: (MD \u00f7 dur) \u00d7 crew ratio') + '" onchange="schSetCrew(\'' + t.id + '\',this.value)">' : (crew ? crew : '\u2014')) + '</td>' : '') +
         '<td style="text-align:right">' + (ed ? '<input class="sch-cell num" type="number" min="0" max="100" value="' +
                 t.pct + '" onchange="schSetPct(\'' + t.id + '\',this.value)">' : t.pct + '%') + '</td>' +
         '<td style="text-align:right">' +
@@ -46640,6 +46640,10 @@ async function schSetDur(id, v) {
 async function schSetMd(id, v) {
   var t = _schFindT(id); if (!t) return;
   _schSnapshot(); t.md = Math.max(0, parseFloat(v) || 0); await _schCommit(t);
+}
+async function schSetCrew(id, v) {
+  var t = _schFindT(id); if (!t) return;
+  _schSnapshot(); t.crewOverride = (v === '' || v == null) ? null : Math.max(0, parseFloat(v)); await _schCommit(t);
 }
 async function schSetPct(id, v) {
   var t = _schFindT(id); if (!t) return;
@@ -46852,8 +46856,8 @@ function _schDrawGantt() {
             : '<div class="drv">' + _schFmt(t.start) + '</div><div class="drv">' + _schFmt(f) + '</div>' +
               '<div class="drv num">' + t.dur + '</div>') +
         '</div>';
-      var mpd = _schMenPerDay(t);
-      var lbl = (_schShowMp && t.md) ? (mpd ? mpd.toFixed(1) + ' men/day' : '')
+      var mpd = _schMenPerDay(t), crew = _taskCrewPerDay(t);
+      var lbl = (_schShowMp && t.md) ? (crew ? crew + ' men/day' : '')
                                      : (schWorkDaysBetween(t.start, f, t) + ' wd');
       rh += '<div class="sch-grow" style="width:' + W + 'px">' + shade +
         _schBar(t.start, f, from, px, false, t.pct, lbl, t.id) + '</div>';
@@ -48100,11 +48104,29 @@ function _mpFmt(s){ var d = _mpD(s); return (d.getMonth() + 1) + '/' + d.getDate
 function _mpToday(){ return _mpS(new Date()); }
 function _mpMonday(s){ var g = (_mpD(s).getDay() + 6) % 7; return _mpAdd(s, -g); }
 
-function _mpCrew(t){
+// Crew factor = total crew per mason, from the task's linked production-estimate
+// line (line.crewId -> crewTemplates -> (masons+laborers)/masons), falling back
+// to the estimate's default crew. Est man-days are mason-days, so
+// men/day = (MD/dur) x factor yields the full crew (masons + laborers).
+function _crewFactor(t){
+  var proj = (typeof getProj === 'function') ? getProj(t.projectId) : null;
+  if (!proj) proj = ((typeof db !== 'undefined' && db.projects) ? db.projects : []).filter(function(x){ return String(x.id) === String(t.projectId); })[0];
+  var est = proj && proj.prodEstimate;
+  if (!est || !Array.isArray(est.lines)) return 1;
+  var line = t.prodLineId ? est.lines.filter(function(l){ return String(l.id) === String(t.prodLineId); })[0] : null;
+  var crewId = (line && line.crewId) || est.defaultCrewId;
+  var crew = (typeof db !== 'undefined' && db.crewTemplates) ? db.crewTemplates.filter(function(c){ return String(c.id) === String(crewId); })[0] : null;
+  if (!crew || !Number(crew.masons)) return 1;
+  return (Number(crew.masons) + Number(crew.laborers || 0)) / Number(crew.masons);
+}
+// Total crew/day: manual override wins; else planned (MD/dur) x crew factor.
+function _taskCrewPerDay(t){
   if (t.crewOverride != null && t.crewOverride !== '') return Number(t.crewOverride);
   var dur = Number(t.dur) || 0, md = Number(t.md) || 0;
-  return dur > 0 ? Math.round(md / dur) : 0;
+  if (dur <= 0) return 0;
+  return Math.round((md / dur) * _crewFactor(t));
 }
+function _mpCrew(t){ return _taskCrewPerDay(t); }
 function _mpTaskDays(t){
   if (t._days) return t._days;
   var out = {}; if (!t.start) { t._days = out; return out; }
@@ -48153,7 +48175,7 @@ async function _mpLoad(){
       return { id: x.id, projectId: x.project_id, name: x.name || '',
         start: String(x.start_date).slice(0, 10), dur: Number(x.duration_days) || 1,
         md: Number(x.est_man_days) || 0, pct: Number(x.percent_complete) || 0,
-        crewOverride: (x.crew_override == null ? null : Number(x.crew_override)), _days: null };
+        crewOverride: (x.crew_override == null ? null : Number(x.crew_override)), prodLineId: x.prod_line_id || null, _days: null };
     });
   _mpLoaded = true;
 }
@@ -48338,11 +48360,7 @@ async function mpPublish(){
 }
 
 // Crew value for the look-ahead crew/day stub (decision 6): override wins, else md/dur.
-function _laStubCrew(t){
-  if (t.crewOverride != null && t.crewOverride !== '') return Math.round(Number(t.crewOverride));
-  var dur = Number(t.dur) || 0, md = Number(t.md) || 0;
-  return dur > 0 ? Math.round(md / dur) : '\u2014';
-}
+function _laStubCrew(t){ var c = _taskCrewPerDay(t); return c ? c : '\u2014'; }
 
 function _mpStyle(){
   return '<style id="mp-css">' +
@@ -49195,7 +49213,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-17-mp4';
+var KMI_BUILD = '2026-08-17-mp5';
 
 var _kmiSessionId = (function(){
   try {
