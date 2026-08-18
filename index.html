@@ -46453,6 +46453,97 @@ function schGo(t) {
 function schSetView(v) { _schView = v; _schRender(); }
 function schSetZoom(z) { _schZoom = z; _schRender(); }
 function schToggleMp(v) { _schShowMp = !!v; _schRender(); }
+
+// Print the project schedule as a week-level timeline (11x17 landscape):
+// fixed Task/Start/Finish/Dur/% columns, phase groups, task bars shaded across
+// the weeks each task is active, page breaks on whole-week boundaries.
+function schPrint(){
+  if (!_schPhases().length && !_schTasks.length){ alert('No schedule to print.'); return; }
+  var r = _schProjRange();
+  if (!r.start || !r.finish){ alert('No schedule range to print.'); return; }
+  var first = _laMondayOf(r.start), weeks = [], w = first, guard = 0;
+  while (w <= r.finish && guard++ < 520){ weeks.push(w); w = _schAddDays(w, 7); }
+  if (!weeks.length) weeks.push(first);
+
+  var perPage = 26;  // ~half a year of weeks per 11x17 landscape page
+  var pages = [];
+  for (var s = 0; s < weeks.length; s += perPage) pages.push([s, Math.min(weeks.length, s + perPage)]);
+  var bodyHtml = pages.map(function(pg, pi){
+    return _schPrintTable(weeks, pg[0], pg[1]) + (pi < pages.length - 1 ? '<div class="scp-pgbreak"></div>' : '');
+  }).join('');
+
+  var p = _schCurrentProject();
+  var title = (p && p.name ? ((p.number ? p.number + ' ' : '') + p.name) : 'Project') +
+    ' \u2014 Schedule  \u00b7  ' + _schFmt(r.start) + ' to ' + _schFmt(r.finish);
+
+  var css = '<style>' +
+    '@page{size:17in 11in;margin:0.4in}' +
+    '.scp-title{font:700 13px/1.3 Arial,sans-serif;margin:0 0 8px;color:#111}' +
+    '.scp-pgbreak{page-break-after:always;height:0}' +
+    '.scp-tbl{border-collapse:collapse;width:100%;font:8px/1.1 Arial,sans-serif;margin-bottom:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+    '.scp-tbl th,.scp-tbl td{border:0.5px solid #bbb;padding:1px 2px;text-align:center}' +
+    '.scp-tbl .t{text-align:left;width:180px;max-width:180px;overflow:hidden;white-space:nowrap}' +
+    '.scp-tbl .c{width:30px}' +
+    '.scp-tbl .wk{font-weight:700;background:#eee}' +
+    '.scp-tbl thead{display:table-header-group}' +
+    '.scp-tbl tr.ph td{font-weight:700;background:#e6edf2}' +
+    '.scp-tbl tr.ph td.t{text-align:left}' +
+    '.scp-tbl td.on{background:#2f6f8f}' +
+    '.scp-tbl td.on.done{background:#3f7f5b}' +
+    '.scp-tbl td.ph-on{background:#c9d6df}' +
+    '</style>';
+
+  var host = document.getElementById('sch-print-host');
+  if (!host){ host = document.createElement('div'); host.id = 'sch-print-host'; document.body.appendChild(host); }
+  host.innerHTML = css + '<div class="scp-title">' + escapeHtml(title) + '</div>' + bodyHtml;
+  host.style.display = 'block';
+
+  var saved = [];
+  Array.prototype.slice.call(document.body.children).forEach(function(el){
+    if (el !== host){ saved.push([el, el.style.display]); el.style.display = 'none'; }
+  });
+  function _schRestore(){ saved.forEach(function(pr){ pr[0].style.display = pr[1]; }); host.style.display = 'none'; window.removeEventListener('afterprint', _schRestore); }
+  window.addEventListener('afterprint', _schRestore);
+  window.print();
+  setTimeout(function(){ if (host.style.display === 'block') _schRestore(); }, 3000);
+}
+
+function _schWeekActive(t, ws){
+  var f = _schTaskFinish(t);
+  if (!t.start || !f) return false;
+  return t.start <= _schAddDays(ws, 6) && f >= ws;
+}
+
+function _schPrintTable(weeks, fw, tw){
+  var head = '<tr><th class="t">Task</th><th class="c">Start</th><th class="c">Finish</th><th class="c">Dur</th><th class="c">%</th>';
+  for (var i = fw; i < tw; i++) head += '<th class="wk c">' + _laMD(weeks[i]) + '</th>';
+  head += '</tr>';
+
+  var rows = '';
+  _schPhases().forEach(function(ph){
+    var rr = _schPhaseRoll(ph);
+    rows += '<tr class="ph"><td class="t">' + escapeHtml(ph.name) + '</td><td class="c"></td><td class="c"></td><td class="c"></td><td class="c"></td>';
+    for (var i = fw; i < tw; i++){
+      var pon = rr.start && rr.finish && rr.start <= _schAddDays(weeks[i], 6) && rr.finish >= weeks[i];
+      rows += '<td class="c' + (pon ? ' ph-on' : '') + '"></td>';
+    }
+    rows += '</tr>';
+    _schChildren(ph.id).forEach(function(t){
+      var f = _schTaskFinish(t), done = (Number(t.pct) || 0) >= 100;
+      rows += '<tr><td class="t">' + escapeHtml(t.name) + '</td>' +
+        '<td class="c">' + (t.start ? _laMD(t.start) : '') + '</td>' +
+        '<td class="c">' + (f ? _laMD(f) : '') + '</td>' +
+        '<td class="c">' + (Number(t.dur) || 0) + '</td>' +
+        '<td class="c">' + (Number(t.pct) || 0) + '</td>';
+      for (var i = fw; i < tw; i++){
+        var on = _schWeekActive(t, weeks[i]);
+        rows += '<td class="c' + (on ? ' on' + (done ? ' done' : '') : '') + '"></td>';
+      }
+      rows += '</tr>';
+    });
+  });
+  return '<table class="scp-tbl"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table>';
+}
 function _schZpx() { return _schZoom === 'days' ? 24 : 9; }
 
 // ── Schedule sub-tab ────────────────────────────────────────────────────
@@ -46500,6 +46591,7 @@ function _schScheduleHtml() {
       '<button class="' + (_schView === 'table' ? 'active' : '') + '" onclick="schSetView(\'table\')">Table</button>' +
       '<button class="' + (_schView === 'gantt' ? 'active' : '') + '" onclick="schSetView(\'gantt\')">Gantt</button>' +
     '</div>' +
+    '<button class="btn btn-sm" onclick="schPrint()">Print</button>' +
     '<label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;' +
       'font-size:12px;color:#666;font-weight:500;cursor:pointer;width:auto">' +
       '<input type="checkbox" style="width:auto" ' + (_schShowMp ? 'checked' : '') +
@@ -48205,7 +48297,7 @@ function _mpShell(inner){
     return '<option' + (k === _mpPM ? ' selected' : '') + '>' + _mpEsc(k) + '</option>'; }).join('');
   return _mpStyle() +
     '<div class="ph"><div><h1>Manpower</h1><div class="sub">Weekly resource planning \u2014 all projects</div><div class="stripe"></div></div>' +
-      '<button class="btn btn-p" onclick="mpPublish()">Publish plan</button></div>' +
+      '<button class="btn" onclick="mpPrint()" style="margin-right:8px">Print</button><button class="btn btn-p" onclick="mpPublish()">Publish plan</button></div>' +
     '<div class="mp-ctrls">' +
       '<div class="mp-fld"><label>Week starting</label><input type="date" id="mp-wk" value="' + _mpAnchor + '" onchange="mpSetWk(this.value)"></div>' +
       '<div class="mp-fld"><label>Horizon (wks)</label><select id="mp-hz" onchange="mpSetHz(this.value)">' + hOpts + '</select></div>' +
@@ -48254,8 +48346,8 @@ function _mpGridHtml(){
   var fixCols = 5; // Task, Start, End, Dur, Crew
 
   // header
-  var h1 = '<tr><th class="fx task">Project / Task</th><th class="fx st">Start</th><th class="fx en">End</th><th class="fx du">Dur</th><th class="fx cr">Crew</th>';
-  var h2 = '<tr><th class="fx task"></th><th class="fx st"></th><th class="fx en"></th><th class="fx du"></th><th class="fx cr"></th>';
+  var h1 = '<tr><th class="fx task" rowspan="2">Project / Task</th><th class="fx st" rowspan="2">Start</th><th class="fx en" rowspan="2">End</th><th class="fx du" rowspan="2">Dur</th><th class="fx cr" rowspan="2">Crew</th>';
+  var h2 = '<tr>';
   for (var w = 0; w < n; w++) {
     h1 += '<th class="wk" colspan="' + (isDay ? 7 : 1) + '">Wk ' + _mpMD(_mpAdd(_mpAnchor, w * 7)) + '</th>';
     if (isDay) { for (var di = 0; di < 7; di++) { var dd = _mpAdd(_mpAnchor, w * 7 + di);
@@ -48270,8 +48362,12 @@ function _mpGridHtml(){
     else { for (var w2 = 0; w2 < n; w2++) s += '<td class="dc ws">' + valFn('week', w2) + '</td>'; }
     return s;
   }
-  var totRow = '<tr class="sum"><td class="fx task">DAILY TOTAL</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>' +
-    cellsFor(function(kind, i){ if (kind === 'day') return dayTot[i] || ''; var s = 0, c = 0; for (var d = 0; d < 7; d++){ var dt = dayTot[i * 7 + d] || 0; if (!_mpWe(_mpAdd(_mpAnchor, i * 7 + d))) { s += dt; c++; } } return c ? Math.round(s / c) : ''; }) + '</tr>';
+  var totRow = '<tr class="sum"><td class="fx task">DAILY TOTAL</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>';
+  if (isDay) { for (var _ti = 0; _ti < days; _ti++) { var _td = _mpAdd(_mpAnchor, _ti), _tv = dayTot[_ti] || 0, _tc = _mpTotClass(_tv);
+    totRow += '<td class="dc' + (_ti % 7 === 0 ? ' ws' : '') + (_mpWe(_td) ? ' we' : '') + (_tc ? ' ' + _tc : '') + '">' + (_tv || '') + '</td>'; } }
+  else { for (var _tw = 0; _tw < n; _tw++) { var _s = 0, _c = 0; for (var _d = 0; _d < 7; _d++){ var _dv = dayTot[_tw * 7 + _d] || 0; if (!_mpWe(_mpAdd(_mpAnchor, _tw * 7 + _d))) { _s += _dv; _c++; } } var _wv = _c ? Math.round(_s / _c) : 0, _wc = _mpTotClass(_wv);
+    totRow += '<td class="dc ws' + (_wc ? ' ' + _wc : '') + '">' + (_wv || '') + '</td>'; } }
+  totRow += '</tr>';
   var peakRow = '<tr class="sum peak"><td class="fx task">WEEKLY PEAK</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>' +
     (isDay ? (function(){ var s = ''; for (var w = 0; w < n; w++) for (var di = 0; di < 7; di++) s += '<td class="dc' + (di === 0 ? ' ws' : '') + '">' + (di === 0 ? weekPeak[w] : '') + '</td>'; return s; })()
            : (function(){ var s = ''; for (var w = 0; w < n; w++) s += '<td class="dc ws">' + weekPeak[w] + '</td>'; return s; })()) + '</tr>';
@@ -48362,6 +48458,79 @@ async function mpPublish(){
 // Crew value for the look-ahead crew/day stub (decision 6): override wins, else md/dur.
 function _laStubCrew(t){ var c = _taskCrewPerDay(t); return c ? c : '\u2014'; }
 
+// Daily-total color band: green <15, orange 15-20, red 21+.
+function _mpTotClass(v){ return v >= 21 ? 'mp-hi' : (v >= 15 ? 'mp-md' : (v > 0 ? 'mp-lo' : '')); }
+
+// Print the Weekly Resource Planning grid (respects current filters), fixed
+// left columns repeated per page, whole weeks per page (clean week breaks),
+// default 11x17 landscape.
+function mpPrint(){
+  var vis = _mpVisProjects();
+  if (!vis.length) { alert('Nothing to print for this filter.'); return; }
+  var n = _mpHorizon, weeksPerPage = 8;   // ~8 weeks fit an 11x17 landscape page
+  _mpTasks.forEach(function(t){ t._days = null; });
+  var days = n * 7, dayTot = [];
+  for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i), tot = 0;
+    vis.forEach(function(p){ p.tasks.forEach(function(t){ if (_mpTaskDays(t)[dt]) tot += _mpCrew(t); }); }); dayTot.push(tot); }
+  var pages = [];
+  for (var s = 0; s < n; s += weeksPerPage) pages.push([s, Math.min(n, s + weeksPerPage)]);
+  var bodyHtml = pages.map(function(pg, pi){
+    return _mpPrintTable(vis, pg[0], pg[1], dayTot) + (pi < pages.length - 1 ? '<div class="mp-pgbreak"></div>' : '');
+  }).join('');
+  var scope = (_mpProj !== 'all' && vis[0]) ? ((vis[0].number ? vis[0].number + ' ' : '') + vis[0].name)
+            : (_mpPM !== 'all' ? 'PM ' + _mpPM : 'All projects');
+  var title = 'Weekly Resource Planning \u2014 ' + scope + '  \u00b7  week of ' + _mpFmt(_mpAnchor) + '  \u00b7  ' + n + ' weeks';
+  var host = g('mp-print-host');
+  if (!host) { host = document.createElement('div'); host.id = 'mp-print-host'; document.body.appendChild(host); }
+  host.innerHTML = '<div class="mp-print-title">' + _mpEsc(title) + '</div>' + bodyHtml;
+
+  var saved = [];
+  Array.prototype.slice.call(document.body.children).forEach(function(el){
+    if (el !== host) { saved.push([el, el.style.display]); el.style.display = 'none'; }
+  });
+  host.style.display = 'block';
+  function _mpRestore(){ saved.forEach(function(p){ p[0].style.display = p[1]; }); host.style.display = 'none'; window.removeEventListener('afterprint', _mpRestore); }
+  window.addEventListener('afterprint', _mpRestore);
+  window.print();
+  setTimeout(function(){ if (host.style.display === 'block') _mpRestore(); }, 3000);
+}
+
+function _mpPrintTable(vis, fw, tw, dayTot){
+  var startDay = fw * 7, dayCount = (tw - fw) * 7;
+  var h1 = '<tr><th class="p-task" rowspan="2">Project / Task</th><th class="p-c" rowspan="2">Start</th>' +
+           '<th class="p-c" rowspan="2">End</th><th class="p-c" rowspan="2">Dur</th><th class="p-c" rowspan="2">Crew</th>';
+  var h2 = '<tr>';
+  for (var w = fw; w < tw; w++) {
+    h1 += '<th class="p-wk" colspan="7">Wk ' + _mpMD(_mpAdd(_mpAnchor, w * 7)) + '</th>';
+    for (var di = 0; di < 7; di++) { var dd = _mpAdd(_mpAnchor, w * 7 + di);
+      h2 += '<td class="p-d' + (_mpWe(dd) ? ' we' : '') + (di === 0 ? ' ws' : '') + '">' + _MP_DOW[_mpD(dd).getDay()] + '<br>' + _mpD(dd).getDate() + '</td>'; }
+  }
+  h1 += '</tr>'; h2 += '</tr>';
+
+  var tot = '<tr class="p-sum"><td class="p-task">DAILY TOTAL</td><td class="p-c"></td><td class="p-c"></td><td class="p-c"></td><td class="p-c"></td>';
+  for (var i = 0; i < dayCount; i++) { var gi = startDay + i, dd2 = _mpAdd(_mpAnchor, gi), v = dayTot[gi] || 0, cls = _mpTotClass(v);
+    tot += '<td class="p-d' + (_mpWe(dd2) ? ' we' : '') + (i % 7 === 0 ? ' ws' : '') + (cls ? ' ' + cls : '') + '">' + (v || '') + '</td>'; }
+  tot += '</tr>';
+
+  var rows = '';
+  vis.forEach(function(p){
+    rows += '<tr class="p-proj"><td class="p-task">' + _mpEsc((p.number ? p.number + ' \u2014 ' : '') + p.name) + (p.stage === 'likely' ? ' (LIKELY)' : '') + '</td>' +
+            '<td class="p-c"></td><td class="p-c"></td><td class="p-c"></td><td class="p-c"></td>';
+    for (var i = 0; i < dayCount; i++) { var dd = _mpAdd(_mpAnchor, startDay + i); rows += '<td class="p-d' + (_mpWe(dd) ? ' we' : '') + (i % 7 === 0 ? ' ws' : '') + '"></td>'; }
+    rows += '</tr>';
+    p.tasks.forEach(function(t){
+      var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t);
+      rows += '<tr><td class="p-task">' + _mpEsc(t.name) + '</td>' +
+        '<td class="p-c">' + (t.start ? _mpMD(t.start) : '') + '</td><td class="p-c">' + (fin ? _mpMD(fin) : '') + '</td>' +
+        '<td class="p-c">' + (Number(t.dur) || 0) + '</td><td class="p-c">' + (crew || '') + '</td>';
+      for (var i = 0; i < dayCount; i++) { var dd = _mpAdd(_mpAnchor, startDay + i), on = tdays[dd];
+        rows += '<td class="p-d' + (_mpWe(dd) ? ' we' : '') + (i % 7 === 0 ? ' ws' : '') + (on ? ' on' : '') + '">' + (on ? crew : '') + '</td>'; }
+      rows += '</tr>';
+    });
+  });
+  return '<table class="mp-print-tbl"><thead>' + h1 + h2 + '</thead><tbody>' + tot + rows + '</tbody></table>';
+}
+
 function _mpStyle(){
   return '<style id="mp-css">' +
     '.mp-ctrls{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:flex-end;margin:6px 0 16px}' +
@@ -48412,6 +48581,28 @@ function _mpStyle(){
     '.tn{font-size:12px;color:#243244;font-weight:400}' +
     '.crin{width:42px;font:inherit;font-size:12px;line-height:1;vertical-align:middle;text-align:center;border:1px solid transparent;border-radius:5px;padding:2px;background:transparent;font-weight:700;color:#2f6f8f}' +
     '.crin:hover{border-color:#d4dae1}.crin:focus{border-color:#2f6f8f;background:#fff;outline:none}.crin.ov{color:#b5442e}' +
+    '.crin::-webkit-inner-spin-button,.crin::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}' +
+    '.crin{-moz-appearance:textfield;appearance:textfield}' +
+    '.mp-grid tr.sum td.mp-lo{background:#e7f4e7;color:#2e7d32}' +
+    '.mp-grid tr.sum td.mp-md{background:#fdf1e0;color:#b26a00}' +
+    '.mp-grid tr.sum td.mp-hi{background:#f6e2dc;color:#b5442e}' +
+    '#mp-print-host{display:none}' +
+    '@media print{@page{size:17in 11in;margin:0.4in}' +
+      '.mp-print-title{font:700 13px/1.3 Arial,sans-serif;margin:0 0 8px;color:#111}' +
+      '.mp-pgbreak{page-break-after:always;height:0}' +
+      '.mp-print-tbl{border-collapse:collapse;width:100%;font:8px/1.1 Arial,sans-serif;margin-bottom:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+      '.mp-print-tbl th,.mp-print-tbl td{border:0.5px solid #bbb;padding:1px 2px;text-align:center}' +
+      '.mp-print-tbl .p-task{text-align:left;width:170px;max-width:170px;overflow:hidden;white-space:nowrap}' +
+      '.mp-print-tbl .p-c{width:34px}' +
+      '.mp-print-tbl .p-wk{font-weight:700;background:#eee}' +
+      '.mp-print-tbl .p-d.we{background:#f2f2f2}' +
+      '.mp-print-tbl thead{display:table-header-group}' +
+      '.mp-print-tbl tr.p-sum td{font-weight:700;background:#eef2f5}' +
+      '.mp-print-tbl tr.p-proj td{font-weight:700;background:#e6edf2}' +
+      '.mp-print-tbl td.mp-lo{background:#e7f4e7 !important}' +
+      '.mp-print-tbl td.mp-md{background:#fdf1e0 !important}' +
+      '.mp-print-tbl td.mp-hi{background:#f6e2dc !important}' +
+    '}' +
     '</style>';
 }
 
@@ -49213,7 +49404,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-17-mp5';
+var KMI_BUILD = '2026-08-17-mp7';
 
 var _kmiSessionId = (function(){
   try {
