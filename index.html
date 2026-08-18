@@ -1670,6 +1670,7 @@ tr.gc-line:hover td{background:#fafafa}
     <div class="sb-group-items">
       <div class="ni" onclick="nav('equipment')"><span class="nico">▥</span>Equipment</div>
       <div class="ni" onclick="nav('cost-jobs')"><span class="nico">#</span>Cost Jobs</div>
+      <div class="ni" onclick="nav('manpower')"><span class="nico">▤</span>Manpower</div>
     </div>
   </div>
   <div class="sb-group" data-group="directory">
@@ -2506,6 +2507,8 @@ tr.gc-line:hover td{background:#fafafa}
 
 <!-- CUSTOMERS -->
 <!-- EQUIPMENT BOARD -->
+<div class="pg" id="pg-manpower"></div>
+
 <div class="pg" id="pg-equipment">
   <div class="ph"><div><h1>Equipment</h1><div class="sub">Big equipment across active jobs — machines, rentals, scaffold &amp; winter</div><div class="stripe"></div></div></div>
   <div class="eqb-toolbar">
@@ -5578,6 +5581,7 @@ function nav(page) {
     'new-tm-ticket':  initNewTmTicket,
     cors:             renderCors,
     equipment:        renderEquipment,
+    manpower:         renderManpower,
     'cost-jobs':      renderCostJobs,
     'new-cor':        initNewCor,
     'email-log':      renderEmailLog,
@@ -46204,6 +46208,7 @@ function _schFromSB(r) {
     finish: r.finish_date || null,
     pct: Number(r.percent_complete) || 0,
     md: Number(r.est_man_days) || 0,
+    crewOverride: (r.crew_override == null ? null : Number(r.crew_override)),
     prodLineId: r.prod_line_id || null,
     ex: (r.exceptions && typeof r.exceptions === 'object') ? r.exceptions : {},
     predecessors: Array.isArray(r.predecessors) ? r.predecessors : [],
@@ -46228,6 +46233,7 @@ function _schToSB(t) {
     finish_date: (t.parentId && t.start) ? _schTaskFinish(t) : (t.start || null),
     percent_complete: Number(t.pct) || 0,
     est_man_days: Number(t.md) || 0,
+    crew_override: (t.crewOverride == null || t.crewOverride === '') ? null : Number(t.crewOverride),
     prod_line_id: t.prodLineId || null,
     exceptions: t.ex || {},
     predecessors: Array.isArray(t.predecessors) ? t.predecessors : [],
@@ -47336,7 +47342,7 @@ function _laStyle() {
     '.la-gcbadge{font-size:10px;color:#9aa4b0;font-weight:700}' +
     '.la-tmeta{font-size:11px;color:#7c8794;margin-top:2px}' +
     '.la-gc .la-tname{color:#9aa4b0;font-style:italic}' +
-    '.la-crewcell{text-align:center;color:#b8c0ca;font-size:12px;border-left:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee;background:repeating-linear-gradient(45deg,#fff,#fff 5px,#fafbfc 5px,#fafbfc 10px)}' +
+    '.la-crewcell{text-align:center;color:#5a6672;font-weight:600;font-size:12px;border-left:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee;background:#fff}' +
     '.la-p4{display:block;font-size:9px;letter-spacing:.05em;color:#c7cdd5}' +
     '.la-day{position:relative;height:40px;min-width:30px;width:30px;border-left:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee}' +
     '.la-day.la-wstart{border-left:2px solid #c9d1da}' +
@@ -47389,7 +47395,7 @@ function _laGridHtml() {
               (gc ? '<span class="la-gcbadge"> \u00b7 GC</span>' : '') + '</div>' +
               '<div class="la-tmeta">' + _laMD(t.start) + '\u2013' + _laMD(fin) + ' \u00b7 ' +
               (Number(t.dur) || 0) + 'wd \u00b7 ' + (Number(t.pct) || 0) + '%</div></td>';
-      body += '<td class="la-crewcell">' + (!gc && t.md ? Number(t.md) : '\u2014') + '<span class="la-p4">P4</span></td>';
+      body += '<td class="la-crewcell">' + (gc ? '\u2014' : _laStubCrew(t)) + '</td>';
       for (var w2 = 0; w2 < n; w2++) {
         for (var d2 = 0; d2 < 7; d2++) {
           var dd2 = _schAddDays(anchor, w2 * 7 + d2), block = !schIsWorkDay(dd2, null);
@@ -48058,6 +48064,339 @@ async function _rlaLoad(pid) {
     if (_laMode === 'rec' && _rlaScreen === 'list' && !_rlaBusy) { var host = g('nprj-schedule-section'); if (host) _schRender(); }
   } catch (e) { _schErr(e, 'Received look-aheads not loaded'); }
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// WEEKLY RESOURCE PLANNING — Manpower (Schedule P4, company-wide)
+// ────────────────────────────────────────────────────────────────────────
+// Top-level, field-facing view under Resources -> Manpower. Aggregates
+// every project's native schedule tasks into one grid modeled on
+// 23-Weekly_Resource_Planning.xlsx: projects grouped w/ PM lead column,
+// Start/End/Duration/Crew, daily-total + weekly-peak rows, day/week toggle,
+// horizons 2/3/4/6/8/12/16, likely-award shading, by-project distribution
+// chart. Crew/day derives from est_man_days/duration_days with an editable
+// override (crew_override on the task) that also feeds the look-ahead stub.
+// "Publish" flip-then-inserts each project's current snapshot to
+// kmi_manpower_snapshots. Calendar here is a company Mon-Fri work week
+// (matches the sheet); per-project holidays are a later refinement.
+// ════════════════════════════════════════════════════════════════════════
+var _mpAnchor = null;      // 'YYYY-MM-DD' Monday
+var _mpHorizon = 4;        // 2,3,4,6,8,12,16
+var _mpGran = 'day';       // 'day' | 'week'
+var _mpPM = 'all';
+var _mpProj = 'all';
+var _mpTasks = [];         // leaf tasks across all projects
+var _mpLoaded = false;
+var _mpBusy = '';
+var _MP_DOW = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+var _MP_COLORS = ['#2f6f8f', '#6b8e5a', '#a5713f', '#7a5c99', '#b5623f', '#3f8e8e', '#8e6b3f', '#5a6bbf'];
+
+function _mpEsc(s){ return (typeof escapeHtml === 'function') ? escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s); }
+function _mpD(s){ if (s instanceof Date) return new Date(s.getFullYear(), s.getMonth(), s.getDate()); var p = String(s).slice(0, 10).split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+function _mpS(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function _mpAdd(s, n){ var d = _mpD(s); d.setDate(d.getDate() + n); return _mpS(d); }
+function _mpWe(s){ var g = _mpD(s).getDay(); return g === 0 || g === 6; }
+function _mpMD(s){ var d = _mpD(s); return (d.getMonth() + 1) + '/' + d.getDate(); }
+function _mpFmt(s){ var d = _mpD(s); return (d.getMonth() + 1) + '/' + d.getDate() + '/' + String(d.getFullYear()).slice(2); }
+function _mpToday(){ return _mpS(new Date()); }
+function _mpMonday(s){ var g = (_mpD(s).getDay() + 6) % 7; return _mpAdd(s, -g); }
+
+function _mpCrew(t){
+  if (t.crewOverride != null && t.crewOverride !== '') return Number(t.crewOverride);
+  var dur = Number(t.dur) || 0, md = Number(t.md) || 0;
+  return dur > 0 ? Math.round(md / dur) : 0;
+}
+function _mpTaskDays(t){
+  if (t._days) return t._days;
+  var out = {}; if (!t.start) { t._days = out; return out; }
+  var d = t.start, c = 0, dur = Number(t.dur) || 0, guard = 0;
+  while (c < dur && guard++ < 800) { if (!_mpWe(d)) { out[d] = 1; c++; } d = _mpAdd(d, 1); }
+  t._days = out; return out;
+}
+function _mpTaskFinish(t){ var ks = Object.keys(_mpTaskDays(t)).sort(); return ks.length ? ks[ks.length - 1] : (t.start || ''); }
+
+function _mpPmInitials(p){
+  var nm = '';
+  if (p.pmId && typeof db !== 'undefined' && db.pms) {
+    var pm = db.pms.filter(function(x){ return String(x.id) === String(p.pmId); })[0];
+    if (pm) nm = pm.name || '';
+  }
+  nm = nm || p.pmName || '';
+  if (!nm) return '\u2014';
+  return nm.split(/\s+/).map(function(w){ return w[0] || ''; }).join('').slice(0, 3).toUpperCase();
+}
+function _mpBuildProjects(){
+  var byId = {}, i = 0;
+  ((typeof db !== 'undefined' && db.projects) ? db.projects : []).forEach(function(p){
+    byId[String(p.id)] = { id: String(p.id), number: p.number || '', name: p.name || '(project)',
+      stage: p.stage || 'active', pm: _mpPmInitials(p), color: _MP_COLORS[i % _MP_COLORS.length], tasks: [] };
+    i++;
+  });
+  _mpTasks.forEach(function(t){ var p = byId[String(t.projectId)]; if (p) p.tasks.push(t); });
+  var out = Object.keys(byId).map(function(k){ return byId[k]; }).filter(function(p){ return p.tasks.length; });
+  out.forEach(function(p){ p.tasks.sort(function(a, b){ return (a.start || '').localeCompare(b.start || ''); }); });
+  return out;
+}
+function _mpVisProjects(){
+  return _mpBuildProjects().filter(function(p){
+    if (_mpProj !== 'all' && p.id !== _mpProj) return false;
+    if (_mpPM !== 'all' && p.pm !== _mpPM) return false;
+    return true;
+  });
+}
+
+async function _mpLoad(){
+  if (typeof supabaseClient === 'undefined' || !supabaseClient) { _mpLoaded = true; return; }
+  var r = await supabaseClient.from('kmi_schedule_tasks').select('*');
+  if (r.error) throw r.error;
+  _mpTasks = (r.data || []).filter(function(x){ return x.parent_id && x.start_date && x.is_kmi_scope !== false; })
+    .map(function(x){
+      return { id: x.id, projectId: x.project_id, name: x.name || '',
+        start: String(x.start_date).slice(0, 10), dur: Number(x.duration_days) || 1,
+        md: Number(x.est_man_days) || 0, pct: Number(x.percent_complete) || 0,
+        crewOverride: (x.crew_override == null ? null : Number(x.crew_override)), _days: null };
+    });
+  _mpLoaded = true;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────
+function renderManpower(){
+  if (!_mpAnchor) _mpAnchor = _mpMonday(_mpToday());
+  var host = g('pg-manpower'); if (!host) return;
+  if (_mpBusy) { host.innerHTML = _mpShell('<div class="mp-load">' + _mpEsc(_mpBusy) + '</div>'); return; }
+  if (!_mpLoaded) {
+    host.innerHTML = _mpShell('<div class="mp-load">Loading schedules\u2026</div>');
+    _mpLoad().then(function(){ renderManpower(); })
+      .catch(function(e){ host.innerHTML = _mpShell('<div class="mp-load">Could not load schedules: ' + _mpEsc(e.message || e) + '</div>'); });
+    return;
+  }
+  _mpTasks.forEach(function(t){ t._days = null; });   // recompute day maps this pass
+  host.innerHTML = _mpShell(_mpChartHtml() + _mpGridHtml());
+}
+
+function _mpShell(inner){
+  var hOpts = [2, 3, 4, 6, 8, 12, 16].map(function(k){ return '<option' + (k === _mpHorizon ? ' selected' : '') + '>' + k + '</option>'; }).join('');
+  var projOpts = '<option value="all">All projects</option>' + _mpBuildProjects().map(function(p){
+    return '<option value="' + _mpEsc(p.id) + '"' + (p.id === _mpProj ? ' selected' : '') + '>' + _mpEsc((p.number ? p.number + ' ' : '') + p.name) + '</option>';
+  }).join('');
+  var pms = {}; _mpBuildProjects().forEach(function(p){ if (p.pm && p.pm !== '\u2014') pms[p.pm] = 1; });
+  var pmOpts = '<option value="all">All PMs</option>' + Object.keys(pms).sort().map(function(k){
+    return '<option' + (k === _mpPM ? ' selected' : '') + '>' + _mpEsc(k) + '</option>'; }).join('');
+  return _mpStyle() +
+    '<div class="ph"><div><h1>Manpower</h1><div class="sub">Weekly resource planning \u2014 all projects</div><div class="stripe"></div></div>' +
+      '<button class="btn btn-p" onclick="mpPublish()">Publish plan</button></div>' +
+    '<div class="mp-ctrls">' +
+      '<div class="mp-fld"><label>Week starting</label><input type="date" id="mp-wk" value="' + _mpAnchor + '" onchange="mpSetWk(this.value)"></div>' +
+      '<div class="mp-fld"><label>Horizon (wks)</label><select id="mp-hz" onchange="mpSetHz(this.value)">' + hOpts + '</select></div>' +
+      '<div class="mp-fld"><label>View</label><div class="mp-seg"><button class="' + (_mpGran === 'day' ? 'on' : '') + '" onclick="mpSetGran(\'day\')">Days</button><button class="' + (_mpGran === 'week' ? 'on' : '') + '" onclick="mpSetGran(\'week\')">Weeks</button></div></div>' +
+      '<div class="mp-fld"><label>PM</label><select id="mp-pm" onchange="mpSetPM(this.value)">' + pmOpts + '</select></div>' +
+      '<div class="mp-fld"><label>Project</label><select id="mp-proj" onchange="mpSetProj(this.value)">' + projOpts + '</select></div>' +
+    '</div>' + inner;
+}
+
+function _mpChartHtml(){
+  var vis = _mpVisProjects(); var n = _mpHorizon;
+  if (!vis.length) return '';
+  var data = vis.map(function(p){
+    var arr = [];
+    for (var w = 0; w < n; w++) {
+      var sum = 0, wd = 0;
+      for (var i = 0; i < 7; i++) { var dt = _mpAdd(_mpAnchor, w * 7 + i); if (_mpWe(dt)) continue; wd++;
+        p.tasks.forEach(function(t){ if (_mpTaskDays(t)[dt]) sum += _mpCrew(t); }); }
+      arr.push(wd ? Math.round(sum / wd) : 0);
+    }
+    return arr;
+  });
+  var totals = []; for (var w = 0; w < n; w++) { var tt = 0; data.forEach(function(a){ tt += a[w]; }); totals.push(tt); }
+  var mx = Math.max.apply(null, totals.concat([1]));
+  var legend = vis.map(function(p){ return '<span><i style="background:' + p.color + '"></i>' + _mpEsc((p.number ? p.number + ' ' : '') + p.name) + (p.stage === 'likely' ? ' (likely)' : '') + '</span>'; }).join('');
+  var bars = '<div class="peakline" style="bottom:' + (Math.max.apply(null, totals) / mx * 100) + '%"><span>peak ' + Math.max.apply(null, totals) + '</span></div>';
+  for (var w = 0; w < n; w++) {
+    bars += '<div class="cbar"><div class="cv">' + totals[w] + '</div><div class="stack" style="height:' + (totals[w] / mx * 118) + 'px">';
+    vis.forEach(function(p, pi){ if (totals[w] > 0) bars += '<div class="sg" style="background:' + p.color + ';height:' + (data[pi][w] / totals[w] * 100) + '%"></div>'; });
+    bars += '</div><div class="cl">' + _mpMD(_mpAdd(_mpAnchor, w * 7)) + '</div></div>';
+  }
+  return '<div class="mp-card"><div class="mp-ch">Manpower distribution by project</div>' +
+    '<div class="mp-legend">' + legend + '</div><div class="mp-chartwrap"><div class="mp-chart">' + bars + '</div></div></div>';
+}
+
+function _mpGridHtml(){
+  var vis = _mpVisProjects(), n = _mpHorizon, days = n * 7;
+  // precompute daily totals across visible projects (for peak + day-view row)
+  var dayTot = [];
+  for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i), tot = 0;
+    vis.forEach(function(p){ p.tasks.forEach(function(t){ if (_mpTaskDays(t)[dt]) tot += _mpCrew(t); }); }); dayTot.push(tot); }
+  var weekPeak = []; for (var w = 0; w < n; w++) { var mx = 0; for (var d = 0; d < 7; d++) mx = Math.max(mx, dayTot[w * 7 + d] || 0); weekPeak.push(mx); }
+
+  var isDay = _mpGran === 'day';
+  var colCount = isDay ? days : n;
+  var fixCols = 5; // Task, Start, End, Dur, Crew
+
+  // header
+  var h1 = '<tr><th class="fx task">Project / Task</th><th class="fx st">Start</th><th class="fx en">End</th><th class="fx du">Dur</th><th class="fx cr">Crew</th>';
+  var h2 = '<tr><th class="fx task"></th><th class="fx st"></th><th class="fx en"></th><th class="fx du"></th><th class="fx cr"></th>';
+  for (var w = 0; w < n; w++) {
+    h1 += '<th class="wk" colspan="' + (isDay ? 7 : 1) + '">Wk ' + _mpMD(_mpAdd(_mpAnchor, w * 7)) + '</th>';
+    if (isDay) { for (var di = 0; di < 7; di++) { var dd = _mpAdd(_mpAnchor, w * 7 + di);
+      h2 += '<td class="d2' + (di === 0 ? ' ws' : '') + (_mpWe(dd) ? ' we' : '') + '">' + _MP_DOW[_mpD(dd).getDay()] + '<small>' + _mpD(dd).getDate() + '</small></td>'; } }
+    else { h2 += '<td class="d2 ws">wk</td>'; }
+  }
+  h1 += '</tr>'; h2 += '</tr>';
+
+  // summary rows
+  function cellsFor(valFn){ var s = '';
+    if (isDay) { for (var i = 0; i < days; i++) { var dd = _mpAdd(_mpAnchor, i); s += '<td class="dc' + (i % 7 === 0 ? ' ws' : '') + (_mpWe(dd) ? ' we' : '') + '">' + valFn('day', i) + '</td>'; } }
+    else { for (var w2 = 0; w2 < n; w2++) s += '<td class="dc ws">' + valFn('week', w2) + '</td>'; }
+    return s;
+  }
+  var totRow = '<tr class="sum"><td class="fx task">DAILY TOTAL</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>' +
+    cellsFor(function(kind, i){ if (kind === 'day') return dayTot[i] || ''; var s = 0, c = 0; for (var d = 0; d < 7; d++){ var dt = dayTot[i * 7 + d] || 0; if (!_mpWe(_mpAdd(_mpAnchor, i * 7 + d))) { s += dt; c++; } } return c ? Math.round(s / c) : ''; }) + '</tr>';
+  var peakRow = '<tr class="sum peak"><td class="fx task">WEEKLY PEAK</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>' +
+    (isDay ? (function(){ var s = ''; for (var w = 0; w < n; w++) for (var di = 0; di < 7; di++) s += '<td class="dc' + (di === 0 ? ' ws' : '') + '">' + (di === 0 ? weekPeak[w] : '') + '</td>'; return s; })()
+           : (function(){ var s = ''; for (var w = 0; w < n; w++) s += '<td class="dc ws">' + weekPeak[w] + '</td>'; return s; })()) + '</tr>';
+
+  // project groups
+  var body = '';
+  if (!vis.length) body = '<tr><td colspan="' + (colCount + fixCols) + '" style="padding:24px;text-align:center;color:#aaa">No projects match this filter.</td></tr>';
+  vis.forEach(function(p){
+    var likely = p.stage === 'likely';
+    body += '<tr class="proj' + (likely ? ' lk' : '') + '"><td class="fx task"><span class="pmb">' + _mpEsc(p.pm) + '</span> ' +
+      _mpEsc((p.number ? p.number + ' \u2014 ' : '') + p.name) +
+      (likely ? '<span class="lkb">LIKELY</span>' : '') +
+      '<span class="lktog" onclick="mpToggleLikely(\'' + _mpEsc(p.id) + '\')" title="Toggle likely-award">' + (likely ? 'set booked' : 'mark likely') + '</span></td>' +
+      '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>';
+    body += (isDay ? cellsFor(function(){ return ''; }) : cellsFor(function(){ return ''; })) + '</tr>';
+    p.tasks.forEach(function(t){
+      var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t);
+      body += '<tr' + (likely ? ' class="lk"' : '') + '><td class="fx task"><span class="tn">' + _mpEsc(t.name) + '</span></td>' +
+        '<td class="fx st">' + (t.start ? _mpMD(t.start) : '\u2014') + '</td>' +
+        '<td class="fx en">' + (fin ? _mpMD(fin) : '\u2014') + '</td>' +
+        '<td class="fx du">' + (Number(t.dur) || 0) + '</td>' +
+        '<td class="fx cr"><input class="crin' + (t.crewOverride != null ? ' ov' : '') + '" type="number" min="0" value="' + crew + '" onchange="mpSetCrew(\'' + _mpEsc(t.id) + '\',this.value)"></td>';
+      if (isDay) { for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i); var on = tdays[dt]; body += '<td class="dc' + (i % 7 === 0 ? ' ws' : '') + (_mpWe(dt) ? ' we' : '') + (on ? ' on' : '') + '">' + (on ? crew : '') + '</td>'; } }
+      else { for (var w = 0; w < n; w++) { var act = false; for (var d = 0; d < 7; d++) { if (tdays[_mpAdd(_mpAnchor, w * 7 + d)]) { act = true; break; } } body += '<td class="dc ws' + (act ? ' on' : '') + '">' + (act ? crew : '') + '</td>'; } }
+      body += '</tr>';
+    });
+  });
+
+  return '<div class="mp-card"><div class="mp-ch">Weekly Resource Planning<span class="mp-sub"> \u00b7 crew/day per active work day \u00b7 edit crew to override</span></div>' +
+    '<div class="mp-gridwrap"><table class="mp-grid"><thead>' + h1 + h2 + '</thead><tbody>' + totRow + peakRow + body + '</tbody></table></div></div>';
+}
+
+// ── Interaction ─────────────────────────────────────────────────────────
+function mpSetGran(v){ _mpGran = (v === 'week' ? 'week' : 'day'); renderManpower(); }
+function mpSetHz(v){ _mpHorizon = Math.max(1, Math.min(16, Number(v) || 4)); renderManpower(); }
+function mpSetPM(v){ _mpPM = v; renderManpower(); }
+function mpSetProj(v){ _mpProj = v; renderManpower(); }
+function mpSetWk(v){ if (v) _mpAnchor = _mpMonday(v); renderManpower(); }
+
+async function mpSetCrew(taskId, val){
+  var t = _mpTasks.filter(function(x){ return String(x.id) === String(taskId); })[0]; if (!t) return;
+  var v = (val === '' || val == null) ? null : Math.max(0, parseFloat(val));
+  t.crewOverride = v; t._days = null; renderManpower();
+  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+    try { var r = await supabaseClient.from('kmi_schedule_tasks').update({ crew_override: v, updated_at: new Date().toISOString() }).eq('id', String(taskId)); if (r.error) throw r.error; }
+    catch (e) { if (typeof _schErr === 'function') _schErr(e, 'Crew override not saved'); }
+  }
+}
+function mpToggleLikely(pid){
+  var p = ((typeof db !== 'undefined' && db.projects) ? db.projects : []).filter(function(x){ return String(x.id) === String(pid); })[0];
+  if (!p) return;
+  p.stage = (p.stage === 'likely') ? 'active' : 'likely';
+  if (typeof saveDB === 'function') saveDB();
+  renderManpower();
+}
+
+async function mpPublish(){
+  if (typeof supabaseClient === 'undefined' || !supabaseClient) { alert('Not connected to the database.'); return; }
+  var projs = _mpVisProjects(); if (!projs.length) { alert('Nothing to publish for this filter.'); return; }
+  if (!confirm('Publish the current plan for ' + projs.length + ' project(s)? This replaces each project\u2019s current snapshot.')) return;
+  _mpBusy = 'Publishing\u2026'; renderManpower();
+  try {
+    for (var i = 0; i < projs.length; i++) {
+      var p = projs[i], anchor = _mpAnchor, days = _mpHorizon * 7;
+      var series = [], peak = 0, sum = 0, cnt = 0, totalMd = 0;
+      p.tasks.forEach(function(t){ totalMd += (Number(t.md) || 0) * (1 - (Number(t.pct) || 0) / 100); });
+      for (var d = 0; d < days; d++) {
+        var dt = _mpAdd(anchor, d); if (_mpWe(dt)) continue;
+        var men = 0; p.tasks.forEach(function(t){ if (_mpTaskDays(t)[dt]) men += _mpCrew(t); });
+        series.push({ d: dt, men: men }); if (men > peak) peak = men; sum += men; cnt++;
+      }
+      var me = (typeof _currentUser !== 'undefined' && _currentUser) ? (_currentUser.email || String(_currentUser.id)) : null;
+      var nm = (typeof _currentUser !== 'undefined' && _currentUser) ? (_currentUser.name || _currentUser.email || '') : '';
+      var rec = { id: _schNewId('mps'), project_id: p.id, schedule_id: null, is_current: true, basis: 'derived',
+        week_start: anchor, horizon_weeks: _mpHorizon, series: series,
+        task_crews: p.tasks.map(function(t){ return { taskId: t.id, name: t.name, start: t.start, finish: _mpTaskFinish(t), dur: t.dur, crew: _mpCrew(t), override: t.crewOverride }; }),
+        peak: peak, avg_men: cnt ? Math.round(sum / cnt * 10) / 10 : 0, total_md: Math.round(totalMd),
+        generated_by_user_id: me, generated_by_name: nm, generated_at: new Date().toISOString() };
+      var up = await supabaseClient.from('kmi_manpower_snapshots').update({ is_current: false }).eq('project_id', p.id).eq('is_current', true);
+      if (up.error) throw up.error;
+      var ins = await supabaseClient.from('kmi_manpower_snapshots').insert(rec);
+      if (ins.error) throw ins.error;
+    }
+    _mpBusy = ''; if (typeof showToast === 'function') showToast('Published plan for ' + projs.length + ' project(s).', 'success'); renderManpower();
+  } catch (e) { _mpBusy = ''; if (typeof _schErr === 'function') _schErr(e, 'Publish failed'); else alert('Publish failed: ' + (e.message || e)); renderManpower(); }
+}
+
+// Crew value for the look-ahead crew/day stub (decision 6): override wins, else md/dur.
+function _laStubCrew(t){
+  if (t.crewOverride != null && t.crewOverride !== '') return Math.round(Number(t.crewOverride));
+  var dur = Number(t.dur) || 0, md = Number(t.md) || 0;
+  return dur > 0 ? Math.round(md / dur) : '\u2014';
+}
+
+function _mpStyle(){
+  return '<style id="mp-css">' +
+    '.mp-ctrls{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:flex-end;margin:6px 0 16px}' +
+    '.mp-fld{display:flex;flex-direction:column;gap:5px}' +
+    '.mp-fld label{font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:#7c8794}' +
+    '.mp-fld input,.mp-fld select{font:inherit;padding:6px 8px;border:1px solid #e4e8ee;border-radius:7px;background:#fff}' +
+    '.mp-seg{display:inline-flex;border:1px solid #e4e8ee;border-radius:7px;overflow:hidden}' +
+    '.mp-seg button{border:0;background:#fff;padding:6px 12px;font:inherit;color:#7c8794;cursor:pointer;font-weight:600;font-size:13px}' +
+    '.mp-seg button.on{background:#2f6f8f;color:#fff}' +
+    '.mp-card{background:#fff;border:1px solid #e4e8ee;border-radius:10px;margin-bottom:16px;overflow:hidden}' +
+    '.mp-ch{font-weight:700;color:#12233b;font-size:14px;padding:13px 16px;border-bottom:1px solid #e4e8ee}' +
+    '.mp-sub{font-weight:400;color:#7c8794;font-size:12px}' +
+    '.mp-load{padding:34px;text-align:center;color:#888;font-size:13px}' +
+    '.mp-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:#7c8794;padding:12px 16px 0}' +
+    '.mp-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle;margin-right:5px}' +
+    '.mp-chartwrap{overflow-x:auto;padding:12px 16px 16px}' +
+    '.mp-chart{display:flex;align-items:flex-end;gap:8px;height:150px;border-bottom:2px solid #d4dae1;position:relative}' +
+    '.peakline{position:absolute;left:0;right:0;border-top:1px dashed #b5442e;pointer-events:none}' +
+    '.peakline span{position:absolute;right:0;top:-15px;font-size:10px;color:#b5442e;font-weight:700;background:#fff;padding:0 3px}' +
+    '.cbar{display:flex;flex-direction:column;align-items:center;flex:none;width:66px}' +
+    '.cbar .stack{display:flex;flex-direction:column-reverse;width:100%;border-radius:3px 3px 0 0;overflow:hidden}' +
+    '.cbar .sg{width:100%}.cbar .cv{font-size:10px;font-weight:700;color:#5a6672;margin-bottom:2px}.cbar .cl{font-size:10px;color:#9aa4b0;margin-top:4px}' +
+    '.mp-gridwrap{overflow-x:auto}' +
+    '.mp-grid{border-collapse:collapse}' +
+    '.mp-grid th,.mp-grid td{padding:0;white-space:nowrap}' +
+    '.mp-grid .fx{position:sticky;background:#fff;z-index:2}' +
+    '.mp-grid th.fx{z-index:4}' +
+    '.mp-grid .task{left:0;width:200px;min-width:200px;max-width:200px;text-align:left;padding:6px 8px;overflow:hidden;text-overflow:ellipsis}' +
+    '.mp-grid .st{left:200px;width:52px;min-width:52px;text-align:center}' +
+    '.mp-grid .en{left:252px;width:52px;min-width:52px;text-align:center}' +
+    '.mp-grid .du{left:304px;width:38px;min-width:38px;text-align:center}' +
+    '.mp-grid .cr{left:342px;width:56px;min-width:56px;text-align:center;border-right:2px solid #d4dae1}' +
+    '.mp-grid thead th{background:#fafbfc;color:#7c8794;font-weight:700;border-bottom:1px solid #e4e8ee;font-size:11px}' +
+    '.mp-grid .st,.mp-grid .en,.mp-grid .du,.mp-grid .cr{font-size:11px}' +
+    '.wk{font-size:10px;color:#243244;font-weight:700;text-align:center;padding:5px 2px;border-left:2px solid #c9d1da}' +
+    '.d2{font-size:9px;font-weight:700;color:#7c8794;text-align:center;padding:3px 0;border-left:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee;width:24px;min-width:24px;background:#fafbfc}' +
+    '.d2.ws{border-left:2px solid #c9d1da}.d2.we{color:#c2c9d1;background:#eef1f4}.d2 small{display:block;font-size:8px;color:#aab2bc}' +
+    '.dc{width:24px;min-width:24px;height:26px;text-align:center;border-left:1px solid #eef1f4;border-bottom:1px solid #f0f2f5;font-size:11px;font-weight:600;color:#2f5468}' +
+    '.dc.ws{border-left:2px solid #c9d1da}.dc.we{background:#eef1f4}.dc.on{background:#e8f0f4}' +
+    'tr.sum td{background:#f2f5f8;font-weight:800;border-bottom:1px solid #d4dae1}tr.sum td.fx{background:#eef2f6}' +
+    'tr.sum.peak td{color:#b5442e;font-size:10px;background:#faf1ee}tr.sum.peak td.fx{background:#f6e9e5}' +
+    'tr.sum td.dc{font-size:11px;color:#12233b}' +
+    'tr.proj td{background:#eaf0f4;border-top:1px solid #c9d1da;border-bottom:1px solid #d4dae1;padding:6px 8px;font-weight:700;color:#12233b;font-size:12px}' +
+    'tr.proj td.fx{background:#e3ebf1}tr.proj.lk td{background:#fbf4e6}tr.proj.lk td.fx{background:#fbf4e6}tr.lk td.dc{background:#fdf9f0}' +
+    '.pmb{display:inline-block;font-size:10px;font-weight:800;color:#fff;background:#2f6f8f;border-radius:4px;padding:1px 5px;margin-right:4px}' +
+    '.lkb{font-size:9px;font-weight:800;color:#9a7a2e;background:#f3e4bf;border-radius:4px;padding:1px 6px;margin-left:6px}' +
+    '.lktog{font-size:10px;color:#9aa4b0;margin-left:8px;cursor:pointer;text-decoration:underline}.lktog:hover{color:#2f6f8f}' +
+    '.tn{font-size:12px;color:#243244;font-weight:400}' +
+    '.crin{width:42px;font:inherit;font-size:12px;text-align:center;border:1px solid transparent;border-radius:5px;padding:2px;background:transparent;font-weight:700;color:#2f6f8f}' +
+    '.crin:hover{border-color:#d4dae1}.crin:focus{border-color:#2f6f8f;background:#fff;outline:none}.crin.ov{color:#b5442e}' +
+    '</style>';
+}
+
 
 
 
@@ -48856,7 +49195,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-13-la3';
+var KMI_BUILD = '2026-08-17-mp1';
 
 var _kmiSessionId = (function(){
   try {
