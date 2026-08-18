@@ -48250,6 +48250,18 @@ function _mpBuildProjects(){
   out.forEach(function(p){ p.tasks.sort(function(a, b){ return (a.start || '').localeCompare(b.start || ''); }); });
   return out;
 }
+function _mpPhaseGroups(p){
+  var by = {}, order = [];
+  p.tasks.forEach(function(t){
+    var key = String(t.parentId || '_none');
+    if (!by[key]) { by[key] = { name: t.phaseName || '(no phase)', seq: (t.phaseSeq == null ? 9999 : t.phaseSeq), tasks: [] }; order.push(key); }
+    by[key].tasks.push(t);
+  });
+  var groups = order.map(function(k){ return by[k]; });
+  groups.sort(function(a, b){ return a.seq - b.seq; });
+  groups.forEach(function(g){ g.tasks.sort(function(a, b){ return (a.start || '').localeCompare(b.start || ''); }); });
+  return groups;
+}
 function _mpVisProjects(){
   return _mpBuildProjects().filter(function(p){
     if (_mpProj !== 'all' && p.id !== _mpProj) return false;
@@ -48262,9 +48274,14 @@ async function _mpLoad(){
   if (typeof supabaseClient === 'undefined' || !supabaseClient) { _mpLoaded = true; return; }
   var r = await supabaseClient.from('kmi_schedule_tasks').select('*');
   if (r.error) throw r.error;
-  _mpTasks = (r.data || []).filter(function(x){ return x.parent_id && x.start_date && x.is_kmi_scope !== false; })
+  var all = r.data || [];
+  var phase = {};
+  all.forEach(function(x){ if (!x.parent_id) phase[String(x.id)] = { name: x.name || '(phase)', seq: (x.seq == null ? 9999 : Number(x.seq)) }; });
+  _mpTasks = all.filter(function(x){ return x.parent_id && x.start_date && x.is_kmi_scope !== false; })
     .map(function(x){
-      return { id: x.id, projectId: x.project_id, name: x.name || '',
+      var ph = phase[String(x.parent_id)] || null;
+      return { id: x.id, projectId: x.project_id, parentId: x.parent_id || null, name: x.name || '',
+        phaseName: ph ? ph.name : '(no phase)', phaseSeq: ph ? ph.seq : 9999,
         start: String(x.start_date).slice(0, 10), dur: Number(x.duration_days) || 1,
         md: Number(x.est_man_days) || 0, pct: Number(x.percent_complete) || 0,
         crewOverride: (x.crew_override == null ? null : Number(x.crew_override)), prodLineId: x.prod_line_id || null, _days: null };
@@ -48383,16 +48400,21 @@ function _mpGridHtml(){
       '<span class="lktog" onclick="mpToggleLikely(\'' + _mpEsc(p.id) + '\')" title="Toggle likely-award">' + (likely ? 'set booked' : 'mark likely') + '</span></td>' +
       '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>';
     body += (isDay ? cellsFor(function(){ return ''; }) : cellsFor(function(){ return ''; })) + '</tr>';
-    p.tasks.forEach(function(t){
-      var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t);
-      body += '<tr' + (likely ? ' class="lk"' : '') + '><td class="fx task"><span class="tn">' + _mpEsc(t.name) + '</span></td>' +
-        '<td class="fx st">' + (t.start ? _mpMD(t.start) : '\u2014') + '</td>' +
-        '<td class="fx en">' + (fin ? _mpMD(fin) : '\u2014') + '</td>' +
-        '<td class="fx du">' + (Number(t.dur) || 0) + '</td>' +
-        '<td class="fx cr"><input class="crin' + (t.crewOverride != null ? ' ov' : '') + '" type="number" min="0" value="' + crew + '" onchange="mpSetCrew(\'' + _mpEsc(t.id) + '\',this.value)"></td>';
-      if (isDay) { for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i); var on = tdays[dt]; body += '<td class="dc' + (i % 7 === 0 ? ' ws' : '') + (_mpWe(dt) ? ' we' : '') + (on ? ' on' : '') + '">' + (on ? crew : '') + '</td>'; } }
-      else { for (var w = 0; w < n; w++) { var act = false; for (var d = 0; d < 7; d++) { if (tdays[_mpAdd(_mpAnchor, w * 7 + d)]) { act = true; break; } } body += '<td class="dc ws' + (act ? ' on' : '') + '">' + (act ? crew : '') + '</td>'; } }
-      body += '</tr>';
+    _mpPhaseGroups(p).forEach(function(gp){
+      body += '<tr class="mp-ph' + (likely ? ' lk' : '') + '"><td class="fx task" style="padding-left:22px">' + _mpEsc(gp.name) + '</td>' +
+        '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>';
+      body += (isDay ? cellsFor(function(){ return ''; }) : cellsFor(function(){ return ''; })) + '</tr>';
+      gp.tasks.forEach(function(t){
+        var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t);
+        body += '<tr' + (likely ? ' class="lk"' : '') + '><td class="fx task" style="padding-left:34px"><span class="tn">' + _mpEsc(t.name) + '</span></td>' +
+          '<td class="fx st">' + (t.start ? _mpMD(t.start) : '\u2014') + '</td>' +
+          '<td class="fx en">' + (fin ? _mpMD(fin) : '\u2014') + '</td>' +
+          '<td class="fx du">' + (Number(t.dur) || 0) + '</td>' +
+          '<td class="fx cr"><input class="crin' + (t.crewOverride != null ? ' ov' : '') + '" type="number" min="0" value="' + crew + '" onchange="mpSetCrew(\'' + _mpEsc(t.id) + '\',this.value)"></td>';
+        if (isDay) { for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i); var on = tdays[dt]; body += '<td class="dc' + (i % 7 === 0 ? ' ws' : '') + (_mpWe(dt) ? ' we' : '') + (on ? ' on' : '') + '">' + (on ? crew : '') + '</td>'; } }
+        else { for (var w = 0; w < n; w++) { var act = false; for (var d = 0; d < 7; d++) { if (tdays[_mpAdd(_mpAnchor, w * 7 + d)]) { act = true; break; } } body += '<td class="dc ws' + (act ? ' on' : '') + '">' + (act ? crew : '') + '</td>'; } }
+        body += '</tr>';
+      });
     });
   });
 
@@ -48467,7 +48489,7 @@ function _mpTotClass(v){ return v >= 21 ? 'mp-hi' : (v >= 15 ? 'mp-md' : (v > 0 
 function mpPrint(){
   var vis = _mpVisProjects();
   if (!vis.length) { alert('Nothing to print for this filter.'); return; }
-  var n = _mpHorizon, weeksPerPage = 8;   // ~8 weeks fit an 11x17 landscape page
+  var n = _mpHorizon, weeksPerPage = 4;   // 4 weeks/page keeps the type readable on 11x17
   _mpTasks.forEach(function(t){ t._days = null; });
   var days = n * 7, dayTot = [];
   for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i), tot = 0;
@@ -48518,14 +48540,19 @@ function _mpPrintTable(vis, fw, tw, dayTot){
             '<td class="p-c"></td><td class="p-c"></td><td class="p-c"></td><td class="p-c"></td>';
     for (var i = 0; i < dayCount; i++) { var dd = _mpAdd(_mpAnchor, startDay + i); rows += '<td class="p-d' + (_mpWe(dd) ? ' we' : '') + (i % 7 === 0 ? ' ws' : '') + '"></td>'; }
     rows += '</tr>';
-    p.tasks.forEach(function(t){
-      var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t);
-      rows += '<tr><td class="p-task">' + _mpEsc(t.name) + '</td>' +
-        '<td class="p-c">' + (t.start ? _mpMD(t.start) : '') + '</td><td class="p-c">' + (fin ? _mpMD(fin) : '') + '</td>' +
-        '<td class="p-c">' + (Number(t.dur) || 0) + '</td><td class="p-c">' + (crew || '') + '</td>';
-      for (var i = 0; i < dayCount; i++) { var dd = _mpAdd(_mpAnchor, startDay + i), on = tdays[dd];
-        rows += '<td class="p-d' + (_mpWe(dd) ? ' we' : '') + (i % 7 === 0 ? ' ws' : '') + (on ? ' on' : '') + '">' + (on ? crew : '') + '</td>'; }
+    _mpPhaseGroups(p).forEach(function(gp){
+      rows += '<tr class="p-ph"><td class="p-task">' + _mpEsc(gp.name) + '</td><td class="p-c"></td><td class="p-c"></td><td class="p-c"></td><td class="p-c"></td>';
+      for (var i = 0; i < dayCount; i++) { var dd = _mpAdd(_mpAnchor, startDay + i); rows += '<td class="p-d' + (_mpWe(dd) ? ' we' : '') + (i % 7 === 0 ? ' ws' : '') + '"></td>'; }
       rows += '</tr>';
+      gp.tasks.forEach(function(t){
+        var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t);
+        rows += '<tr><td class="p-task" style="padding-left:14px">' + _mpEsc(t.name) + '</td>' +
+          '<td class="p-c">' + (t.start ? _mpMD(t.start) : '') + '</td><td class="p-c">' + (fin ? _mpMD(fin) : '') + '</td>' +
+          '<td class="p-c">' + (Number(t.dur) || 0) + '</td><td class="p-c">' + (crew || '') + '</td>';
+        for (var i = 0; i < dayCount; i++) { var dd = _mpAdd(_mpAnchor, startDay + i), on = tdays[dd];
+          rows += '<td class="p-d' + (_mpWe(dd) ? ' we' : '') + (i % 7 === 0 ? ' ws' : '') + (on ? ' on' : '') + '">' + (on ? crew : '') + '</td>'; }
+        rows += '</tr>';
+      });
     });
   });
   return '<table class="mp-print-tbl"><thead>' + h1 + h2 + '</thead><tbody>' + tot + rows + '</tbody></table>';
@@ -48574,7 +48601,7 @@ function _mpStyle(){
     'tr.sum.peak td{color:#b5442e;font-size:10px;background:#faf1ee}tr.sum.peak td.fx{background:#f6e9e5}' +
     'tr.sum td.dc{font-size:11px;color:#12233b}' +
     'tr.proj td{background:#eaf0f4;border-top:1px solid #c9d1da;border-bottom:1px solid #d4dae1;padding:6px 8px;font-weight:700;color:#12233b;font-size:12px}' +
-    'tr.proj td.fx{background:#e3ebf1}tr.proj.lk td{background:#fbf4e6}tr.proj.lk td.fx{background:#fbf4e6}tr.lk td.dc{background:#fdf9f0}' +
+    'tr.proj td.fx{background:#e3ebf1}tr.proj.lk td{background:#fbf4e6}tr.proj.lk td.fx{background:#fbf4e6}tr.lk td.dc{background:#fdf9f0}' + 'tr.mp-ph td{background:#f4f7f9;font-weight:600;color:#3a5a72;font-size:12px}tr.mp-ph td.fx{background:#eef3f6}' +
     '.pmb{display:inline-block;font-size:10px;font-weight:800;color:#fff;background:#2f6f8f;border-radius:4px;padding:1px 5px;margin-right:4px}' +
     '.lkb{font-size:9px;font-weight:800;color:#9a7a2e;background:#f3e4bf;border-radius:4px;padding:1px 6px;margin-left:6px}' +
     '.lktog{font-size:10px;color:#9aa4b0;margin-left:8px;cursor:pointer;text-decoration:underline}.lktog:hover{color:#2f6f8f}' +
@@ -48590,15 +48617,15 @@ function _mpStyle(){
     '@media print{@page{size:17in 11in;margin:0.4in}' +
       '.mp-print-title{font:700 13px/1.3 Arial,sans-serif;margin:0 0 8px;color:#111}' +
       '.mp-pgbreak{page-break-after:always;height:0}' +
-      '.mp-print-tbl{border-collapse:collapse;width:100%;font:8px/1.1 Arial,sans-serif;margin-bottom:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
-      '.mp-print-tbl th,.mp-print-tbl td{border:0.5px solid #bbb;padding:1px 2px;text-align:center}' +
+      '.mp-print-tbl{border-collapse:collapse;width:100%;font:10px/1.15 Arial,sans-serif;margin-bottom:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+      '.mp-print-tbl th,.mp-print-tbl td{border:0.5px solid #bbb;padding:2px 3px;text-align:center}' +
       '.mp-print-tbl .p-task{text-align:left;width:170px;max-width:170px;overflow:hidden;white-space:nowrap}' +
       '.mp-print-tbl .p-c{width:34px}' +
       '.mp-print-tbl .p-wk{font-weight:700;background:#eee}' +
       '.mp-print-tbl .p-d.we{background:#f2f2f2}' +
       '.mp-print-tbl thead{display:table-header-group}' +
       '.mp-print-tbl tr.p-sum td{font-weight:700;background:#eef2f5}' +
-      '.mp-print-tbl tr.p-proj td{font-weight:700;background:#e6edf2}' +
+      '.mp-print-tbl tr.p-proj td{font-weight:700;background:#e6edf2}' + '.mp-print-tbl tr.p-ph td{font-weight:600;background:#eef2f5}' + '.mp-print-tbl tr.p-ph td.p-task{text-align:left}' +
       '.mp-print-tbl td.mp-lo{background:#e7f4e7 !important}' +
       '.mp-print-tbl td.mp-md{background:#fdf1e0 !important}' +
       '.mp-print-tbl td.mp-hi{background:#f6e2dc !important}' +
@@ -49404,7 +49431,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-17-mp7';
+var KMI_BUILD = '2026-08-17-mp8';
 
 var _kmiSessionId = (function(){
   try {
