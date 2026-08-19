@@ -49433,7 +49433,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-19-ap1';
+var KMI_BUILD = '2026-08-19-ap2';
 
 var _kmiSessionId = (function(){
   try {
@@ -50411,11 +50411,15 @@ function fromSBProject(r) {
     // Round 2.5 — project file attachments
     attachments:                 Array.isArray(r.attachments) ? r.attachments : [],
     // Round 4.1 — COR markup percentages (legacy projects fall back to defaults)
-    matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
-    subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5,
+    // Number() is required, not cosmetic: these are `numeric` columns, and
+    // PostgREST serializes numeric as a STRING to preserve arbitrary precision.
+    // Without the coercion a 1.5% rate arrives as "1.50" and any consumer that
+    // does arithmetic without its own Number() wrap silently concatenates.
+    matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? Number(r.mat_eq_markup_pct) : 10,
+    subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? Number(r.sub_markup_pct)    : 5,
     // Hunzinger COR form: legacy projects default to Standard, 0% bond
     corFormType:    (r.cor_form_type === 'Hunzinger') ? 'Hunzinger' : 'Standard',
-    bondRatePct:    (r.bond_rate_pct  !== null && r.bond_rate_pct  !== undefined) ? r.bond_rate_pct  : 0,
+    bondRatePct:    (r.bond_rate_pct  !== null && r.bond_rate_pct  !== undefined) ? Number(r.bond_rate_pct)  : 0,
     // Round 4.4 — Default cost codes for Foundation CO exports (legacy projects default to 4000)
     coDefaultLaborCostCode:    r.co_default_labor_cost_code    || '4000',
     coDefaultMaterialCostCode: r.co_default_material_cost_code || '4000',
@@ -50730,18 +50734,20 @@ function fromSBCor(r) {
     autoMaterialRows:  matAuto,
     manualMaterialRows: matManual,
     subRows:      Array.isArray(r.sub_rows) ? r.sub_rows : [],
-    matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? r.mat_eq_markup_pct : 10,
-    subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? r.sub_markup_pct    : 5,
+    matEqMarkupPct: (r.mat_eq_markup_pct !== null && r.mat_eq_markup_pct !== undefined) ? Number(r.mat_eq_markup_pct) : 10,
+    subMarkupPct:   (r.sub_markup_pct    !== null && r.sub_markup_pct    !== undefined) ? Number(r.sub_markup_pct)    : 5,
     // Equipment + Unit Pricing rows + their markups. Legacy CORs (before the
     // SQL migration) will have these as undefined → defaulted to []/10/0.
     equipmentRows: Array.isArray(r.equipment_rows)  ? r.equipment_rows  : [],
     unitPriceRows: Array.isArray(r.unit_price_rows) ? r.unit_price_rows : [],
-    equipmentMarkupPct: (r.equipment_markup_pct  !== null && r.equipment_markup_pct  !== undefined) ? r.equipment_markup_pct  : 10,
-    unitPriceMarkupPct: (r.unit_price_markup_pct !== null && r.unit_price_markup_pct !== undefined) ? r.unit_price_markup_pct : 0,
+    // Number() required — see fromSBProject: these are `numeric` columns and
+    // PostgREST returns numeric as a string.
+    equipmentMarkupPct: (r.equipment_markup_pct  !== null && r.equipment_markup_pct  !== undefined) ? Number(r.equipment_markup_pct)  : 10,
+    unitPriceMarkupPct: (r.unit_price_markup_pct !== null && r.unit_price_markup_pct !== undefined) ? Number(r.unit_price_markup_pct) : 0,
     // Bond rate (legacy CORs default to 0). Bond cost is stored on the
     // COR but we'll also recompute it from totals — this is the
     // historical-snapshot copy that survives if the totals drift.
-    bondRatePct:    (r.bond_rate_pct !== null && r.bond_rate_pct !== undefined) ? r.bond_rate_pct : 0,
+    bondRatePct:    (r.bond_rate_pct !== null && r.bond_rate_pct !== undefined) ? Number(r.bond_rate_pct) : 0,
     // Hunzinger-specific fields (legacy CORs have null)
     timeExtensionDays: (r.time_extension_days !== null && r.time_extension_days !== undefined) ? r.time_extension_days : '',
     addedScope:        r.added_scope   || '',
