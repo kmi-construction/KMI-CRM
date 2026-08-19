@@ -49433,7 +49433,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-17-mp12';
+var KMI_BUILD = '2026-08-19-ap1';
 
 var _kmiSessionId = (function(){
   try {
@@ -51092,7 +51092,14 @@ function toSBApInvoice(r) {
     // every push look fresh, so the kmi_reject_stale_update trigger could never
     // tell a stale session's snapshot from a current one and waved all of them
     // through \u2014 which is how exported invoices kept reverting to approved.
-    updated_at:r.updatedAt||new Date().toISOString()
+    //
+    // The `|| new Date()` fallback that used to sit here defeated the whole
+    // fix: fromSBApInvoice never read updated_at back, so EVERY pulled record
+    // had updatedAt === undefined and every push fell through to "now". Null
+    // is the correct signal for "this record carries no known prior timestamp"
+    // \u2014 it routes to the trigger's NULL branch, which is the same contract
+    // every other table in this file has used all along.
+    updated_at:r.updatedAt||null
   };
 }
 function fromSBApInvoice(r) {
@@ -51117,7 +51124,13 @@ function fromSBApInvoice(r) {
     eqBoardHandled:!!r.eq_board_handled,
     voidedAt:r.voided_at||'', voidedBy:r.voided_by||'', voidReason:r.void_reason||'',
     isCredit:(r.is_credit==null ? null : !!r.is_credit),
-    createdBy:r.created_by||'', createdAt:r.created_at||''
+    createdBy:r.created_by||'', createdAt:r.created_at||'',
+    // Round-trip the cloud timestamp. Without this the stale-write guard was
+    // blind on the one table that has been clobbered three times: a pulled
+    // record arrived with no updatedAt, so its next push carried a fresh "now"
+    // and sailed past the comparison. Matches the house pattern used by every
+    // other fromSB* mapper in this file.
+    updatedAt:r.updated_at||''
   };
 }
 function toSBApLine(r) {
