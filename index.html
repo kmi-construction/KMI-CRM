@@ -46461,15 +46461,13 @@ function schPrint(){
   if (!_schPhases().length && !_schTasks.length){ alert('No schedule to print.'); return; }
   var r = _schProjRange();
   if (!r.start || !r.finish){ alert('No schedule range to print.'); return; }
-  var first = _laMondayOf(r.start), weeks = [], w = first, guard = 0;
-  while (w <= r.finish && guard++ < 520){ weeks.push(w); w = _schAddDays(w, 7); }
-  if (!weeks.length) weeks.push(first);
-
-  var perPage = 26;  // ~half a year of weeks per 11x17 landscape page
+  var first = _laMondayOf(r.start), lastMon = _laMondayOf(r.finish);
+  var totalWeeks = Math.max(1, Math.round(_schDiffDays(first, lastMon) / 7) + 1);
+  var weeksPerPage = 4;
   var pages = [];
-  for (var s = 0; s < weeks.length; s += perPage) pages.push([s, Math.min(weeks.length, s + perPage)]);
+  for (var ws = 0; ws < totalWeeks; ws += weeksPerPage) pages.push([ws, Math.min(totalWeeks, ws + weeksPerPage)]);
   var bodyHtml = pages.map(function(pg, pi){
-    return _schPrintTable(weeks, pg[0], pg[1]) + (pi < pages.length - 1 ? '<div class="scp-pgbreak"></div>' : '');
+    return _schPrintTable(first, pg[0], pg[1]) + (pi < pages.length - 1 ? '<div class="scp-pgbreak"></div>' : '');
   }).join('');
 
   var p = _schCurrentProject();
@@ -46478,19 +46476,22 @@ function schPrint(){
 
   var css = '<style>' +
     '@page{size:17in 11in;margin:0.4in}' +
-    '.scp-title{font:700 13px/1.3 Arial,sans-serif;margin:0 0 8px;color:#111}' +
+    'html,body{-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+    '.scp-title{font:700 14px/1.3 Arial,sans-serif;margin:0 0 8px;color:#111}' +
     '.scp-pgbreak{page-break-after:always;height:0}' +
-    '.scp-tbl{border-collapse:collapse;width:100%;font:8px/1.1 Arial,sans-serif;margin-bottom:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
-    '.scp-tbl th,.scp-tbl td{border:0.5px solid #bbb;padding:1px 2px;text-align:center}' +
-    '.scp-tbl .t{text-align:left;width:180px;max-width:180px;overflow:hidden;white-space:nowrap}' +
-    '.scp-tbl .c{width:30px}' +
-    '.scp-tbl .wk{font-weight:700;background:#eee}' +
+    '.scp-tbl{border-collapse:collapse;width:100%;font:10px/1.2 Arial,sans-serif;margin-bottom:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+    '.scp-tbl th,.scp-tbl td{border:0.5px solid #bbb;padding:2px 3px;text-align:center;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+    '.scp-tbl .t{text-align:left;width:190px;max-width:190px;overflow:hidden;white-space:nowrap}' +
+    '.scp-tbl .c{width:36px}' +
+    '.scp-tbl .wk{font-weight:700;background:#e9edf1}' +
+    '.scp-tbl .d{width:26px;font-size:8px;color:#777;line-height:1.1}' +
+    '.scp-tbl .d.ws{border-left:1.5px solid #999}' +
+    '.scp-tbl .d.we{background:#f2f3f5;color:#bbb}' +
     '.scp-tbl thead{display:table-header-group}' +
-    '.scp-tbl tr.ph td{font-weight:700;background:#e6edf2}' +
+    '.scp-tbl tr.ph td{font-weight:700;background:#e2e9ef}' +
     '.scp-tbl tr.ph td.t{text-align:left}' +
-    '.scp-tbl td.on{background:#2f6f8f}' +
-    '.scp-tbl td.on.done{background:#3f7f5b}' +
-    '.scp-tbl td.ph-on{background:#c9d6df}' +
+    '.scp-tbl td.on{background:#2f6f8f;border-color:#2f6f8f}' +
+    '.scp-tbl td.on.done{background:#3f7f5b;border-color:#3f7f5b}' +
     '</style>';
 
   var host = document.getElementById('sch-print-host');
@@ -46508,41 +46509,47 @@ function schPrint(){
   setTimeout(function(){ if (host.style.display === 'block') _schRestore(); }, 3000);
 }
 
-function _schWeekActive(t, ws){
-  var f = _schTaskFinish(t);
-  if (!t.start || !f) return false;
-  return t.start <= _schAddDays(ws, 6) && f >= ws;
-}
+function _schPrintTable(first, fw, tw){
+  var startDay = fw * 7, dayCount = (tw - fw) * 7;
+  var pageStart = _schAddDays(first, startDay), pageEnd = _schAddDays(first, startDay + dayCount - 1);
+  var DOW = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+  function we(d){ var g = _schDow(d); return g === 0 || g === 6; }
 
-function _schPrintTable(weeks, fw, tw){
-  var head = '<tr><th class="t">Task</th><th class="c">Start</th><th class="c">Finish</th><th class="c">Dur</th><th class="c">%</th>';
-  for (var i = fw; i < tw; i++) head += '<th class="wk c">' + _laMD(weeks[i]) + '</th>';
-  head += '</tr>';
+  var h1 = '<tr><th class="t" rowspan="2">Task</th><th class="c" rowspan="2">Start</th><th class="c" rowspan="2">Finish</th><th class="c" rowspan="2">Dur</th><th class="c" rowspan="2">%</th>';
+  var h2 = '<tr>';
+  for (var w = fw; w < tw; w++){
+    var ws = _schAddDays(first, w * 7);
+    h1 += '<th class="wk" colspan="7">Wk ' + _laMD(ws) + '</th>';
+    for (var di = 0; di < 7; di++){ var dd = _schAddDays(ws, di);
+      h2 += '<td class="d' + (di === 0 ? ' ws' : '') + (we(dd) ? ' we' : '') + '">' + DOW[_schDow(dd)] + '<br>' + _schD(dd).getDate() + '</td>'; }
+  }
+  h1 += '</tr>'; h2 += '</tr>';
 
   var rows = '';
   _schPhases().forEach(function(ph){
-    var rr = _schPhaseRoll(ph);
+    var kids = _schChildren(ph.id).filter(function(t){ var f = _schTaskFinish(t); return t.start && f && t.start <= pageEnd && f >= pageStart; });
+    if (!kids.length) return;
     rows += '<tr class="ph"><td class="t">' + escapeHtml(ph.name) + '</td><td class="c"></td><td class="c"></td><td class="c"></td><td class="c"></td>';
-    for (var i = fw; i < tw; i++){
-      var pon = rr.start && rr.finish && rr.start <= _schAddDays(weeks[i], 6) && rr.finish >= weeks[i];
-      rows += '<td class="c' + (pon ? ' ph-on' : '') + '"></td>';
-    }
+    for (var i = 0; i < dayCount; i++){ var dd = _schAddDays(first, startDay + i); rows += '<td class="d' + (i % 7 === 0 ? ' ws' : '') + (we(dd) ? ' we' : '') + '"></td>'; }
     rows += '</tr>';
-    _schChildren(ph.id).forEach(function(t){
+    kids.forEach(function(t){
       var f = _schTaskFinish(t), done = (Number(t.pct) || 0) >= 100;
       rows += '<tr><td class="t">' + escapeHtml(t.name) + '</td>' +
         '<td class="c">' + (t.start ? _laMD(t.start) : '') + '</td>' +
         '<td class="c">' + (f ? _laMD(f) : '') + '</td>' +
         '<td class="c">' + (Number(t.dur) || 0) + '</td>' +
         '<td class="c">' + (Number(t.pct) || 0) + '</td>';
-      for (var i = fw; i < tw; i++){
-        var on = _schWeekActive(t, weeks[i]);
-        rows += '<td class="c' + (on ? ' on' + (done ? ' done' : '') : '') + '"></td>';
+      for (var i = 0; i < dayCount; i++){
+        var dd = _schAddDays(first, startDay + i);
+        var on = (t.start <= dd && dd <= f);
+        rows += '<td class="d' + (i % 7 === 0 ? ' ws' : '') + (we(dd) ? ' we' : '') + (on ? ' on' + (done ? ' done' : '') : '') + '"></td>';
       }
       rows += '</tr>';
     });
   });
-  return '<table class="scp-tbl"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table>';
+  if (!rows) rows = '<tr><td class="t">No tasks in this window</td><td class="c"></td><td class="c"></td><td class="c"></td><td class="c"></td>' +
+    '<td colspan="' + dayCount + '"></td></tr>';
+  return '<table class="scp-tbl"><thead>' + h1 + h2 + '</thead><tbody>' + rows + '</tbody></table>';
 }
 function _schZpx() { return _schZoom === 'days' ? 24 : 9; }
 
@@ -49431,7 +49438,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-17-mp9';
+var KMI_BUILD = '2026-08-17-mp10';
 
 var _kmiSessionId = (function(){
   try {
