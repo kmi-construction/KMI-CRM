@@ -39849,6 +39849,156 @@ function apVendorDisplayName(i){
   return i.foundationVendorName || i.vendorName || '';
 }
 
+// ── Foundation payee — set / correct on an already-decided invoice ──
+// The Foundation payee # is an Accounting mapping detail, not part of what a PM
+// approves (job / cost code / class / amount). Correcting it therefore must NOT
+// disturb status, approverId, approvedBy or approvedAt — which is why this is a
+// narrow two-field writer rather than a relaxation of _apIsLocked. Full
+// re-coding of an approved invoice is still refused by apCodeSave; only these
+// two vendor fields move through here.
+//
+// Before this existed, an invoice approved with a blank payee was unreachable:
+// export refused it (_apExportBlockers), re-coding refused it (_apIsLocked), and
+// apRevertExport only accepts status==='exported'. Direct SQL was the only exit.
+var _apPayeePickCtx = null;   // { invoiceId, onDone }
+var _apPayeeHits    = [];     // current search results, indexed by the row onclick
+
+async function apSetPayee(invoiceId, vendorNo, vendorName, saveAlias){
+  if(!_apIsAcct()){ alert('Only Accounting or Admin can change the Foundation payee.'); return false; }
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(invoiceId);});
+  if(!i || !vendorNo) return false;
+  var prevNo   = i.foundationVendorNo || '';
+  var prevName = i.foundationVendorName || '';
+  var prevUpd  = i.updatedAt || '';
+  if(String(prevNo)===String(vendorNo)) return true;          // no-op
+  i.foundationVendorNo   = String(vendorNo);
+  i.foundationVendorName = vendorName || '';
+  i.updatedAt            = new Date().toISOString();
+  var aliasRec=null;
+  if(saveAlias && i.vendorName){
+    var nk=_normVendorName(i.vendorName);
+    if(nk){
+      db.apVendorAliases=(db.apVendorAliases||[]).filter(function(a){ return a.aliasNorm!==nk; });
+      aliasRec={ id:'alias-'+Date.now(), aliasNorm:nk, aliasRaw:i.vendorName,
+                 foundationVendorNo:String(vendorNo), foundationVendorName:vendorName||'',
+                 createdBy:(_currentUser?_currentUser.email:'') };
+      db.apVendorAliases.push(aliasRec);
+    }
+  }
+  saveDB();
+  if(supabaseClient){
+    try{
+      // Deliberately NOT apPushInvoice — that helper swallows upsert errors to
+      // console.warn. A silent cloud failure here is the worst outcome: the fix
+      // looks applied, the invoice exports locally, and the blank payee comes
+      // back on the next reload. Surface it and roll back instead.
+      var r = await supabaseClient.from('kmi_ap_invoices').upsert(toSBApInvoice(i));
+      if(r && r.error) throw new Error(r.error.message);
+      if(aliasRec){
+        var ar = await supabaseClient.from('kmi_ap_vendor_aliases').upsert(toSBApAlias(aliasRec));
+        if(ar && ar.error) throw new Error('alias \u2014 '+ar.error.message);
+      }
+    }catch(e){
+      i.foundationVendorNo=prevNo; i.foundationVendorName=prevName; i.updatedAt=prevUpd;
+      if(aliasRec) db.apVendorAliases=(db.apVendorAliases||[]).filter(function(a){ return a.id!==aliasRec.id; });
+      saveDB();
+      alert('The payee change could not be saved to the cloud and was rolled back:\n\n'+
+            (e&&e.message?e.message:String(e))+'\n\nNothing was changed. Reload and try again.');
+      return false;
+    }
+  }
+  apLog(i.id,'payee_set',
+    (prevNo ? ('Foundation payee changed '+prevNo+' \u2192 '+vendorNo) : ('Foundation payee set to '+vendorNo+' (was blank)'))+
+    ' \u2014 '+(vendorName||'')+' \u2014 approval status untouched');
+  return true;
+}
+
+function apOpenPayeePicker(invoiceId, onDone){
+  if(!_apIsAcct()){ alert('Only Accounting or Admin can change the Foundation payee.'); return; }
+  var i=(db.apInvoices||[]).find(function(x){return String(x.id)===String(invoiceId);}); if(!i) return;
+  _apPayeePickCtx = { invoiceId:String(invoiceId), onDone:(typeof onDone==='function'?onDone:null) };
+  var ov=document.createElement('div');
+  ov.id='ap-payee-modal';
+  // z-index above the export modal (9999) so it stacks over the checklist.
+  ov.style.cssText='position:fixed;inset:0;background:rgba(20,24,45,.55);z-index:10010;display:flex;align-items:center;justify-content:center;padding:24px';
+  ov.innerHTML='<div style="background:#fff;border-radius:12px;max-width:560px;width:100%;max-height:78vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">'+
+    '<div style="padding:14px 18px;background:var(--kmi);color:#fff;display:flex;justify-content:space-between;align-items:center">'+
+      '<div><div style="font-size:15px;font-weight:700">Foundation payee</div>'+
+      '<div style="font-size:11.5px;color:#c4c9df;margin-top:2px">'+apEsc(i.vendorName||'(no extracted vendor name)')+' \u00b7 '+apEsc(i.invoiceNo||'(no #)')+' \u00b7 '+apMoney(i.total)+'</div></div>'+
+      '<button onclick="apClosePayeePicker()" style="background:none;border:0;color:#c4c9df;font-size:22px;cursor:pointer;line-height:1">&times;</button></div>'+
+    '<div style="padding:8px 18px 0;font-size:11.5px;color:#7a8194">Changing the payee does not affect the approval \u2014 status, approver and approval date stay as they are.</div>'+
+    '<div style="padding:10px 18px 8px"><input id="ap-payee-q" type="text" placeholder="Search payee name or number\u2026" oninput="_apRenderPayeeHits()" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid #d8dce6;border-radius:7px"></div>'+
+    '<div id="ap-payee-hits" style="overflow:auto;flex:1;padding:0 18px 8px"></div>'+
+    '<div style="padding:11px 18px;border-top:1px solid #eef0f4;display:flex;justify-content:space-between;align-items:center;gap:10px">'+
+      '<label style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:#555;cursor:pointer"><input type="checkbox" id="ap-payee-alias" checked style="width:auto"> Remember this mapping for future invoices</label>'+
+      '<button class="btn" onclick="apClosePayeePicker()">Cancel</button>'+
+    '</div>'+
+  '</div>';
+  document.body.appendChild(ov);
+  _apRenderPayeeHits();
+  try{ g('ap-payee-q').focus(); }catch(e){}
+}
+function apClosePayeePicker(){ var m=g('ap-payee-modal'); if(m) m.remove(); _apPayeePickCtx=null; _apPayeeHits=[]; }
+
+function _apRenderPayeeHits(){
+  var el=g('ap-payee-hits'); if(!el||!_apPayeePickCtx) return;
+  var inv=(db.apInvoices||[]).find(function(x){return String(x.id)===String(_apPayeePickCtx.invoiceId);});
+  var qe=g('ap-payee-q'), q=String(qe?qe.value:'').trim().toLowerCase();
+  var pool=(db.foundationVendors||[]);
+  var hits, lead=false;
+  if(!q){
+    // Empty box → lead with candidates matched off the extracted vendor name, so
+    // the common case (payee simply never got picked) is one click, no typing.
+    var nk=_normVendorName(inv?inv.vendorName:'');
+    hits = nk ? pool.filter(function(f){
+      var k=_normVendorName(f.name);
+      return k && (k.indexOf(nk)===0 || nk.indexOf(k)===0 || k.indexOf(nk)>=0 || nk.indexOf(k)>=0);
+    }).slice(0,40) : [];
+    lead = hits.length>0;
+    if(!hits.length){
+      _apPayeeHits=[];
+      el.innerHTML='<div style="font-size:12px;color:#888;padding:8px 0">Type to search the '+(pool.length||0).toLocaleString()+'-payee master.</div>';
+      return;
+    }
+  } else {
+    hits = pool.filter(function(f){
+      return String(f.name||'').toLowerCase().indexOf(q)>=0 || String(f.vendorNo||'').toLowerCase().indexOf(q)>=0;
+    }).slice(0,40);
+    if(!hits.length){
+      _apPayeeHits=[];
+      el.innerHTML='<div style="font-size:12px;color:#A32D2D;padding:8px 0">No payees match \u201c'+apEsc(q)+'\u201d.</div>';
+      return;
+    }
+  }
+  _apPayeeHits = hits;
+  el.innerHTML=(lead?'<div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4;padding:6px 0 4px">Likely matches for \u201c'+apEsc(inv?inv.vendorName:'')+'\u201d</div>':'')+
+    hits.map(function(f,ix){
+      return '<div onclick="apPickPayee('+ix+')" style="padding:8px 10px;border-bottom:1px solid #eef0f4;cursor:pointer;display:flex;justify-content:space-between;gap:12px;font-size:12.5px" onmouseover="this.style.background=\'#f6f7fa\'" onmouseout="this.style.background=\'\'">'+
+        '<span>'+apEsc(f.name)+'</span>'+
+        '<span style="font-family:ui-monospace,monospace;color:#3B6D11;font-weight:700;white-space:nowrap">'+apEsc(f.vendorNo)+'</span></div>';
+    }).join('');
+}
+
+async function apPickPayee(ix){
+  var f=_apPayeeHits[ix]; if(!f||!_apPayeePickCtx) return;
+  var ctx=_apPayeePickCtx;
+  var aliasEl=g('ap-payee-alias'), wantAlias=!!(aliasEl&&aliasEl.checked);
+  apClosePayeePicker();
+  var ok = await apSetPayee(ctx.invoiceId, f.vendorNo, f.name, wantAlias);
+  if(ok && ctx.onDone){ try{ ctx.onDone(); }catch(e){ console.warn('payee onDone:',e); } }
+}
+
+// Call sites: the export checklist (fix at the point of discovery) and the
+// invoice review pane (correct a wrong payee).
+function apExportFixPayee(ev,id){
+  if(ev){ ev.preventDefault(); ev.stopPropagation(); }
+  apOpenPayeePicker(id, function(){ apCloseExportModal(); apOpenExportModal(); });
+}
+function apReviewFixPayee(ev,id){
+  if(ev){ ev.preventDefault(); ev.stopPropagation(); }
+  apOpenPayeePicker(id, function(){ apRenderReview(); });
+}
+
 // Inbox "Job" cell — reflects the coded distribution once an invoice is coded:
 // the single job, "Multiple (n)" for a split spanning jobs, or "Overhead" for GL.
 function apInvoiceJobCell(i){
@@ -42092,7 +42242,16 @@ function apRenderReview(){
   // header summary
   function kv(l,v){ return '<div><div style="font-size:10px;text-transform:uppercase;color:#9aa0b4;letter-spacing:.4px">'+l+'</div>'+apEsc(v==null||v===''?'\u2014':v)+'</div>'; }
   var hdr='<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px;margin-bottom:14px">'+
-    '<div style="font-weight:700;font-size:15px;color:var(--kmi)">'+apEsc(apVendorDisplayName(i)||i.vendorName)+(i.foundationVendorNo?(' <span style="background:#e7f3e0;color:#3B6D11;font-size:10px;font-weight:700;padding:1px 7px;border-radius:9px">'+apEsc(i.foundationVendorNo)+'</span>'):'')+'</div>'+
+    '<div style="font-weight:700;font-size:15px;color:var(--kmi)">'+apEsc(apVendorDisplayName(i)||i.vendorName||'(no vendor name)')+
+      (i.foundationVendorNo
+        ? ' <span style="background:#e7f3e0;color:#3B6D11;font-size:10px;font-weight:700;padding:1px 7px;border-radius:9px">'+apEsc(i.foundationVendorNo)+'</span>'
+        : ' <span style="background:#fbe9e9;color:#b23636;font-size:10px;font-weight:700;padding:1px 7px;border-radius:9px">no Foundation payee</span>')+
+      // Accounting can correct the payee at any status. This writes only the two
+      // vendor fields (apSetPayee) — the approval is deliberately left intact.
+      (_apIsAcct()
+        ? ' <a href="#" onclick="apReviewFixPayee(event,\''+i.id+'\')" style="font-size:11px;font-weight:600;color:'+(i.foundationVendorNo?'#7a8194':'#b23636')+';margin-left:6px">'+(i.foundationVendorNo?'Change payee':'Set payee \u2192')+'</a>'
+        : '')+
+    '</div>'+
     '<div style="font-size:11px;color:#888;margin:2px 0 11px">coded by '+apEsc(apApproverName(i.createdBy)||i.createdBy)+(i.queuedAt?(' \u00b7 submitted '+apEsc(new Date(i.queuedAt).toLocaleDateString())):'')+'</div>'+
     '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 14px;font-size:12.5px">'+
       kv('Invoice #',i.invoiceNo)+kv('Invoice date',i.invoiceDate)+kv('Terms',i.terms)+
@@ -42168,6 +42327,17 @@ function apApprove(id){
   // here with a stale view of the record.
   if(_apIsLocked(i)){ alert(_apLockedMsg(i)); apRenderReview(); return; }
   if(!_apCanDecide(i)){ alert('Only the assigned approver or Accounting can approve this.'); return; }
+  // Gate the approval on the payee. Approving without one produces an invoice
+  // that can't be exported (_apExportBlockers) and can't be re-coded
+  // (_apIsLocked) — the dead end apSetPayee exists to unwind. Cheaper to stop
+  // it here than to rescue it afterwards.
+  if(!i.foundationVendorNo){
+    alert('This invoice has no Foundation payee, so it could not be exported even once approved.\n\n'+
+          (_apIsAcct()
+            ? 'Use \u201cSet payee \u2192\u201d next to the vendor name above, then approve.'
+            : 'Put it on hold with a note so Accounting can set the payee, then approve it.'));
+    return;
+  }
   if(Math.abs(((db.apInvoiceLines||[]).filter(function(l){return String(l.invoiceId)===String(i.id);}).reduce(function(t,l){return t+(Number(l.amount)||0);},0))-(Number(i.total)||0))>=0.01){
     if(!confirm('The coding lines don\u2019t tie out to the invoice total. Approve anyway?')) return;
   }
@@ -42378,7 +42548,15 @@ function apOpenExportModal(){
       '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace">'+apEsc(i.invoiceNo)+'</td>'+
       '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4">'+apInvoiceJobCell(i)+'</td>'+
       '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4;font-family:ui-monospace,monospace;text-align:right">'+apMoney(i.total)+'</td>'+
-      '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4;font-size:11px;color:'+(ok?'#3B6D11':'#b23636')+'">'+(ok?'Ready':apEsc(bl.join('; ')))+'</td></tr>';
+      '<td style="padding:7px 9px;border-bottom:1px solid #eef0f4;font-size:11px;color:'+(ok?'#3B6D11':'#b23636')+'">'+
+        (ok ? 'Ready'
+            : (apEsc(bl.join('; '))+
+               // Fix at the point of discovery: the payee blocker is the one
+               // blocker Accounting can clear without leaving this screen.
+               ((bl.indexOf('No Foundation vendor #')>=0 && _apIsAcct())
+                 ? ' <a href="#" onclick="apExportFixPayee(event,\''+i.id+'\')" style="color:var(--kmi);font-weight:700;white-space:nowrap">Pick payee \u2192</a>'
+                 : '')))+
+      '</td></tr>';
   }).join('') : '<tr><td colspan="6" style="padding:24px;text-align:center;color:#888">No approved invoices waiting to export.</td></tr>';
   ov.innerHTML='<div style="background:#fff;border-radius:12px;max-width:920px;width:100%;max-height:86vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">'+
     '<div style="padding:15px 20px;background:var(--kmi);color:#fff;display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:16px;font-weight:700">Export to Foundation</div><div style="font-size:12px;color:#c4c9df;margin-top:2px">'+okCount+' ready &middot; '+(cands.length-okCount)+' blocked &middot; one file, batch-local voucher #s</div></div><button onclick="apCloseExportModal()" style="background:none;border:0;color:#c4c9df;font-size:22px;cursor:pointer;line-height:1">&times;</button></div>'+
@@ -49433,7 +49611,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-25-ap2';
+var KMI_BUILD = '2026-08-25-AP_Issues';
 
 var _kmiSessionId = (function(){
   try {
