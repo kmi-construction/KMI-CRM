@@ -31462,7 +31462,10 @@ async function _eqbPinSave(){
 // the admin trucking PIN (revoked by rotating it). Moves write straight to
 // kmi_equipment + kmi_equipment_moves with source:'scan' and the device name.
 var _eqbPendingScan = null;
-var _truckClient = null, _truckUnit = null, _truckProjects = [], _truckPin = '', _truckToken = null, _truckSelDest = null;
+// _truckPin holds the PIN the driver typed on THIS device (pairing only). It is
+// never populated from the database any more \u2014 _truckPinSet just records whether
+// a PIN is configured server-side. See _eqbEnterTruckMode.
+var _truckClient = null, _truckUnit = null, _truckProjects = [], _truckPin = '', _truckPinSet = false, _truckToken = null, _truckSelDest = null;
 
 function _eqbFlushPendingScan(){ if(_eqbPendingScan){ var t=_eqbPendingScan; _eqbPendingScan=null; _eqbOpenScannedUnit(t); } }
 
@@ -31498,26 +31501,44 @@ async function _eqbEnterTruckMode(token){
   if(!window.supabase || !c.url || !c.key){ return _truckRender(_truckErr('Can\u2019t reach the database','Please contact KMI.')); }
   try{ _truckClient=window.supabase.createClient(c.url, c.key); }
   catch(e){ return _truckRender(_truckErr('Can\u2019t reach the database','Please contact KMI.')); }
+  // Auth migration B1: this portal used to read kmi_equipment, kmi_projects and
+  // kmi_settings directly with the anon key, which meant the trucking PIN was
+  // fetched to the browser and compared in JS \u2014 anyone who scanned one sticker
+  // could read it off the network tab and then move any unit. It now goes
+  // through kmi_truck_get_unit, a SECURITY DEFINER RPC that returns a fixed
+  // projection and reports only whether a PIN is configured. The PIN value
+  // never leaves the database. This is also what keeps the portal working once
+  // RLS lands in M2, since anon will hold no table grants at all.
   try{
-    var eqRes=await _truckClient.from('kmi_equipment').select('*').eq('qr_token', token).limit(1);
-    if(eqRes.error){ return _truckRender(_truckErr('Unable to load','We hit an error loading this unit. Please try again.')); }
-    var row=(eqRes.data&&eqRes.data[0]);
-    if(!row){ return _truckRender(_truckErr('Unknown tag','This QR code isn\u2019t linked to a unit. It may be an old label \u2014 ask KMI to reprint it.')); }
-    if(row.kind==='package'){ return _truckRender(_truckErr('Not movable','Scaffold & winter packages stay with their job and aren\u2019t moved by scan.')); }
-    _truckUnit={ id:row.id, unitNo:row.unit_no, manufacturer:row.manufacturer, model:row.model, name:row.name, eqType:row.eq_type, currentCol:row.current_col, kind:row.kind };
-    var pjRes=await _truckClient.from('kmi_projects').select('*');
-    // Real projects + equipment cost jobs are valid move destinations; overhead
-    // cost jobs are AP-only and never appear as a place to park a unit.
-    _truckProjects=((pjRes&&pjRes.data)?pjRes.data:[]).filter(function(r){ return r.category!=='overhead'; });
-    var stRes=await _truckClient.from('kmi_settings').select('value').eq('key','truckingPin').limit(1);
-    _truckPin=(stRes&&stRes.data&&stRes.data[0])?String(stRes.data[0].value||''):'';
+    var rpcRes=await _truckClient.rpc('kmi_truck_get_unit',{ p_token: token });
+    if(rpcRes.error){ return _truckRender(_truckErr('Unable to load','We hit an error loading this unit. Please try again.')); }
+    var d=rpcRes.data;
+    if(!d || !d.ok){
+      var why=d&&d.reason;
+      if(why==='not_movable'){ return _truckRender(_truckErr('Not movable','Scaffold & winter packages stay with their job and aren\u2019t moved by scan.')); }
+      return _truckRender(_truckErr('Unknown tag','This QR code isn\u2019t linked to a unit. It may be an old label \u2014 ask KMI to reprint it.'));
+    }
+    _truckUnit=d.unit||null;
+    if(!_truckUnit){ return _truckRender(_truckErr('Unable to load','We hit an error loading this unit. Please try again.')); }
+    // The RPC already filters overhead cost jobs and projects down to
+    // id/number/name \u2014 the only fields _truckDests() reads.
+    _truckProjects=Array.isArray(d.projects)?d.projects:[];
+    _truckPinSet=!!d.pin_set;
   }catch(e){ return _truckRender(_truckErr('Unable to load','Please check your signal and try again, or contact KMI.')); }
 
-  if(!_truckPin){ return _truckRender(_truckErr('Not enabled yet','Scan-to-move isn\u2019t set up yet. Ask a KMI admin to set the trucking PIN.')); }
+  if(!_truckPinSet){ return _truckRender(_truckErr('Not enabled yet','Scan-to-move isn\u2019t set up yet. Ask a KMI admin to set the trucking PIN.')); }
 
+  // A paired device stores the PIN locally. We can no longer compare it against
+  // a fetched value, so re-verify it server-side. A rotated PIN now correctly
+  // forces re-pairing on every previously paired device.
   var dev=_truckDevice();
-  if(dev && String(dev.pin)===String(_truckPin)){ _truckShowMove(); }
-  else { _truckShowPair(); }
+  if(dev && dev.pin){
+    try{
+      var vRes=await _truckClient.rpc('kmi_truck_verify_pin',{ p_pin:String(dev.pin) });
+      if(!vRes.error && vRes.data===true){ return _truckShowMove(); }
+    }catch(e){ /* fall through to pairing */ }
+  }
+  _truckShowPair();
 }
 
 function _truckShowPair(){
@@ -31533,10 +31554,22 @@ function _truckShowPair(){
     '</div>');
 }
 function _truckPinIn(){ var p=(g('eqt-pin').value||'').replace(/\D/g,''); g('eqt-pin').value=p; var b=g('eqt-pairbtn'); if(b) b.disabled=(p.length<4); }
-function _truckPair(){
+async function _truckPair(){
   var pin=(g('eqt-pin').value||'').replace(/\D/g,'');
-  if(pin!==String(_truckPin)){ alert('That PIN doesn\u2019t match. Check with your KMI contact.'); return; }
+  var btn=g('eqt-pairbtn');
+  if(btn){ btn.disabled=true; btn.textContent='Checking\u2026'; }
+  var ok=false;
+  try{
+    var vRes=await _truckClient.rpc('kmi_truck_verify_pin',{ p_pin:pin });
+    ok=(!vRes.error && vRes.data===true);
+  }catch(e){ ok=false; }
+  if(!ok){
+    if(btn){ btn.disabled=false; btn.textContent='Pair device'; }
+    alert('That PIN doesn\u2019t match. Check with your KMI contact.');
+    return;
+  }
   var name=(g('eqt-dev').value||'').trim()||'Unnamed device';
+  _truckPin=pin;
   _truckSaveDevice(name);
   _truckShowMove();
 }
@@ -31585,11 +31618,26 @@ async function _truckMove(){
   var u=_truckUnit, dev=_truckDevice(), dest=_truckSelDest, nowISO=new Date().toISOString();
   var btn=g('eqt-movebtn'); if(btn){ btn.disabled=true; btn.textContent='Saving\u2026'; }
   try{
-    var up=await _truckClient.from('kmi_equipment').update({ current_col:dest, assigned_at:nowISO, is_down:(dest==='maint'), updated_at:nowISO }).eq('id', u.id);
-    if(up.error){ throw new Error(up.error.message); }
-    var mv={ id:'em'+Date.now()+'_'+Math.floor(Math.random()*1000), equipment_id:u.id, from_col:u.currentCol, to_col:dest,
-             moved_by_user_id:null, moved_by_device:(dev?dev.name:'device'), source:'scan', moved_at:nowISO, created_at:nowISO };
-    await _truckClient.from('kmi_equipment_moves').insert(mv);
+    // Single RPC replaces the equipment UPDATE + moves INSERT. It re-verifies
+    // the PIN, the token and the destination server-side, so a caller can no
+    // longer post an arbitrary string into current_col or move a unit without
+    // a valid PIN. Timestamps are generated in-database in the same
+    // toISOString() format the rest of the app writes.
+    var mvRes=await _truckClient.rpc('kmi_truck_move',{
+      p_token:  _truckToken,
+      p_pin:    String((dev&&dev.pin)||_truckPin||''),
+      p_dest:   String(dest),
+      p_device: (dev?dev.name:'device')
+    });
+    if(mvRes.error){ throw new Error(mvRes.error.message); }
+    var r=mvRes.data;
+    if(!r||!r.ok){
+      var why=(r&&r.reason)||'';
+      if(why==='bad_pin'){ throw new Error('This device is no longer paired. Reload the page and re-enter the PIN.'); }
+      if(why==='bad_destination'){ throw new Error('That destination is no longer valid. Reload and pick again.'); }
+      if(why==='not_movable'){ throw new Error('This unit isn\u2019t movable by scan.'); }
+      throw new Error('The move was rejected. Reload the page and try again.');
+    }
     u.currentCol=dest;
     _truckShowDone(dest);
   }catch(err){
@@ -49611,7 +49659,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-25-payee1';
+var KMI_BUILD = '2026-08-26-authB1a';
 
 var _kmiSessionId = (function(){
   try {
@@ -51680,13 +51728,49 @@ async function pushToSupabase() {
       var r = await supabaseClient.from('kmi_project_budgets').upsert(db.projectBudgets.map(toSBProjBudget));
       if (r && r.error) errs.push('project_budgets: ' + r.error.message);
     }
-    // Activity (insert new ones — get current max id first)
+    // Activity
+    //
+    // This used to be: delete().gte('id', 0)  — i.e. delete EVERY row in the
+    // table — followed by a re-insert of this tab's most recent 50. Any client
+    // pushing a stale or partial activity list wiped the whole company's log
+    // and replaced it with its own view. Under the M2 RLS gate that is worse,
+    // not better: an authenticated user still passes the policy, so the delete
+    // still succeeds against every row they can see.
+    //
+    // Replaced with a bounded two-step: read the ids currently in the cloud,
+    // insert only the rows this client actually has that aren't there yet, and
+    // trim by explicit id list rather than by an unbounded predicate. If the
+    // read fails we insert without trimming — growing the log is recoverable,
+    // emptying it is not.
     if (db.activity.length && _tblDirty('activity')) {
-      var actRows = db.activity.slice(0, 50).map(function(a) { return {text:a.text||'', type:a.type||'', time:a.time||''}; });
-      // Delete all and re-insert to keep in sync
-      await supabaseClient.from('kmi_activity').delete().gte('id', 0);
-      var r = await supabaseClient.from('kmi_activity').insert(actRows.reverse());
-      if (r.error) errs.push('activity: ' + r.error.message);
+      var actRows = db.activity.slice(0, 50).map(function(a) {
+        return { text:a.text||'', type:a.type||'', time:a.time||'' };
+      }).reverse();
+      var actKey = function(x){ return (x.time||'') + '\u0001' + (x.type||'') + '\u0001' + (x.text||''); };
+      var existing = await supabaseClient.from('kmi_activity').select('id,text,type,time');
+      if (existing.error) {
+        var rIns = await supabaseClient.from('kmi_activity').insert(actRows);
+        if (rIns.error) errs.push('activity: ' + rIns.error.message);
+      } else {
+        var have = {};
+        (existing.data || []).forEach(function(row){ have[actKey(row)] = 1; });
+        var toInsert = actRows.filter(function(x){ return !have[actKey(x)]; });
+        if (toInsert.length) {
+          var rIns2 = await supabaseClient.from('kmi_activity').insert(toInsert);
+          if (rIns2.error) errs.push('activity: ' + rIns2.error.message);
+        }
+        // Trim to the newest 200 by explicit id. Never a bare predicate.
+        var all = (existing.data || []).slice().sort(function(a,b){
+          return String(b.time||'').localeCompare(String(a.time||''));
+        });
+        if (all.length > 200) {
+          var staleIds = all.slice(200).map(function(x){ return x.id; }).filter(function(x){ return x != null; });
+          if (staleIds.length) {
+            var rDel = await supabaseClient.from('kmi_activity').delete().in('id', staleIds);
+            if (rDel.error) errs.push('activity trim: ' + rDel.error.message);
+          }
+        }
+      }
     }
     // Settings
     var settingsRows = [
