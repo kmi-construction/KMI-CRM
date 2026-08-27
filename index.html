@@ -4505,6 +4505,54 @@ async function kmiAuthSignOut() {
   _kmiRecoveryMode = false;
 }
 
+// How long to wait on a data pull. The old value was a flat 8s, which is tight
+// for a phone on site LTE pulling ~40 tables and left the user staring at an
+// error when it tripped.
+function kmiPullTimeoutMs() { return _kmiAuthPersist() ? 25000 : 15000; }
+
+// Read ONE user row with the authenticated JWT.
+//
+// After M2, anon holds no table grants, so the boot pull — which runs BEFORE
+// sign-in — returns nothing and db.users is empty on any device without a
+// cached db. loginAttempt() previously resolved the signed-in user by
+// searching that empty array and bailed with "Invalid email or password"
+// despite correct credentials.
+//
+// Mobile is where this bites: iOS evicts localStorage for sites not opened in
+// about a week, so a foreman who uses the app weekly can easily return to an
+// empty cache. On desktop the cache usually survives, so the failure would
+// have looked like "broken only on phones".
+async function kmiAuthFetchUser(userId, email) {
+  if (!supabaseClient) return null;
+  try {
+    var q = supabaseClient.from('kmi_users').select('*');
+    q = userId ? q.eq('id', userId) : q.ilike('email', String(email || ''));
+    var r = await q.limit(1);
+    if (r.error || !r.data || !r.data[0]) return null;
+    return fromSBUser(r.data[0]);
+  } catch(e) { console.warn('user fetch failed', e); return null; }
+}
+
+// Pull the dataset once the JWT exists. The boot pull ran as anon and, after
+// M2, came back empty — without this the user would reach a signed-in app with
+// no projects, tickets or invoices until they happened to pull-to-refresh.
+// Non-fatal: a failure here leaves whatever local data exists intact.
+async function kmiAuthPostLoginSync() {
+  if (!supabaseClient || !_kmiAuthSession) return 'skipped';
+  try {
+    await Promise.race([
+      pullFromSupabase(),
+      new Promise(function(_, reject){
+        setTimeout(function(){ reject(new Error('pull timeout')); }, kmiPullTimeoutMs());
+      })
+    ]);
+    return 'pulled';
+  } catch(e) {
+    console.warn('post-login sync failed', e);
+    return 'failed';
+  }
+}
+
 function kmiAuthErrText(reason, detail) {
   if (reason === 'bad_credentials')     return 'Invalid email or password.';
   if (reason === 'offline')             return 'Can\u2019t reach the server. Check your connection and try again.';
@@ -4600,20 +4648,69 @@ async function loginAttempt() {
 
   // Authenticated. Bind the JWT to the kmi_users row.
   var link = await kmiAuthLink();
-  if (link && link.ok && link.user_id) {
-    var linked = db.users.find(function(x){ return String(x.id) === String(link.user_id); });
-    if (linked) u = linked;
-  } else if (link && link.reason === 'inactive') {
+  if (link && link.reason === 'inactive') {
     await kmiAuthSignOut();
     err.textContent = 'This account is inactive. Contact an administrator.';
     return;
   }
-  if (!u) { await kmiAuthSignOut(); err.textContent = 'Invalid email or password.'; return; }
+
+  // B2: resolve the user from the SERVER, not from db.users.
+  //
+  // db.users is populated by the boot pull, which runs as anon and — after M2 —
+  // returns nothing. On a device with no cached db (new phone, cleared browser,
+  // or an iOS cache evicted after ~a week of not opening the app) the local
+  // array is empty, and the old code bailed here with "Invalid email or
+  // password" even though authentication had just succeeded.
+  //
+  // Prefer the id the link RPC resolved; fall back to email.
+  var serverUser = await kmiAuthFetchUser(link && link.user_id, email);
+  if (serverUser) {
+    var known = db.users.find(function(x){ return String(x.id) === String(serverUser.id); });
+    if (known) {
+      // Keep the existing object identity so anything already holding a
+      // reference stays valid, but take the server's values.
+      Object.keys(serverUser).forEach(function(k){ known[k] = serverUser[k]; });
+      u = known;
+    } else {
+      db.users.push(serverUser);
+      u = serverUser;
+    }
+  } else if (link && link.user_id) {
+    var linked = db.users.find(function(x){ return String(x.id) === String(link.user_id); });
+    if (linked) u = linked;
+  }
+
+  if (!u) {
+    // Authentication succeeded but we cannot identify the app user. Do not
+    // claim the credentials were wrong — that sent people to Forgot Password,
+    // which cannot fix this.
+    await kmiAuthSignOut();
+    err.textContent = 'Signed in, but your user record could not be loaded. Check your connection and try again, or contact an administrator.';
+    return;
+  }
+  if (u.status === 'inactive') {
+    await kmiAuthSignOut();
+    err.textContent = 'This account is inactive. Contact an administrator.';
+    return;
+  }
   if (_kmiAuthSession && _kmiAuthSession.user) { u.authUserId = _kmiAuthSession.user.id; }
 
   _currentUser = u;
   saveSession(u);
-  if (u.mustResetPassword) { showForceResetModal(); return; }
+
+  // B2: pull with the JWT. The boot pull ran as anon; after M2 it came back
+  // empty, so without this the user lands in a signed-in app with no data.
+  // pullFromSupabase() re-binds _currentUser to the freshly pulled row.
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading your data\u2026'; }
+  var syncRes = await kmiAuthPostLoginSync();
+  if (btn) { btn.disabled = false; btn.textContent = btnTxt || 'Sign in'; }
+  if (syncRes === 'failed' && !(db.projects || []).length) {
+    err.textContent = 'Signed in, but your data didn\u2019t load. Check your connection and try again.';
+    return;
+  }
+  if (!_currentUser) _currentUser = u;
+
+  if (_currentUser.mustResetPassword) { showForceResetModal(); return; }
   enterApp();
 }
 function enterApp() {
@@ -5705,16 +5802,30 @@ async function attemptSupabaseConnect() {
   if (pullb) pullb.style.display = 'inline-block';
   setSyncStatus('syncing', 'Connecting\u2026');
   try {
-    // 8-second timeout so a hung pull doesn't trap the user forever
+    // B2: was a flat 8s. Too tight for a phone on site LTE pulling ~40 tables,
+    // and tripping it left the user on an error with no route forward.
+    // kmiPullTimeoutMs() gives mobile more headroom.
+    var _to = kmiPullTimeoutMs();
     await Promise.race([
       pullFromSupabase(),
       new Promise(function(_, reject){
-        setTimeout(function(){ reject(new Error('Database pull timed out after 8s')); }, 8000);
+        setTimeout(function(){ reject(new Error('Database pull timed out after ' + Math.round(_to/1000) + 's')); }, _to);
       })
     ]);
     return 'pulled';
   } catch (e) {
-    setSyncStatus('error', 'Connected, but data load failed');
+    // B2: distinguish "not signed in" from "no connection". After M2 an
+    // unauthenticated pull is REJECTED rather than empty, and the old blanket
+    // "Connected, but data load failed" told a field user nothing actionable.
+    // This is the expected state at the login screen, not a fault.
+    var msg = String((e && e.message) || '');
+    if (!_kmiAuthSession && /permission|denied|JWT|row-level|401|403/i.test(msg)) {
+      setSyncStatus('offline', 'Sign in to load data');
+    } else if (/timed out/i.test(msg)) {
+      setSyncStatus('error', 'Slow connection \u2014 data load timed out');
+    } else {
+      setSyncStatus('error', 'Connected, but data load failed');
+    }
     console.error('[Supabase auto-pull failed]', e);
     return 'pull_failed';
   }
@@ -49947,7 +50058,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-27-authB1c';
+var KMI_BUILD = '2026-08-27-authB2';
 
 var _kmiSessionId = (function(){
   try {
@@ -52284,6 +52395,27 @@ async function pullFromSupabase() {
       }
       return r;
     });
+    // B2: re-bind _currentUser to the freshly pulled row.
+    //
+    // db.users is replaced wholesale immediately above, so any existing
+    // _currentUser reference now points at an ORPHANED object. Permission
+    // checks keep working (they only read), but every WRITE to _currentUser —
+    // submitPasswordReset() setting passwordHash/mustResetPassword, signature
+    // capture, profile edits — lands on a detached object that is no longer in
+    // db, so saveDB() never serialises it and the change is silently lost.
+    //
+    // Latent before B2 because the only pulls after sign-in were pull-to-refresh
+    // and the manual button. B2 adds a pull immediately after login, which would
+    // have made this fire on every single sign-in. Fixed here rather than in the
+    // caller so every pull path is covered.
+    //
+    // Match on id first; fall back to email for the post-M2 case where the
+    // pre-login db was empty and _currentUser came from a targeted server read.
+    if (typeof _currentUser !== 'undefined' && _currentUser) {
+      var _rebound = db.users.find(function(x){ return String(x.id) === String(_currentUser.id); })
+                  || db.users.find(function(x){ return (x.email || '').toLowerCase() === (_currentUser.email || '').toLowerCase(); });
+      if (_rebound) _currentUser = _rebound;
+    }
     db.opportunities = (opps.data   || []).map(fromSBOpp);
     db.proposals     = (props.data  || []).map(fromSBProposal);
     db.projects      = (projs.data  || []).map(fromSBProject);
@@ -52786,7 +52918,15 @@ async function autoConnectSupabase() {
   } catch (e) {
     // Client is initialized so writes will still queue and push. We just
     // couldn't load fresh data this round — surface as a soft warning.
-    setSyncStatus('error', 'Connected, but data load failed');
+    // B2: same distinction as attemptSupabaseConnect. This is the background
+    // path taken on session restore, so after M2 it is where a returning user
+    // whose JWT has expired ends up — that is "sign in again", not a fault.
+    var msg2 = String((e && e.message) || '');
+    if (!_kmiAuthSession && /permission|denied|JWT|row-level|401|403/i.test(msg2)) {
+      setSyncStatus('offline', 'Sign in to load data');
+    } else {
+      setSyncStatus('error', 'Connected, but data load failed');
+    }
     console.error('[Supabase auto-pull failed]', e);
   }
 }
