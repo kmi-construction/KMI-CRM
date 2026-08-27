@@ -4630,8 +4630,32 @@ async function loginAttempt() {
   var probeSalt = (u && u.passwordSalt) || 'probe';
   var hash      = await hashPassword(pw, probeSalt);
   var legacyOk  = !!(u && u.passwordHash && hash === u.passwordHash);
+  var legacyInfo = null;
 
-  if (u && u.status === 'inactive') { err.textContent = 'This account is inactive. Contact an administrator.'; return; }
+  // B3: fall back to server-side verification when the local check could not
+  // run. db.users comes from the boot pull, which runs as ANON — so after M2
+  // it is empty on any device without a cached db, and the comparison above
+  // has no salt or hash to work with.
+  //
+  // For an already-migrated user that does not matter: signInWithPassword
+  // succeeds below and legacyOk is never consulted. For an UNMIGRATED user it
+  // is fatal — the legacy check is their only route in, so shadow migration
+  // would become impossible and they would be locked out the moment the gate
+  // drops. kmi_legacy_verify() does the same SHA-256 comparison in Postgres,
+  // which is what lets M2 ship without waiting for everyone to sign in first.
+  if (!legacyOk && supabaseClient) {
+    try {
+      var lv = await supabaseClient.rpc('kmi_legacy_verify', { p_email: email, p_password: pw });
+      if (!lv.error && lv.data && lv.data.ok) {
+        legacyOk   = true;
+        legacyInfo = lv.data;
+      }
+    } catch(e) { console.warn('legacy verify unavailable', e); }
+  }
+
+  // Status may only be known from the server when db.users is empty.
+  var knownStatus = (u && u.status) || (legacyInfo && legacyInfo.status) || '';
+  if (knownStatus === 'inactive') { err.textContent = 'This account is inactive. Contact an administrator.'; return; }
 
   var btn = document.querySelector('#login-overlay .login-btn');
   var btnTxt = btn ? btn.textContent : '';
@@ -4662,8 +4686,10 @@ async function loginAttempt() {
   // array is empty, and the old code bailed here with "Invalid email or
   // password" even though authentication had just succeeded.
   //
-  // Prefer the id the link RPC resolved; fall back to email.
-  var serverUser = await kmiAuthFetchUser(link && link.user_id, email);
+  // Prefer the id the link RPC resolved; then the id kmi_legacy_verify
+  // returned (the only source when db.users is empty); then email.
+  var serverUser = await kmiAuthFetchUser(
+    (link && link.user_id) || (legacyInfo && legacyInfo.user_id), email);
   if (serverUser) {
     var known = db.users.find(function(x){ return String(x.id) === String(serverUser.id); });
     if (known) {
@@ -50058,7 +50084,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-27-authB2';
+var KMI_BUILD = '2026-08-27-authB3';
 
 var _kmiSessionId = (function(){
   try {
