@@ -48086,8 +48086,12 @@ function _schMpHtml(){
     });
   });
 
+  var _p = _schCurrentProject();
+  var _fmn = _p ? _mpKmiByRole(_p, /foreman/i).map(function(u){ return _mpUserName(u); }).join(', ') : '';
   return _mpStyle('smp-css') + ctrls +
-    '<div class="mp-card"><div class="mp-ch">Manpower<span class="mp-sub"> \u00b7 crew/day on this project\u2019s work calendar' +
+    '<div class="mp-card"><div class="mp-ch">Manpower<span class="mp-sub">' +
+    (_fmn ? ' \u00b7 Foreman: ' + escapeHtml(_fmn) : '') +
+    ' \u00b7 crew/day on this project\u2019s work calendar' +
     (ed ? ' \u00b7 edit crew to override the MD \u00f7 duration figure' : '') + '</span></div>' +
     '<div class="mp-gridwrap"><table class="mp-grid"><thead>' + h1 + h2 + '</thead><tbody>' +
     totRow + peakRow + body + '</tbody></table></div></div>' +
@@ -48939,7 +48943,8 @@ async function _rlaLoad(pid) {
 // every project's native schedule tasks into one grid modeled on
 // 23-Weekly_Resource_Planning.xlsx: projects grouped w/ PM lead column,
 // Start/End/Duration/Crew, daily-total + weekly-peak rows, day/week toggle,
-// horizons 2/3/4/6/8/12/16, likely-award shading, by-project distribution
+// horizons 2/3/4/6/8/12/16, foreman column + availability, by-project
+// distribution
 // chart. Crew/day derives from est_man_days/duration_days with an editable
 // override (crew_override on the task) that also feeds the look-ahead stub.
 // "Publish" flip-then-inserts each project's current snapshot to
@@ -48951,6 +48956,7 @@ var _mpHorizon = 4;        // 2,3,4,6,8,12,16
 var _mpGran = 'day';       // 'day' | 'week'
 var _mpPM = 'all';
 var _mpProj = 'all';
+var _mpFore = 'all';       // foreman user id, or 'all'
 var _mpTasks = [];         // leaf tasks across all projects
 var _mpLoaded = false;
 var _mpLoadedAt = 0;       // epoch ms of the last successful load
@@ -49039,21 +49045,43 @@ function _mpTaskDays(t){
 }
 function _mpTaskFinish(t){ var ks = Object.keys(_mpTaskDays(t)).sort(); return ks.length ? ks[ks.length - 1] : (t.start || ''); }
 
+// KMI internal staff come from the project's kmiAssignments -> db.users.
+// NOT db.pms, which is the CUSTOMER contact store (keyed by customerId) —
+// reading that here is what left the PM column blank on every row. Same
+// lookup shape as the AP, kickoff and mobile-notify paths.
+function _mpUser(id){
+  return ((typeof db !== 'undefined' && db.users) ? db.users : [])
+    .filter(function(u){ return String(u.id) === String(id); })[0] || null;
+}
+function _mpUserName(u){ return (((u.firstName || '') + ' ' + (u.lastName || '')).trim()) || (u.email || ''); }
+function _mpKmiByRole(p, re){
+  var out = [], seen = {};
+  (Array.isArray(p.kmiAssignments) ? p.kmiAssignments : []).forEach(function(a){
+    if (!a || !a.role || !re.test(String(a.role))) return;
+    var u = _mpUser(a.userId);
+    if (!u || seen[String(u.id)]) return;
+    seen[String(u.id)] = 1; out.push(u);
+  });
+  return out;
+}
+// /project manager/i covers 'Project Manager' and 'Sr. Project Manager'
+// (AP_PM_PROJECT_ROLES) and does not collide with 'Project Foreman'.
 function _mpPmInitials(p){
-  var nm = '';
-  if (p.pmId && typeof db !== 'undefined' && db.pms) {
-    var pm = db.pms.filter(function(x){ return String(x.id) === String(p.pmId); })[0];
-    if (pm) nm = pm.name || '';
-  }
-  nm = nm || p.pmName || '';
+  var pms = _mpKmiByRole(p, /project manager/i);
+  if (!pms.length) return '\u2014';
+  var nm = _mpUserName(pms[0]);
   if (!nm) return '\u2014';
   return nm.split(/\s+/).map(function(w){ return w[0] || ''; }).join('').slice(0, 3).toUpperCase();
 }
 function _mpBuildProjects(){
   var byId = {}, i = 0;
   ((typeof db !== 'undefined' && db.projects) ? db.projects : []).forEach(function(p){
+    var fm = _mpKmiByRole(p, /foreman/i);
     byId[String(p.id)] = { id: String(p.id), number: p.number || '', name: p.name || '(project)',
-      stage: p.stage || 'active', pm: _mpPmInitials(p), color: _MP_COLORS[i % _MP_COLORS.length], tasks: [] };
+      pm: _mpPmInitials(p), color: _MP_COLORS[i % _MP_COLORS.length], tasks: [],
+      foremen: fm.map(function(u){ return { id: String(u.id), name: _mpUserName(u), last: (u.lastName || _mpUserName(u)) }; }),
+      foremanLabel: fm.map(function(u){ return (u.lastName || _mpUserName(u)); }).join(', '),
+      foremanFull:  fm.map(function(u){ return _mpUserName(u); }).join(', ') };
     i++;
   });
   _mpTasks.forEach(function(t){ var p = byId[String(t.projectId)]; if (p) p.tasks.push(t); });
@@ -49077,6 +49105,10 @@ function _mpVisProjects(){
   return _mpBuildProjects().filter(function(p){
     if (_mpProj !== 'all' && p.id !== _mpProj) return false;
     if (_mpPM !== 'all' && p.pm !== _mpPM) return false;
+    if (_mpFore !== 'all') {
+      var hit = p.foremen.filter(function(f){ return f.id === _mpFore; }).length;
+      if (!hit) return false;
+    }
     return true;
   });
 }
@@ -49133,7 +49165,7 @@ function renderManpower(){
     return;
   }
   _mpTasks.forEach(function(t){ t._days = null; });   // recompute day maps this pass
-  host.innerHTML = _mpShell(_mpChartHtml() + _mpGridHtml());
+  host.innerHTML = _mpShell(_mpChartHtml() + _mpAvailHtml() + _mpGridHtml());
 }
 
 function _mpShell(inner){
@@ -49141,6 +49173,11 @@ function _mpShell(inner){
   var projOpts = '<option value="all">All projects</option>' + _mpBuildProjects().map(function(p){
     return '<option value="' + _mpEsc(p.id) + '"' + (p.id === _mpProj ? ' selected' : '') + '>' + _mpEsc((p.number ? p.number + ' ' : '') + p.name) + '</option>';
   }).join('');
+  var fseen = {}, fore = [];
+  _mpBuildProjects().forEach(function(p){ p.foremen.forEach(function(f){ if (!fseen[f.id]) { fseen[f.id] = 1; fore.push(f); } }); });
+  fore.sort(function(a, b){ return a.name.localeCompare(b.name); });
+  var foreOpts = '<option value="all">All foremen</option>' + fore.map(function(f){
+    return '<option value="' + _mpEsc(f.id) + '"' + (f.id === _mpFore ? ' selected' : '') + '>' + _mpEsc(f.name) + '</option>'; }).join('');
   var pms = {}; _mpBuildProjects().forEach(function(p){ if (p.pm && p.pm !== '\u2014') pms[p.pm] = 1; });
   var pmOpts = '<option value="all">All PMs</option>' + Object.keys(pms).sort().map(function(k){
     return '<option' + (k === _mpPM ? ' selected' : '') + '>' + _mpEsc(k) + '</option>'; }).join('');
@@ -49153,6 +49190,7 @@ function _mpShell(inner){
       '<div class="mp-fld"><label>Horizon (wks)</label><select id="mp-hz" onchange="mpSetHz(this.value)">' + hOpts + '</select></div>' +
       '<div class="mp-fld"><label>View</label><div class="mp-seg"><button class="' + (_mpGran === 'day' ? 'on' : '') + '" onclick="mpSetGran(\'day\')">Days</button><button class="' + (_mpGran === 'week' ? 'on' : '') + '" onclick="mpSetGran(\'week\')">Weeks</button></div></div>' +
       '<div class="mp-fld"><label>PM</label><select id="mp-pm" onchange="mpSetPM(this.value)">' + pmOpts + '</select></div>' +
+      '<div class="mp-fld"><label>Foreman</label><select id="mp-fore" onchange="mpSetFore(this.value)">' + foreOpts + '</select></div>' +
       '<div class="mp-fld"><label>Project</label><select id="mp-proj" onchange="mpSetProj(this.value)">' + projOpts + '</select></div>' +
     '</div>' + inner;
 }
@@ -49172,7 +49210,7 @@ function _mpChartHtml(){
   });
   var totals = []; for (var w = 0; w < n; w++) { var tt = 0; data.forEach(function(a){ tt += a[w]; }); totals.push(tt); }
   var mx = Math.max.apply(null, totals.concat([1]));
-  var legend = vis.map(function(p){ return '<span><i style="background:' + p.color + '"></i>' + _mpEsc((p.number ? p.number + ' ' : '') + p.name) + (p.stage === 'likely' ? ' (likely)' : '') + '</span>'; }).join('');
+  var legend = vis.map(function(p){ return '<span><i style="background:' + p.color + '"></i>' + _mpEsc((p.number ? p.number + ' ' : '') + p.name) + '</span>'; }).join('');
   var bars = '<div class="peakline" style="bottom:' + (Math.max.apply(null, totals) / mx * 100) + '%"><span>peak ' + Math.max.apply(null, totals) + '</span></div>';
   for (var w = 0; w < n; w++) {
     bars += '<div class="cbar"><div class="cv">' + totals[w] + '</div><div class="stack" style="height:' + (totals[w] / mx * 118) + 'px">';
@@ -49181,6 +49219,81 @@ function _mpChartHtml(){
   }
   return '<div class="mp-card"><div class="mp-ch">Manpower distribution by project</div>' +
     '<div class="mp-legend">' + legend + '</div><div class="mp-chartwrap"><div class="mp-chart">' + bars + '</div></div></div>';
+}
+
+// ── Foreman availability ───────────────────────────────────
+// "Committed through" counts REMAINING work only — task days from today
+// forward — so a job that is nearly done stops reading as a full-duration
+// commitment. Deliberately ignores the horizon and every filter: a foreman
+// booked into November must not read as free because the grid shows 4 weeks.
+// Assignment is project-level, so a foreman on a job is committed for that
+// job's whole remaining span (decision 7-C).
+function _mpProjRemainThrough(p){
+  var today = _mpToday(), last = null;
+  p.tasks.forEach(function(t){
+    var ks = Object.keys(_mpTaskDays(t));
+    for (var i = 0; i < ks.length; i++) if (ks[i] >= today && (!last || ks[i] > last)) last = ks[i];
+  });
+  return last;
+}
+// Roster = anyone holding a foreman assignment, plus every active user whose
+// role is Foreman, so an unassigned foreman shows as available now rather
+// than silently missing from the list.
+function _mpAvailRows(){
+  var by = {}, projs = _mpBuildProjects();
+  projs.forEach(function(p){
+    var through = _mpProjRemainThrough(p);
+    p.foremen.forEach(function(f){
+      if (!by[f.id]) by[f.id] = { id: f.id, name: f.name, projects: [], through: null, thruProj: null };
+      var r = by[f.id];
+      if (!through) return;
+      r.projects.push((p.number ? p.number + ' ' : '') + p.name);
+      if (!r.through || through > r.through) { r.through = through; r.thruProj = p; }
+    });
+  });
+  ((typeof db !== 'undefined' && db.users) ? db.users : []).forEach(function(u){
+    if ((u.status || 'active') !== 'active') return;
+    var role = (typeof normalizeRole === 'function') ? normalizeRole(u.role) : u.role;
+    if (role !== 'Foreman') return;
+    if (!by[String(u.id)]) by[String(u.id)] = { id: String(u.id), name: _mpUserName(u), projects: [], through: null, thruProj: null };
+  });
+  var out = Object.keys(by).map(function(k){
+    var r = by[k];
+    if (r.through) {
+      var d = _mpAdd(r.through, 1), guard = 0;
+      while (!_mpIsWorkDay(d, { projectId: r.thruProj ? r.thruProj.id : null, ex: {} }) && guard++ < 400) d = _mpAdd(d, 1);
+      r.free = d;
+      r.daysOut = Math.round((_mpD(d) - _mpD(_mpToday())) / 86400000);
+    } else { r.free = null; r.daysOut = 0; }
+    return r;
+  });
+  out.sort(function(a, b){
+    if (!a.free && !b.free) return a.name.localeCompare(b.name);
+    if (!a.free) return -1;
+    if (!b.free) return 1;
+    if (a.free !== b.free) return a.free < b.free ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return out;
+}
+function _mpAvailHtml(){
+  var rows = _mpAvailRows();
+  if (!rows.length) {
+    return '<div class="mp-card"><div class="mp-ch">Foreman availability</div>' +
+      '<div class="mp-load">No foremen assigned to any project yet. Add a KMI assignment with a ' +
+      'Project Foreman role on the project record and they will appear here.</div></div>';
+  }
+  var body = rows.map(function(r){
+    return '<tr><td class="nm">' + _mpEsc(r.name) + '</td>' +
+      '<td class="pj">' + (r.projects.length ? _mpEsc(r.projects.join(' \u00b7 ')) : '\u2014') + '</td>' +
+      '<td>' + (r.through ? _mpFmt(r.through) : '\u2014') + '</td>' +
+      '<td class="' + (r.free ? 'busy' : 'free') + '">' + (r.free ? _mpFmt(r.free) : 'Available now') + '</td>' +
+      '<td>' + (r.free ? r.daysOut + 'd' : '\u2014') + '</td></tr>';
+  }).join('');
+  return '<div class="mp-card"><div class="mp-ch">Foreman availability' +
+    '<span class="mp-sub"> \u00b7 remaining work only \u00b7 every project, not just this window</span></div>' +
+    '<table class="mp-av"><thead><tr><th>Foreman</th><th>Committed to</th><th>Through</th>' +
+    '<th>Free</th><th>Out</th></tr></thead><tbody>' + body + '</tbody></table></div>';
 }
 
 function _mpGridHtml(){
@@ -49193,10 +49306,10 @@ function _mpGridHtml(){
 
   var isDay = _mpGran === 'day';
   var colCount = isDay ? days : n;
-  var fixCols = 5; // Task, Start, End, Dur, Crew
+  var fixCols = 6; // Task, Start, End, Dur, Crew, Foreman
 
   // header
-  var h1 = '<tr><th class="fx task" rowspan="2">Project / Task</th><th class="fx st" rowspan="2">Start</th><th class="fx en" rowspan="2">End</th><th class="fx du" rowspan="2">Dur</th><th class="fx cr" rowspan="2">Crew</th>';
+  var h1 = '<tr><th class="fx task" rowspan="2">Project / Task</th><th class="fx st" rowspan="2">Start</th><th class="fx en" rowspan="2">End</th><th class="fx du" rowspan="2">Dur</th><th class="fx cr" rowspan="2">Crew</th><th class="fx fm" rowspan="2">Foreman</th>';
   var h2 = '<tr>';
   for (var w = 0; w < n; w++) {
     h1 += '<th class="wk" colspan="' + (isDay ? 7 : 1) + '">Wk ' + _mpMD(_mpAdd(_mpAnchor, w * 7)) + '</th>';
@@ -49212,13 +49325,13 @@ function _mpGridHtml(){
     else { for (var w2 = 0; w2 < n; w2++) s += '<td class="dc ws">' + valFn('week', w2) + '</td>'; }
     return s;
   }
-  var totRow = '<tr class="sum"><td class="fx task">DAILY TOTAL</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>';
+  var totRow = '<tr class="sum"><td class="fx task">DAILY TOTAL</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td><td class="fx fm"></td>';
   if (isDay) { for (var _ti = 0; _ti < days; _ti++) { var _td = _mpAdd(_mpAnchor, _ti), _tv = dayTot[_ti] || 0, _tc = _mpTotClass(_tv);
     totRow += '<td class="dc' + (_ti % 7 === 0 ? ' ws' : '') + (_mpWe(_td) ? ' we' : '') + (_tc ? ' ' + _tc : '') + '">' + (_tv || '') + '</td>'; } }
   else { for (var _tw = 0; _tw < n; _tw++) { var _s = 0, _c = 0; for (var _d = 0; _d < 7; _d++){ var _dv = dayTot[_tw * 7 + _d] || 0; if (!_mpWe(_mpAdd(_mpAnchor, _tw * 7 + _d))) { _s += _dv; _c++; } } var _wv = _c ? Math.round(_s / _c) : 0, _wc = _mpTotClass(_wv);
     totRow += '<td class="dc ws' + (_wc ? ' ' + _wc : '') + '">' + (_wv || '') + '</td>'; } }
   totRow += '</tr>';
-  var peakRow = '<tr class="sum peak"><td class="fx task">WEEKLY PEAK</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>' +
+  var peakRow = '<tr class="sum peak"><td class="fx task">WEEKLY PEAK</td><td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td><td class="fx fm"></td>' +
     (isDay ? (function(){ var s = ''; for (var w = 0; w < n; w++) for (var di = 0; di < 7; di++) s += '<td class="dc' + (di === 0 ? ' ws' : '') + '">' + (di === 0 ? weekPeak[w] : '') + '</td>'; return s; })()
            : (function(){ var s = ''; for (var w = 0; w < n; w++) s += '<td class="dc ws">' + weekPeak[w] + '</td>'; return s; })()) + '</tr>';
 
@@ -49226,24 +49339,23 @@ function _mpGridHtml(){
   var body = '';
   if (!vis.length) body = '<tr><td colspan="' + (colCount + fixCols) + '" style="padding:24px;text-align:center;color:#aaa">No projects match this filter.</td></tr>';
   vis.forEach(function(p){
-    var likely = p.stage === 'likely';
-    body += '<tr class="proj' + (likely ? ' lk' : '') + '"><td class="fx task"><span class="pmb">' + _mpEsc(p.pm) + '</span> ' +
-      _mpEsc((p.number ? p.number + ' \u2014 ' : '') + p.name) +
-      (likely ? '<span class="lkb">LIKELY</span>' : '') +
-      '<span class="lktog" onclick="mpToggleLikely(\'' + _mpEsc(p.id) + '\')" title="Toggle likely-award">' + (likely ? 'set booked' : 'mark likely') + '</span></td>' +
-      '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>';
-    body += (isDay ? cellsFor(function(){ return ''; }) : cellsFor(function(){ return ''; })) + '</tr>';
+    body += '<tr class="proj"><td class="fx task"><span class="pmb">' + _mpEsc(p.pm) + '</span> ' +
+      _mpEsc((p.number ? p.number + ' \u2014 ' : '') + p.name) + '</td>' +
+      '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>' +
+      '<td class="fx fm" title="' + _mpEsc(p.foremanFull) + '">' + _mpEsc(p.foremanLabel || '\u2014') + '</td>';
+    body += cellsFor(function(){ return ''; }) + '</tr>';
     _mpPhaseGroups(p).forEach(function(gp){
-      body += '<tr class="mp-ph' + (likely ? ' lk' : '') + '"><td class="fx task" style="padding-left:22px">' + _mpEsc(gp.name) + '</td>' +
-        '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>';
-      body += (isDay ? cellsFor(function(){ return ''; }) : cellsFor(function(){ return ''; })) + '</tr>';
+      body += '<tr class="mp-ph"><td class="fx task" style="padding-left:22px">' + _mpEsc(gp.name) + '</td>' +
+        '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td><td class="fx fm"></td>';
+      body += cellsFor(function(){ return ''; }) + '</tr>';
       gp.tasks.forEach(function(t){
         var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t);
-        body += '<tr' + (likely ? ' class="lk"' : '') + '><td class="fx task" style="padding-left:34px"><span class="tn">' + _mpEsc(t.name) + '</span></td>' +
+        body += '<tr><td class="fx task" style="padding-left:34px"><span class="tn">' + _mpEsc(t.name) + '</span></td>' +
           '<td class="fx st">' + (t.start ? _mpMD(t.start) : '\u2014') + '</td>' +
           '<td class="fx en">' + (fin ? _mpMD(fin) : '\u2014') + '</td>' +
           '<td class="fx du">' + (Number(t.dur) || 0) + '</td>' +
-          '<td class="fx cr"><input class="crin' + (t.crewOverride != null ? ' ov' : '') + '" type="text" inputmode="numeric" maxlength="4" value="' + crew + '" onchange="mpSetCrew(\'' + _mpEsc(t.id) + '\',this.value)"></td>';
+          '<td class="fx cr"><input class="crin' + (t.crewOverride != null ? ' ov' : '') + '" type="text" inputmode="numeric" maxlength="4" value="' + crew + '" onchange="mpSetCrew(\'' + _mpEsc(t.id) + '\',this.value)"></td>' +
+          '<td class="fx fm"></td>';
         if (isDay) { for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i); var on = tdays[dt]; body += '<td class="dc' + (i % 7 === 0 ? ' ws' : '') + (_mpWe(dt) ? ' we' : '') + (on ? ' on' : '') + '">' + (on ? crew : '') + '</td>'; } }
         else { for (var w = 0; w < n; w++) { var act = false; for (var d = 0; d < 7; d++) { if (tdays[_mpAdd(_mpAnchor, w * 7 + d)]) { act = true; break; } } body += '<td class="dc ws' + (act ? ' on' : '') + '">' + (act ? crew : '') + '</td>'; } }
         body += '</tr>';
@@ -49260,6 +49372,7 @@ function mpSetGran(v){ _mpGran = (v === 'week' ? 'week' : 'day'); renderManpower
 function mpSetHz(v){ _mpHorizon = Math.max(1, Math.min(16, Number(v) || 4)); renderManpower(); }
 function mpSetPM(v){ _mpPM = v; renderManpower(); }
 function mpSetProj(v){ _mpProj = v; renderManpower(); }
+function mpSetFore(v){ _mpFore = v; renderManpower(); }
 function mpSetWk(v){ if (v) _mpAnchor = _mpMonday(v); renderManpower(); }
 
 async function mpSetCrew(taskId, val){
@@ -49277,29 +49390,6 @@ function _mpStampHtml(){
   var d = new Date(_mpLoadedAt), h = d.getHours(), ap = h >= 12 ? 'pm' : 'am';
   h = h % 12; if (!h) h = 12;
   return ' \u00b7 loaded ' + h + ':' + String(d.getMinutes()).padStart(2, '0') + ap;
-}
-
-// Likely-award flag. Written with a TARGETED per-row update (decision 2-B) —
-// deliberately NOT saveDB(), which would fire the debounced wholesale
-// pushToSupabase() and let a stale tab clobber every project row. `stage` is
-// also left out of toSBProject() on purpose, so this is the only writer.
-async function mpToggleLikely(pid){
-  var p = ((typeof db !== 'undefined' && db.projects) ? db.projects : []).filter(function(x){ return String(x.id) === String(pid); })[0];
-  if (!p) return;
-  var prev = (p.stage === 'likely') ? 'likely' : 'active';
-  var next = (prev === 'likely') ? 'active' : 'likely';
-  p.stage = next;
-  renderManpower();
-  if (typeof supabaseClient === 'undefined' || !supabaseClient) return;
-  try {
-    var r = await supabaseClient.from('kmi_projects')
-      .update({ stage: next }).eq('id', p.id);
-    if (r.error) throw r.error;
-  } catch (e) {
-    p.stage = prev;
-    if (typeof _schErr === 'function') _schErr(e, 'Likely flag not saved');
-    renderManpower();
-  }
 }
 
 async function mpPublish(){
@@ -49360,7 +49450,7 @@ function mpPrint(){
   var title = 'Weekly Resource Planning \u2014 ' + scope + '  \u00b7  week of ' + _mpFmt(_mpAnchor) + '  \u00b7  ' + n + ' weeks';
   var host = g('mp-print-host');
   if (!host) { host = document.createElement('div'); host.id = 'mp-print-host'; document.body.appendChild(host); }
-  host.innerHTML = '<div class="mp-print-title">' + _mpEsc(title) + '</div>' + bodyHtml;
+  host.innerHTML = '<div class="mp-print-title">' + _mpEsc(title) + '</div>' + _mpAvailPrintHtml() + bodyHtml;
 
   var saved = [];
   Array.prototype.slice.call(document.body.children).forEach(function(el){
@@ -49371,6 +49461,20 @@ function mpPrint(){
   window.addEventListener('afterprint', _mpRestore);
   window.print();
   setTimeout(function(){ if (host.style.display === 'block') _mpRestore(); }, 3000);
+}
+
+function _mpAvailPrintHtml(){
+  var rows = _mpAvailRows();
+  if (!rows.length) return '';
+  var body = rows.map(function(r){
+    return '<tr><td class="a-nm">' + _mpEsc(r.name) + '</td>' +
+      '<td class="a-pj">' + (r.projects.length ? _mpEsc(r.projects.join(' \u00b7 ')) : '\u2014') + '</td>' +
+      '<td>' + (r.through ? _mpFmt(r.through) : '\u2014') + '</td>' +
+      '<td>' + (r.free ? _mpFmt(r.free) : 'Available now') + '</td>' +
+      '<td>' + (r.free ? r.daysOut + 'd' : '\u2014') + '</td></tr>';
+  }).join('');
+  return '<table class="mp-av-print"><thead><tr><th class="a-nm">Foreman</th><th class="a-pj">Committed to</th>' +
+    '<th>Through</th><th>Free</th><th>Out</th></tr></thead><tbody>' + body + '</tbody></table>';
 }
 
 function _mpPrintTable(vis, fw, tw, dayTot){
@@ -49398,7 +49502,8 @@ function _mpPrintTable(vis, fw, tw, dayTot){
   vis.forEach(function(p){
     var groups = _mpPhaseGroups(p).map(function(gp){ return { name: gp.name, tasks: gp.tasks.filter(inWin) }; }).filter(function(gp){ return gp.tasks.length; });
     if (!groups.length) return;
-    rows += '<tr class="p-proj"><td class="p-task">' + _mpEsc((p.number ? p.number + ' \u2014 ' : '') + p.name) + (p.stage === 'likely' ? ' (LIKELY)' : '') + '</td>' +
+    rows += '<tr class="p-proj"><td class="p-task">' + _mpEsc((p.number ? p.number + ' \u2014 ' : '') + p.name) +
+      (p.foremanLabel ? ' \u00b7 Foreman: ' + _mpEsc(p.foremanFull) : '') + '</td>' +
       '<td class="p-c"></td><td class="p-c"></td><td class="p-c"></td><td class="p-c"></td>';
     for (var i = 0; i < dayCount; i++) { var dd = _mpAdd(_mpAnchor, startDay + i); rows += '<td class="p-d' + (_mpWe(dd) ? ' we' : '') + (i % 7 === 0 ? ' ws' : '') + '"></td>'; }
     rows += '</tr>';
@@ -49434,6 +49539,15 @@ function _mpStyle(sid){
     '.mp-ch{font-weight:700;color:#12233b;font-size:14px;padding:13px 16px;border-bottom:1px solid #e4e8ee}' +
     '.mp-sub{font-weight:400;color:#7c8794;font-size:12px}' +
     '.mp-load{padding:34px;text-align:center;color:#888;font-size:13px}' +
+    '.mp-av{width:100%;border-collapse:collapse;font-size:12px}' +
+    '.mp-av th{text-align:left;font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;' +
+      'color:#7c8794;padding:8px 16px;border-bottom:1px solid #e4e8ee;background:#fafbfc;white-space:nowrap}' +
+    '.mp-av td{padding:8px 16px;border-bottom:0.5px solid #eef1f4;color:#243244;vertical-align:top}' +
+    '.mp-av tr:last-child td{border-bottom:0}' +
+    '.mp-av .nm{font-weight:700;color:#12233b;white-space:nowrap}' +
+    '.mp-av .pj{color:#7c8794;font-size:11px;line-height:1.5}' +
+    '.mp-av .free{font-weight:700;color:#2e7d32;white-space:nowrap}' +
+    '.mp-av .busy{font-weight:700;color:#b5442e;white-space:nowrap}' +
     '.mp-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:#7c8794;padding:12px 16px 0}' +
     '.mp-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle;margin-right:5px}' +
     '.mp-chartwrap{overflow-x:auto;padding:12px 16px 16px}' +
@@ -49452,9 +49566,11 @@ function _mpStyle(sid){
     '.mp-grid .st{left:200px;width:52px;min-width:52px;text-align:center}' +
     '.mp-grid .en{left:252px;width:52px;min-width:52px;text-align:center}' +
     '.mp-grid .du{left:304px;width:38px;min-width:38px;text-align:center}' +
-    '.mp-grid .cr{left:342px;width:60px;min-width:60px;text-align:center;border-right:2px solid #d4dae1}' +
+    '.mp-grid .cr{left:342px;width:60px;min-width:60px;text-align:center}' +
+    '.mp-grid .fm{left:402px;width:88px;min-width:88px;max-width:88px;text-align:left;padding:0 6px;' +
+      'overflow:hidden;text-overflow:ellipsis;border-right:2px solid #d4dae1;color:#5a6672}' +
     '.mp-grid thead th{background:#fafbfc;color:#7c8794;font-weight:700;border-bottom:1px solid #e4e8ee;font-size:11px}' +
-    '.mp-grid .st,.mp-grid .en,.mp-grid .du,.mp-grid .cr{font-size:11px}' +
+    '.mp-grid .st,.mp-grid .en,.mp-grid .du,.mp-grid .cr,.mp-grid .fm{font-size:11px}' +
     '.wk{font-size:10px;color:#243244;font-weight:700;text-align:center;padding:5px 2px;border-left:2px solid #c9d1da}' +
     '.d2{font-size:9px;font-weight:700;color:#7c8794;text-align:center;padding:3px 0;border-left:1px solid #e4e8ee;border-bottom:1px solid #e4e8ee;width:24px;min-width:24px;background:#fafbfc}' +
     '.d2.ws{border-left:2px solid #c9d1da}.d2.we{color:#c2c9d1;background:#eef1f4}.d2 small{display:block;font-size:8px;color:#aab2bc}' +
@@ -49464,10 +49580,8 @@ function _mpStyle(sid){
     'tr.sum.peak td{color:#b5442e;font-size:10px;background:#faf1ee}tr.sum.peak td.fx{background:#f6e9e5}' +
     'tr.sum td.dc{font-size:11px;color:#12233b}' +
     'tr.proj td{background:#eaf0f4;border-top:1px solid #c9d1da;border-bottom:1px solid #d4dae1;padding:6px 8px;font-weight:700;color:#12233b;font-size:12px}' +
-    'tr.proj td.fx{background:#e3ebf1}tr.proj.lk td{background:#fbf4e6}tr.proj.lk td.fx{background:#fbf4e6}tr.lk td.dc{background:#fdf9f0}' + 'tr.mp-ph td{background:#f4f7f9;font-weight:600;color:#3a5a72;font-size:12px}tr.mp-ph td.fx{background:#eef3f6}' +
+    'tr.proj td.fx{background:#e3ebf1}' + 'tr.mp-ph td{background:#f4f7f9;font-weight:600;color:#3a5a72;font-size:12px}tr.mp-ph td.fx{background:#eef3f6}' +
     '.pmb{display:inline-block;font-size:10px;font-weight:800;color:#fff;background:#2f6f8f;border-radius:4px;padding:1px 5px;margin-right:4px}' +
-    '.lkb{font-size:9px;font-weight:800;color:#9a7a2e;background:#f3e4bf;border-radius:4px;padding:1px 6px;margin-left:6px}' +
-    '.lktog{font-size:10px;color:#9aa4b0;margin-left:8px;cursor:pointer;text-decoration:underline}.lktog:hover{color:#2f6f8f}' +
     '.tn{font-size:12px;color:#243244;font-weight:400}' +
     '.crin{width:48px;font:inherit;font-size:12px;line-height:1;vertical-align:middle;text-align:center;border:1px solid transparent;border-radius:5px;padding:2px;background:transparent;font-weight:700;color:#2f6f8f}' +
     '.crin:hover{border-color:#d4dae1}.crin:focus{border-color:#2f6f8f;background:#fff;outline:none}.crin.ov{color:#b5442e}' +
@@ -49479,6 +49593,11 @@ function _mpStyle(sid){
     '#mp-print-host{display:none}' +
     '@media print{@page{size:17in 11in;margin:0.4in}' +
       '.mp-print-title{font:700 13px/1.3 Arial,sans-serif;margin:0 0 8px;color:#111}' +
+      '.mp-av-print{border-collapse:collapse;font:10px/1.2 Arial,sans-serif;margin:0 0 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+      '.mp-av-print th,.mp-av-print td{border:0.5px solid #bbb;padding:2px 6px;text-align:center;white-space:nowrap}' +
+      '.mp-av-print th{font-weight:700;background:#eef2f5}' +
+      '.mp-av-print .a-nm{text-align:left;font-weight:700}' +
+      '.mp-av-print .a-pj{text-align:left;white-space:normal;max-width:260px}' +
       '.mp-pgbreak{page-break-after:always;height:0}' +
       '.mp-print-tbl{border-collapse:collapse;width:100%;font:10px/1.15 Arial,sans-serif;margin-bottom:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
       '.mp-print-tbl th,.mp-print-tbl td{border:0.5px solid #bbb;padding:2px 3px;text-align:center}' +
@@ -50294,7 +50413,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-27-mpc1';
+var KMI_BUILD = '2026-08-27-fore1';
 
 var _kmiSessionId = (function(){
   try {
@@ -51254,10 +51373,6 @@ function fromSBProject(r) {
   return {
     id:r.id, number:r.number||'', name:r.name||'',
     category:r.category||'project',
-    // Manpower planning flag. Read here so it survives a pull; deliberately
-    // NOT in toSBProject(), so the wholesale push can never carry or blank it.
-    // mpToggleLikely() is the single writer, via a targeted per-row update.
-    stage:r.stage||'active',
     customerId:r.customer_id||null,
     address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
     contractAmount:r.contract_amount||0,
