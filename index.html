@@ -5672,7 +5672,7 @@ function signRenderDone() {
       '<div style="font-size:12px;margin-top:4px">' + _signEsc(t.signed_by_name || '') + (when ? ' · ' + _signEsc(when) : '') + '</div>';
     var sigImg = t.signature_image
       ? '<img src="' + _signEsc(t.signature_image) + '" alt="Signature" style="max-width:300px;max-height:120px;border:0.5px solid #E5E5E5;border-radius:6px;background:#fff;padding:6px">'
-      : '<em style="color:#888">No signature image on file</em>';
+      : '<em style="color:#888">Signature recorded — not redisplayed for security</em>';
     body.innerHTML =
       '<div style="background:#fff;border:0.5px solid #E5E5E5;border-radius:10px;padding:18px 22px;margin-bottom:14px">' +
         '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:#888;margin-bottom:6px">T&amp;M Ticket</div>' +
@@ -17105,9 +17105,16 @@ async function sendForSignature() {
   btn.disabled = true;
   btn.textContent = 'Generating…';
 
-  // Generate token + 45-day expiry
+  // Generate token + 30-day expiry.
+  //
+  // Was 45. The token is a bearer credential that travels in the query string,
+  // so it persists in server logs, browser history and referrer headers for as
+  // long as it is valid — shortening the window is the only lever on that, since
+  // the GC cannot sign what they cannot see. 30 days still covers a slow
+  // approval cycle, and reissuing is one click: sending for signature again
+  // mints a fresh token.
   var token = _genSignToken();
-  var expires = new Date(Date.now() + 45 * 24 * 60 * 60 * 1000).toISOString();
+  var expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
   var nowIso = new Date().toISOString();
 
   t.signToken = token;
@@ -50084,7 +50091,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-27-authB3';
+var KMI_BUILD = '2026-08-27-authB4';
 
 var _kmiSessionId = (function(){
   try {
