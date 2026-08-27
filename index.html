@@ -4379,16 +4379,171 @@ function generateTempPassword() {
   return pick(letters,3) + pick(digits,4) + pick(letters,2);
 }
 
+// ═══ Supabase Auth core (B1b) ══════════════════════════════════════════
+// Migration from the custom SHA-256 scheme to Supabase Auth, shadow style:
+// a user signs in with the same email and password they always have, and the
+// first time they do it after this build ships, their Supabase Auth account is
+// created behind the scenes. Nobody is told to do anything.
+//
+// The legacy hash path is deliberately NOT deleted here. It is what proves a
+// password is genuine before we create an auth account with it, and it is also
+// how admin-created users get their first login. It goes away in M2 along with
+// the password_hash / password_salt columns.
+//
+// _kmiAuthSession is the live session. _kmiAuthReachable records whether we
+// were able to ask Supabase at all, which is what lets the app still work
+// offline without turning "offline" into an authentication bypass.
+var _kmiAuthSession   = null;
+var _kmiAuthReachable = false;
+var _kmiRecoveryMode  = false;
+var _sbInitKey        = null;
+
+// 6-C: phones keep their session across app switches and screen locks, which
+// matters for field staff. Desktops stay per-tab so a shared office machine
+// does not leave someone signed in.
+function _kmiAuthPersist() {
+  try { return !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches); }
+  catch(e) { return false; }
+}
+function _kmiAuthOpts() {
+  return {
+    persistSession:   true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    storage: _kmiAuthPersist() ? window.localStorage : window.sessionStorage
+  };
+}
+
+// Bearer token for Edge Function calls. Falls back to the publishable key so a
+// signed-out or offline caller behaves exactly as it did before this build.
+function kmiAuthToken(fallbackKey) {
+  try {
+    return (_kmiAuthSession && _kmiAuthSession.access_token)
+      ? _kmiAuthSession.access_token : fallbackKey;
+  } catch(e) { return fallbackKey; }
+}
+
+// Creates the client early — before the session gate in boot() — so the auth
+// session is known before we decide whether to trust a local session marker.
+async function kmiAuthBootstrap() {
+  try {
+    var creds = getSBCreds();
+    if ((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) {
+      creds = { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY };
+    }
+    if (!creds || !creds.url || !creds.key) return null;
+    var waited = 0;
+    while (!window.supabase && waited < 5000) {
+      await new Promise(function(r){ setTimeout(r, 100); });
+      waited += 100;
+    }
+    if (!window.supabase) return null;
+    if (!initSupabase(normalizeSBUrl(creds.url), creds.key)) return null;
+    var s = await supabaseClient.auth.getSession();
+    _kmiAuthSession   = (s && s.data) ? s.data.session : null;
+    _kmiAuthReachable = true;
+    return _kmiAuthSession;
+  } catch(e) { return null; }
+}
+
+// Binds this JWT to its kmi_users row. No arguments by design — the identity
+// comes from the verified token, so there is no parameter to forge.
+async function kmiAuthLink() {
+  try {
+    if (!supabaseClient) return null;
+    var r = await supabaseClient.rpc('kmi_claim_auth_link');
+    if (r.error) { console.warn('auth link failed', r.error); return null; }
+    return r.data || null;
+  } catch(e) { console.warn('auth link error', e); return null; }
+}
+
+// Shadow sign-in. legacyOk says the password already checked out against the
+// SHA-256 hash, which is our licence to create an auth account with it.
+async function kmiAuthSignIn(email, pw, legacyOk) {
+  if (!supabaseClient) return { ok:false, reason:'offline' };
+  try {
+    var r = await supabaseClient.auth.signInWithPassword({ email: email, password: pw });
+    if (r && r.data && r.data.session) {
+      _kmiAuthSession = r.data.session;
+      return { ok:true, migrated:false };
+    }
+  } catch(e) { return { ok:false, reason:'offline' }; }
+
+  if (!legacyOk) return { ok:false, reason:'bad_credentials' };
+
+  var s;
+  try { s = await supabaseClient.auth.signUp({ email: email, password: pw }); }
+  catch(e) { return { ok:false, reason:'offline' }; }
+
+  if (s && s.error) {
+    var m = String(s.error.message || '');
+    if (/at least|weak|short|6 characters|password should be/i.test(m)) {
+      return { ok:false, reason:'password_too_short' };
+    }
+    if (/already|registered|exists/i.test(m)) {
+      return { ok:false, reason:'stale_auth_password' };
+    }
+    return { ok:false, reason:'signup_failed', detail:m };
+  }
+  // Supabase returns success with a NULL session when the email already has an
+  // auth account — deliberate, so signUp cannot be used to enumerate accounts.
+  // Here it means the auth password has diverged from the legacy one, which
+  // only recovery can fix.
+  if (!s || !s.data || !s.data.session) return { ok:false, reason:'stale_auth_password' };
+
+  _kmiAuthSession = s.data.session;
+  return { ok:true, migrated:true };
+}
+
+async function kmiAuthSignOut() {
+  try { if (supabaseClient) await supabaseClient.auth.signOut(); } catch(e) {}
+  _kmiAuthSession  = null;
+  _kmiRecoveryMode = false;
+}
+
+function kmiAuthErrText(reason, detail) {
+  if (reason === 'bad_credentials')     return 'Invalid email or password.';
+  if (reason === 'offline')             return 'Can\u2019t reach the server. Check your connection and try again.';
+  if (reason === 'stale_auth_password') return 'Your sign-in password has changed. Use \u201CForgot password?\u201D to reset it.';
+  if (reason === 'password_too_short')  return 'Your password is too short for the new sign-in system. Use \u201CForgot password?\u201D to set one of at least 8 characters.';
+  return 'Sign-in failed' + (detail ? ' \u2014 ' + detail : '') + '. Please try again.';
+}
+// ═══ end Supabase Auth core ════════════════════════════════════════════
+
+// B1b: which store depends on viewport (6-C). Read both, because a user can
+// resize or rotate between visits and we would rather find a stale marker than
+// silently drop a valid one.
+function _kmiSessStore() { return _kmiAuthPersist() ? window.localStorage : window.sessionStorage; }
 function loadSession() {
   try {
-    var s = sessionStorage.getItem(SESSION_KEY);
+    var s = null;
+    try { s = _kmiSessStore().getItem(SESSION_KEY); } catch(e) {}
+    if (!s) { try { s = window.localStorage.getItem(SESSION_KEY); } catch(e) {} }
+    if (!s) { try { s = window.sessionStorage.getItem(SESSION_KEY); } catch(e) {} }
     if (!s) return null;
     var obj = JSON.parse(s);
+    // The Supabase Auth session is the authority now. A local marker on its own
+    // is no longer enough — that is what markers left behind by the pre-auth
+    // build look like, and honouring them would leave a signed-out user inside
+    // the app. Only when we could not reach Supabase at all do we fall back to
+    // the marker, so genuine offline use still works without turning "offline"
+    // into a way around signing in.
+    if (_kmiAuthReachable && !_kmiAuthSession) return null;
     return db.users.find(function(x){ return x.id === obj.userId; }) || null;
   } catch(e) { return null; }
 }
-function saveSession(u) { sessionStorage.setItem(SESSION_KEY, JSON.stringify({userId:u.id, loginAt:Date.now()})); }
-function clearSession() { sessionStorage.removeItem(SESSION_KEY); }
+function saveSession(u) {
+  var payload = JSON.stringify({
+    userId: u.id,
+    loginAt: Date.now(),
+    authUid: (_kmiAuthSession && _kmiAuthSession.user) ? _kmiAuthSession.user.id : null
+  });
+  try { _kmiSessStore().setItem(SESSION_KEY, payload); } catch(e) {}
+}
+function clearSession() {
+  try { window.sessionStorage.removeItem(SESSION_KEY); } catch(e) {}
+  try { window.localStorage.removeItem(SESSION_KEY);   } catch(e) {}
+}
 
 function showLogin() {
   g('login-overlay').style.display = 'flex';
@@ -4415,10 +4570,43 @@ async function loginAttempt() {
   err.textContent = '';
   if (!email || !pw) { err.textContent = 'Please enter your email and password.'; return; }
   var u = db.users.find(function(x){ return (x.email || '').toLowerCase() === email; });
+
+  // Legacy check first. This does not sign anyone in — it establishes that the
+  // password is genuinely theirs, which is what entitles us to create a
+  // Supabase Auth account with it further down. The probe salt keeps the
+  // timing similar for unknown emails.
   var probeSalt = (u && u.passwordSalt) || 'probe';
-  var hash = await hashPassword(pw, probeSalt);
-  if (!u || !u.passwordHash || hash !== u.passwordHash) { err.textContent = 'Invalid email or password.'; return; }
-  if (u.status === 'inactive') { err.textContent = 'This account is inactive. Contact an administrator.'; return; }
+  var hash      = await hashPassword(pw, probeSalt);
+  var legacyOk  = !!(u && u.passwordHash && hash === u.passwordHash);
+
+  if (u && u.status === 'inactive') { err.textContent = 'This account is inactive. Contact an administrator.'; return; }
+
+  var btn = document.querySelector('#login-overlay .login-btn');
+  var btnTxt = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Signing in\u2026'; }
+  var res = await kmiAuthSignIn(email, pw, legacyOk);
+  if (btn) { btn.disabled = false; btn.textContent = btnTxt || 'Sign in'; }
+
+  if (!res.ok) {
+    // Never let a wrong password reveal whether the address exists.
+    if (res.reason === 'bad_credentials' && !u) { err.textContent = 'Invalid email or password.'; return; }
+    err.textContent = kmiAuthErrText(res.reason, res.detail);
+    return;
+  }
+
+  // Authenticated. Bind the JWT to the kmi_users row.
+  var link = await kmiAuthLink();
+  if (link && link.ok && link.user_id) {
+    var linked = db.users.find(function(x){ return String(x.id) === String(link.user_id); });
+    if (linked) u = linked;
+  } else if (link && link.reason === 'inactive') {
+    await kmiAuthSignOut();
+    err.textContent = 'This account is inactive. Contact an administrator.';
+    return;
+  }
+  if (!u) { await kmiAuthSignOut(); err.textContent = 'Invalid email or password.'; return; }
+  if (_kmiAuthSession && _kmiAuthSession.user) { u.authUserId = _kmiAuthSession.user.id; }
+
   _currentUser = u;
   saveSession(u);
   if (u.mustResetPassword) { showForceResetModal(); return; }
@@ -4445,7 +4633,11 @@ function enterApp() {
   }
   nav(firstAccessiblePage());
 }
-function logout() {
+async function logout() {
+  // Clear the Supabase Auth session too. Without this the JWT survives logout
+  // and the next person at this browser inherits an authenticated client — the
+  // exact hole M2's RLS gate is meant to close.
+  await kmiAuthSignOut();
   _currentUser = null;
   clearSession();
   closeModal();
@@ -4462,11 +4654,30 @@ function logout() {
 }
 
 async function forgotPassword() {
-  var email = prompt('Enter the email on your account. A temporary password will be sent.');
+  var email = prompt('Enter the email on your account. A reset link will be sent.');
   if (!email) return;
   email = email.trim().toLowerCase();
   var u = db.users.find(function(x){ return (x.email || '').toLowerCase() === email; });
-  if (!u) { alert('If that email is on file, a temporary password has been sent.'); return; }
+  // Same reply either way — never confirm whether an address is on file.
+  var generic = 'If that email is on file, reset instructions have been sent.';
+  if (!u) { alert(generic); return; }
+
+  // Migrated users live in Supabase Auth, so their password cannot be reset by
+  // rewriting the legacy hash — signInWithPassword would still check the auth
+  // password and fail. They get a real recovery link instead.
+  if (u.authUserId && supabaseClient) {
+    try {
+      var r = await supabaseClient.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin + window.location.pathname
+      });
+      if (r && r.error) console.warn('recovery send failed', r.error);
+    } catch(e) { console.warn('recovery error', e); }
+    alert(generic);
+    return;
+  }
+
+  // Not yet migrated: no auth account exists to recover. Issue a legacy temp
+  // password — shadow migration converts them on their next sign-in.
   var tempPw = generateTempPassword();
   var salt   = generateSalt();
   u.passwordHash = await hashPassword(tempPw, salt);
@@ -4658,12 +4869,31 @@ async function submitPasswordReset() {
   err.textContent = '';
   if (a.length < 8) { err.textContent = 'Password must be at least 8 characters.'; return; }
   if (a !== b)      { err.textContent = 'Passwords do not match.'; return; }
+
+  // Supabase Auth is the real credential store now, so it has to be updated
+  // first — if it fails we must not leave the legacy hash pointing at a
+  // password that will not actually sign anyone in.
+  if (supabaseClient && _kmiAuthSession) {
+    try {
+      var up = await supabaseClient.auth.updateUser({ password: a });
+      if (up && up.error) { err.textContent = up.error.message || 'Could not update password.'; return; }
+    } catch(e) { err.textContent = 'Could not reach the server. Please try again.'; return; }
+  }
+
+  // Legacy hash kept in step deliberately. It is still what admin-created users
+  // sign in with the first time, and it keeps a rollback to the previous build
+  // survivable. Both go away in M2.
   var salt = generateSalt();
   _currentUser.passwordHash = await hashPassword(a, salt);
   _currentUser.passwordSalt = salt;
   _currentUser.mustResetPassword = false;
   saveDB();
   closeModal();
+  if (_kmiRecoveryMode) {
+    _kmiRecoveryMode = false;
+    try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch(e) {}
+    saveSession(_currentUser);
+  }
   enterApp();
 }
 
@@ -4852,7 +5082,9 @@ async function enterSignMode(token) {
     return signShowError('Configuration error', 'The signing page can\'t reach the database. Please contact the sender.');
   }
   try {
-    _signClient = window.supabase.createClient(url, key);
+    // Anonymous GC signing portal — never signs in. Explicitly non-persisting
+    // so it cannot share or clobber the main client's auth storage key.
+    _signClient = window.supabase.createClient(url, key, { auth: { persistSession:false, autoRefreshToken:false, detectSessionInUrl:false } });
   } catch (e) {
     return signShowError('Configuration error', 'The signing page can\'t reach the database. Please contact the sender.');
   }
@@ -5338,6 +5570,13 @@ async function bootSequence() {
   // move screen (mirrors the sign bypass above). With a session → fall through
   // to normal boot, then open the scanned unit once data has loaded.
   var eqParam = (function(){ try { return new URLSearchParams(window.location.search).get('eq'); } catch(e){ return null; } })();
+
+  // B1b: resolve the Supabase Auth session BEFORE any loadSession() call.
+  // loadSession() now refuses a local marker when Supabase says nobody is
+  // signed in, so it has to know the answer first. Skipped for ?eq= scans,
+  // which are anonymous by design and must not wait on auth.
+  if (!eqParam) { await kmiAuthBootstrap(); }
+
   if (eqParam) {
     if (!loadSession()) { return _eqbEnterTruckMode(eqParam); }
     _eqbPendingScan = eqParam;
@@ -5347,6 +5586,22 @@ async function bootSequence() {
   //    the user already authenticated successfully on this device once. The
   //    Supabase connection still gets attempted in the background so push/pull
   //    work, but session persistence trumps connectivity for return visits.
+  // Arrived from a password-reset email: a recovery session exists but no new
+  // password has been chosen yet. Land them on the set-password modal rather
+  // than the login form they just came from.
+  if (_kmiRecoveryMode && _kmiAuthSession && _kmiAuthSession.user) {
+    var rEmail = String(_kmiAuthSession.user.email || '').toLowerCase();
+    var rUser  = db.users.find(function(x){ return (x.email || '').toLowerCase() === rEmail; });
+    if (rUser) {
+      _currentUser = rUser;
+      await kmiAuthLink();
+      hideLogin(); applyUserPermissions(); nav('dashboard'); showForceResetModal();
+      autoConnectSupabase().then(function(){ _eqbFlushPendingScan(); }).catch(function(){ _eqbFlushPendingScan(); });
+      return;
+    }
+    _kmiRecoveryMode = false;
+  }
+
   var session = loadSession();
   if (session) {
     _currentUser = session;
@@ -24223,7 +24478,7 @@ async function bgBeginExtraction(file, isAppend) {
       headers: {
         'Content-Type':  'application/json',
         'apikey':        creds.key,
-        'Authorization': 'Bearer ' + creds.key
+        'Authorization': 'Bearer ' + kmiAuthToken(creds.key)
       },
       body: JSON.stringify({ pdf_base64: b64, project_id: _bgProjectId })
     });
@@ -31499,7 +31754,8 @@ async function _eqbEnterTruckMode(token){
   _truckRender('<div class="eqt-load">Loading unit…</div>');
   var c=_truckCreds();
   if(!window.supabase || !c.url || !c.key){ return _truckRender(_truckErr('Can\u2019t reach the database','Please contact KMI.')); }
-  try{ _truckClient=window.supabase.createClient(c.url, c.key); }
+  // Anonymous truck portal — RPC-only, no session of its own.
+  try{ _truckClient=window.supabase.createClient(c.url, c.key, { auth: { persistSession:false, autoRefreshToken:false, detectSessionInUrl:false } }); }
   catch(e){ return _truckRender(_truckErr('Can\u2019t reach the database','Please contact KMI.')); }
   // Auth migration B1: this portal used to read kmi_equipment, kmi_projects and
   // kmi_settings directly with the anon key, which meant the trucking PIN was
@@ -40720,7 +40976,7 @@ async function apHandleUpload(evt){
     try { bytes = await apFileToCleanPdfBytes(file); b64 = _abToBase64(bytes); } catch(e){ readErr='could not read the file'; }
     if(b64){
       try {
-        var resp = await fetch(fnUrl,{ method:'POST', headers:{'Content-Type':'application/json','apikey':creds.key,'Authorization':'Bearer '+creds.key}, body:JSON.stringify({pdf_base64:b64}) });
+        var resp = await fetch(fnUrl,{ method:'POST', headers:{'Content-Type':'application/json','apikey':creds.key,'Authorization':'Bearer '+kmiAuthToken(creds.key)}, body:JSON.stringify({pdf_base64:b64}) });
         var data = await resp.json();
         if(resp.ok && data && data.ok){ ex = data.data || {}; }
         else { readErr = (data && data.error) ? (String(data.error) + (data.detail ? ' \u2014 '+String(data.detail).slice(0,200) : '')) : ('reader returned status '+(resp?resp.status:'(none)')); }
@@ -46155,11 +46411,25 @@ function normalizeSBUrl(raw) {
 
 function initSupabase(url, key) {
   try {
-    supabaseClient = window.supabase.createClient(url, key);
+    // Idempotent: kmiAuthBootstrap() creates the client early, then
+    // autoConnectSupabase() calls this again. Rebuilding the client would drop
+    // the auth state listener and orphan the live session, so reuse it.
+    if (supabaseClient && _sbInitKey === (url + '|' + key)) return true;
+    supabaseClient = window.supabase.createClient(url, key, { auth: _kmiAuthOpts() });
+    _sbInitKey = url + '|' + key;
+    try {
+      supabaseClient.auth.onAuthStateChange(function(event, session) {
+        _kmiAuthSession = session || null;
+        // Fired when the user arrives on a recovery link from their email.
+        // boot() reads this flag once data has loaded.
+        if (event === 'PASSWORD_RECOVERY') { _kmiRecoveryMode = true; }
+      });
+    } catch(e) { console.warn('auth listener failed', e); }
     return true;
   } catch(e) {
     console.error('Supabase init error:', e);
     supabaseClient = null;
+    _sbInitKey = null;
     return false;
   }
 }
@@ -46192,7 +46462,7 @@ async function sendEmail(payload) {
       headers: {
         'Content-Type':  'application/json',
         'apikey':        creds.key,
-        'Authorization': 'Bearer ' + creds.key
+        'Authorization': 'Bearer ' + kmiAuthToken(creds.key)
       },
       body: JSON.stringify(payload)
     });
@@ -49659,7 +49929,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-26-authB1a';
+var KMI_BUILD = '2026-08-27-authB1b';
 
 var _kmiSessionId = (function(){
   try {
@@ -50440,11 +50710,16 @@ function toSBUser(r)    {
     status:              r.status || 'active',
     // JSONB column. Stores either { data: '<dataURL>', w: <px>, h: <px> } or null.
     signature_image:     r.signatureImage || null,
-    foundation_pm_code:  r.foundationPmCode || null
+    foundation_pm_code:  r.foundationPmCode || null,
+    // B1b: link to the Supabase Auth identity. Written server-side by
+    // kmi_claim_auth_link(); carried here so the client can tell a migrated
+    // user from one who has not signed in since the cutover.
+    auth_user_id:        r.authUserId || null
   };
 }
 function fromSBUser(r)  {
   return {
+    authUserId:         r.auth_user_id || null,
     id:r.id, firstName:r.first_name||'', lastName:r.last_name||'',
     email:r.email||'', phone:r.phone||'', role:r.role||'',
     title:              r.title || '',
@@ -52370,7 +52645,9 @@ async function testSupabaseConnection() {
 
   showSBResult('Testing\u2026 (' + url + ')', null);
   var client;
-  try { client = window.supabase.createClient(url, key); }
+  // Throwaway probe for the Test-connection button. Non-persisting so a test
+  // against another project cannot overwrite the signed-in user's session.
+  try { client = window.supabase.createClient(url, key, { auth: { persistSession:false, autoRefreshToken:false, detectSessionInUrl:false } }); }
   catch (e) { showSBResult('\u2718 Could not create client: ' + e.message, false); return; }
 
   try {
@@ -55325,7 +55602,7 @@ async function _dwCallExtractor(pages, examples){
   try{
     resp = await fetch(fnUrl, {
       method:'POST',
-      headers:{ 'Content-Type':'application/json', 'apikey':creds.key, 'Authorization':'Bearer '+creds.key },
+      headers:{ 'Content-Type':'application/json', 'apikey':creds.key, 'Authorization':'Bearer '+kmiAuthToken(creds.key) },
       body: JSON.stringify({ pages: pages, examples: examples || [] })
     });
     data = await resp.json();
