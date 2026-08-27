@@ -4480,7 +4480,11 @@ async function kmiAuthSignIn(email, pw, legacyOk) {
     if (/at least|weak|short|6 characters|password should be/i.test(m)) {
       return { ok:false, reason:'password_too_short' };
     }
-    if (/already|registered|exists/i.test(m)) {
+    // 422 is what Supabase returns for an existing account when email
+    // confirmation is disabled. With confirmation ON it instead returns 200
+    // with a null session, handled below. Both mean the same thing: an auth
+    // account already exists and its password is not the one just typed.
+    if (s.error.status === 422 || /already|registered|exists/i.test(m)) {
       return { ok:false, reason:'stale_auth_password' };
     }
     return { ok:false, reason:'signup_failed', detail:m };
@@ -4504,7 +4508,7 @@ async function kmiAuthSignOut() {
 function kmiAuthErrText(reason, detail) {
   if (reason === 'bad_credentials')     return 'Invalid email or password.';
   if (reason === 'offline')             return 'Can\u2019t reach the server. Check your connection and try again.';
-  if (reason === 'stale_auth_password') return 'Your sign-in password has changed. Use \u201CForgot password?\u201D to reset it.';
+  if (reason === 'stale_auth_password') return 'This account needs a password reset. Click \u201CForgot password?\u201D below and follow the emailed link.';
   if (reason === 'password_too_short')  return 'Your password is too short for the new sign-in system. Use \u201CForgot password?\u201D to set one of at least 8 characters.';
   return 'Sign-in failed' + (detail ? ' \u2014 ' + detail : '') + '. Please try again.';
 }
@@ -4662,10 +4666,24 @@ async function forgotPassword() {
   var generic = 'If that email is on file, reset instructions have been sent.';
   if (!u) { alert(generic); return; }
 
-  // Migrated users live in Supabase Auth, so their password cannot be reset by
-  // rewriting the legacy hash — signInWithPassword would still check the auth
-  // password and fail. They get a real recovery link instead.
-  if (u.authUserId && supabaseClient) {
+  // B1c: ASK THE SERVER which path applies. This used to branch on the local
+  // u.authUserId, which is null exactly when someone is stuck — the link is
+  // only written after a SUCCESSFUL sign-in, and sign-in is the thing failing.
+  // So a locked-out user was handed another legacy temp password that could
+  // not work either, forever, with no self-service way out.
+  //
+  // kmi_password_reset_route() checks auth.users directly, so it also catches
+  // the case where an auth account exists but the link was never written —
+  // precisely the state that caused the lockout.
+  var route = 'legacy';
+  if (supabaseClient) {
+    try {
+      var rr = await supabaseClient.rpc('kmi_password_reset_route', { p_email: email });
+      if (!rr.error && rr.data) route = String(rr.data);
+    } catch(e) { console.warn('reset route lookup failed', e); }
+  }
+
+  if (route === 'auth' && supabaseClient) {
     try {
       var r = await supabaseClient.auth.resetPasswordForEmail(email, {
         redirectTo: window.location.origin + window.location.pathname
@@ -49929,7 +49947,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-27-authB1b';
+var KMI_BUILD = '2026-08-27-authB1c';
 
 var _kmiSessionId = (function(){
   try {
@@ -50700,7 +50718,7 @@ function fromSBProjectParameter(r) {
 }
 
 function toSBUser(r)    {
-  return {
+  var o = {
     id:r.id, first_name:r.firstName||'', last_name:r.lastName||'',
     email:r.email||'', phone:r.phone||'', role:r.role||'',
     title:                r.title || '',
@@ -50710,12 +50728,22 @@ function toSBUser(r)    {
     status:              r.status || 'active',
     // JSONB column. Stores either { data: '<dataURL>', w: <px>, h: <px> } or null.
     signature_image:     r.signatureImage || null,
-    foundation_pm_code:  r.foundationPmCode || null,
-    // B1b: link to the Supabase Auth identity. Written server-side by
-    // kmi_claim_auth_link(); carried here so the client can tell a migrated
-    // user from one who has not signed in since the cutover.
-    auth_user_id:        r.authUserId || null
+    foundation_pm_code:  r.foundationPmCode || null
   };
+  // B1c: auth_user_id is OMITTED from the payload unless this client actually
+  // has one. It used to be mapped as (r.authUserId || null), which meant any
+  // browser holding a db cached from before B1b — whose user objects have no
+  // authUserId at all — wrote NULL over a link that kmi_claim_auth_link() had
+  // legitimately set. The user was then silently unlinked, and their next
+  // sign-in dead-ended on a 422 "already registered" with no way out.
+  //
+  // Same wholesale-clobber shape as the AP incidents, so it gets the same
+  // treatment as foundation_vendor_no: send the field only when we have a
+  // value, so an absent one cannot overwrite the server's copy. Upsert leaves
+  // omitted columns untouched. trg_kmi_users_protect_auth_link is the backstop
+  // for stale tabs still running pre-B1c code.
+  if (r.authUserId) o.auth_user_id = r.authUserId;
+  return o;
 }
 function fromSBUser(r)  {
   return {
