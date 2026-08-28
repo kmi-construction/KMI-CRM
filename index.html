@@ -46828,8 +46828,17 @@ function _schPhaseRoll(ph) {
     md += Number(t.md) || 0;
     wsum += (Number(t.md) || 0) * (Number(t.pct) || 0);
   });
+  // % is man-day weighted so a three-week task outweighs a three-day one.
+  // But when NO task carries an estimate, md is 0 and the weighted figure
+  // collapses to 0% however much work is finished — which made completed
+  // phases report 0% and put a bogus ‘mark complete’ button on them. Fall
+  // back to a plain average of task pct in that case.
+  var flat = kids.length
+    ? Math.round(kids.reduce(function(a, t){ return a + (Number(t.pct) || 0); }, 0) / kids.length)
+    : 0;
+  var open = kids.filter(function(t){ return (Number(t.pct) || 0) < 100; }).length;
   return { start: st, finish: fi, dur: schWorkDaysBetween(st, fi, null),
-           md: md, pct: md ? Math.round(wsum / md) : 0, count: kids.length };
+           md: md, pct: md ? Math.round(wsum / md) : flat, open: open, count: kids.length };
 }
 function _schLeafTasks() { return _schTasks.filter(function(t){ return !!t.parentId; }); }
 function _schProjRange() {
@@ -47290,7 +47299,7 @@ function _schTableHtml() {
             Math.round(rr.md).toLocaleString() + '</td><td class="sch-mp"></td>' : '') +
       '<td style="color:#888;font-size:12px;text-align:right">' + rr.pct + '%</td>' +
       '<td style="text-align:right">' +
-        (ed ? (rr.count && rr.pct < 100
+        (ed ? (rr.open
                 ? '<button class="sch-rowact" title="Mark every task in this phase 100% complete" ' +
                   'onclick="schCompletePhase(\'' + ph.id + '\')">\u2713</button>' : '') +
               '<button class="sch-rowact" title="Add task" onclick="schAddTask(\'' + ph.id + '\')">+</button>' +
@@ -47398,7 +47407,7 @@ async function schCompletePhase(phaseId) {
   if (!_schCanEdit()) return;
   var ph = _schFindT(phaseId); if (!ph) return;
   var kids = _schChildren(phaseId).filter(function(t){ return (Number(t.pct) || 0) < 100; });
-  if (!kids.length) return;
+  if (!kids.length) { alert('Every task in \u201c' + (ph.name || 'this phase') + '\u201d is already 100% complete.'); return; }
   if (!confirm('Mark all ' + kids.length + ' remaining task' + (kids.length === 1 ? '' : 's') +
                ' in \u201c' + (ph.name || 'this phase') + '\u201d as 100% complete?\n\n' +
                'Completed work stops consuming crew on the Manpower grid and stops holding its foreman.')) return;
@@ -47994,7 +48003,10 @@ function _schMpHtml(){
   var dayTot = [];
   for (var i = 0; i < days; i++) {
     var dt = _schAddDays(_smpAnchor, i), tot = 0;
-    groups.forEach(function(gp){ gp.tasks.forEach(function(t){ if (dmap[String(t.id)][dt]) tot += _taskCrewPerDay(t); }); });
+    groups.forEach(function(gp){ gp.tasks.forEach(function(t){
+      if (_mpIsDone(t)) return;
+      if (dmap[String(t.id)][dt]) tot += _taskCrewPerDay(t);
+    }); });
     dayTot.push(tot);
   }
   var weekPeak = [];
@@ -48071,13 +48083,14 @@ function _schMpHtml(){
     body += '<tr class="mp-ph"><td class="fx task" style="padding-left:14px">' + escapeHtml(gp.name) + '</td>' +
       '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td>' + blanks() + '</tr>';
     gp.tasks.forEach(function(t){
-      var crew = _taskCrewPerDay(t), tdays = dmap[String(t.id)];
+      var crew = _taskCrewPerDay(t), tdays = dmap[String(t.id)], tdone = _mpIsDone(t);
       var ks = Object.keys(tdays).sort(), fin = ks.length ? ks[ks.length - 1] : t.start;
-      var crewCell = ed
+      var crewCell = tdone ? '<span class="zc">0</span>' : (ed
         ? '<input class="crin' + (t.crewOverride != null ? ' ov' : '') + '" type="text" inputmode="numeric" maxlength="4" value="' +
           crew + '" onchange="schSetCrew(\'' + t.id + '\',this.value)">'
-        : String(crew);
-      body += '<tr><td class="fx task" style="padding-left:26px"><span class="tn">' + escapeHtml(t.name) + '</span></td>' +
+        : String(crew));
+      body += '<tr' + (tdone ? ' class="tdone"' : '') + '><td class="fx task" style="padding-left:26px"><span class="tn">' + escapeHtml(t.name) + '</span>' +
+        (tdone ? '<span class="ckb">100%</span>' : '') + '</td>' +
         '<td class="fx st">' + (t.start ? _schFmt(t.start).slice(0, -3) : '\u2014') + '</td>' +
         '<td class="fx en">' + (fin ? _schFmt(fin).slice(0, -3) : '\u2014') + '</td>' +
         '<td class="fx du">' + (Number(t.dur) || 0) + '</td>' +
@@ -48085,14 +48098,14 @@ function _schMpHtml(){
       if (isDay) {
         for (var i3 = 0; i3 < days; i3++) {
           var d3 = _schAddDays(_smpAnchor, i3), on = tdays[d3];
-          body += '<td class="dc' + (i3 % 7 === 0 ? ' ws' : '') + (_smpOff(d3) ? ' we' : '') + (on ? ' on' : '') + '">' +
-                  (on ? crew : '') + '</td>';
+          body += '<td class="dc' + (i3 % 7 === 0 ? ' ws' : '') + (_smpOff(d3) ? ' we' : '') +
+                  (on ? (tdone ? ' donebar' : ' on') : '') + '">' + (on && !tdone ? crew : '') + '</td>';
         }
       } else {
         for (var w4 = 0; w4 < n; w4++) {
           var act = false;
           for (var d4 = 0; d4 < 7; d4++) if (tdays[_schAddDays(_smpAnchor, w4 * 7 + d4)]) { act = true; break; }
-          body += '<td class="dc ws' + (act ? ' on' : '') + '">' + (act ? crew : '') + '</td>';
+          body += '<td class="dc ws' + (act ? (tdone ? ' donebar' : ' on') : '') + '">' + (act && !tdone ? crew : '') + '</td>';
         }
       }
       body += '</tr>';
@@ -50479,7 +50492,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-28-done1';
+var KMI_BUILD = '2026-08-28-done2';
 
 var _kmiSessionId = (function(){
   try {
