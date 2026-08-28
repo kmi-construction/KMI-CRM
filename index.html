@@ -46841,19 +46841,11 @@ function _schProjRange() {
   });
   return { start: st, finish: fi };
 }
-// Phase-4 preview: remaining man-days spread over remaining work days.
-function _schMenPerDay(t) {
-  var f = _schTaskFinish(t);
-  if (!t.start || !f) return 0;
-  var remainMd = (Number(t.md) || 0) * (1 - (Number(t.pct) || 0) / 100);
-  if (remainMd <= 0) return 0;
-  var today = _schToday();
-  var from = t.start > today ? t.start : today;
-  var remainWd = schWorkDaysBetween(from, f, t);
-  if (remainWd > 0) return remainMd / remainWd;
-  var wd = schWorkDaysBetween(t.start, f, t);
-  return wd > 0 ? remainMd / wd : 0;
-}
+// Crew maths lives in ONE place: _taskCrewPerDay(), which returns TOTAL
+// BODIES (md ÷ dur, scaled by the linked production line's crew template,
+// or the explicit override). The old _schMenPerDay() returned mason-days
+// per day — a different unit behind a near-identical name — and both call
+// sites had stopped reading it. Removed rather than kept as a trap.
 
 // ── Supabase mappers ────────────────────────────────────────────────────
 function _schFromSB(r) {
@@ -47298,7 +47290,10 @@ function _schTableHtml() {
             Math.round(rr.md).toLocaleString() + '</td><td class="sch-mp"></td>' : '') +
       '<td style="color:#888;font-size:12px;text-align:right">' + rr.pct + '%</td>' +
       '<td style="text-align:right">' +
-        (ed ? '<button class="sch-rowact" title="Add task" onclick="schAddTask(\'' + ph.id + '\')">+</button>' +
+        (ed ? (rr.count && rr.pct < 100
+                ? '<button class="sch-rowact" title="Mark every task in this phase 100% complete" ' +
+                  'onclick="schCompletePhase(\'' + ph.id + '\')">\u2713</button>' : '') +
+              '<button class="sch-rowact" title="Add task" onclick="schAddTask(\'' + ph.id + '\')">+</button>' +
               '<button class="sch-rowact" title="Delete phase" onclick="schDelete(\'' + ph.id + '\')">\u2715</button>' : '') +
       '</td></tr>';
 
@@ -47311,7 +47306,7 @@ function _schTableHtml() {
       var chip = t.prodLineId
         ? '<span class="sch-link-chip">\u{1F517} ' + escapeHtml(_schProdLineLabel(t.prodLineId)) + '</span>'
         : '<span class="sch-link-chip none">Not linked</span>';
-      var mpd = _schMenPerDay(t), crew = _taskCrewPerDay(t), crewOv = (t.crewOverride != null && t.crewOverride !== '');
+      var crew = _taskCrewPerDay(t), crewOv = (t.crewOverride != null && t.crewOverride !== '');
       rows += '<tr class="sch-task-row">' +
         '<td><div style="padding-left:22px">' +
           (ed ? '<input class="sch-cell" value="' + escapeHtml(t.name) + '" onchange="schSetName(\'' + t.id + '\',this.value)">'
@@ -47393,6 +47388,24 @@ async function schSetCrew(id, v) {
 async function schSetPct(id, v) {
   var t = _schFindT(id); if (!t) return;
   _schSnapshot(); t.pct = Math.min(100, Math.max(0, parseFloat(v) || 0)); await _schCommit(t);
+}
+
+// Closeout affordance: marking a phase complete in one action, rather than
+// editing % on each task. Manpower reads pct to decide whether work still
+// consumes crew and holds a foreman, so an unclosed phase quietly overstates
+// both. Single snapshot for the whole batch so one undo reverses it.
+async function schCompletePhase(phaseId) {
+  if (!_schCanEdit()) return;
+  var ph = _schFindT(phaseId); if (!ph) return;
+  var kids = _schChildren(phaseId).filter(function(t){ return (Number(t.pct) || 0) < 100; });
+  if (!kids.length) return;
+  if (!confirm('Mark all ' + kids.length + ' remaining task' + (kids.length === 1 ? '' : 's') +
+               ' in \u201c' + (ph.name || 'this phase') + '\u201d as 100% complete?\n\n' +
+               'Completed work stops consuming crew on the Manpower grid and stops holding its foreman.')) return;
+  _schSnapshot();
+  kids.forEach(function(t){ t.pct = 100; });
+  _schRender();
+  await schPushTasks(kids);
 }
 
 async function schAddPhase() {
@@ -47601,7 +47614,7 @@ function _schDrawGantt() {
             : '<div class="drv">' + _schFmt(t.start) + '</div><div class="drv">' + _schFmt(f) + '</div>' +
               '<div class="drv num">' + t.dur + '</div>') +
         '</div>';
-      var mpd = _schMenPerDay(t), crew = _taskCrewPerDay(t);
+      var crew = _taskCrewPerDay(t);
       var lbl = (_schShowMp && t.md) ? (crew ? crew + ' men/day' : '')
                                      : (schWorkDaysBetween(t.start, f, t) + ' wd');
       rh += '<div class="sch-grow" style="width:' + W + 'px">' + shade +
@@ -48957,6 +48970,8 @@ var _mpGran = 'day';       // 'day' | 'week'
 var _mpPM = 'all';
 var _mpProj = 'all';
 var _mpFore = 'all';       // foreman user id, or 'all'
+var _mpShowClosed = false; // closed jobs hidden by default (decision 2-B)
+var _mpAvOpen = true;      // foreman availability block expanded
 var _mpTasks = [];         // leaf tasks across all projects
 var _mpLoaded = false;
 var _mpLoadedAt = 0;       // epoch ms of the last successful load
@@ -49035,6 +49050,31 @@ function _taskCrewPerDay(t){
   if (dur <= 0) return 0;
   return Math.round((md / dur) * _crewFactor(t));
 }
+// pct is used ONLY as a done / not-done test (decision 2-C). Crew stays
+// md ÷ dur regardless of progress; re-spreading remaining man-days over
+// remaining days is a separate, larger change.
+function _mpIsDone(t){ return (Number(t.pct) || 0) >= 100; }
+
+// A project leaves the board when it is explicitly marked inactive, OR when
+// every task is complete and its last scheduled work day is more than
+// MP_CLOSED_WEEKS behind us (decision 1-D). The explicit flag is the lever;
+// the automatic rule is the floor for when nobody remembers to pull it.
+var MP_CLOSED_WEEKS = 12;
+function _mpIsClosed(p){
+  var raw = ((typeof db !== 'undefined' && db.projects) ? db.projects : [])
+    .filter(function(x){ return String(x.id) === String(p.id); })[0];
+  if (raw && raw.status === 'inactive') return true;
+  if (!p.tasks.length) return false;
+  for (var i = 0; i < p.tasks.length; i++) if (!_mpIsDone(p.tasks[i])) return false;
+  var last = null;
+  p.tasks.forEach(function(t){
+    var f = _mpTaskFinish(t);
+    if (f && (!last || f > last)) last = f;
+  });
+  if (!last) return false;
+  return last < _mpAdd(_mpToday(), -(MP_CLOSED_WEEKS * 7));
+}
+
 function _mpCrew(t){ return _taskCrewPerDay(t); }
 function _mpTaskDays(t){
   if (t._days) return t._days;
@@ -49086,6 +49126,7 @@ function _mpBuildProjects(){
   });
   _mpTasks.forEach(function(t){ var p = byId[String(t.projectId)]; if (p) p.tasks.push(t); });
   var out = Object.keys(byId).map(function(k){ return byId[k]; }).filter(function(p){ return p.tasks.length; });
+  out.forEach(function(p){ p.closed = _mpIsClosed(p); });
   out.forEach(function(p){ p.tasks.sort(function(a, b){ return (a.start || '').localeCompare(b.start || ''); }); });
   return out;
 }
@@ -49103,6 +49144,7 @@ function _mpPhaseGroups(p){
 }
 function _mpVisProjects(){
   return _mpBuildProjects().filter(function(p){
+    if (!_mpShowClosed && p.closed) return false;
     if (_mpProj !== 'all' && p.id !== _mpProj) return false;
     if (_mpPM !== 'all' && p.pm !== _mpPM) return false;
     if (_mpFore !== 'all') {
@@ -49173,6 +49215,7 @@ function _mpShell(inner){
   var projOpts = '<option value="all">All projects</option>' + _mpBuildProjects().map(function(p){
     return '<option value="' + _mpEsc(p.id) + '"' + (p.id === _mpProj ? ' selected' : '') + '>' + _mpEsc((p.number ? p.number + ' ' : '') + p.name) + '</option>';
   }).join('');
+  var closedN = _mpBuildProjects().filter(function(p){ return p.closed; }).length;
   var fseen = {}, fore = [];
   _mpBuildProjects().forEach(function(p){ p.foremen.forEach(function(f){ if (!fseen[f.id]) { fseen[f.id] = 1; fore.push(f); } }); });
   fore.sort(function(a, b){ return a.name.localeCompare(b.name); });
@@ -49191,6 +49234,9 @@ function _mpShell(inner){
       '<div class="mp-fld"><label>View</label><div class="mp-seg"><button class="' + (_mpGran === 'day' ? 'on' : '') + '" onclick="mpSetGran(\'day\')">Days</button><button class="' + (_mpGran === 'week' ? 'on' : '') + '" onclick="mpSetGran(\'week\')">Weeks</button></div></div>' +
       '<div class="mp-fld"><label>PM</label><select id="mp-pm" onchange="mpSetPM(this.value)">' + pmOpts + '</select></div>' +
       '<div class="mp-fld"><label>Foreman</label><select id="mp-fore" onchange="mpSetFore(this.value)">' + foreOpts + '</select></div>' +
+      '<div class="mp-fld"><label>Closed jobs</label><label class="mp-chk">' +
+        '<input type="checkbox"' + (_mpShowClosed ? ' checked' : '') + ' onchange="mpSetClosed(this.checked)">' +
+        '<span>Show' + (closedN ? ' (' + closedN + ')' : '') + '</span></label></div>' +
       '<div class="mp-fld"><label>Project</label><select id="mp-proj" onchange="mpSetProj(this.value)">' + projOpts + '</select></div>' +
     '</div>' + inner;
 }
@@ -49231,6 +49277,7 @@ function _mpChartHtml(){
 function _mpProjRemainThrough(p){
   var today = _mpToday(), last = null;
   p.tasks.forEach(function(t){
+    if (_mpIsDone(t)) return;   // finished early -> stops holding the foreman
     var ks = Object.keys(_mpTaskDays(t));
     for (var i = 0; i < ks.length; i++) if (ks[i] >= today && (!last || ks[i] > last)) last = ks[i];
   });
@@ -49242,6 +49289,7 @@ function _mpProjRemainThrough(p){
 function _mpAvailRows(){
   var by = {}, projs = _mpBuildProjects();
   projs.forEach(function(p){
+    if (p.closed) return;   // a closed job never holds a foreman (decision 3-A)
     var through = _mpProjRemainThrough(p);
     p.foremen.forEach(function(f){
       if (!by[f.id]) by[f.id] = { id: f.id, name: f.name, projects: [], through: null, thruProj: null };
@@ -49290,10 +49338,15 @@ function _mpAvailHtml(){
       '<td class="' + (r.free ? 'busy' : 'free') + '">' + (r.free ? _mpFmt(r.free) : 'Available now') + '</td>' +
       '<td>' + (r.free ? r.daysOut + 'd' : '\u2014') + '</td></tr>';
   }).join('');
-  return '<div class="mp-card"><div class="mp-ch">Foreman availability' +
-    '<span class="mp-sub"> \u00b7 remaining work only \u00b7 every project, not just this window</span></div>' +
-    '<table class="mp-av"><thead><tr><th>Foreman</th><th>Committed to</th><th>Through</th>' +
-    '<th>Free</th><th>Out</th></tr></thead><tbody>' + body + '</tbody></table></div>';
+  var freeN = rows.filter(function(r){ return !r.free; }).length;
+  var cnt = (freeN ? freeN + ' free now' : 'none free') +
+            ' \u00b7 ' + (rows.length - freeN) + ' booked';
+  return '<div class="mp-card"><div class="mp-ch clk' + (_mpAvOpen ? '' : ' collapsed') + '" onclick="mpToggleAvail()">' +
+    '<span class="caret">\u25bc</span>Foreman availability' +
+    '<span class="mp-sub"> \u00b7 remaining work only \u00b7 every project, not just this window</span>' +
+    '<span class="cnt">' + cnt + '</span></div>' +
+    (_mpAvOpen ? '<table class="mp-av"><thead><tr><th>Foreman</th><th>Committed to</th><th>Through</th>' +
+    '<th>Free</th><th>Out</th></tr></thead><tbody>' + body + '</tbody></table>' : '') + '</div>';
 }
 
 function _mpGridHtml(){
@@ -49301,7 +49354,7 @@ function _mpGridHtml(){
   // precompute daily totals across visible projects (for peak + day-view row)
   var dayTot = [];
   for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i), tot = 0;
-    vis.forEach(function(p){ p.tasks.forEach(function(t){ if (_mpTaskDays(t)[dt]) tot += _mpCrew(t); }); }); dayTot.push(tot); }
+    vis.forEach(function(p){ p.tasks.forEach(function(t){ if (_mpIsDone(t)) return; if (_mpTaskDays(t)[dt]) tot += _mpCrew(t); }); }); dayTot.push(tot); }
   var weekPeak = []; for (var w = 0; w < n; w++) { var mx = 0; for (var d = 0; d < 7; d++) mx = Math.max(mx, dayTot[w * 7 + d] || 0); weekPeak.push(mx); }
 
   var isDay = _mpGran === 'day';
@@ -49349,15 +49402,15 @@ function _mpGridHtml(){
         '<td class="fx st"></td><td class="fx en"></td><td class="fx du"></td><td class="fx cr"></td><td class="fx fm"></td>';
       body += cellsFor(function(){ return ''; }) + '</tr>';
       gp.tasks.forEach(function(t){
-        var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t);
-        body += '<tr><td class="fx task" style="padding-left:34px"><span class="tn">' + _mpEsc(t.name) + '</span></td>' +
+        var crew = _mpCrew(t), fin = _mpTaskFinish(t), tdays = _mpTaskDays(t), tdone = _mpIsDone(t);
+        body += '<tr' + (tdone ? ' class="tdone"' : '') + '><td class="fx task" style="padding-left:34px"><span class="tn">' + _mpEsc(t.name) + '</span>' + (tdone ? '<span class="ckb">100%</span>' : '') + '</td>' +
           '<td class="fx st">' + (t.start ? _mpMD(t.start) : '\u2014') + '</td>' +
           '<td class="fx en">' + (fin ? _mpMD(fin) : '\u2014') + '</td>' +
           '<td class="fx du">' + (Number(t.dur) || 0) + '</td>' +
-          '<td class="fx cr"><input class="crin' + (t.crewOverride != null ? ' ov' : '') + '" type="text" inputmode="numeric" maxlength="4" value="' + crew + '" onchange="mpSetCrew(\'' + _mpEsc(t.id) + '\',this.value)"></td>' +
+          '<td class="fx cr">' + (tdone ? '<span class="zc">0</span>' : '<input class="crin' + (t.crewOverride != null ? ' ov' : '') + '" type="text" inputmode="numeric" maxlength="4" value="' + crew + '" onchange="mpSetCrew(\'' + _mpEsc(t.id) + '\',this.value)">') + '</td>' +
           '<td class="fx fm"></td>';
-        if (isDay) { for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i); var on = tdays[dt]; body += '<td class="dc' + (i % 7 === 0 ? ' ws' : '') + (_mpWe(dt) ? ' we' : '') + (on ? ' on' : '') + '">' + (on ? crew : '') + '</td>'; } }
-        else { for (var w = 0; w < n; w++) { var act = false; for (var d = 0; d < 7; d++) { if (tdays[_mpAdd(_mpAnchor, w * 7 + d)]) { act = true; break; } } body += '<td class="dc ws' + (act ? ' on' : '') + '">' + (act ? crew : '') + '</td>'; } }
+        if (isDay) { for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i); var on = tdays[dt]; body += '<td class="dc' + (i % 7 === 0 ? ' ws' : '') + (_mpWe(dt) ? ' we' : '') + (on ? (tdone ? ' donebar' : ' on') : '') + '">' + (on && !tdone ? crew : '') + '</td>'; } }
+        else { for (var w = 0; w < n; w++) { var act = false; for (var d = 0; d < 7; d++) { if (tdays[_mpAdd(_mpAnchor, w * 7 + d)]) { act = true; break; } } body += '<td class="dc ws' + (act ? (tdone ? ' donebar' : ' on') : '') + '">' + (act && !tdone ? crew : '') + '</td>'; } }
         body += '</tr>';
       });
     });
@@ -49373,6 +49426,8 @@ function mpSetHz(v){ _mpHorizon = Math.max(1, Math.min(16, Number(v) || 4)); ren
 function mpSetPM(v){ _mpPM = v; renderManpower(); }
 function mpSetProj(v){ _mpProj = v; renderManpower(); }
 function mpSetFore(v){ _mpFore = v; renderManpower(); }
+function mpSetClosed(v){ _mpShowClosed = !!v; renderManpower(); }
+function mpToggleAvail(){ _mpAvOpen = !_mpAvOpen; renderManpower(); }
 function mpSetWk(v){ if (v) _mpAnchor = _mpMonday(v); renderManpower(); }
 
 async function mpSetCrew(taskId, val){
@@ -49439,7 +49494,7 @@ function mpPrint(){
   _mpTasks.forEach(function(t){ t._days = null; });
   var days = n * 7, dayTot = [];
   for (var i = 0; i < days; i++) { var dt = _mpAdd(_mpAnchor, i), tot = 0;
-    vis.forEach(function(p){ p.tasks.forEach(function(t){ if (_mpTaskDays(t)[dt]) tot += _mpCrew(t); }); }); dayTot.push(tot); }
+    vis.forEach(function(p){ p.tasks.forEach(function(t){ if (_mpIsDone(t)) return; if (_mpTaskDays(t)[dt]) tot += _mpCrew(t); }); }); dayTot.push(tot); }
   var pages = [];
   for (var s = 0; s < n; s += weeksPerPage) pages.push([s, Math.min(n, s + weeksPerPage)]);
   var bodyHtml = pages.map(function(pg, pi){
@@ -49548,6 +49603,17 @@ function _mpStyle(sid){
     '.mp-av .pj{color:#7c8794;font-size:11px;line-height:1.5}' +
     '.mp-av .free{font-weight:700;color:#2e7d32;white-space:nowrap}' +
     '.mp-av .busy{font-weight:700;color:#b5442e;white-space:nowrap}' +
+    '.mp-ch.clk{cursor:pointer;display:flex;align-items:center;gap:8px;user-select:none}' +
+    '.mp-ch .caret{display:inline-block;transition:transform .16s ease;color:#7c8794;font-size:11px}' +
+    '.mp-ch.collapsed .caret{transform:rotate(-90deg)}' +
+    '.mp-ch .cnt{margin-left:auto;font-size:11px;font-weight:600;color:#7c8794;background:#f2f5f8;border-radius:11px;padding:2px 9px}' +
+    '.mp-chk{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#5a6672;cursor:pointer;padding:6px 0}' +
+    '.mp-chk input{margin:0;cursor:pointer}' +
+    '.mp-grid .dc.donebar{background:repeating-linear-gradient(45deg,#eceff2,#eceff2 3px,#e2e6ea 3px,#e2e6ea 6px)}' +
+    '.mp-grid tr.tdone td.fx.task{color:#9aa4b0}' +
+    '.mp-grid tr.tdone .tn{text-decoration:line-through;text-decoration-color:#c3ccd4}' +
+    '.ckb{font-size:9px;font-weight:800;color:#3f7f5b;background:#e4f0e8;border-radius:4px;padding:1px 5px;margin-left:6px}' +
+    '.zc{color:#c3ccd4;font-weight:700}' +
     '.mp-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:#7c8794;padding:12px 16px 0}' +
     '.mp-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle;margin-right:5px}' +
     '.mp-chartwrap{overflow-x:auto;padding:12px 16px 16px}' +
@@ -50413,7 +50479,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-27-fore1';
+var KMI_BUILD = '2026-08-28-done1';
 
 var _kmiSessionId = (function(){
   try {
