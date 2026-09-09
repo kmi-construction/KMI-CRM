@@ -253,6 +253,28 @@ textarea{resize:vertical;min-height:72px}
 .cg-crow select{flex:0 0 160px;font-size:12px;padding:6px 8px;border:0.5px solid #ddd;border-radius:6px;background:#fff;cursor:pointer}
 .cg-crow input[type=text]{flex:1;font-size:13px;padding:6px 10px;border:0.5px solid #ddd;border-radius:6px;background:#fff}
 .cg-crow .cg-rm{background:none;border:none;cursor:pointer;color:#E24B4A;font-size:18px;padding:0 4px;line-height:1;flex-shrink:0}
+/* Rebid: copy a proposal from a previous bid */
+.copy-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:100px;font-size:11px;font-weight:600;background:#EEF0F8;color:var(--kmi);border:0.5px solid var(--stl)}
+.copy-chip.clickable{cursor:pointer}
+.copy-chip.clickable:hover{background:#DDE1F0}
+.src-row{display:flex;align-items:center;gap:12px;padding:10px 12px;border:0.5px solid #e5e5e5;border-radius:7px;margin-bottom:6px;cursor:pointer;transition:all .15s}
+.src-row:hover{background:#f7f8fc;border-color:var(--stl)}
+.src-row.sel{background:#EEF0F8;border-color:var(--kmi);box-shadow:0 0 0 1px var(--kmi)}
+.src-row .nm{font-weight:600;font-size:13px}
+.src-row .meta{font-size:11px;color:#888;margin-top:2px}
+.src-row .val{margin-left:auto;text-align:right;font-size:13px;font-weight:600;white-space:nowrap}
+.src-row .val span{display:block;font-size:11px;font-weight:400;color:#888}
+.matchpct{font-size:10px;font-weight:600;color:#3B6D11;background:#EAF3DE;border-radius:100px;padding:2px 7px;white-space:nowrap}
+.scopebox{display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#fafafa;border-radius:7px;padding:14px}
+.scopebox label{display:flex;align-items:flex-start;gap:8px;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400;color:#1a1a1a;cursor:pointer}
+.scopebox input[type=checkbox]{width:auto;margin-top:2px;flex:0 0 auto;accent-color:var(--kmi)}
+.scopebox .sublbl{display:block;font-size:11px;color:#888;margin-top:1px}
+.copied-banner{background:#EEF0F8;border:0.5px solid var(--stl);border-radius:7px;padding:11px 14px;font-size:13px;color:var(--kmi);margin-bottom:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.copied-banner .grow{flex:1;min-width:200px}
+input.carried{background:#FFFBEF;border-color:var(--acl)}
+input.carried:focus{background:#fff;border-color:var(--kmi)}
+.cp-tag{font-size:10px;font-weight:600;color:var(--acd);background:#FFFBEF;border:0.5px solid var(--acl);border-radius:100px;padding:1px 7px;flex-shrink:0}
+.ratehint{font-size:11px;color:var(--acd);margin-top:8px}
 .cg-addbtn{font-size:11px;padding:4px 10px;border:0.5px solid var(--kmi);background:#fff;color:var(--kmi);border-radius:14px;cursor:pointer;font-weight:600;text-transform:none;letter-spacing:0}
 .cg-addbtn:hover{background:var(--kmi);color:#fff}
 .cg-empty{color:#aaa;font-size:11px;font-weight:500;text-transform:none;letter-spacing:0;margin-left:8px}
@@ -2060,6 +2082,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="stripe"></div>
     </div>
   </div>
+  <div id="np-copy-banner"></div>
   <div class="card">
     <div class="ch"><span class="ct">Project details</span></div>
     <div class="fg">
@@ -2092,6 +2115,7 @@ tr.gc-line:hover td{background:#fafafa}
       <span></span>
     </div>
     <div id="np-rows"></div>
+    <div id="np-carried-hint"></div>
     <div class="ctot"><span>Total Bid Proposal</span><strong id="np-total">$0</strong></div>
   </div>
   <div class="card">
@@ -25858,7 +25882,7 @@ var _npCustomIdx = 0;
 
 // Render a single custom-item row (trade dropdown + text + remove) inside
 // the proper group section. `presetGroup` is the trade name, '' for General.
-function npAddItemInGroup(type, presetGroup, presetText) {
+function npAddItemInGroup(type, presetGroup, presetText, carried) {
   _npCustomIdx++;
   var idPrefix = (type === 'inc') ? 'nsc' : 'nex';
   var name = (presetGroup || '').trim();
@@ -25923,6 +25947,16 @@ function npAddItemInGroup(type, presetGroup, presetText) {
 
   row.appendChild(sel);
   row.appendChild(inp);
+  // Flag rows seeded from a previous proposal so the user can tell copied
+  // clarifications apart from ones typed for this bid. .cg-crow is a flexbox,
+  // so an extra child slots in without disturbing the existing three.
+  if (carried) {
+    var cptag = document.createElement('span');
+    cptag.className = 'cp-tag';
+    cptag.textContent = 'carried';
+    cptag.title = 'Copied from the source proposal';
+    row.appendChild(cptag);
+  }
   row.appendChild(del);
   customs.appendChild(row);
   _cgRefreshDivider(sect);
@@ -26612,7 +26646,13 @@ function renderOppDetail(id) {
       sec.innerHTML = '<div class="card" style="border:2px dashed #C4C9DF;text-align:center;padding:36px">' +
         '<div style="font-size:15px;font-weight:600;color:var(--kmi);margin-bottom:8px">No proposal created yet</div>' +
         '<div style="font-size:13px;color:#888;margin-bottom:20px">You have decided to bid \u2014 create a proposal for this opportunity</div>' +
-        '<button class="btn btn-p" onclick="openNewProposal(\'' + id + '\')" style="font-size:14px;padding:10px 28px">Create proposal</button></div>';
+        '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
+        '<button class="btn btn-p" onclick="openNewProposal(\'' + id + '\')" style="font-size:14px;padding:10px 28px">Create proposal</button>' +
+        // Rebid path -- only offered when there is something to copy from.
+        ((db.proposals || []).some(function(p){ return String(p.opportunityId) !== String(id); })
+          ? '<button class="btn btn-pdf" onclick="openCopyProposalPicker(\'' + id + '\')" style="font-size:14px;padding:10px 28px" title="Seed this proposal from a previous bid">&#x29C9; Copy from previous</button>'
+          : '') +
+        '</div></div>';
     } else {
       var ii  = db.stdClar.filter(function(x){ return prop.inc && prop.inc.indexOf(x.id) > -1; });
       var pi  = db.projClar.filter(function(x){ return prop.pc && prop.pc.indexOf(x.id) > -1; });
@@ -26621,6 +26661,7 @@ function renderOppDetail(id) {
       sec.innerHTML = '<div class="card">' +
         '<div class="ch"><span class="ct">Proposal \u2014 ' + prop.id + '</span>' +
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' + propBadge(prop.status) +
+        _cpChipHtml(prop) +
         '<button class="btn btn-sm" onclick="chgPropStatus(\'' + prop.id + '\')">Change status</button>' +
         '<button class="btn btn-sm" onclick="editProposal(\'' + prop.id + '\')">\u270e Edit</button>' +
         '<button class="btn btn-sm btn-pdf" onclick="dlPDF(\'' + prop.id + '\')">&#x2193; Download PDF</button>' +
@@ -27786,10 +27827,341 @@ function deleteOpp(id) {
   saveDB(); filterOpp();
 }
 
+
+// ── COPY A PROPOSAL FROM A PREVIOUS BID (rebid support) ─────────
+// A rebid of an old opportunity usually carries most of the same
+// clarifications, exclusions and cost structure. This block seeds a brand
+// new proposal from any existing one. It is staging only -- nothing is
+// written to db until npSave() runs, so cancelling out costs nothing.
+//
+// Provenance lands on the new proposal as copiedFromProposalId (write-once,
+// set at create, never edited). See toSBProposal for the stale-write guard.
+
+var _npCopiedFrom       = null;  // source proposal ID staged for the pending create
+var _npCopiedScopeLabel = '';    // human-readable list of what was copied
+var _cpOppId            = null;  // opportunity the picker was opened from
+var _cpSrcId            = null;  // source proposal currently selected in the picker
+var _cpLikely           = [];    // scored candidates above the "likely" bar
+var _cpRest             = [];    // everything else, searchable
+
+var _CP_ST = {draft:'Draft', sent:'Sent', review:'Under review',
+              negotiation:'Negotiation', won:'Won', lost:'Lost'};
+
+function _cpEsc(v){
+  return (v == null ? '' : String(v))
+    .replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Tokenise a project name for overlap scoring. Tokens under 3 chars and a
+// small stopword list are dropped so "The New Building" doesn't match half
+// the database on filler words alone.
+var _CP_STOP = {the:1, and:1, for:1, new:1, project:1, building:1, phase:1,
+                inc:1, llc:1, corp:1, company:1, construction:1, addition:1,
+                center:1, centre:1};
+// Job names abbreviate constantly and inconsistently -- the same building is
+// "Waukesha County Highway Facility" one year and "Waukesha Co. Hwy Garage"
+// the next. Fold both spellings onto one token before comparing, or the
+// score leans entirely on the street address.
+var _CP_SYN = {highway:'hwy', elementary:'elem', junior:'jr', senior:'sr',
+               apartments:'apts', apartment:'apts', manufacturing:'mfg',
+               warehouse:'whse', distribution:'distr', headquarters:'hq',
+               hospital:'hosp', medical:'med', municipal:'muni',
+               township:'twp', village:'vlg', maintenance:'maint',
+               facility:'fac', facilities:'fac', garage:'garage'};
+function _cpTokens(s){
+  var out = [], seen = {};
+  String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').split(' ').forEach(function(t){
+    if (t.length < 3 || _CP_STOP[t]) return;
+    var k = _CP_SYN[t] || t;
+    if (!seen[k]) { seen[k] = 1; out.push(k); }
+  });
+  return out;
+}
+var _CP_ABBR = {road:'rd', street:'st', avenue:'ave', boulevard:'blvd',
+                drive:'dr', lane:'ln', court:'ct', highway:'hwy',
+                parkway:'pkwy', place:'pl', north:'n', south:'s',
+                east:'e', west:'w'};
+function _cpAddr(s){
+  return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()
+    .split(' ').map(function(t){ return _CP_ABBR[t] || t; }).join(' ');
+}
+
+// 0..1 similarity between the target opportunity and a candidate proposal.
+// Project-name token overlap carries 0.75; an exact street-address match adds
+// the remaining 0.25, a partial street-name overlap about half that.
+function _cpScore(opp, prop){
+  var score = 0;
+  var a = _cpTokens(opp.project), b = _cpTokens(prop.project);
+  if (a.length && b.length) {
+    var inB = {}; b.forEach(function(t){ inB[t] = 1; });
+    var hits = 0;
+    a.forEach(function(t){ if (inB[t]) hits++; });
+    score = (hits / Math.max(1, Math.min(a.length, b.length))) * 0.75;
+  }
+  // Proposals carry no address of their own -- read it off their opportunity.
+  var srcOpp = prop.opportunityId ? getOpp(prop.opportunityId) : null;
+  if (srcOpp) {
+    var x = _cpAddr(opp.address), y = _cpAddr(srcOpp.address);
+    if (x && y) {
+      if (x === y) score += 0.25;
+      else {
+        var xt = _cpTokens(x), yt = _cpTokens(y);
+        if (xt.filter(function(t){ return yt.indexOf(t) > -1; }).length) score += 0.12;
+      }
+    }
+  }
+  return Math.min(1, score);
+}
+
+// Every proposal except ones already tied to this opportunity, scored and
+// sorted best-first, newest breaking ties.
+function _cpCandidates(opp){
+  return (db.proposals || [])
+    .filter(function(p){ return String(p.opportunityId) !== String(opp.id); })
+    .map(function(p){ return {p:p, score:_cpScore(opp, p)}; })
+    .sort(function(a,b){
+      if (b.score !== a.score) return b.score - a.score;
+      return String(b.p.created || '').localeCompare(String(a.p.created || ''));
+    });
+}
+
+function _cpCounts(p){
+  return {
+    clar:  (p.inc||[]).length + (p.exc||[]).length +
+           (p.customIncs||[]).length + (p.customExcs||[]).length,
+    costs: (p.costs||[]).length,
+    alt:   (p.alternateCosts||[]).length,
+    ve:    (p.veCosts||[]).length
+  };
+}
+
+function _cpScopeLabel(scope){
+  var parts = [];
+  if (scope && scope.clar)  parts.push('clarifications');
+  if (scope && scope.costs) parts.push('cost breakdown');
+  if (scope && scope.alt)   parts.push('alternates');
+  if (scope && scope.ve)    parts.push('VE');
+  return parts.join(', ');
+}
+
+function _cpRowHtml(cand, showScore){
+  var p = cand.p, c = _cpCounts(p);
+  var srcOpp = p.opportunityId ? getOpp(p.opportunityId) : null;
+  var cust   = getCust(p.customerId);
+  var meta   = [];
+  if (cust && cust.name && cust.name !== 'Unknown') meta.push(_cpEsc(cust.name));
+  if (p.created) meta.push(_cpEsc(p.created));
+  if (p.status)  meta.push(_cpEsc(_CP_ST[p.status] || p.status));
+  if (srcOpp && srcOpp.address) {
+    meta.push(_cpEsc([srcOpp.address, srcOpp.city, srcOpp.state].filter(Boolean).join(', ')));
+  }
+  var sub = c.clar + ' clarification' + (c.clar === 1 ? '' : 's') +
+            ' \u00b7 ' + c.costs + ' cost row' + (c.costs === 1 ? '' : 's');
+  return '<div class="src-row' + (String(_cpSrcId) === String(p.id) ? ' sel' : '') +
+           '" data-cp-id="' + _cpEsc(p.id) + '" onclick="cpSelectSource(this.getAttribute(\'data-cp-id\'))">' +
+    '<div style="min-width:0">' +
+      '<div class="nm">' + _cpEsc(p.id) + ' \u2014 ' + _cpEsc(p.project || '(untitled)') +
+        (showScore ? ' <span class="matchpct">' + Math.round(cand.score * 100) + '% match</span>' : '') +
+      '</div>' +
+      '<div class="meta">' + (meta.join(' \u00b7 ') || '&nbsp;') + '</div>' +
+    '</div>' +
+    '<div class="val">' + fmtC(p.value || 0) + '<span>' + sub + '</span></div>' +
+  '</div>';
+}
+
+function _cpScopeRow(key, label, sub){
+  return '<label><input type="checkbox" id="cp-sc-' + key + '" checked>' +
+    '<span>' + label + '<span class="sublbl" id="cp-sub-' + key + '">' + (sub || '') + '</span></span></label>';
+}
+
+function openCopyProposalPicker(oppId){
+  var o = getOpp(oppId); if (!o) return;
+  var cands = _cpCandidates(o);
+  if (!cands.length) { alert('There are no other proposals to copy from.'); return; }
+  _cpOppId = oppId;
+  // Preselect the top candidate only when it clears the "likely match" bar --
+  // otherwise the user picks deliberately rather than accepting a weak guess.
+  _cpSrcId = (cands[0].score >= 0.25) ? cands[0].p.id : null;
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Copy from a previous proposal</div>' +
+    '<div class="msb">' + _cpEsc(o.id) + ' \u2014 ' + _cpEsc(o.project || '') + '</div>' +
+    '<div id="cp-lists"></div>' +
+    '<div style="margin:20px 0 8px"><label>What to copy</label></div>' +
+    '<div class="scopebox">' +
+      _cpScopeRow('clar',  'Clarifications &amp; exclusions', 'Standard selections + custom items, with trade tags') +
+      _cpScopeRow('costs', 'Cost breakdown', 'Descriptions, qty, unit, and bid amounts') +
+      _cpScopeRow('alt',   'Alternate pricing', '') +
+      _cpScopeRow('ve',    'VE pricing', '') +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" id="cp-go" onclick="cpApply()">Copy &amp; open form</button>' +
+    '</div>');
+  cpRenderList();
+}
+
+// Static shell: likely matches, the search box, and the results container.
+// Only #cp-results is rewritten as the user types, so the input keeps focus.
+function cpRenderList(){
+  var el = g('cp-lists'); if (!el) return;
+  var o  = getOpp(_cpOppId); if (!o) return;
+  var all = _cpCandidates(o);
+  _cpLikely = all.filter(function(c){ return c.score >= 0.25; }).slice(0, 5);
+  var ids = {}; _cpLikely.forEach(function(c){ ids[String(c.p.id)] = 1; });
+  _cpRest = all.filter(function(c){ return !ids[String(c.p.id)]; });
+  el.innerHTML =
+    (_cpLikely.length
+      ? '<div style="margin-bottom:8px"><label>Likely matches</label></div>' +
+        _cpLikely.map(function(c){ return _cpRowHtml(c, true); }).join('')
+      : '') +
+    '<div style="margin:' + (_cpLikely.length ? '18px' : '0') + ' 0 8px">' +
+      '<label>' + (_cpLikely.length ? 'Search all proposals' : 'All proposals') + '</label>' +
+      '<input id="cp-search" placeholder="Project name, customer, or proposal ID\u2026" style="margin-top:6px" oninput="cpRenderResults()">' +
+    '</div>' +
+    '<div id="cp-results"></div>';
+  cpRenderResults();
+}
+
+function cpRenderResults(){
+  var el = g('cp-results'); if (!el) return;
+  var q = (g('cp-search') ? g('cp-search').value : '').trim().toLowerCase();
+  var rows = _cpRest;
+  if (q) {
+    rows = rows.filter(function(c){
+      var cust = getCust(c.p.customerId);
+      return (String(c.p.id) + ' ' + (c.p.project || '') + ' ' + ((cust && cust.name) || ''))
+             .toLowerCase().indexOf(q) > -1;
+    });
+  }
+  el.innerHTML = rows.length
+    ? rows.slice(0, 30).map(function(c){ return _cpRowHtml(c, false); }).join('') +
+      (rows.length > 30
+        ? '<div style="font-size:11px;color:#888;padding:8px 2px">Showing 30 of ' + rows.length + ' \u2014 narrow the search to see more.</div>'
+        : '')
+    : '<div style="font-size:13px;color:#888;padding:10px 2px">No other proposals match that search.</div>';
+  _cpRefreshScope();
+}
+
+function cpSelectSource(pid){
+  _cpSrcId = pid;
+  document.querySelectorAll('#cp-lists .src-row').forEach(function(r){
+    r.classList.toggle('sel', String(r.getAttribute('data-cp-id')) === String(pid));
+  });
+  _cpRefreshScope();
+}
+
+// Retitle the scope checkboxes against the selected source, and disable the
+// ones it has nothing to give. A box auto-unchecked this way is re-checked
+// if the user picks a source that does have that section, so the auto-
+// disable never silently drops something they meant to copy.
+function _cpRefreshScope(){
+  var p = _cpSrcId ? getProp(_cpSrcId) : null;
+  var c = p ? _cpCounts(p) : {clar:0, costs:0, alt:0, ve:0};
+  function put(key, txt, has){
+    var lbl = g('cp-sub-' + key); if (lbl) lbl.textContent = txt;
+    var cb  = g('cp-sc-' + key);  if (!cb) return;
+    if (has) {
+      cb.disabled = false;
+      if (cb.getAttribute('data-cp-auto') === '1') {
+        cb.checked = true; cb.removeAttribute('data-cp-auto');
+      }
+    } else {
+      if (cb.checked) { cb.checked = false; cb.setAttribute('data-cp-auto', '1'); }
+      cb.disabled = true;
+    }
+    var wrap = cb.closest('label');
+    if (wrap) { wrap.style.opacity = has ? '' : '.45'; wrap.style.cursor = has ? 'pointer' : 'default'; }
+  }
+  var on = p ? (' on ' + p.id) : '';
+  put('clar',  p ? (c.clar  + ' item'      + (c.clar ===1?'':'s') + on) : 'Standard selections + custom items',   c.clar  > 0);
+  put('costs', p ? (c.costs + ' row'       + (c.costs===1?'':'s') + on) : 'Descriptions, qty, unit, and bid amounts', c.costs > 0);
+  put('alt',   p ? (c.alt ? c.alt + ' alternate' + (c.alt===1?'':'s') + on : 'None' + on) : '', c.alt > 0);
+  put('ve',    p ? (c.ve  ? c.ve  + ' VE line'   + (c.ve ===1?'':'s') + on : 'None' + on) : '', c.ve  > 0);
+  var go = g('cp-go');
+  if (go) { go.disabled = !p; go.style.opacity = p ? '' : '.5'; }
+}
+
+function cpApply(){
+  if (!_cpSrcId) { alert('Pick a proposal to copy from.'); return; }
+  var src = getProp(_cpSrcId);
+  if (!src) { alert('That proposal could no longer be found. Refresh and try again.'); return; }
+  var scope = {
+    clar:  !!(g('cp-sc-clar')  && g('cp-sc-clar').checked),
+    costs: !!(g('cp-sc-costs') && g('cp-sc-costs').checked),
+    alt:   !!(g('cp-sc-alt')   && g('cp-sc-alt').checked),
+    ve:    !!(g('cp-sc-ve')    && g('cp-sc-ve').checked)
+  };
+  if (!scope.clar && !scope.costs && !scope.alt && !scope.ve) {
+    alert('Nothing is selected to copy. Tick at least one section, or cancel and create a blank proposal.');
+    return;
+  }
+  var oppId = _cpOppId;
+  closeModal();
+  openNewProposal(oppId, {srcId: src.id, scope: scope});
+}
+
+// Banner across the top of the Create/Edit Proposal page. In create mode it
+// offers Change source / Clear; in edit mode provenance is already committed
+// and write-once, so it renders read-only.
+function _cpRenderBanner(){
+  var el = g('np-copy-banner'); if (!el) return;
+  if (!_npCopiedFrom) { el.innerHTML = ''; return; }
+  var src = getProp(_npCopiedFrom);
+  var label = _cpEsc(_npCopiedFrom) +
+              (src && src.project ? ' \u2014 ' + _cpEsc(src.project) : '') +
+              (src && src.created ? ' (' + _cpEsc(src.created) + ')' : '');
+  var editing = !!_editProposalId;
+  el.innerHTML = '<div class="copied-banner"><span>&#x29C9;</span>' +
+    '<span class="grow">Copied from <strong>' + label + '</strong>' +
+      ((!editing && _npCopiedScopeLabel) ? ' \u00b7 ' + _cpEsc(_npCopiedScopeLabel) : '') +
+      (src ? '' : ' <em style="color:#888">(source proposal no longer exists)</em>') +
+    '</span>' +
+    (editing ? '' :
+      '<button class="btn btn-sm" onclick="cpChangeSource()">Change source</button>' +
+      '<button class="btn btn-sm btn-nobid" onclick="npClearCopy()">&#215; Clear</button>') +
+    '</div>';
+}
+
+function cpChangeSource(){
+  if (!_npOppId) return;
+  if (!confirm('Re-open the source picker?\n\nAnything you have typed or changed on this form will be discarded.')) return;
+  openCopyProposalPicker(_npOppId);
+}
+
+function npClearCopy(){
+  if (!_npOppId) return;
+  if (!confirm('Clear the copied data and start from a blank proposal?\n\nAnything you have typed or changed on this form will be discarded.')) return;
+  openNewProposal(_npOppId);
+}
+
+// Provenance chip for the proposal card on the opportunity detail page.
+// Clickable through to the source opportunity when it still resolves.
+function _cpChipHtml(prop){
+  var srcId = prop && prop.copiedFromProposalId;
+  if (!srcId) return '';
+  var src    = getProp(srcId);
+  var srcOpp = (src && src.opportunityId) ? getOpp(src.opportunityId) : null;
+  var title  = 'Copied from ' + srcId + (src && src.project ? ' \u2014 ' + src.project : '');
+  if (srcOpp) {
+    return '<span class="copy-chip clickable" title="' + _cpEsc(title) + ' (click to open)" ' +
+           'onclick="openOppDetail(\'' + _cpEsc(srcOpp.id) + '\')">&#x29C9; from ' + _cpEsc(srcId) + '</span>';
+  }
+  return '<span class="copy-chip" title="' + _cpEsc(title) + '">&#x29C9; from ' + _cpEsc(srcId) + '</span>';
+}
+
 // ── NEW PROPOSAL ────────────────────────────────────────────────
-function openNewProposal(oppId) {
+// `seed` is optional: {srcId, scope:{clar,costs,alt,ve}}. When present the
+// form is hydrated from that proposal instead of opening blank. Nothing is
+// written to db until npSave() runs -- the seed only pre-fills the inputs.
+function openNewProposal(oppId, seed) {
   var o = getOpp(oppId); if (!o) return;
   _npOppId = oppId; _npIdx = 0; _editProposalId = null;
+  var src   = (seed && seed.srcId) ? getProp(seed.srcId) : null;
+  var scope = (seed && seed.scope) || {};
+  _npCopiedFrom       = src ? src.id : null;
+  _npCopiedScopeLabel = src ? _cpScopeLabel(scope) : '';
   var c   = getCust(o.customerId);
   // Preview only -- the binding ID is re-derived in saveProposal(). See nextSeqId().
   var pid = nextSeqId(db.proposals, 'KMI');
@@ -27798,20 +28170,54 @@ function openNewProposal(oppId) {
   g('np-project').value              = o.project || '';
   g('np-cust-ro').value              = c.name;
   g('np-type-ro').value              = Array.isArray(o.types) ? o.types.join(', ') : (o.type || '');
-  g('np-inc').innerHTML = renderGroupedCheckboxes(db.stdClar,    'nsc', true);
+  // Inclusions normally default to all-checked. When clarifications are being
+  // copied in we start from nothing, so the source proposal's selection is the
+  // only one applied rather than being unioned with every standard item.
+  var seedClar = !!(src && scope.clar);
+  g('np-inc').innerHTML = renderGroupedCheckboxes(db.stdClar,    'nsc', !seedClar);
   g('np-exc').innerHTML = renderGroupedCheckboxes(db.exclusions, 'nex', false);
 // (no separate custom containers — custom rows live inside each group section)
   g('np-rows').innerHTML = ''; g('np-total').textContent = '$0';
   var altEl = g('np-alt-rows'); if (altEl) altEl.innerHTML = '';
   var veEl  = g('np-ve-rows');  if (veEl)  veEl.innerHTML  = '';
+  var hintEl = g('np-carried-hint'); if (hintEl) hintEl.innerHTML = '';
+
+  if (seedClar) {
+    (src.inc || []).forEach(function(cid){ var cb = g('nsc' + cid); if (cb) cb.checked = true; });
+    (src.exc || []).forEach(function(cid){ var cb = g('nex' + cid); if (cb) cb.checked = true; });
+    _npHydrateCustoms('inc', src.customIncs, true);
+    _npHydrateCustoms('exc', src.customExcs, true);
+  }
+  if (src && scope.costs) {
+    (src.costs || []).forEach(function(r){ npAddRow(r.desc, r.qty, r.unit, r.rate, true); });
+    if ((src.costs || []).length && hintEl) {
+      hintEl.innerHTML = '<div class="ratehint">&#9679; Gold-tinted rates carried from ' +
+        _cpEsc(src.id) + (src.created ? ' (' + _cpEsc(src.created) + ')' : '') +
+        ' \u2014 the tint clears when you edit the cell.</div>';
+    }
+  }
+  if (src && scope.alt) (src.alternateCosts || []).forEach(function(r){ npAddAltRow(r.desc, r.amount, true); });
+  if (src && scope.ve)  (src.veCosts        || []).forEach(function(r){ npAddVeRow(r.desc,  r.amount, true); });
+
   g('np-back-btn').onclick   = function(){ openOppDetail(oppId); };
   g('np-cancel-btn').onclick = function(){ openOppDetail(oppId); };
   var ttl = g('np-page-title'); if (ttl) ttl.textContent = 'Create proposal';
   var sbt = g('np-save-btn');   if (sbt) sbt.textContent = 'Create proposal';
+  _cpRenderBanner();
   setActivePage('opportunities');
   document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
   g('pg-new-proposal').classList.add('active');
-  npAddRow();
+  if (!g('np-rows').children.length) npAddRow();
+  npTotal();
+}
+
+// Shared hydration for typed-in (custom) clarifications. Legacy proposals
+// stored these as plain strings; newer ones as {group, text}.
+function _npHydrateCustoms(type, arr, carried) {
+  (arr || []).forEach(function(it){
+    if (typeof it === 'string') npAddItemInGroup(type, '', it, carried);
+    else                        npAddItemInGroup(type, (it && it.group) || '', (it && it.text) || '', carried);
+  });
 }
 
 function editProposal(propId) {
@@ -27819,6 +28225,10 @@ function editProposal(propId) {
   if (!prop) { alert('Proposal not found.'); return; }
   var o = getOpp(prop.opportunityId); if (!o) { alert('Linked opportunity not found.'); return; }
   _npOppId = prop.opportunityId; _npIdx = 0; _editProposalId = propId;
+  // Provenance is write-once. In edit mode the banner is informational only --
+  // no Change source / Clear buttons (see _cpRenderBanner).
+  _npCopiedFrom = prop.copiedFromProposalId || null;
+  _npCopiedScopeLabel = '';
   var c   = getCust(o.customerId);
 
   // Header shows the existing proposal ID, not a new one
@@ -27862,6 +28272,8 @@ function editProposal(propId) {
 
   g('np-back-btn').onclick   = function(){ openOppDetail(prop.opportunityId); };
   g('np-cancel-btn').onclick = function(){ _editProposalId = null; openOppDetail(prop.opportunityId); };
+  var hintEl = g('np-carried-hint'); if (hintEl) hintEl.innerHTML = '';
+  _cpRenderBanner();
   var ttl = g('np-page-title'); if (ttl) ttl.textContent = 'Edit proposal';
   var sbt = g('np-save-btn');   if (sbt) sbt.textContent = 'Save changes';
 
@@ -28206,7 +28618,10 @@ async function sendProposalEmail() {
   }
 }
 
-function npAddRow(desc, qty, unit, rate) {
+// `carried` tints the rate cell gold to flag a bid amount copied in from a
+// previous proposal (see openCopyProposalPicker). The tint clears the first
+// time the cell is focused, so an untouched gold cell is a stale price.
+function npAddRow(desc, qty, unit, rate, carried) {
   _npIdx++;
   var rid   = 'r' + _npIdx;
   var units = ['cy','day','ea','hr','lf','lot','sf','ton'];
@@ -28216,7 +28631,7 @@ function npAddRow(desc, qty, unit, rate) {
     '<input class="rd" placeholder="Description" value="' + (desc || '') + '" oninput="npTotal()">' +
     '<input class="rq" type="number" placeholder="0" value="' + (qty || '') + '" oninput="npTotal()" style="text-align:right">' +
     '<select class="ru" oninput="npTotal()">' + units.map(function(u){ return '<option' + (u === (unit || 'lot') ? ' selected' : '') + '>' + u + '</option>'; }).join('') + '</select>' +
-    '<input class="rr" type="number" placeholder="0.00" value="' + (rate || '') + '" oninput="npTotal()" style="text-align:right">' +
+    '<input class="rr' + (carried ? ' carried' : '') + '" type="number" placeholder="0.00" value="' + (rate || '') + '" oninput="npTotal()"' + (carried ? ' onfocus="this.classList.remove(\'carried\')"' : '') + ' style="text-align:right">' +
     '<button onclick="npRemRow(\'' + rid + '\')" style="background:none;border:none;cursor:pointer;color:#E24B4A;font-size:18px;line-height:1;padding:0">&#215;</button>';
   g('np-rows').appendChild(row);
   npTotal();
@@ -28244,9 +28659,9 @@ function npApplyTmpl() {
 // Simple two-column rows (description + lump-sum bid amount). Unlike the
 // main cost breakdown, these sections are NOT summed — each line stands on
 // its own so the customer can accept any subset.
-function npAddAltRow(desc, amount) { return _npAddSideRow('alt', desc, amount); }
-function npAddVeRow(desc, amount)  { return _npAddSideRow('ve',  desc, amount); }
-function _npAddSideRow(kind, desc, amount) {
+function npAddAltRow(desc, amount, carried) { return _npAddSideRow('alt', desc, amount, carried); }
+function npAddVeRow(desc, amount, carried)  { return _npAddSideRow('ve',  desc, amount, carried); }
+function _npAddSideRow(kind, desc, amount, carried) {
   var cfg = (kind === 've')
     ? {cont:'np-ve-rows',  cls:'ve-cr',  placeholder:'e.g. VE: substitute precast for CIP'}
     : {cont:'np-alt-rows', cls:'alt-cr', placeholder:'e.g. Alternate #1: epoxy floor coating'};
@@ -28256,7 +28671,7 @@ function _npAddSideRow(kind, desc, amount) {
   row.className = cfg.cls; row.id = rid;
   row.innerHTML =
     '<input class="rd" placeholder="' + cfg.placeholder + '" value="' + (desc || '').replace(/"/g,'&quot;') + '">' +
-    '<input class="ra" type="number" step="0.01" placeholder="0.00" value="' + (amount != null ? amount : '') + '" style="text-align:right">' +
+    '<input class="ra' + (carried ? ' carried' : '') + '" type="number" step="0.01" placeholder="0.00" value="' + (amount != null ? amount : '') + '"' + (carried ? ' onfocus="this.classList.remove(\'carried\')"' : '') + ' style="text-align:right">' +
     '<button onclick="npRemRow(\'' + rid + '\')" style="background:none;border:none;cursor:pointer;color:#E24B4A;font-size:18px;line-height:1;padding:0">&#215;</button>';
   g(cfg.cont).appendChild(row);
 }
@@ -28300,8 +28715,10 @@ function npSave() {
     prop.alternateCosts = alternateCosts;
     prop.veCosts        = veCosts;
     db.activity.unshift({text: prop.id + ' proposal updated', type: prop.status || 'draft', time: 'Just now'});
+    // copiedFromProposalId is deliberately NOT touched here -- write-once.
     var editedId = _editProposalId;
     _editProposalId = null;
+    _npCopiedFrom = null; _npCopiedScopeLabel = '';
     saveDB(); openOppDetail(_npOppId);
     return;
   }
@@ -28317,9 +28734,15 @@ function npSave() {
     alert('Could not generate a unique proposal ID (' + pid + ' is already in use).\n\nNothing was saved. Please report this before retrying.');
     return;
   }
-  db.proposals.push({id:pid, opportunityId:_npOppId, project:project, customerId:o.customerId, value:Math.round(total), status:'draft', created:new Date().toISOString().slice(0,10), type:o.type||'', inc:incs, pc:[], exc:excs, customIncs:customIncs, customExcs:customExcs, costs:costs, alternateCosts:alternateCosts, veCosts:veCosts});
+  // opportunityId is the CURRENT opportunity, never the source proposal's --
+  // getting that wrong produces the crossed link _warnIdIntegrity() reports.
+  db.proposals.push({id:pid, opportunityId:_npOppId, project:project, customerId:o.customerId, value:Math.round(total), status:'draft', created:new Date().toISOString().slice(0,10), type:o.type||'', inc:incs, pc:[], exc:excs, customIncs:customIncs, customExcs:customExcs, costs:costs, alternateCosts:alternateCosts, veCosts:veCosts, copiedFromProposalId:(_npCopiedFrom || null)});
   o.proposalId = pid;
-  db.activity.unshift({text: pid + ' proposal created for ' + o.id, type: 'draft', time: 'Just now'});
+  db.activity.unshift({
+    text: pid + ' proposal created for ' + o.id + (_npCopiedFrom ? ' (copied from ' + _npCopiedFrom + ')' : ''),
+    type: 'draft', time: 'Just now'
+  });
+  _npCopiedFrom = null; _npCopiedScopeLabel = '';
   saveDB(); openOppDetail(_npOppId);
 }
 function saveFinalBid(oppId) {
@@ -50492,7 +50915,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-08-28-done2';
+var KMI_BUILD = '2026-09-08-rebidcopy';
 
 var _kmiSessionId = (function(){
   try {
@@ -51353,6 +51776,11 @@ function toSBProposal(r) {
     // Items are {group, text} objects; legacy rows may contain plain
     // strings — _normCustom() / _hydrateCustoms() handle both shapes.
     custom_incs:r.customIncs||[], custom_excs:r.customExcs||[],
+    // Rebid provenance. Write-once at create; never edited afterwards. A
+    // BEFORE UPDATE trigger on kmi_proposals COALESCEs an incoming NULL back
+    // to the stored value, so a stale tab's wholesale pushToSupabase() upsert
+    // cannot blank it out on rows it loaded before this column existed.
+    copied_from_proposal_id:r.copiedFromProposalId||null,
     last_emailed_at:r.lastEmailedAt||null, last_emailed_to:r.lastEmailedTo||null
   };
 }
@@ -51367,6 +51795,8 @@ function fromSBProposal(r) {
     // null/missing → []; legacy string entries are preserved as-is and
     // handled downstream by _normCustom() / _hydrateCustoms().
     customIncs:r.custom_incs||[], customExcs:r.custom_excs||[],
+    // Rebid provenance -- see toSBProposal.
+    copiedFromProposalId:r.copied_from_proposal_id||null,
     lastEmailedAt:r.last_emailed_at||null, lastEmailedTo:r.last_emailed_to||null
   };
 }
