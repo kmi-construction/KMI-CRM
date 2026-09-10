@@ -45900,6 +45900,141 @@ async function prodPacketPreview() {
   }
 }
 
+// ── Distribution (P6 / B3c) ───────────────────────────────────────
+// D5-C: one merged company packet to every PM and Superintendent, derived
+// from role rather than a hand-kept list, so a new hire is covered the day
+// their user record exists.
+function _prodWeekDistributed(weekStart) {
+  return (db.prodWeekApprovals || []).some(function(a){
+    return String(a.weekStart) === String(weekStart) && a.distributedAt;
+  });
+}
+function _prodWeekDistributedAt(weekStart) {
+  var hit = (db.prodWeekApprovals || []).find(function(a){
+    return String(a.weekStart) === String(weekStart) && a.distributedAt;
+  });
+  if (!hit) return '';
+  var dt = new Date(hit.distributedAt);
+  return isNaN(dt.getTime()) ? '' : dt.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+}
+function _prodPacketRecipients() {
+  return (db.users || []).filter(function(u){
+    if (!u || u.status === 'inactive') return false;
+    if (!u.email || String(u.email).indexOf('@') < 0) return false;
+    var r = String(u.role || '');
+    return /project manager/i.test(r) || /superintendent/i.test(r);
+  });
+}
+
+// btoa() on a multi-megabyte string built with apply() blows the argument
+// limit, so chunk it.
+function _prodU8ToBase64(u8) {
+  var CH = 0x8000, parts = [];
+  for (var i = 0; i < u8.length; i += CH) {
+    parts.push(String.fromCharCode.apply(null, u8.subarray(i, i + CH)));
+  }
+  return btoa(parts.join(''));
+}
+
+async function prodPacketSend() {
+  if (canAccess('distribute-production') === 'none') { alert('Distribution is limited to Admins.'); return; }
+  var btn = g('prod-send-btn');
+  var rcpts = _prodPacketRecipients();
+  if (!rcpts.length) {
+    alert('No active Project Managers or Superintendents have an email address on file, so there is nobody to send to.');
+    return;
+  }
+
+  var res;
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Building\u2026'; }
+    res = await prodPacketBuild(_prodReviewWeek);
+  } catch (e) {
+    console.error('packet build failed', e);
+    alert('Could not build the packet: ' + (e && e.message ? e.message : e));
+    if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
+    return;
+  }
+  if (!res.included.length) {
+    alert('No jobs had production entered for this week, so there is nothing to send.');
+    if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
+    return;
+  }
+
+  var b64 = _prodU8ToBase64(res.bytes);
+  var mb = b64.length / 1048576;
+  if (mb > 25) {
+    alert('The packet is about ' + mb.toFixed(1) + ' MB once encoded, which is over what the mail service will accept.\n\n' +
+          'Use Preview packet to download it and send it another way for this week.');
+    if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
+    return;
+  }
+
+  var label = _prodWeekRangeLabel(_prodReviewWeek, _prodAddDays(_prodReviewWeek, 6));
+  // D10-A: the packet goes out on schedule whether or not everything was
+  // approved. The UNAPPROVED stamp carries the warning, not a blocked button.
+  var warn = res.unapproved
+    ? ('\n\n' + res.unapproved + ' job' + (res.unapproved === 1 ? ' was' : 's were') +
+       ' NOT approved and will be stamped UNAPPROVED in the packet.')
+    : '';
+  if (!confirm('Send the production packet for ' + label + '?\n\n' +
+      res.included.length + ' job report' + (res.included.length === 1 ? '' : 's') + ', ' +
+      mb.toFixed(1) + ' MB, to ' + rcpts.length + ' recipient' + (rcpts.length === 1 ? '' : 's') + ':\n' +
+      rcpts.map(function(u){ return '  \u00b7 ' + (_prodUserName(u.id) || u.email); }).join('\n') + warn)) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
+    return;
+  }
+
+  if (btn) btn.textContent = 'Sending\u2026';
+  var sent = 0, failed = [];
+  var body =
+    'Attached is the KMI production packet for ' + label + '.\n\n' +
+    'The first page is the current backlog across every job with open quantities. ' +
+    'Behind it is one report per job that had production entered last week.' +
+    (res.unapproved ? ('\n\n' + res.unapproved + ' job report' + (res.unapproved === 1 ? ' is' : 's are') +
+      ' marked UNAPPROVED \u2014 those figures had not been approved when the packet went out.') : '') +
+    '\n\nKMI Construction LLC';
+  var filename = 'KMI Weekly Production - ' + _prodReviewWeek + '.pdf';
+
+  for (var i = 0; i < rcpts.length; i++) {
+    try {
+      var r = await sendEmail({
+        to:       rcpts[i].email,
+        subject:  'KMI Production Packet \u2014 ' + label,
+        text:     body,
+        flowType: 'prod_weekly_packet',
+        sentBy:   _currentUser ? _currentUser.id : null,
+        relatedEntityType: 'prod_week',
+        relatedEntityId:   String(_prodReviewWeek),
+        attachments: [{ filename: filename, content: b64 }]
+      });
+      if (r && r.success) sent++; else failed.push(rcpts[i].email + ' (' + ((r && r.error) || 'failed') + ')');
+    } catch (e) {
+      failed.push(rcpts[i].email + ' (' + (e && e.message ? e.message : 'threw') + ')');
+    }
+  }
+
+  // Only stamp distribution if something actually left the building. The
+  // column is write-once, so a premature stamp could not be corrected.
+  var stamped = 0;
+  if (sent > 0 && supabaseClient) {
+    try {
+      var mk = await supabaseClient.rpc('kmi_prod_week_mark_distributed',
+        { p_week_start: _prodReviewWeek, p_email_id: 'packet_' + _prodReviewWeek + '_' + Date.now() });
+      if (mk && mk.error) console.warn('mark_distributed failed:', mk.error.message);
+      else stamped = Number(mk && mk.data) || 0;
+      await prodReloadWeekApprovals();
+      try { saveDB(); } catch(e) {}
+    } catch (e) { console.warn('mark_distributed threw', e); }
+  }
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
+  renderProdReview();
+  alert('Packet sent to ' + sent + ' of ' + rcpts.length + ' recipient' + (rcpts.length === 1 ? '' : 's') + '.' +
+    (stamped ? ('\n' + stamped + ' approved job-week' + (stamped === 1 ? '' : 's') + ' stamped as distributed.') : '') +
+    (failed.length ? ('\n\nFailed:\n' + failed.join('\n')) : ''));
+}
+
 function renderProdReview() {
   var host = g('prod-review-body'); if (!host) return;
   if (canAccess('approve-production-week') === 'none') {
@@ -46006,7 +46141,10 @@ function renderProdReview() {
            (blocked ? (blocked + ' blocked on missing entries.') : 'Approve them to release the packet.'))) +
     '</div><div style="flex:1"></div>' +
     '<button class="btn btn-sm" id="prod-packet-btn" onclick="prodPacketPreview()">\u2913 Preview packet</button>' +
-    '<button class="btn btn-sm btn-p" disabled title="Distribution arrives in the next build">Send weekly packet</button>' +
+    (_prodWeekDistributed(_prodReviewWeek)
+      ? ('<span style="font-size:12px;color:#1F7A4D;font-weight:600">\u2713 Sent ' + _prodEsc(_prodWeekDistributedAt(_prodReviewWeek)) + '</span>' +
+         '<button class="btn btn-sm" onclick="prodPacketSend()">Send again</button>')
+      : '<button class="btn btn-sm btn-p" id="prod-send-btn" onclick="prodPacketSend()">Send weekly packet</button>') +
   '</div>';
 
   host.innerHTML = nav +
@@ -46231,9 +46369,19 @@ function prodExportTrackingPdf(opts) {
   var NAVY = [30,36,72], GOLD = [200,168,75], GOOD = [31,122,77], BAD = [163,45,45], GREY = [120,120,120];
   function sf(st,sz,col){ doc.setFont('helvetica',st); doc.setFontSize(sz); doc.setTextColor(col?col[0]:0, col?col[1]:0, col?col[2]:0); }
   function ln(x1,y1,x2,y2,w,rgb){ doc.setDrawColor(rgb?rgb[0]:0, rgb?rgb[1]:0, rgb?rgb[2]:0); doc.setLineWidth(w||0.5); doc.line(x1,y1,x2,y2); }
-  function letterhead(){
+  // cont=true on every page after the first. A continuation page that says
+  // only 'PRODUCTION TRACKING' is unreadable inside a merged packet \u2014 there
+  // is nothing on it to say whose numbers these are.
+  function letterhead(cont){
     if (typeof KMI_LOGO_IMG === 'string' && KMI_LOGO_IMG) { try { doc.addImage(KMI_LOGO_IMG,'JPEG',LM,24,100,45); } catch(e){} }
     sf('bold',18,[0,0,0]); doc.text('PRODUCTION TRACKING', LM+120, 52);
+    if (cont) {
+      sf('normal',10,[0,0,0]);
+      doc.text(one(String((p.number||'') + (p.name ? ('  ' + p.name) : '')), 420), LM+120, 66);
+      sf('normal',8,GREY);
+      doc.text('continued', RM, 66, { align:'right' });
+      ln(LM, 74, RM, 74, 0.6, GOLD);
+    }
   }
   function money(v){ v = Number(v)||0; return (v<0?'-$':'$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
   function num(v){ return (Number(v)||0).toLocaleString(); }
@@ -46345,7 +46493,7 @@ function prodExportTrackingPdf(opts) {
     return yy + 14;
   }
   function ensure(yy){
-    if (yy + 16 > FOOTER_TOP) { doc.addPage(); letterhead(); var ny = 92; sf('bold',11,NAVY); doc.text('Production items (cont.)', LM, ny); ny += 14; return header(ny); }
+    if (yy + 16 > FOOTER_TOP) { doc.addPage(); letterhead(true); var ny = 92; sf('bold',11,NAVY); doc.text('Production items (cont.)', LM, ny); ny += 14; return header(ny); }
     return yy;
   }
 
@@ -46389,18 +46537,18 @@ function prodExportTrackingPdf(opts) {
     // row by row below, so nothing is ever dropped off the bottom.
     var fNeed = 28 + (C.field.length * 16) + 24;
     var fPage = FOOTER_TOP - 92;
-    if (y + fNeed > FOOTER_TOP && fNeed <= fPage) { doc.addPage(); letterhead(); y = 92; }
-    else if (y + 40 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
+    if (y + fNeed > FOOTER_TOP && fNeed <= fPage) { doc.addPage(); letterhead(true); y = 92; }
+    else if (y + 40 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = 92; }
     y = fieldHead('Field labor', y);
     C.field.forEach(function(r){
-      if (y + 16 > FOOTER_TOP) { doc.addPage(); letterhead(); y = fieldHead('Field labor (cont.)', 92); }
+      if (y + 16 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = fieldHead('Field labor (cont.)', 92); }
       var ty = y + 10; sf('normal',8,[0,0,0]); doc.text(one(r.name, fcols[0].w-3), fcols[0].left, ty);
       function fc(i,t,col){ sf('normal',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, ty, {align:'right'}); }
       fc(1,num(r.f)); fc(2,num(r.m)); fc(3,num(r.l)); fc(4,money(r.est)); fc(5,money(r.earn)); fc(6,money(r.act));
       fc(7, (r.varv>0?'+':'') + money(r.varv), r.varv>0 ? GOOD : (r.varv<0 ? BAD : [0,0,0]));
       y += 16; ln(LM, y, fRight, y, 0.25, [238,238,238]);
     });
-    if (y + 26 > FOOTER_TOP) { doc.addPage(); letterhead(); y = fieldHead('Field labor (cont.)', 92); }
+    if (y + 26 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = fieldHead('Field labor (cont.)', 92); }
     var ff = C.fieldTot; var fty = y + 11; ln(LM, y, fRight, y, 0.8, [170,170,170]);
     sf('bold',8,[0,0,0]); doc.text('Field subtotal', fcols[0].left, fty);
     function fst(i,t,col){ sf('bold',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, fty, {align:'right'}); }
@@ -46421,17 +46569,17 @@ function prodExportTrackingPdf(opts) {
     }
     var cNeed = 28 + (C.categories.length * 16) + 22;
     var cPage = FOOTER_TOP - 92;
-    if (y + cNeed > FOOTER_TOP && cNeed <= cPage) { doc.addPage(); letterhead(); y = 92; }
-    else if (y + 46 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
+    if (y + cNeed > FOOTER_TOP && cNeed <= cPage) { doc.addPage(); letterhead(true); y = 92; }
+    else if (y + 46 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = 92; }
     y = catHead('Category completion', y);
     C.categories.forEach(function(c){
-      if (y + 16 > FOOTER_TOP) { doc.addPage(); letterhead(); y = catHead('Category completion (cont.)', 92); }
+      if (y + 16 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = catHead('Category completion (cont.)', 92); }
       var ty = y + 10; sf('normal',8,[0,0,0]); doc.text(one(c.name, ccols[0].w-3), ccols[0].left, ty);
       function cc(i,t){ sf('normal',8,[0,0,0]); doc.text(String(t), ccols[i].right-3, ty, {align:'right'}); }
       cc(1, money(c.labor)); cc(2, pct(c.pct)); cc(3, money(c.earned));
       y += 16; ln(LM, y, cRight, y, 0.25, [238,238,238]);
     });
-    if (y + 26 > FOOTER_TOP) { doc.addPage(); letterhead(); y = catHead('Category completion (cont.)', 92); }
+    if (y + 26 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = catHead('Category completion (cont.)', 92); }
     var cty = y + 11; ln(LM, y, cRight, y, 0.8, [170,170,170]);
     sf('bold',8,[0,0,0]); doc.text('Overall', ccols[0].left, cty);
     function cst(i,t){ sf('bold',8,[0,0,0]); doc.text(String(t), ccols[i].right-3, cty, {align:'right'}); }
@@ -46440,7 +46588,7 @@ function prodExportTrackingPdf(opts) {
     if (C.generalLabor > 0) { sf('normal',7,GREY); doc.text('General labor ' + money(C.generalLabor) + ' distributed across the categories by direct-labor share.', LM, y); y += 14; }
   }
 
-  if (y + 30 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
+  if (y + 30 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = 92; }
   sf('normal',7,GREY);
   var fn = 'Actual MDU = ' + (C.defCrew ? ('default crew (' + C.defCrew.name + ') cost ' + money(C.mdc)) : 'default crew cost') +
     ' / Actual $/unit.   Earned $ = Est $ x % complete.   Variance = Earned - Actual.   Field labor earns at the overall % (General) or category % (category-tied).';
@@ -51862,7 +52010,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-10-prodpaging3';
+var KMI_BUILD = '2026-09-10-proddist';
 
 var _kmiSessionId = (function(){
   try {
