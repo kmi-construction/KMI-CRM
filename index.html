@@ -46301,7 +46301,7 @@ function prodExportTrackingPdf(opts) {
     by += 22;
     var wcols = [
       {label:'Item', w:210, align:'left'}, {label:'Units', w:78}, {label:'Hrs', w:60},
-      {label:'Act MDU', w:70}, {label:'Est MDU', w:70}, {label:'\u0394', w:62}, {label:'\u0394%', w:62}
+      {label:'Act MDU', w:70}, {label:'Est MDU', w:70}, {label:'Diff', w:62}, {label:'Diff %', w:62}
     ];
     var wx = LM + 10; wcols.forEach(function(c){ c.left = wx; c.right = wx + c.w; wx += c.w; });
     sf('bold',6.5,[156,140,94]);
@@ -46374,20 +46374,33 @@ function prodExportTrackingPdf(opts) {
   y += 24;
 
   if (C.field.length) {
-    if (y + 40 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
-    sf('bold',11,NAVY); doc.text('Field labor', LM, y); y += 14;
     var fcols = [{label:'Item',w:158,align:'left'},{label:'JTD Fmn hrs',w:66},{label:'JTD Mason hrs',w:72},{label:'JTD Lab hrs',w:66},{label:'Est $',w:74},{label:'Earned $',w:74},{label:'Actual $',w:74},{label:'Var $',w:74}];
     var fx = LM; fcols.forEach(function(c){ c.left = fx; c.right = fx + c.w; fx += c.w; });
     var fRight = fcols[fcols.length-1].right;
-    sf('bold',7,[90,90,90]); fcols.forEach(function(c){ if (c.align==='left') doc.text(c.label, c.left, y); else doc.text(c.label, c.right-3, y, {align:'right'}); });
-    ln(LM, y+4, fRight, y+4, 0.6, [180,180,180]); y += 14;
+    // Draws the section heading and column strip, returning the new y.
+    function fieldHead(title, yy){
+      sf('bold',11,NAVY); doc.text(title, LM, yy); yy += 14;
+      sf('bold',7,[90,90,90]); fcols.forEach(function(c){ if (c.align==='left') doc.text(c.label, c.left, yy); else doc.text(c.label, c.right-3, yy, {align:'right'}); });
+      ln(LM, yy+4, fRight, yy+4, 0.6, [180,180,180]);
+      return yy + 14;
+    }
+    // Keep the section whole when it can fit on a fresh page \u2014 avoids
+    // orphaning two rows. If it is taller than a page it still paginates
+    // row by row below, so nothing is ever dropped off the bottom.
+    var fNeed = 28 + (C.field.length * 16) + 24;
+    var fPage = FOOTER_TOP - 92;
+    if (y + fNeed > FOOTER_TOP && fNeed <= fPage) { doc.addPage(); letterhead(); y = 92; }
+    else if (y + 40 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
+    y = fieldHead('Field labor', y);
     C.field.forEach(function(r){
+      if (y + 16 > FOOTER_TOP) { doc.addPage(); letterhead(); y = fieldHead('Field labor (cont.)', 92); }
       var ty = y + 10; sf('normal',8,[0,0,0]); doc.text(one(r.name, fcols[0].w-3), fcols[0].left, ty);
       function fc(i,t,col){ sf('normal',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, ty, {align:'right'}); }
       fc(1,num(r.f)); fc(2,num(r.m)); fc(3,num(r.l)); fc(4,money(r.est)); fc(5,money(r.earn)); fc(6,money(r.act));
       fc(7, (r.varv>0?'+':'') + money(r.varv), r.varv>0 ? GOOD : (r.varv<0 ? BAD : [0,0,0]));
       y += 16; ln(LM, y, fRight, y, 0.25, [238,238,238]);
     });
+    if (y + 26 > FOOTER_TOP) { doc.addPage(); letterhead(); y = fieldHead('Field labor (cont.)', 92); }
     var ff = C.fieldTot; var fty = y + 11; ln(LM, y, fRight, y, 0.8, [170,170,170]);
     sf('bold',8,[0,0,0]); doc.text('Field subtotal', fcols[0].left, fty);
     function fst(i,t,col){ sf('bold',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, fty, {align:'right'}); }
@@ -46397,19 +46410,28 @@ function prodExportTrackingPdf(opts) {
   }
 
   if (C.categories.length) {
-    if (y + 46 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
-    sf('bold',11,NAVY); doc.text('Category completion', LM, y); y += 14;
     var ccols = [{label:'Category',w:200,align:'left'},{label:'Labor $',w:110},{label:'% complete',w:90},{label:'Earned $',w:110}];
     var ccx = LM; ccols.forEach(function(c){ c.left = ccx; c.right = ccx + c.w; ccx += c.w; });
     var cRight = ccols[ccols.length-1].right;
-    sf('bold',7,[90,90,90]); ccols.forEach(function(c){ if (c.align==='left') doc.text(c.label, c.left, y); else doc.text(c.label, c.right-3, y, {align:'right'}); });
-    ln(LM, y+4, cRight, y+4, 0.6, [180,180,180]); y += 14;
+    function catHead(title, yy){
+      sf('bold',11,NAVY); doc.text(title, LM, yy); yy += 14;
+      sf('bold',7,[90,90,90]); ccols.forEach(function(c){ if (c.align==='left') doc.text(c.label, c.left, yy); else doc.text(c.label, c.right-3, yy, {align:'right'}); });
+      ln(LM, yy+4, cRight, yy+4, 0.6, [180,180,180]);
+      return yy + 14;
+    }
+    var cNeed = 28 + (C.categories.length * 16) + 22;
+    var cPage = FOOTER_TOP - 92;
+    if (y + cNeed > FOOTER_TOP && cNeed <= cPage) { doc.addPage(); letterhead(); y = 92; }
+    else if (y + 46 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
+    y = catHead('Category completion', y);
     C.categories.forEach(function(c){
+      if (y + 16 > FOOTER_TOP) { doc.addPage(); letterhead(); y = catHead('Category completion (cont.)', 92); }
       var ty = y + 10; sf('normal',8,[0,0,0]); doc.text(one(c.name, ccols[0].w-3), ccols[0].left, ty);
       function cc(i,t){ sf('normal',8,[0,0,0]); doc.text(String(t), ccols[i].right-3, ty, {align:'right'}); }
       cc(1, money(c.labor)); cc(2, pct(c.pct)); cc(3, money(c.earned));
       y += 16; ln(LM, y, cRight, y, 0.25, [238,238,238]);
     });
+    if (y + 26 > FOOTER_TOP) { doc.addPage(); letterhead(); y = catHead('Category completion (cont.)', 92); }
     var cty = y + 11; ln(LM, y, cRight, y, 0.8, [170,170,170]);
     sf('bold',8,[0,0,0]); doc.text('Overall', ccols[0].left, cty);
     function cst(i,t){ sf('bold',8,[0,0,0]); doc.text(String(t), ccols[i].right-3, cty, {align:'right'}); }
@@ -51840,7 +51862,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-10-prodpaging2';
+var KMI_BUILD = '2026-09-10-prodpaging3';
 
 var _kmiSessionId = (function(){
   try {
