@@ -45577,6 +45577,278 @@ function prodReviewToggle(projectId) {
   _prodReviewOpen[projectId] = !_prodReviewOpen[projectId]; renderProdReview();
 }
 
+// ════════════════════════════════════════════════════════════════════
+// WEEKLY PACKET — backlog cover + merged job reports (P6 / B3a)
+// The cover is a backlog sheet: every job with open production quantities,
+// whether or not it moved last week. Quantities are units remaining, not
+// weekly production. The Hours / Variance / Status columns describe the week
+// and read blank for dormant jobs. Tabloid landscape, because 15 category
+// columns at letter width land near 20pt and stop being readable.
+// ════════════════════════════════════════════════════════════════════
+
+// Several categories already carry their unit in the name — 'Precast(LF)',
+// 'Cut Stone (EA)'. Splitting it out avoids headers reading 'Precast(SF)/SF'.
+// Tolerates the inconsistent space before the paren.
+function _prodCatUnit(name) {
+  var s = String(name || '').trim();
+  var m = s.match(/^(.*?)\s*\(\s*([A-Za-z.]{1,4})\s*\)$/);
+  if (m) return { label: m[1].trim(), unit: m[2].toUpperCase() };
+  return { label: s, unit: '' };
+}
+
+// The unit an estimate line is measured in, used when the category name
+// does not already declare one.
+function _prodLineUnit(l) { return String(l.unitLabel || '').trim().toUpperCase(); }
+
+function _prodProjectForeman(p) {
+  // Foreman is a project team assignment, not something recorded against
+  // logged hours \u2014 kmi_prod_weekly stores hours by craft with no user on
+  // them, so there is no 'last foreman to log hours' to look back through.
+  if (typeof _mpKmiByRole !== 'function') return '';
+  var fm = _mpKmiByRole(p, /foreman/i);
+  return fm.map(function(u){ return (u.lastName || (typeof _mpUserName === 'function' ? _mpUserName(u) : '')); })
+           .filter(Boolean).join(', ');
+}
+function _prodProjectPmCode(p) {
+  if (typeof _mpPmInitials === 'function') { var s = _mpPmInitials(p); return (s === '\u2014') ? '' : s; }
+  return '';
+}
+
+// One backlog row per job with open production quantities. Sorted by job
+// number ascending.
+function _prodBacklogRows(weekStart) {
+  var out = [];
+  (db.projects || []).forEach(function(p){
+    if (p.category && p.category !== 'project') return;
+    if (p.status === 'inactive' || p.status === 'closed') return;
+    var est = _prodEnsureEstimate(p);
+    if (!(est.lines || []).length) return;
+
+    var q = {}, anyOpen = false;
+    (est.lines || []).forEach(function(l){
+      if (l.lineType !== 'production') return;            // hours-only items carry no quantity
+      var estU = Number(l.estUnits) || 0;
+      if (estU <= 0) return;
+      var jtd = _prodJtdForLine(p.id, l.id).units;
+      var bal = estU - jtd;
+      if (bal <= 0) return;                                // finished scopes drop off on their own
+      var cat = _prodCategory(l.categoryId);
+      if (!cat || cat.isGeneral) return;                   // General is distributed labor, no units
+      var cu = _prodCatUnit(cat.name);
+      var unit = cu.unit || _prodLineUnit(l);
+      var key = String(cat.id) + '|' + unit;
+      if (!q[key]) q[key] = { key:key, label:cu.label, unit:unit, sort:Number(cat.sortOrder)||0, qty:0 };
+      q[key].qty += bal;
+      anyOpen = true;
+    });
+    if (!anyOpen) return;
+
+    var W = _prodWeekCompute(p, weekStart);
+    var a = W.approval;
+    var moved = W.lines.length > 0 && W.tot.hrs > 0;
+    var noWork = !!(a && a.status === 'approved' && a.noWork);
+    var st = noWork ? 'nowork'
+           : (!moved ? 'none'
+           : ((a && a.status === 'approved') ? 'approved' : 'unapproved'));
+    out.push({ p:p, q:q, W:W, moved:moved, status:st,
+      pm:_prodProjectPmCode(p), foreman:_prodProjectForeman(p),
+      num:String(p.number||''), name:String(p.name||''),
+      start:p.startDate||'', end:p.endDate||'' });
+  });
+  out.sort(function(a,b){
+    return String(a.num).localeCompare(String(b.num), undefined, { numeric:true, sensitivity:'base' });
+  });
+  return out;
+}
+
+// Only category+unit pairs that actually carry a balance become columns.
+function _prodBacklogCols(rows) {
+  var seen = {};
+  rows.forEach(function(r){
+    Object.keys(r.q).forEach(function(k){ if (r.q[k].qty > 0) seen[k] = r.q[k]; });
+  });
+  return Object.keys(seen).map(function(k){ return seen[k]; })
+    .sort(function(a,b){ return (a.sort - b.sort) || a.unit.localeCompare(b.unit); });
+}
+
+// Backlog cover, tabloid landscape (1224 x 792pt).
+function prodPacketCoverDoc(weekStart, rows) {
+  if (!window.jspdf || !window.jspdf.jsPDF) return null;
+  rows = rows || _prodBacklogRows(weekStart);
+  var cols = _prodBacklogCols(rows);
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ unit:'pt', format:'tabloid', orientation:'landscape' });
+  var PAGE_W = 1224, PAGE_H = 792, LM = 36, RM = PAGE_W - 36;
+  var NAVY = [30,36,72], GOLD = [200,168,75], GOOD = [31,122,77], BAD = [163,45,45], GREY = [140,144,155];
+  function sf(st,sz,col){ doc.setFont('helvetica',st); doc.setFontSize(sz); doc.setTextColor(col?col[0]:0, col?col[1]:0, col?col[2]:0); }
+  function ln(x1,y1,x2,y2,w,c){ doc.setDrawColor(c?c[0]:0,c?c[1]:0,c?c[2]:0); doc.setLineWidth(w||0.5); doc.line(x1,y1,x2,y2); }
+  function num(v){ return v ? Number(Math.round(v)).toLocaleString() : '-'; }
+  function one(t,w){ var a = doc.splitTextToSize(String(t||''), w); return a.length ? a[0] : ''; }
+
+  var FIX = [
+    { k:'pm',   label:'PM',       w:26,  align:'left' },
+    { k:'num',  label:'JOB #',    w:42,  align:'left' },
+    { k:'name', label:'JOB NAME', w:135, align:'left' },
+    { k:'fm',   label:'FOREMAN',  w:84,  align:'left' },
+    { k:'s',    label:'START',    w:44 },
+    { k:'e',    label:'END',      w:44 }
+  ];
+  var TAIL = [ { k:'hrs', label:'HRS', sub:'WK', w:38 },
+               { k:'var', label:'VARIANCE', sub:'WK', w:54 },
+               { k:'st',  label:'STATUS', sub:'WK', w:52 } ];
+  var fixedW = FIX.concat(TAIL).reduce(function(s,c){ return s + c.w; }, 0);
+  var qtyW = cols.length ? Math.max(26, (RM - LM - fixedW) / cols.length) : 0;
+
+  var all = FIX.concat(cols.map(function(c){
+    return { k:'q:'+c.key, label:c.label.toUpperCase(), sub:c.unit, w:qtyW };
+  })).concat(TAIL);
+  var x = LM; all.forEach(function(c){ c.left = x; c.right = x + c.w; x += c.w; });
+
+  if (typeof KMI_LOGO_IMG === 'string' && KMI_LOGO_IMG) { try { doc.addImage(KMI_LOGO_IMG,'JPEG',LM,20,78,34); } catch(e){} }
+  sf('bold',15,[0,0,0]); doc.text('WEEKLY PRODUCTION PACKET', LM+92, 40);
+  sf('normal',8.5,GREY); doc.text('Production backlog \u2014 all jobs with open quantities', LM+92, 52);
+  sf('bold',10,[0,0,0]);
+  doc.text('Week of ' + _prodWeekRangeLabel(weekStart, _prodAddDays(weekStart,6)), RM, 38, { align:'right' });
+  sf('normal',8.5,GREY);
+  doc.text('KMI Construction LLC \u00b7 generated ' + new Date().toLocaleDateString('en-US'), RM, 50, { align:'right' });
+  ln(LM, 60, RM, 60, 1.5, NAVY);
+
+  var y = 78;
+  function header(yy){
+    sf('bold',5.6,[107,112,128]);
+    all.forEach(function(c){
+      var tx = (c.align === 'left') ? c.left : c.right - 3;
+      var opt = (c.align === 'left') ? {} : { align:'right' };
+      doc.text(c.label, tx, yy, opt);
+      if (c.sub) { sf('bold',5.6,[164,169,182]); doc.text(c.sub, tx, yy + 6, opt); sf('bold',5.6,[107,112,128]); }
+    });
+    ln(LM, yy + 9, RM, yy + 9, 0.8, NAVY);
+    return yy + 19;
+  }
+  y = header(y);
+
+  var tot = {}, totHrs = 0, totVar = 0, shown = 0;
+  rows.forEach(function(r, i){
+    if (y > PAGE_H - 78) { doc.addPage(); y = header(48); }
+    if (i % 2) { doc.setFillColor(250,251,253); doc.rect(LM, y - 8, RM - LM, 12, 'F'); }
+    var vr = r.moved ? (r.W.tot.earn - r.W.tot.act) : null;
+    totHrs += r.W.tot.hrs; if (vr != null) totVar += vr;
+    shown++;
+
+    sf('normal',6.6,[0,0,0]);
+    doc.text(one(r.pm, 24), FIX[0].left, y);
+    doc.text(one(r.num, 40), FIX[1].left, y);
+    sf('bold',6.6,[0,0,0]); doc.text(one(r.name, 132), FIX[2].left, y); sf('normal',6.6,[0,0,0]);
+    doc.text(one(r.foreman || '\u2014', 82), FIX[3].left, y);
+    doc.text(one(r.start, 42), FIX[4].right - 3, y, { align:'right' });
+    doc.text(one(r.end, 42),   FIX[5].right - 3, y, { align:'right' });
+
+    cols.forEach(function(c, ci){
+      var cell = all[FIX.length + ci];
+      var v = r.q[c.key] ? r.q[c.key].qty : 0;
+      tot[c.key] = (tot[c.key] || 0) + v;
+      sf('normal',6.6, v ? [0,0,0] : [195,199,209]);
+      doc.text(num(v), cell.right - 3, y, { align:'right' });
+    });
+
+    var tHrs = all[all.length-3], tVar = all[all.length-2], tSt = all[all.length-1];
+    sf('normal',6.6, r.W.tot.hrs ? [0,0,0] : [195,199,209]);
+    doc.text(r.W.tot.hrs ? Number(r.W.tot.hrs).toLocaleString() : '-', tHrs.right - 3, y, { align:'right' });
+    if (vr == null) { sf('normal',6.6,[195,199,209]); doc.text('-', tVar.right - 3, y, { align:'right' }); }
+    else {
+      sf('bold',6.6, vr >= 0 ? GOOD : BAD);
+      doc.text((vr>=0?'+$':'-$') + Math.abs(Math.round(vr)).toLocaleString(), tVar.right - 3, y, { align:'right' });
+    }
+    var stMap = { approved:['APPROVED',GOOD], unapproved:['UNAPPROVED',BAD], nowork:['NO WORK',[138,109,31]], none:['-',[195,199,209]] };
+    var sm = stMap[r.status] || stMap.none;
+    sf('bold',5.6, sm[1]); doc.text(sm[0], tSt.right - 3, y, { align:'right' });
+    ln(LM, y + 3.5, RM, y + 3.5, 0.35, [240,242,246]);
+    y += 12;
+  });
+
+  ln(LM, y + 1, RM, y + 1, 1, NAVY); y += 12;
+  sf('bold',6.8,[0,0,0]);
+  doc.text('Backlog remaining \u2014 ' + shown + ' open job' + (shown === 1 ? '' : 's'), FIX[0].left, y);
+  cols.forEach(function(c, ci){
+    var cell = all[FIX.length + ci];
+    doc.text(num(tot[c.key]), cell.right - 3, y, { align:'right' });
+  });
+  doc.text(Number(totHrs).toLocaleString(), all[all.length-3].right - 3, y, { align:'right' });
+  sf('bold',6.8, totVar >= 0 ? GOOD : BAD);
+  doc.text((totVar>=0?'+$':'-$') + Math.abs(Math.round(totVar)).toLocaleString(), all[all.length-2].right - 3, y, { align:'right' });
+  y += 18;
+
+  var nw = rows.filter(function(r){ return r.status === 'nowork'; });
+  if (nw.length) {
+    doc.setFillColor(253,250,241); doc.rect(LM, y - 8, RM - LM, 20, 'F');
+    doc.setFillColor(200,168,75);  doc.rect(LM, y - 8, 2, 20, 'F');
+    sf('bold',7,[75,70,58]); doc.text('No work recorded this week:', LM + 8, y + 1);
+    sf('normal',7,[107,99,80]);
+    doc.text(one(nw.map(function(r){ return r.num + ' ' + r.name; }).join('  \u00b7  '), RM - LM - 150), LM + 118, y + 1);
+    y += 26;
+  }
+
+  sf('normal',6,[162,166,178]);
+  [ 'Quantities are estimated units remaining (estimate less job-to-date), not weekly production. Categories with no remaining quantity anywhere are omitted; General and T&M Work carry no unit quantities and never appear.',
+    'Hours, Variance and Status describe the week named above and are blank for jobs with no activity. Jobs marked UNAPPROVED had production entered but were not approved before distribution.'
+  ].forEach(function(t){ doc.text(one(t, RM - LM), LM, y); y += 9; });
+
+  return doc;
+}
+
+// Merge the cover and every included job report into one PDF.
+// D10/D11: no-work jobs are excluded from the body but stay on the cover;
+// unapproved jobs with hours are included and stamped.
+async function prodPacketBuild(weekStart) {
+  if (!window.PDFLib) throw new Error('PDF merge library still loading. Try again in a moment.');
+  var rows = _prodBacklogRows(weekStart);
+  var cover = prodPacketCoverDoc(weekStart, rows);
+  if (!cover) throw new Error('PDF library still loading. Try again in a moment.');
+
+  var parts = [ cover.output('arraybuffer') ];
+  var included = [];
+  rows.forEach(function(r){
+    if (!r.moved) return;                      // nothing happened: no report page
+    if (r.status === 'nowork') return;         // D11: cover line only
+    var doc = prodExportTrackingPdf({ project:r.p, weekStart:weekStart,
+      unapproved:(r.status === 'unapproved'), returnDoc:true });
+    if (!doc) return;
+    parts.push(doc.output('arraybuffer'));
+    included.push(r);
+  });
+
+  var merged = await PDFLib.PDFDocument.create();
+  for (var i = 0; i < parts.length; i++) {
+    var src = await PDFLib.PDFDocument.load(parts[i]);
+    var pages = await merged.copyPages(src, src.getPageIndices());
+    pages.forEach(function(pg){ merged.addPage(pg); });
+  }
+  var bytes = await merged.save();
+  return { bytes:bytes, rows:rows, included:included,
+           unapproved:included.filter(function(r){ return r.status === 'unapproved'; }).length };
+}
+
+async function prodPacketPreview() {
+  var btn = g('prod-packet-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Building\u2026'; }
+  try {
+    var res = await prodPacketBuild(_prodReviewWeek);
+    if (!res.included.length) { alert('No jobs had production entered for this week, so there is nothing to put in a packet.'); return; }
+    var blob = new Blob([res.bytes], { type:'application/pdf' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'KMI Weekly Production - ' + _prodReviewWeek + '.pdf';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+  } catch (e) {
+    console.error('packet build failed', e);
+    alert('Could not build the packet: ' + (e && e.message ? e.message : e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '\u2913 Preview packet'; }
+  }
+}
+
 function renderProdReview() {
   var host = g('prod-review-body'); if (!host) return;
   if (canAccess('approve-production-week') === 'none') {
@@ -45682,7 +45954,8 @@ function renderProdReview() {
         : ('<strong>' + left + ' job' + (left === 1 ? '' : 's') + ' still open.</strong> ' +
            (blocked ? (blocked + ' blocked on missing entries.') : 'Approve them to release the packet.'))) +
     '</div><div style="flex:1"></div>' +
-    '<button class="btn btn-sm btn-p" disabled title="Packet assembly and distribution arrive in the next build">Send weekly packet</button>' +
+    '<button class="btn btn-sm" id="prod-packet-btn" onclick="prodPacketPreview()">\u2913 Preview packet</button>' +
+    '<button class="btn btn-sm btn-p" disabled title="Distribution arrives in the next build">Send weekly packet</button>' +
   '</div>';
 
   host.innerHTML = nav +
@@ -45886,11 +46159,19 @@ function renderProdTrackingView() {
 }
 
 // ── Tracking document PDF (Phase 3b) — landscape letter, jsPDF ──────────
-function prodExportTrackingPdf() {
-  var p = _prodCurrentProject(); if (!p) return;
-  if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return; }
+// opts: { project, weekStart, unapproved, returnDoc }
+// Called with no arguments it behaves exactly as it always has \u2014 current
+// project, previous complete week, saves to disk. The packet builder passes
+// a project and asks for the doc back instead.
+function prodExportTrackingPdf(opts) {
+  opts = opts || {};
+  var p = opts.project || _prodCurrentProject(); if (!p) return null;
+  if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return null; }
   var est = _prodEnsureEstimate(p);
-  if (!(est.lines || []).length) { alert('Build the estimate first, then export.'); return; }
+  if (!(est.lines || []).length) {
+    if (!opts.returnDoc) alert('Build the estimate first, then export.');
+    return null;
+  }
   var C = _prodTrackingCompute(p);
 
   var jsPDF = window.jspdf.jsPDF;
@@ -45930,7 +46211,7 @@ function prodExportTrackingPdf() {
 
   // ── Weekly band ── what moved last week, above the job-to-date tables.
   // Same _prodWeekCompute() the screen band uses, so the two cannot diverge.
-  var Wk = _prodWeekCompute(p, _prodPrevWeekRange().start);
+  var Wk = _prodWeekCompute(p, opts.weekStart || _prodPrevWeekRange().start);
   (function drawWeekBand(){
     function n1(v){ return (Number(v)||0).toFixed(1); }
     var rowsN = Math.min(Wk.lines.length, 8);
@@ -46092,7 +46373,30 @@ function prodExportTrackingPdf() {
     ' \u00f7 Actual $/unit.   Earned $ = Est $ \u00d7 % complete.   Variance = Earned \u2212 Actual.   Field labor earns at the overall % (General) or category % (category-tied).';
   doc.text(doc.splitTextToSize(fn, RM-LM), LM, y);
 
+  // D13: an unapproved job still ships, but says so on every page \u2014 a
+  // diagonal watermark that survives someone printing one page out of
+  // context, and a header band that survives skimming.
+  if (opts.unapproved) {
+    var np = doc.getNumberOfPages();
+    for (var _pi = 1; _pi <= np; _pi++) {
+      doc.setPage(_pi);
+      doc.setFillColor(163,45,45); doc.rect(0, 0, PAGE_W, 15, 'F');
+      sf('bold',8,[255,255,255]);
+      doc.text('UNAPPROVED \u2014 these figures were not approved before distribution', PAGE_W/2, 10.5, { align:'center' });
+      if (doc.saveGraphicsState && doc.GState) {
+        doc.saveGraphicsState(); doc.setGState(new doc.GState({ opacity:0.10 }));
+      } else {
+        doc.setTextColor(238,214,214);
+      }
+      sf('bold',82,[163,45,45]);
+      doc.text('UNAPPROVED', PAGE_W/2, PAGE_H/2 + 26, { align:'center', angle:26 });
+      if (doc.restoreGraphicsState) doc.restoreGraphicsState();
+    }
+    doc.setPage(np);
+  }
+  if (opts.returnDoc) return doc;
   doc.save('Production Tracking - ' + (p.number || p.name || 'project') + '.pdf');
+  return doc;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -51485,7 +51789,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-10-prodreview';
+var KMI_BUILD = '2026-09-10-prodpacket';
 
 var _kmiSessionId = (function(){
   try {
