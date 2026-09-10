@@ -1677,6 +1677,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="ni" onclick="nav('drawings')"><span class="nico">▱</span>Drawings</div>
       <div class="ni" onclick="nav('meetings')"><span class="nico">🗒</span>Meeting Minutes</div>
       <div class="ni" onclick="nav('tasks')"><span class="nico">☑</span>Tasks</div>
+      <div class="ni" onclick="nav('prod-review')"><span class="nico">◷</span>Production Review<span id="prodReviewNavCount" class="ni-count" style="display:none"></span></div>
     </div>
   </div>
   <div class="sb-group" data-group="accounting">
@@ -2703,6 +2704,11 @@ tr.gc-line:hover td{background:#fafafa}
 </div>
 
 <!-- AP APPROVALS (Session 3) -->
+<div class="pg" id="pg-prod-review">
+  <div class="ph"><div><h1>Production Review</h1><div class="sub">Approve last week's production job by job, then release the packet to PMs and superintendents.</div><div class="stripe"></div></div></div>
+  <div id="prod-review-body"></div>
+</div>
+
 <div class="pg" id="pg-ap-approvals">
   <div class="ph"><div><h1>AP Approvals</h1><div class="sub">Review coded invoices, verify coding, and approve for export &mdash; or reject back to coding.</div><div class="stripe"></div></div></div>
   <div id="ap-appr-banner" style="display:none"></div>
@@ -4322,6 +4328,7 @@ var PAGE_ACTION_MAP = {
   'templates':      'templates',
   'ap-invoices':    'ap-invoices',
   'ap-approvals':   'ap-approvals',
+  'prod-review':    'approve-production-week',
   'ap-checks':      'ap-checks',
   'budget':         'view_project_budget',
   'tm-tickets':     'view-tm-tickets',
@@ -6018,6 +6025,7 @@ function nav(page) {
     templates:        renderTemplates,
     'ap-invoices':    function(){ apLoadPayments(true).then(function(){ renderApInbox(); }); },
     'ap-approvals':   renderApApprovals,
+    'prod-review':    renderProdReview,
     'ap-checks':      renderApChecks,
     projects:         renderProjects,
     'new-project':    initNewProject,
@@ -45481,6 +45489,279 @@ function _prodTrackingCompute(p, asOf) {
     categories:categories, generalLabor:generalLabor, catLaborSum:catLaborSum,
     catEarnedSum:catEarnedSum, pctCompleteLabor:pctCompleteLabor };
 }
+// ════════════════════════════════════════════════════════════════════
+// PRODUCTION REVIEW — weekly approval screen (Productivity P6 / B2)
+// One screen, one week, every active job. Rows expand in place and render
+// the same _prodWeekBandHtml() the report uses, so a reviewer never has to
+// open a project record. Approval is per job (decision D1) even when the
+// click is bulk, and every write goes through a SECURITY DEFINER RPC — the
+// kmi_prod_week_approvals table has no INSERT/UPDATE grant.
+// ════════════════════════════════════════════════════════════════════
+var _prodReviewWeek = null;      // Sunday of the week under review
+var _prodReviewOpen = {};        // projectId -> expanded?
+var _prodReviewBusy = false;
+
+// Rate variance that trips a flag. Deliberately a named constant rather than
+// a magic number — tune it once real weeks have been through the screen.
+var PROD_RATE_FLAG_PCT = 10;
+
+function _prodReviewProjects() {
+  return (db.projects || []).filter(function(p){
+    if (p.category && p.category !== 'project') return false;   // equipment / overhead cost jobs
+    if (p.status === 'inactive' || p.status === 'closed') return false;
+    var est = (p.prodEstimate && p.prodEstimate.lines) ? p.prodEstimate.lines : null;
+    if (est && est.length) return true;
+    // No estimate yet, but somebody has been entering against it.
+    return (db.prodWeekly || []).some(function(r){ return String(r.projectId) === String(p.id); });
+  });
+}
+
+// Everything the screen needs about one job for one week, including why it
+// might not be safe to approve.
+function _prodReviewRow(p, weekStart) {
+  var W = _prodWeekCompute(p, weekStart);
+  var a = W.approval;
+  var flags = [], blocking = false;
+
+  if (!W.lines.length) {
+    blocking = true;
+    flags.push({ tone:'red', label:'No entries',
+      detail:'Nothing was entered for this job last week.' });
+  }
+  W.lines.forEach(function(r){
+    if (r.isProd && r.hrs > 0 && !r.units) {
+      flags.push({ tone:'red', label:'Hours, no units',
+        detail: r.name + ' has ' + r.hrs + ' hours booked with no units installed.' });
+    }
+    if (r.dPct != null && r.dPct < -PROD_RATE_FLAG_PCT) {
+      flags.push({ tone:'amber', label:'Rate off ' + Math.round(Math.abs(r.dPct)) + '%',
+        detail: r.name + ' ran ' + Math.round(Math.abs(r.dPct)) + '% under its estimated rate.' });
+    }
+  });
+  var customs = 0;
+  (db.prodWeekly || []).forEach(function(r){
+    if (String(r.projectId) !== String(p.id)) return;
+    var dd = String(r.weekEnding || '');
+    if (dd < W.weekStart || dd > W.weekEnd) return;
+    customs += (r.custom || []).length;
+  });
+  if (customs) {
+    flags.push({ tone:'amber', label: customs + ' custom item' + (customs === 1 ? '' : 's'),
+      detail:'Added from the field and not yet mapped to estimate lines, so the hours sit outside earned value.' });
+  }
+  if (W.lines.length && W.pctAfter < W.pctBefore - 0.0001) {
+    flags.push({ tone:'red', label:'% went backward',
+      detail:'Job-to-date completion fell over the week, which usually means a units entry was overstated earlier.' });
+  }
+
+  var status = (a && a.status === 'approved') ? 'approved'
+             : (blocking ? 'blocked' : (flags.length ? 'needs' : 'clean'));
+  return { p:p, W:W, approval:a, flags:flags, blocking:blocking, status:status,
+           noWork: !!(a && a.noWork), revision: a ? (Number(a.revision)||0) : 0 };
+}
+
+function _prodReviewData() {
+  if (!_prodReviewWeek) _prodReviewWeek = _prodPrevWeekRange().start;
+  return _prodReviewProjects().map(function(p){ return _prodReviewRow(p, _prodReviewWeek); })
+    .sort(function(a,b){
+      var rank = { blocked:0, needs:1, clean:2, approved:3 };
+      if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
+      return String(a.p.number||'').localeCompare(String(b.p.number||''));
+    });
+}
+
+function prodReviewGo(weekStart) {
+  _prodReviewWeek = weekStart; _prodReviewOpen = {}; renderProdReview();
+}
+function prodReviewToggle(projectId) {
+  _prodReviewOpen[projectId] = !_prodReviewOpen[projectId]; renderProdReview();
+}
+
+function renderProdReview() {
+  var host = g('prod-review-body'); if (!host) return;
+  if (canAccess('approve-production-week') === 'none') {
+    host.innerHTML = '<div class="card"><div style="padding:16px;color:#888;font-size:13px">' +
+      'Weekly production approval is limited to Admins.</div></div>';
+    return;
+  }
+  if (!_prodReviewWeek) _prodReviewWeek = _prodPrevWeekRange().start;
+  var rows = _prodReviewData();
+  var weekEnd = _prodAddDays(_prodReviewWeek, 6);
+  var appr = rows.filter(function(r){ return r.status === 'approved'; }).length;
+  var clean = rows.filter(function(r){ return r.status === 'clean'; }).length;
+  var blocked = rows.filter(function(r){ return r.status === 'blocked'; }).length;
+  var left = rows.length - appr;
+
+  function esc(x){ return _prodEsc(x); }
+  function money(v){ v = Number(v)||0; return (v<0?'-$':'$') + Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}); }
+
+  var nav = '<div class="card"><div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">' +
+    '<div style="display:flex;align-items:center;gap:8px">' +
+      '<button class="btn" style="width:32px;padding:6px 0" onclick="prodReviewGo(\'' + _prodAddDays(_prodReviewWeek,-7) + '\')">\u2039</button>' +
+      '<div style="font-size:15px;font-weight:600;min-width:210px;text-align:center">' + esc(_prodWeekRangeLabel(_prodReviewWeek, weekEnd)) + '</div>' +
+      '<button class="btn" style="width:32px;padding:6px 0" onclick="prodReviewGo(\'' + _prodAddDays(_prodReviewWeek,7) + '\')">\u203a</button>' +
+    '</div>' +
+    '<div style="flex:1"></div>' +
+    '<div style="font-size:13px;color:#888"><strong style="color:#22252e">' + appr + ' of ' + rows.length + '</strong> jobs approved</div>' +
+    (clean ? ('<button class="btn btn-sm btn-p" onclick="prodReviewApproveAllClean()">Approve all clean (' + clean + ')</button>') : '') +
+  '</div></div>';
+
+  if (!rows.length) {
+    host.innerHTML = nav + '<div class="card"><div style="padding:16px;color:#888;font-size:13px">' +
+      'No active jobs are tracking production yet.</div></div>';
+    return;
+  }
+
+  var body = rows.map(function(r){
+    var open = !!_prodReviewOpen[r.p.id];
+    var pillMap = {
+      clean:    ['#EAF5EE','#1F7A4D','Clean'],
+      needs:    ['#FDF4E3','#8A6D1F','Needs review'],
+      blocked:  ['#FDECEC','#A32D2D','Blocked'],
+      approved: ['#EEF1F8','#4A5378', r.noWork ? 'No work' : 'Approved']
+    };
+    var pm = pillMap[r.status];
+    var pill = '<span style="display:inline-block;font-size:11px;font-weight:600;padding:3px 10px;border-radius:100px;background:' + pm[0] + ';color:' + pm[1] + '">' + pm[2] + '</span>';
+    var tags = r.flags.map(function(f){
+      var c = f.tone === 'red' ? ['#FDECEC','#A32D2D','#F4D3D3'] : ['#FDF6E6','#8A6D1F','#EDDFBA'];
+      return '<span title="' + esc(f.detail) + '" style="display:inline-block;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:3px;margin-left:5px;background:' + c[0] + ';color:' + c[1] + ';border:1px solid ' + c[2] + '">' + esc(f.label) + '</span>';
+    }).join('');
+
+    var pid = String(r.p.id).replace(/'/g, "\\'");
+    var act;
+    if (r.status === 'approved') {
+      act = '<span style="font-size:11.5px;color:#888;margin-right:8px">' +
+            esc(_prodUserName(r.approval && r.approval.approvedByUserId)) + '</span>' +
+            '<button class="btn btn-sm" onclick="event.stopPropagation();prodReviewReopen(\'' + pid + '\')">Reopen</button>';
+    } else if (r.blocking) {
+      act = '<button class="btn btn-sm" style="color:#A32D2D;border-color:#E2C9C9" onclick="event.stopPropagation();prodReviewNoWork(\'' + pid + '\')">Mark no work</button>';
+    } else {
+      act = '<button class="btn btn-sm btn-p" onclick="event.stopPropagation();prodReviewApprove(\'' + pid + '\')">Approve</button>';
+    }
+
+    var vr = r.W.tot.earn - r.W.tot.act;
+    var vcol = vr >= 0 ? '#1F7A4D' : '#A32D2D';
+    var pctCell = r.W.lines.length
+      ? (((r.W.pctAfter - r.W.pctBefore) >= 0 ? '+' : '\u2212') + Math.abs((r.W.pctAfter-r.W.pctBefore)*100).toFixed(1) + ' pts')
+      : '<span style="color:#B3B7C2">\u2014</span>';
+
+    var main = '<tr onclick="prodReviewToggle(\'' + pid + '\')" style="cursor:pointer' + (open ? ';background:#F7F9FC' : '') + '">' +
+      '<td><span style="display:inline-block;width:14px;color:#B0B5C3;font-size:11px">' + (open ? '\u25bc' : '\u25b6') + '</span>' +
+        '<strong>' + esc((r.p.number||'') + ' \u2014 ' + (r.p.name||'')) + '</strong>' + tags +
+        (r.revision > 0 ? '<span style="font-size:10.5px;color:#8A6D1F;margin-left:5px">rev ' + r.revision + '</span>' : '') + '</td>' +
+      '<td style="text-align:right">' + (r.W.days || '<span style="color:#B3B7C2">0</span>') + '</td>' +
+      '<td style="text-align:right">' + ((Number(r.W.tot.hrs)||0).toLocaleString()) + '</td>' +
+      '<td style="text-align:right;color:' + vcol + ';font-weight:600">' + (r.W.lines.length ? ((vr>=0?'+':'') + money(vr)) : '<span style="color:#B3B7C2">\u2014</span>') + '</td>' +
+      '<td style="text-align:right">' + pctCell + '</td>' +
+      '<td>' + pill + '</td>' +
+      '<td style="text-align:right">' + act + '</td></tr>';
+
+    var detail = '';
+    if (open) {
+      var inner = r.W.lines.length
+        ? _prodWeekBandHtml(r.p, _prodReviewWeek)
+        : '<div style="background:#FFF5F5;border:1px solid #F0C9C9;border-left:3px solid #A32D2D;padding:12px 15px;font-size:13px;color:#7D3030;line-height:1.55">' +
+          '<strong>Nothing was entered for this job last week.</strong> Either the crew missed their entries, or the job genuinely stood down \u2014 ' +
+          'mark it as no work and the report will say so, rather than reading as a zero.</div>';
+      var fl = r.flags.length
+        ? ('<div style="margin-top:10px;font-size:12.5px;color:#7D3030;line-height:1.6">' +
+           r.flags.map(function(f){ return '\u2022 ' + esc(f.detail); }).join('<br>') + '</div>')
+        : '';
+      detail = '<tr><td colspan="7" style="background:#F7F9FC;padding:14px 16px 18px">' + inner + fl + '</td></tr>';
+    }
+    return main + detail;
+  }).join('');
+
+  var head = '<thead><tr><th>Job</th><th style="text-align:right">Days</th><th style="text-align:right">Hours</th>' +
+    '<th style="text-align:right">Variance</th><th style="text-align:right">% comp</th><th>Status</th><th></th></tr></thead>';
+
+  var footer = '<div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">' +
+    '<div style="font-size:13px;color:#4D5261">' +
+      (left === 0
+        ? ('<strong>All ' + rows.length + ' jobs approved.</strong> The packet is ready to go.')
+        : ('<strong>' + left + ' job' + (left === 1 ? '' : 's') + ' still open.</strong> ' +
+           (blocked ? (blocked + ' blocked on missing entries.') : 'Approve them to release the packet.'))) +
+    '</div><div style="flex:1"></div>' +
+    '<button class="btn btn-sm btn-p" disabled title="Packet assembly and distribution arrive in the next build">Send weekly packet</button>' +
+  '</div>';
+
+  host.innerHTML = nav +
+    '<div class="card"><div style="overflow-x:auto"><table style="min-width:860px">' + head + '<tbody>' + body + '</tbody></table></div></div>' +
+    footer;
+}
+
+// ── RPC wiring ────────────────────────────────────────────────
+// Never write kmi_prod_week_approvals directly: authenticated holds SELECT
+// only, so an UPDATE would fail outright. Re-reading the table after each
+// call keeps the local mirror honest instead of guessing what the RPC did.
+async function prodReloadWeekApprovals() {
+  if (!supabaseClient) return;
+  try {
+    var res = await supabaseClient.from('kmi_prod_week_approvals').select('*');
+    if (res && !res.error) db.prodWeekApprovals = (res.data || []).map(fromSBProdWeekApproval);
+    else if (res && res.error) console.warn('reload approvals failed:', res.error.message);
+  } catch (e) { console.warn('reload approvals threw:', e); }
+}
+
+async function _prodReviewCall(fn, args, okMsg) {
+  if (!supabaseClient) { alert('Not connected to the cloud \u2014 approval needs a live connection.'); return false; }
+  if (_prodReviewBusy) return false;
+  _prodReviewBusy = true;
+  try {
+    var res = await supabaseClient.rpc(fn, args);
+    if (res && res.error) {
+      // The RPCs raise readable messages \u2014 the D9 no-entries rule and the
+      // Admin-only gate both surface here. Show them rather than a generic failure.
+      alert((res.error.message || 'The database rejected that.').replace(/^ERROR:\s*/, ''));
+      return false;
+    }
+    await prodReloadWeekApprovals();
+    try { saveDB(); } catch(e) { console.warn('saveDB after approval', e); }
+    if (okMsg) console.log(okMsg);
+    return true;
+  } catch (e) {
+    console.error(fn + ' threw', e);
+    alert('Could not reach the database. Nothing was changed.');
+    return false;
+  } finally {
+    _prodReviewBusy = false;
+    renderProdReview();
+  }
+}
+
+async function prodReviewApprove(projectId) {
+  await _prodReviewCall('kmi_prod_week_approve',
+    { p_project_id:String(projectId), p_week_start:_prodReviewWeek, p_no_work:false, p_note:null },
+    'approved ' + projectId);
+}
+async function prodReviewNoWork(projectId) {
+  var p = (db.projects||[]).find(function(x){ return String(x.id) === String(projectId); });
+  if (!confirm('Record no work on ' + ((p && p.number) || projectId) + ' for the week of ' +
+      _prodWeekRangeLabel(_prodReviewWeek, _prodAddDays(_prodReviewWeek,6)) + '?\n\n' +
+      'The job appears in the packet with no production, rather than reading as a zero.')) return;
+  await _prodReviewCall('kmi_prod_week_approve',
+    { p_project_id:String(projectId), p_week_start:_prodReviewWeek, p_no_work:true, p_note:'No work this week' },
+    'no work ' + projectId);
+}
+async function prodReviewReopen(projectId) {
+  var reason = prompt('Why is this week being reopened?\n\nThe reason is recorded and the report is reissued marked revised.');
+  if (reason === null) return;
+  if (!String(reason).trim()) { alert('A reason is required to reopen a week.'); return; }
+  await _prodReviewCall('kmi_prod_week_reopen',
+    { p_project_id:String(projectId), p_week_start:_prodReviewWeek, p_reason:String(reason).trim() },
+    'reopened ' + projectId);
+}
+async function prodReviewApproveAllClean() {
+  var clean = _prodReviewData().filter(function(r){ return r.status === 'clean'; });
+  if (!clean.length) return;
+  if (!confirm('Approve ' + clean.length + ' job' + (clean.length === 1 ? '' : 's') + ' with no exceptions?')) return;
+  for (var i = 0; i < clean.length; i++) {
+    var ok = await _prodReviewCall('kmi_prod_week_approve',
+      { p_project_id:String(clean[i].p.id), p_week_start:_prodReviewWeek, p_no_work:false, p_note:null });
+    if (!ok) break;   // stop on the first refusal rather than firing the rest blind
+  }
+}
+
 function renderProdTrackingView() {
   var host = g('nprj-prod-subcontent'); if (!host) return;
   var p = _prodCurrentProject(); if (!p) return;
@@ -51204,7 +51485,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-10-prodband';
+var KMI_BUILD = '2026-09-10-prodreview';
 
 var _kmiSessionId = (function(){
   try {
