@@ -45917,12 +45917,18 @@ function _prodWeekDistributedAt(weekStart) {
   var dt = new Date(hit.distributedAt);
   return isNaN(dt.getTime()) ? '' : dt.toLocaleDateString('en-US', { month:'short', day:'numeric' });
 }
+// Admins are included alongside PMs and Superintendents: they own the
+// approval and should hold the same copy that went out. /project manager/i
+// also catches 'Sr. Project Manager' and does not collide with
+// 'Project Foreman'.
 function _prodPacketRecipients() {
   return (db.users || []).filter(function(u){
     if (!u || u.status === 'inactive') return false;
     if (!u.email || String(u.email).indexOf('@') < 0) return false;
     var r = String(u.role || '');
-    return /project manager/i.test(r) || /superintendent/i.test(r);
+    return /project manager/i.test(r) || /superintendent/i.test(r) || /admin/i.test(r);
+  }).sort(function(a,b){
+    return String(_prodUserName(a.id) || a.email).localeCompare(String(_prodUserName(b.id) || b.email));
   });
 }
 
@@ -45936,71 +45942,112 @@ function _prodU8ToBase64(u8) {
   return btoa(parts.join(''));
 }
 
-async function prodPacketSend() {
+// Recipient picker, matching the COR and proposal send modals: pre-checked
+// list, editable subject and body, inline error line.
+function prodPacketOpenSend() {
   if (canAccess('distribute-production') === 'none') { alert('Distribution is limited to Admins.'); return; }
-  var btn = g('prod-send-btn');
   var rcpts = _prodPacketRecipients();
+  var label = _prodWeekRangeLabel(_prodReviewWeek, _prodAddDays(_prodReviewWeek, 6));
   if (!rcpts.length) {
-    alert('No active Project Managers or Superintendents have an email address on file, so there is nobody to send to.');
+    showModal(
+      '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+      '<div class="mt" style="color:#7A2E2E">No recipients on file</div>' +
+      '<div class="msb">No active Admin, Project Manager or Superintendent has an email address. ' +
+      'Add one on the Users page, then send from here.</div>' +
+      '<div class="mbtns"><button class="btn" onclick="closeModal()">Close</button></div>');
     return;
   }
+  var rows = rcpts.map(function(u){
+    return '<label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;cursor:pointer">' +
+      '<input type="checkbox" class="prod-rcpt" data-email="' + _prodEsc(u.email) + '" checked>' +
+      '<span><strong>' + _prodEsc(_prodUserName(u.id) || u.email) + '</strong>' +
+      (u.role ? ' \u2014 ' + _prodEsc(u.role) : '') + ' &lt;' + _prodEsc(u.email) + '&gt;</span></label>';
+  }).join('');
+
+  var body = [
+    'Attached is the KMI production packet for ' + label + '.',
+    '',
+    'The first page is the current backlog across every job with open quantities.',
+    'Behind it is one report per job that had production entered last week.',
+    '',
+    'KMI Construction LLC'
+  ].join('\n');
+
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Send production packet \u2014 ' + _prodEsc(label) + '</div>' +
+    '<div class="msb">The merged PDF is built and attached automatically. Jobs that were not approved are stamped <strong>UNAPPROVED</strong>.</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>Recipients (pick one or more)</label>' +
+        '<div style="border:0.5px solid #ddd;border-radius:6px;padding:8px 10px;background:#fafafa;max-height:210px;overflow-y:auto">' + rows + '</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Admins, Project Managers and Superintendents with an email on file. Each gets their own copy.</div>' +
+      '</div>' +
+      '<div class="fgr full"><label>Subject *</label>' +
+        '<input type="text" id="prod-em-subject" value="' + _prodEsc('KMI Production Packet \u2014 ' + label) + '">' +
+      '</div>' +
+      '<div class="fgr full"><label>Body</label>' +
+        '<textarea id="prod-em-body" rows="9" style="font-family:monospace;font-size:12px">' + _prodEsc(body) + '</textarea>' +
+      '</div>' +
+    '</div>' +
+    '<div id="prod-em-err" style="color:#A32D2D;font-size:12px;margin:6px 0;min-height:14px"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()" id="prod-em-cancel-btn">Cancel</button>' +
+      '<button class="btn btn-p" onclick="prodPacketSend()" id="prod-em-send-btn">&#9993;&#65039; Send</button>' +
+    '</div>');
+}
+
+async function prodPacketSend() {
+  if (canAccess('distribute-production') === 'none') { alert('Distribution is limited to Admins.'); return; }
+  var btn = g('prod-em-send-btn');
+  var errEl = g('prod-em-err');
+  function fail(msg){ if (errEl) errEl.textContent = msg; else alert(msg);
+                      if (btn) { btn.disabled = false; btn.innerHTML = '&#9993;&#65039; Send'; } }
+
+  var rcpts = [];
+  document.querySelectorAll('input.prod-rcpt:checked').forEach(function(cb){
+    if (cb.dataset.email) rcpts.push({ email: cb.dataset.email });
+  });
+  if (!rcpts.length) { fail('Pick at least one recipient.'); return; }
+
+  var subject = (g('prod-em-subject') && g('prod-em-subject').value || '').trim();
+  if (!subject) { fail('Subject is required.'); return; }
+  var bodyTxt = (g('prod-em-body') && g('prod-em-body').value) || '';
 
   var res;
   try {
     if (btn) { btn.disabled = true; btn.textContent = 'Building\u2026'; }
+    if (errEl) errEl.textContent = '';
     res = await prodPacketBuild(_prodReviewWeek);
   } catch (e) {
     console.error('packet build failed', e);
-    alert('Could not build the packet: ' + (e && e.message ? e.message : e));
-    if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
+    fail('Could not build the packet: ' + (e && e.message ? e.message : e));
     return;
   }
-  if (!res.included.length) {
-    alert('No jobs had production entered for this week, so there is nothing to send.');
-    if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
-    return;
-  }
+  if (!res.included.length) { fail('No jobs had production entered for this week, so there is nothing to send.'); return; }
 
   var b64 = _prodU8ToBase64(res.bytes);
   var mb = b64.length / 1048576;
   if (mb > 25) {
-    alert('The packet is about ' + mb.toFixed(1) + ' MB once encoded, which is over what the mail service will accept.\n\n' +
-          'Use Preview packet to download it and send it another way for this week.');
-    if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
-    return;
-  }
-
-  var label = _prodWeekRangeLabel(_prodReviewWeek, _prodAddDays(_prodReviewWeek, 6));
-  // D10-A: the packet goes out on schedule whether or not everything was
-  // approved. The UNAPPROVED stamp carries the warning, not a blocked button.
-  var warn = res.unapproved
-    ? ('\n\n' + res.unapproved + ' job' + (res.unapproved === 1 ? ' was' : 's were') +
-       ' NOT approved and will be stamped UNAPPROVED in the packet.')
-    : '';
-  if (!confirm('Send the production packet for ' + label + '?\n\n' +
-      res.included.length + ' job report' + (res.included.length === 1 ? '' : 's') + ', ' +
-      mb.toFixed(1) + ' MB, to ' + rcpts.length + ' recipient' + (rcpts.length === 1 ? '' : 's') + ':\n' +
-      rcpts.map(function(u){ return '  \u00b7 ' + (_prodUserName(u.id) || u.email); }).join('\n') + warn)) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
+    fail('The packet is about ' + mb.toFixed(1) + ' MB encoded, past what the mail service accepts. ' +
+         'Use Preview packet to download it and send it another way this week.');
     return;
   }
 
   if (btn) btn.textContent = 'Sending\u2026';
   var sent = 0, failed = [];
-  var body =
-    'Attached is the KMI production packet for ' + label + '.\n\n' +
-    'The first page is the current backlog across every job with open quantities. ' +
-    'Behind it is one report per job that had production entered last week.' +
+  // D10-A: the packet ships whether or not everything was approved, so the
+  // note goes in the body as well as the page stamp \u2014 a reader should not
+  // have to open the PDF to learn some of it is unapproved.
+  var body = bodyTxt +
     (res.unapproved ? ('\n\n' + res.unapproved + ' job report' + (res.unapproved === 1 ? ' is' : 's are') +
-      ' marked UNAPPROVED \u2014 those figures had not been approved when the packet went out.') : '') +
-    '\n\nKMI Construction LLC';
+      ' marked UNAPPROVED \u2014 those figures had not been approved when the packet went out.') : '');
   var filename = 'KMI Weekly Production - ' + _prodReviewWeek + '.pdf';
 
   for (var i = 0; i < rcpts.length; i++) {
     try {
       var r = await sendEmail({
         to:       rcpts[i].email,
-        subject:  'KMI Production Packet \u2014 ' + label,
+        subject:  subject,
         text:     body,
         flowType: 'prod_weekly_packet',
         sentBy:   _currentUser ? _currentUser.id : null,
@@ -46028,7 +46075,8 @@ async function prodPacketSend() {
     } catch (e) { console.warn('mark_distributed threw', e); }
   }
 
-  if (btn) { btn.disabled = false; btn.textContent = 'Send weekly packet'; }
+  if (btn) { btn.disabled = false; btn.innerHTML = '&#9993;&#65039; Send'; }
+  if (sent > 0) closeModal();
   renderProdReview();
   alert('Packet sent to ' + sent + ' of ' + rcpts.length + ' recipient' + (rcpts.length === 1 ? '' : 's') + '.' +
     (stamped ? ('\n' + stamped + ' approved job-week' + (stamped === 1 ? '' : 's') + ' stamped as distributed.') : '') +
@@ -46143,8 +46191,8 @@ function renderProdReview() {
     '<button class="btn btn-sm" id="prod-packet-btn" onclick="prodPacketPreview()">\u2913 Preview packet</button>' +
     (_prodWeekDistributed(_prodReviewWeek)
       ? ('<span style="font-size:12px;color:#1F7A4D;font-weight:600">\u2713 Sent ' + _prodEsc(_prodWeekDistributedAt(_prodReviewWeek)) + '</span>' +
-         '<button class="btn btn-sm" onclick="prodPacketSend()">Send again</button>')
-      : '<button class="btn btn-sm btn-p" id="prod-send-btn" onclick="prodPacketSend()">Send weekly packet</button>') +
+         '<button class="btn btn-sm" onclick="prodPacketOpenSend()">Send again</button>')
+      : '<button class="btn btn-sm btn-p" onclick="prodPacketOpenSend()">Send weekly packet</button>') +
   '</div>';
 
   host.innerHTML = nav +
