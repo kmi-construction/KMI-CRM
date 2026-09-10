@@ -2209,7 +2209,7 @@ tr.gc-line:hover td{background:#fafafa}
         <!-- Project status — authoritative for Meeting Minutes and the Tasks board
              (replaces the old endDate-derived "active" check). Overhead is NOT a
              status: overhead/equipment cost jobs live on category (see _isCostJob). -->
-        <div class="fgr"><label>Status</label><select id="nprj-status"><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
+        <div class="fgr"><label>Exclude from company reports</label><label style="display:flex;align-items:center;gap:8px;font-size:13px;padding-top:8px"><input type="checkbox" id="nprj-excl-reports"> Test or template job</label></div><div class="fgr"><label>Status</label><select id="nprj-status"><option value="active">Active</option><option value="inactive">Inactive</option></select></div>
         <div class="fgr full">
           <label>Project types <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(select all that apply)</span></label>
           <div id="nprj-type-checks" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px"></div>
@@ -32746,6 +32746,7 @@ function initNewProject() {
   if (g('nprj-start-date'))    g('nprj-start-date').value    = '';
   if (g('nprj-end-date'))      g('nprj-end-date').value      = '';
   if (g('nprj-status'))        g('nprj-status').value        = 'active';
+  if (g('nprj-excl-reports'))  g('nprj-excl-reports').checked = false;
   if (g('nprj-ap-tax-exempt')) g('nprj-ap-tax-exempt').checked = false;
   populateFoundationCustomerDropdown(prefill ? prefill.foundationCustomerNo : '');
   populateProjectCustDropdown(prefill ? prefill.customerId : '');
@@ -32840,6 +32841,7 @@ function saveProject(closeAfterSave) {
     startDate:   g('nprj-start-date') ? (g('nprj-start-date').value || '') : '',
     endDate:     g('nprj-end-date')   ? (g('nprj-end-date').value   || '') : '',
     status:      g('nprj-status')     ? (g('nprj-status').value     || 'active') : 'active',
+    excludeFromReports: g('nprj-excl-reports') ? !!g('nprj-excl-reports').checked : false,
     apTaxExempt: (g('nprj-ap-tax-exempt') && g('nprj-ap-tax-exempt').checked) ? 'Y' : 'N',
     matEqMarkupPct: matEqMarkup,
     subMarkupPct:   subMarkup,
@@ -33036,6 +33038,9 @@ function editProject(id, initialTab) {
   // Legacy rows predating the status column read as 'active'; the SQL backfill
   // sets the real value, this is only a client-side safety net.
   if (g('nprj-status'))       g('nprj-status').value       = (p.status === 'inactive') ? 'inactive' : 'active';
+  // Keeps the job off company-wide rollups (production review, backlog
+  // cover, weekly packet) while leaving its own screens fully usable.
+  if (g('nprj-excl-reports')) g('nprj-excl-reports').checked = !!p.excludeFromReports;
   // A/P Tax Exempt — stored as 'Y'/'N' on the project record (Foundation format).
   // The checkbox is checked iff the stored value normalises to 'Y'.
   if (g('nprj-ap-tax-exempt')) {
@@ -44082,6 +44087,9 @@ function _prodItemModal(it) {
       '<select id="pi-category">' + _prodCategoryOptions(it.categoryId) + '</select></div>' +
     '<label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:#333">' +
       '<input type="checkbox" id="pi-active"' + (it.active !== false ? ' checked' : '') + '> Active</label>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px">' +
+      '<input type="checkbox" id="pi-backlog"' + (it.includeInBacklog !== false ? ' checked' : '') + '> Include on backlog report</label>' +
+    '<div style="font-size:11px;color:#888;margin:4px 0 0 26px;line-height:1.45">Untick for small-ticket, high-count scopes \u2014 anchors, cleaning, sealing. They carry large quantities against small labor dollars and overstate how much work is left.</div>' +
     '<div class="mf">' +
       '<button class="btn" onclick="closeModal();_editProdItemId=null;">Cancel</button>' +
       '<button class="btn btn-p" onclick="saveProdItem()">Save</button>' +
@@ -44102,6 +44110,7 @@ function saveProdItem() {
   var mduRaw = g('pi-mdu').value, pctRaw = g('pi-pct').value;
   var crewId = g('pi-crew').value || '';
   var active = !!g('pi-active').checked;
+  var inBacklog = g('pi-backlog') ? !!g('pi-backlog').checked : true;
   var defaultMdu = (type === 'production' && mduRaw !== '') ? (parseFloat(mduRaw) || 0) : null;
   var defaultPct = (type === 'field_pct'  && pctRaw !== '') ? (parseFloat(pctRaw) || 0) : null;
   var categoryId = (g('pi-category') && g('pi-category').value) || null;
@@ -44114,6 +44123,7 @@ function saveProdItem() {
       it.name = name; it.itemType = type; it.unitLabel = unit;
       it.defaultMdu = defaultMdu; it.defaultPct = defaultPct;
       it.defaultCrewId = crewId || null; it.categoryId = categoryId; it.active = active;
+      it.includeInBacklog = inBacklog;
       it.updatedAt = _nowIso;
       _savedItem = it;
     }
@@ -44259,6 +44269,10 @@ function _prodNewLineFromItem(item) {
     amount: (item.itemType === 'field_pct' && item.defaultPct != null) ? item.defaultPct : '',
     crewId: item.defaultCrewId || null,
     categoryId: item.categoryId || _prodGeneralCategoryId(),
+    // D22: copied from the catalog when the item is added, the same way
+    // defaultMdu and defaultCrewId are, so one job's odd scope never needs
+    // a catalog change. Overridable per line.
+    includeInBacklog: (item.includeInBacklog !== false),
     bprRef: null,
     source: 'manual'
   };
@@ -45268,7 +45282,11 @@ function _prodWeekStartOf(day) {
 function _prodUserName(userId) {
   if (userId == null || userId === '') return '';
   var u = (db.users || []).find(function(x){ return String(x.id) === String(userId); });
-  return u ? (u.name || u.email || '') : '';
+  if (!u) return '';
+  // kmi_users stores first_name / last_name \u2014 there is no name column on
+  // either side, so u.name was always undefined and this fell through to email.
+  var nm = ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
+  return nm || u.email || '';
 }
 function _prodWeekApprovalFor(projectId, weekStart) {
   var list = db.prodWeekApprovals || [];
@@ -45509,6 +45527,7 @@ function _prodReviewProjects() {
   return (db.projects || []).filter(function(p){
     if (p.category && p.category !== 'project') return false;   // equipment / overhead cost jobs
     if (p.status === 'inactive' || p.status === 'closed') return false;
+    if (!_prodProjectInReports(p)) return false;                // test / template jobs
     var est = (p.prodEstimate && p.prodEstimate.lines) ? p.prodEstimate.lines : null;
     if (est && est.length) return true;
     // No estimate yet, but somebody has been entering against it.
@@ -45592,13 +45611,40 @@ function prodReviewToggle(projectId) {
 function _prodCatUnit(name) {
   var s = String(name || '').trim();
   var m = s.match(/^(.*?)\s*\(\s*([A-Za-z.]{1,4})\s*\)$/);
-  if (m) return { label: m[1].trim(), unit: m[2].toUpperCase() };
+  if (m) return { label: m[1].trim(), unit: _prodNormUnit(m[2]) };
   return { label: s, unit: '' };
 }
 
 // The unit an estimate line is measured in, used when the category name
 // does not already declare one.
-function _prodLineUnit(l) { return String(l.unitLabel || '').trim().toUpperCase(); }
+// unitLabel is free text on the estimate line and has been typed many ways
+// over the years \u2014 EA / EACH / PIECES all mean the same thing, and treating
+// them as distinct produced five CMU columns on the backlog cover where
+// there should have been three. Display-time only; nothing stored changes.
+var PROD_UNIT_ALIASES = {
+  'EACH':'EA', 'EACHES':'EA', 'PIECE':'EA', 'PIECES':'EA', 'PCS':'EA', 'PC':'EA', 'PS':'EA',
+  'SQFT':'SF', 'SQ FT':'SF', 'SQ. FT.':'SF', 'SQFT.':'SF', 'S.F.':'SF', 'SQUARE FEET':'SF',
+  'LINFT':'LF', 'LIN FT':'LF', 'LIN. FT.':'LF', 'L.F.':'LF', 'LNFT':'LF', 'LINEAL FEET':'LF',
+  'CBCFT':'CF', 'CUFT':'CF', 'CU FT':'CF', 'CU. FT.':'CF', 'C.F.':'CF', 'CUBIC FEET':'CF'
+};
+function _prodNormUnit(u) {
+  var s = String(u == null ? '' : u).trim().toUpperCase().replace(/\s+/g, ' ');
+  if (!s) return '';
+  return PROD_UNIT_ALIASES[s] || s;
+}
+function _prodLineUnit(l) { return _prodNormUnit(l.unitLabel); }
+
+// D21/D22: whether this estimate line's remaining quantity belongs on the
+// backlog cover. The line's own flag wins; otherwise fall back to the catalog
+// item's default; otherwise include. Defaulting to included means a scope
+// never vanishes silently \u2014 noise gets noticed faster than absence.
+function _prodLineInBacklog(l) {
+  if (l && l.includeInBacklog != null) return l.includeInBacklog !== false;
+  var it = (l && l.itemId != null && typeof _prodItem === 'function') ? _prodItem(l.itemId) : null;
+  if (it && it.includeInBacklog != null) return it.includeInBacklog !== false;
+  return true;
+}
+function _prodProjectInReports(p) { return !(p && p.excludeFromReports); }
 
 function _prodProjectForeman(p) {
   // Foreman is a project team assignment, not something recorded against
@@ -45621,12 +45667,14 @@ function _prodBacklogRows(weekStart) {
   (db.projects || []).forEach(function(p){
     if (p.category && p.category !== 'project') return;
     if (p.status === 'inactive' || p.status === 'closed') return;
+    if (!_prodProjectInReports(p)) return;          // test / template jobs
     var est = _prodEnsureEstimate(p);
     if (!(est.lines || []).length) return;
 
     var q = {}, anyOpen = false;
     (est.lines || []).forEach(function(l){
       if (l.lineType !== 'production') return;            // hours-only items carry no quantity
+      if (!_prodLineInBacklog(l)) return;                 // small-ticket scopes, D21
       var estU = Number(l.estUnits) || 0;
       if (estU <= 0) return;
       var jtd = _prodJtdForLine(p.id, l.id).units;
@@ -45667,8 +45715,11 @@ function _prodBacklogCols(rows) {
   rows.forEach(function(r){
     Object.keys(r.q).forEach(function(k){ if (r.q[k].qty > 0) seen[k] = r.q[k]; });
   });
+  // D23: order by label then unit so the three Precast columns sit together.
+  // Category sort_order interleaves them (100 Precast, 102 Cut Stone, 105
+  // Precast), and the cover should not depend on that table being tidy.
   return Object.keys(seen).map(function(k){ return seen[k]; })
-    .sort(function(a,b){ return (a.sort - b.sort) || a.unit.localeCompare(b.unit); });
+    .sort(function(a,b){ return a.label.localeCompare(b.label) || a.unit.localeCompare(b.unit); });
 }
 
 // Backlog cover, tabloid landscape (1224 x 792pt).
@@ -46237,9 +46288,9 @@ function prodExportTrackingPdf(opts) {
       [ (Number(Wk.tot.hrs)||0).toLocaleString(), 'hours \u00b7 ' + Wk.tot.f + 'F / ' + Wk.tot.m + 'M / ' + Wk.tot.l + 'L', null ],
       [ money(Wk.tot.act),  'actual labor', null ],
       [ money(Wk.tot.earn), 'earned on production', null ],
-      [ (vr>=0?'+':'\u2212') + money(Math.abs(vr)).replace('-',''), 'production variance', vr>=0?GOOD:BAD ],
-      [ (Wk.pctBefore*100).toFixed(1) + ' \u2192 ' + (Wk.pctAfter*100).toFixed(1) + '%',
-        'complete, ' + ((Wk.pctAfter-Wk.pctBefore)>=0?'+':'\u2212') + Math.abs((Wk.pctAfter-Wk.pctBefore)*100).toFixed(1) + ' pts', null ]
+      [ (vr>=0?'+':'-') + money(Math.abs(vr)).replace('-',''), 'production variance', vr>=0?GOOD:BAD ],
+      [ (Wk.pctBefore*100).toFixed(1) + ' to ' + (Wk.pctAfter*100).toFixed(1) + '%',
+        'complete, ' + ((Wk.pctAfter-Wk.pctBefore)>=0?'+':'-') + Math.abs((Wk.pctAfter-Wk.pctBefore)*100).toFixed(1) + ' pts', null ]
     ];
     var sx = LM + 10;
     cells.forEach(function(c){
@@ -46266,13 +46317,13 @@ function prodExportTrackingPdf(opts) {
         sf('normal',8,col || [0,0,0]);
         doc.text(String(txt), wcols[i].right - 4, by, { align:'right' });
       }
-      put(1, r.units == null ? '\u2014' : (num(r.units) + (r.unitLabel ? (' ' + r.unitLabel) : '')));
+      put(1, r.units == null ? '-' : (num(r.units) + (r.unitLabel ? (' ' + r.unitLabel) : '')));
       put(2, num(r.hrs));
-      put(3, r.actMdu == null ? '\u2014' : n1(r.actMdu));
-      put(4, r.estMdu == null ? '\u2014' : n1(r.estMdu));
+      put(3, r.actMdu == null ? '-' : n1(r.actMdu));
+      put(4, r.estMdu == null ? '-' : n1(r.estMdu));
       var dcol = r.dMdu == null ? GREY : (r.dMdu >= 0 ? GOOD : BAD);
-      put(5, r.dMdu == null ? '\u2014' : ((r.dMdu>0?'+':'\u2212') + n1(Math.abs(r.dMdu))), dcol);
-      put(6, r.dPct == null ? '\u2014' : ((r.dPct>0?'+':'\u2212') + n1(Math.abs(r.dPct)) + '%'), dcol);
+      put(5, r.dMdu == null ? '-' : ((r.dMdu>0?'+':'-') + n1(Math.abs(r.dMdu))), dcol);
+      put(6, r.dPct == null ? '-' : ((r.dPct>0?'+':'-') + n1(Math.abs(r.dPct)) + '%'), dcol);
       by += 13;
     });
     if (Wk.lines.length > 8) {
@@ -46370,7 +46421,7 @@ function prodExportTrackingPdf(opts) {
   if (y + 30 > FOOTER_TOP) { doc.addPage(); letterhead(); y = 92; }
   sf('normal',7,GREY);
   var fn = 'Actual MDU = ' + (C.defCrew ? ('default crew (' + C.defCrew.name + ') cost ' + money(C.mdc)) : 'default crew cost') +
-    ' \u00f7 Actual $/unit.   Earned $ = Est $ \u00d7 % complete.   Variance = Earned \u2212 Actual.   Field labor earns at the overall % (General) or category % (category-tied).';
+    ' / Actual $/unit.   Earned $ = Est $ x % complete.   Variance = Earned - Actual.   Field labor earns at the overall % (General) or category % (category-tied).';
   doc.text(doc.splitTextToSize(fn, RM-LM), LM, y);
 
   // D13: an unapproved job still ships, but says so on every page \u2014 a
@@ -46382,7 +46433,7 @@ function prodExportTrackingPdf(opts) {
       doc.setPage(_pi);
       doc.setFillColor(163,45,45); doc.rect(0, 0, PAGE_W, 15, 'F');
       sf('bold',8,[255,255,255]);
-      doc.text('UNAPPROVED \u2014 these figures were not approved before distribution', PAGE_W/2, 10.5, { align:'center' });
+      doc.text('UNAPPROVED - these figures were not approved before distribution', PAGE_W/2, 10.5, { align:'center' });
       if (doc.saveGraphicsState && doc.GState) {
         doc.saveGraphicsState(); doc.setGState(new doc.GState({ opacity:0.10 }));
       } else {
@@ -51789,7 +51840,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-10-prodpacket';
+var KMI_BUILD = '2026-09-10-prodscope';
 
 var _kmiSessionId = (function(){
   try {
@@ -52482,6 +52533,7 @@ function toSBProdItem(r) {
     category_id:     (r.categoryId != null ? String(r.categoryId) : null),
     sort_order:      Number(r.sortOrder) || 0,
     is_active:       (r.active !== false),
+    include_in_backlog: (r.includeInBacklog !== false),
     created_at:      r.createdAt || null,
     updated_at:      r.updatedAt || null
   };
@@ -52498,6 +52550,7 @@ function fromSBProdItem(r) {
     categoryId:    (r.category_id != null ? r.category_id : null),
     sortOrder:     Number(r.sort_order) || 0,
     active:        (r.is_active !== false),
+    includeInBacklog: (r.include_in_backlog !== false),
     createdAt:     r.created_at || null,
     updatedAt:     r.updated_at || null
   };
@@ -52683,6 +52736,7 @@ function toSBProject(r) {
     // Projects list and every project picker; equipment jobs still appear on the
     // Equipment board; both remain codeable in AP.
     category:r.category||'project',
+    exclude_from_reports: !!r.excludeFromReports,
     customer_id:r.customerId||null,
     address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
     contract_amount:r.contractAmount||0,
@@ -52756,6 +52810,7 @@ function fromSBProject(r) {
   return {
     id:r.id, number:r.number||'', name:r.name||'',
     category:r.category||'project',
+    excludeFromReports: !!r.exclude_from_reports,
     customerId:r.customer_id||null,
     address:r.address||'', city:r.city||'', state:r.state||'', zip:r.zip||'',
     contractAmount:r.contract_amount||0,
