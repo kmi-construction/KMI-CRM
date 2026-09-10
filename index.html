@@ -3837,6 +3837,7 @@ var DB_DEFAULTS = {
   // See the COR module (separate) for how rolled-up tickets feed CORs.
   tmTickets: [],
   prodWeekly: [],
+  prodWeekApprovals: [],   // read-only mirror of kmi_prod_week_approvals (P6)
   // Meeting Minutes (Round 1) — internal weekly meeting record, organized by
   // project. kmi_meetings holds one row per week (per-project discussion +
   // per-week hidden/added project lists); kmi_meeting_action_items is a
@@ -4147,6 +4148,16 @@ var PERMISSIONS = {
   // reads it for AP matching. Office staff (Admin/PM/PC) get full edit.
   'view-procurement': ['full','full','full','read','read','read','none'],
   'edit-procurement': ['full','full','full','none','none','none','none'],
+  // Production (Productivity P6). Order: Admin, PM, PC, Accounting,
+  // Superintendent, Foreman, Shop. Before these existed canAccess() fell
+  // through to its 'no row means full' default, so every role had full
+  // access to production tracking and its PDF export.
+  'view-production':         ['full','full','full','read','full','full','none'],
+  'enter-production':        ['full','full','full','none','full','full','none'],
+  // Approval and distribution are Admin-only and enforced server-side by
+  // kmi_is_admin() inside the RPCs; these keys only shape the UI.
+  'approve-production-week': ['full','none','none','none','none','none','none'],
+  'distribute-production':   ['full','none','none','none','none','none','none'],
   'analytics': ['full','read','read','read','none','none','none'],
   'users': ['full','none','none','none','none','none','none'],
   'templates': ['full','read','none','none','none','none','none'],
@@ -44925,6 +44936,27 @@ function renderProdWeeklyView() {
   if (!_prodWeekEnding) _prodWeekEnding = _prodDefaultWeekEnding();
   var stored = _prodWeekStoredRow(p.id, _prodWeekEnding);
   _prodWeekModel = { weekEnding: _prodWeekEnding, entries: stored ? JSON.parse(JSON.stringify(stored.entries || {})) : {} };
+  // A day inside an approved week is read-only. The database enforces this
+  // too, but silently \u2014 trg_kmi_prod_weekly_lock skips the write rather than
+  // raising, so that one locked row cannot abort the whole bulk upsert. That
+  // makes this banner the only thing that tells the user why nothing saved.
+  var _wkLocked = _prodDayLocked(p.id, _prodWeekEnding);
+  var _wkApproval = _wkLocked ? _prodWeekApprovalFor(p.id, _prodWeekStartOf(_prodWeekEnding)) : null;
+  var _wkReadOnly = _wkLocked || !hasFull('enter-production');
+  var lockBanner = '';
+  if (_wkLocked) {
+    var _wkWho = _wkApproval && _wkApproval.approvedByUserId ? (_prodUserName(_wkApproval.approvedByUserId) || '') : '';
+    lockBanner = '<div class="card" style="background:#F7F9FC;border:0.5px solid #D6DCE8;border-left:3px solid #1E2448">' +
+      '<div style="font-size:13px;color:#3D4356;line-height:1.55">' +
+      '<strong>This week has been approved and is locked.</strong> ' +
+      'The production report for ' + _prodEsc(_prodWeekRangeLabel(_prodWeekStartOf(_prodWeekEnding), _prodAddDays(_prodWeekStartOf(_prodWeekEnding),6))) +
+      ' has already gone out' + (_wkWho ? (', approved by ' + _prodEsc(_wkWho)) : '') + '. ' +
+      'Corrections need an Admin to reopen the week, which reissues the report marked revised.' +
+      '</div></div>';
+  } else if (!hasFull('enter-production')) {
+    lockBanner = '<div class="card" style="background:#F7F9FC;border:0.5px solid #D6DCE8;border-left:3px solid #1E2448">' +
+      '<div style="font-size:13px;color:#3D4356">You have read-only access to production entry.</div></div>';
+  }
 
   var bar = '<div class="card"><div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">' +
       '<div style="display:flex;align-items:center;gap:8px">' +
@@ -44934,8 +44966,8 @@ function renderProdWeeklyView() {
       '</div>' +
       '<input type="date" value="' + _prodWeekEnding + '" onchange="prodWkGo(this.value)" style="padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-family:inherit">' +
       '<div style="flex:1"></div>' +
-      '<button class="btn btn-pdf btn-sm" onclick="prodWkOpenUpload()">\u2913 Smart upload</button>' +
-      '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save day</button>' +
+      (_wkReadOnly ? '' : ('<button class="btn btn-pdf btn-sm" onclick="prodWkOpenUpload()">\u2913 Smart upload</button>' +
+      '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save day</button>')) +
     '</div></div>';
 
   function sec(label){ return '<tr><td colspan="7" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">' + label + '</td></tr>'; }
@@ -44957,7 +44989,12 @@ function renderProdWeeklyView() {
   var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this week</strong>. JTD units roll up across all weeks automatically. Field-labor items track hours only.</div>';
   var table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:760px">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' + hint + '</div>';
 
-  host.innerHTML = bar + table;
+  host.innerHTML = lockBanner + bar + table;
+  if (_wkReadOnly) {
+    host.querySelectorAll('input, select, textarea').forEach(function(el){
+      if (el.type !== 'date') { el.disabled = true; el.style.background = '#F5F6F9'; }
+    });
+  }
   prodWkRefresh();
 }
 function _prodWkRowHtml(l) {
@@ -45013,6 +45050,10 @@ function prodWkGo(weekEnding) {
 }
 function prodWkPersist() {
   var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
+  // Never write into an approved week. The database would skip the row
+  // silently anyway; refusing here keeps the local copy from diverging from
+  // what Supabase actually holds.
+  if (_prodDayLocked(p.id, _prodWeekModel.weekEnding)) return false;
   db.prodWeekly = db.prodWeekly || [];
   var row = _prodWeekStoredRow(p.id, _prodWeekModel.weekEnding);
   if (!row) {
@@ -45025,6 +45066,11 @@ function prodWkPersist() {
 }
 async function prodWkSave() {
   var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
+  if (_prodDayLocked(p.id, _prodWeekModel.weekEnding)) {
+    alert('This week has been approved and is locked.\n\nAn Admin has to reopen it before entries can change; the report is then reissued marked revised.');
+    return;
+  }
+  if (!hasFull('enter-production')) { alert('You have read-only access to production entry.'); return; }
   prodWkPersist();
   var btn = g('prodwk-save-btn'); if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
   try {
@@ -45161,10 +45207,13 @@ async function prodWkRunUpload() {
 //   Actual MDU       = default crew man-day cost / (Actual $/unit)
 //   Variance         = Earned - Actual (production); Est - Actual (field)
 // ════════════════════════════════════════════════════════════════════
-function _prodJtdForLine(projectId, lineId) {
+// asOf ('YYYY-MM-DD', optional) caps the rollup at that day inclusive.
+// Omitted, it behaves exactly as before: everything ever entered.
+function _prodJtdForLine(projectId, lineId, asOf) {
   var o = { units:0, f:0, m:0, l:0 };
   (db.prodWeekly || []).forEach(function(r){
     if (String(r.projectId) !== String(projectId)) return;
+    if (asOf && String(r.weekEnding || '') > asOf) return;
     var e = r.entries && r.entries[lineId]; if (!e) return;
     o.units += Number(e.u)||0; o.f += Number(e.f)||0; o.m += Number(e.m)||0; o.l += Number(e.l)||0;
   });
@@ -45196,8 +45245,165 @@ function _prodRecentUnitsForLine(projectId, lineId) {
   });
   return total;
 }
+// ── Weekly production band (Productivity P6 / B1) ───────────────────
+// "What happened last week", shown above the job-to-date tables on both the
+// tracking screen and the PDF. The % complete movement comes from running
+// _prodTrackingCompute() at two cutoffs rather than recomputing the category
+// weighting here, so the band cannot drift from the tables beneath it.
+function _prodWeekStartOf(day) {
+  if (!day) return null;
+  var d = new Date(String(day) + 'T00:00:00');
+  if (isNaN(d.getTime())) return null;
+  d.setDate(d.getDate() - d.getDay());          // back up to Sunday
+  return _prodDateStr(d);
+}
+function _prodUserName(userId) {
+  if (userId == null || userId === '') return '';
+  var u = (db.users || []).find(function(x){ return String(x.id) === String(userId); });
+  return u ? (u.name || u.email || '') : '';
+}
+function _prodWeekApprovalFor(projectId, weekStart) {
+  var list = db.prodWeekApprovals || [];
+  for (var i = 0; i < list.length; i++) {
+    var a = list[i];
+    if (String(a.projectId) === String(projectId) && String(a.weekStart) === String(weekStart)) return a;
+  }
+  return null;
+}
+// True when this day falls inside an approved week. The database enforces the
+// same thing via trg_kmi_prod_weekly_lock; this is the half that can explain
+// itself to the user, because the trigger deliberately skips writes silently
+// rather than aborting a whole bulk upsert.
+function _prodDayLocked(projectId, day) {
+  var ws = _prodWeekStartOf(day); if (!ws) return false;
+  var a = _prodWeekApprovalFor(projectId, ws);
+  return !!(a && a.status === 'approved');
+}
+function _prodWeekCompute(p, weekStart) {
+  var est = _prodEnsureEstimate(p);
+  var comp = _prodCompute(p, est);
+  var defCrew = _prodCrew(est.defaultCrewId);
+  var mdc = _prodManDayCost(p, defCrew);
+  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer');
+  var weekEnd = _prodAddDays(weekStart, 6);
+  var days = {}, notes = [], lines = [];
+  var tot = { f:0, m:0, l:0, hrs:0, act:0, earn:0 };
+  (db.prodWeekly || []).forEach(function(r){
+    if (String(r.projectId) !== String(p.id)) return;
+    var dd = String(r.weekEnding || '');
+    if (dd < weekStart || dd > weekEnd) return;
+    if (r.note && String(r.note).trim()) notes.push({ day:dd, text:String(r.note).trim() });
+  });
+  notes.sort(function(a,b){ return a.day < b.day ? -1 : (a.day > b.day ? 1 : 0); });
+  (est.lines || []).forEach(function(l){
+    var w = { units:0, f:0, m:0, l:0 };
+    (db.prodWeekly || []).forEach(function(r){
+      if (String(r.projectId) !== String(p.id)) return;
+      var dd = String(r.weekEnding || '');
+      if (dd < weekStart || dd > weekEnd) return;
+      var e = r.entries && r.entries[l.id]; if (!e) return;
+      var u = Number(e.u)||0, ef = Number(e.f)||0, em = Number(e.m)||0, el = Number(e.l)||0;
+      if (u || ef || em || el) days[dd] = true;
+      w.units += u; w.f += ef; w.m += em; w.l += el;
+    });
+    var hrs = w.f + w.m + w.l;
+    if (!hrs && !w.units) return;               // no activity this week: drop the row
+    var act = w.f*fRate + w.m*mRate + w.l*lRate;
+    var c = comp.perLine[l.id];
+    var estD = (c ? c.pre : 0) * comp.wageMult;
+    var isProd = (l.lineType === 'production');
+    var estU = Number(l.estUnits)||0, estMdu = Number(l.estMdu)||0;
+    var perUnit = w.units>0 ? act/w.units : 0;
+    var actMdu = (isProd && perUnit>0) ? (mdc/perUnit) : null;
+    var earn = (isProd && estU>0) ? estD * (w.units/estU) : 0;
+    var dM = (actMdu != null && estMdu>0) ? (actMdu - estMdu) : null;
+    lines.push({ name:l.itemName, isProd:isProd,
+      units: isProd ? w.units : null, unitLabel: l.unitLabel || '',
+      f:w.f, m:w.m, l:w.l, hrs:hrs,
+      actMdu:actMdu, estMdu: estMdu>0 ? estMdu : null,
+      dMdu:dM, dPct: (dM != null && estMdu>0) ? (dM/estMdu*100) : null,
+      act:act, earn:earn });
+    tot.f+=w.f; tot.m+=w.m; tot.l+=w.l; tot.hrs+=hrs; tot.act+=act; tot.earn+=earn;
+  });
+  var pctBefore = _prodTrackingCompute(p, _prodAddDays(weekStart,-1)).pctCompleteLabor;
+  var pctAfter  = _prodTrackingCompute(p, weekEnd).pctCompleteLabor;
+  return { weekStart:weekStart, weekEnd:weekEnd, lines:lines, tot:tot, notes:notes,
+    days:Object.keys(days).length, pctBefore:pctBefore, pctAfter:pctAfter,
+    approval:_prodWeekApprovalFor(p.id, weekStart) };
+}
+function _prodWeekRangeLabel(ws, we) {
+  var a = new Date(ws + 'T00:00:00'), b = new Date(we + 'T00:00:00');
+  var mo = { month:'short', day:'numeric' };
+  return a.toLocaleDateString(undefined, mo) + ' \u2013 ' + b.toLocaleDateString(undefined, mo);
+}
+// Screen band. weekStart defaults to the previous complete Sun–Sat week,
+// the same window _prodRecentUnitsForLine() reports against.
+function _prodWeekBandHtml(p, weekStart) {
+  weekStart = weekStart || _prodPrevWeekRange().start;
+  var W = _prodWeekCompute(p, weekStart);
+  function money(v){ v = Number(v)||0; return (v<0?'-$':'$') + Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0}); }
+  function n1(v){ return (Number(v)||0).toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}); }
+  if (!W.lines.length) {
+    return '<div style="background:#FDFAF1;border:1px solid #EFE4C6;border-left:3px solid #C8A84B;padding:14px 18px;margin-bottom:16px">' +
+      '<div style="font-size:12px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:#7A6420">Week of ' +
+      _prodEsc(_prodWeekRangeLabel(W.weekStart, W.weekEnd)) + '</div>' +
+      '<div style="font-size:13px;color:#9C8C5E;margin-top:6px">Nothing was entered for this job last week.</div></div>';
+  }
+  var vr = W.tot.earn - W.tot.act;
+  var vcol = vr >= 0 ? '#1F7A4D' : '#A32D2D';
+  function stat(v, lab, col, first){
+    return '<div style="padding:0 22px;' + (first ? '' : 'border-left:1px solid #EADFC0;') + '">' +
+      '<div style="font-size:20px;font-weight:600;line-height:1.15;' + (col ? ('color:'+col) : '') + '">' + v + '</div>' +
+      '<div style="font-size:11px;color:#9C8C5E;margin-top:3px">' + lab + '</div></div>';
+  }
+  var appr = W.approval;
+  var pill = appr && appr.status === 'approved'
+    ? '<span style="margin-left:auto;font-size:11px;font-weight:600;background:#fff;border:1px solid #BCD9C6;color:#1F7A4D;padding:3px 9px;border-radius:100px">Approved' +
+      (Number(appr.revision) > 0 ? ' \u00b7 revised' : '') + '</span>'
+    : '<span style="margin-left:auto;font-size:11px;font-weight:600;background:#fff;border:1px solid #C8A84B;color:#7A6420;padding:3px 9px;border-radius:100px">Awaiting approval</span>';
+  var rows = W.lines.map(function(r){
+    var dcol = r.dMdu == null ? '#B3B7C2' : (r.dMdu >= 0 ? '#1F7A4D' : '#A32D2D');
+    var dtxt = r.dMdu == null ? '\u2014' : ((r.dMdu > 0 ? '+' : '\u2212') + n1(Math.abs(r.dMdu)));
+    var ptxt = r.dPct == null ? '\u2014' : ((r.dPct > 0 ? '+' : '\u2212') + n1(Math.abs(r.dPct)) + '%');
+    var uc = r.units == null ? '<span style="color:#B3B7C2">\u2014</span>'
+      : ((Number(r.units)||0).toLocaleString() + (r.unitLabel ? (' <span style="font-size:11px;color:#A99A6D">' + _prodEsc(r.unitLabel) + '</span>') : ''));
+    function c(v){ return '<td style="text-align:right;padding:6px 8px;border-bottom:1px solid #F2EAD7">' + v + '</td>'; }
+    return '<tr><td style="padding:6px 8px 6px 0;border-bottom:1px solid #F2EAD7">' + _prodEsc(r.name) +
+      (r.isProd ? '' : ' <span style="font-size:11px;color:#A99A6D">field labor</span>') + '</td>' +
+      c(uc) + c((Number(r.hrs)||0).toLocaleString()) +
+      c(r.actMdu == null ? '<span style="color:#B3B7C2">\u2014</span>' : n1(r.actMdu)) +
+      c(r.estMdu == null ? '<span style="color:#B3B7C2">\u2014</span>' : n1(r.estMdu)) +
+      c('<span style="color:' + dcol + ';font-weight:600">' + dtxt + '</span>') +
+      c('<span style="color:' + dcol + '">' + ptxt + '</span>') + '</tr>';
+  }).join('');
+  var noteHtml = W.notes.length
+    ? ('<div style="margin-top:13px;padding-top:11px;border-top:1px solid #EADFC0;font-size:12.5px;color:#6B6350;line-height:1.55">' +
+       W.notes.map(function(nt){ return '<b style="color:#4B463A">' + _prodEsc(_prodWeekLabel(nt.day)) + '</b> \u2014 ' + _prodEsc(nt.text); }).join('<br>') + '</div>')
+    : '';
+  return '<div style="background:#FDFAF1;border:1px solid #EFE4C6;border-left:3px solid #C8A84B;padding:15px 20px 17px;margin-bottom:16px">' +
+    '<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">' +
+      '<div style="font-size:12px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:#7A6420">Week of ' +
+        _prodEsc(_prodWeekRangeLabel(W.weekStart, W.weekEnd)) + '</div>' +
+      '<div style="font-size:12px;color:#9C8C5E">' + W.days + ' day' + (W.days === 1 ? '' : 's') + ' worked</div>' +
+      pill +
+    '</div>' +
+    '<div style="display:flex;flex-wrap:wrap;margin-top:12px">' +
+      stat((Number(W.tot.hrs)||0).toLocaleString(), 'hours \u00b7 ' + W.tot.f + ' fmn / ' + W.tot.m + ' mason / ' + W.tot.l + ' lab', null, true) +
+      stat(money(W.tot.act), 'actual labor') +
+      stat(money(W.tot.earn), 'earned on production') +
+      stat((vr >= 0 ? '+' : '\u2212') + money(Math.abs(vr)).replace('-',''), 'production variance', vcol) +
+      stat((W.pctBefore*100).toFixed(1) + ' \u2192 ' + (W.pctAfter*100).toFixed(1) + '%',
+           'complete \u00b7 ' + ((W.pctAfter-W.pctBefore) >= 0 ? '+' : '\u2212') + Math.abs((W.pctAfter-W.pctBefore)*100).toFixed(1) + ' pts this week') +
+    '</div>' +
+    '<table style="width:100%;border-collapse:collapse;margin-top:14px;font-size:13px"><thead><tr>' +
+      ['Item','Units','Hrs','Act MDU','Est MDU','\u0394','\u0394%'].map(function(h,i){
+        return '<th style="font-size:11px;font-weight:600;color:#9C8C5E;text-align:' + (i ? 'right' : 'left') +
+          ';padding:0 8px 6px ' + (i ? '8px' : '0') + ';border-bottom:1px solid #EADFC0;white-space:nowrap">' + h + '</th>';
+      }).join('') +
+    '</tr></thead><tbody>' + rows + '</tbody></table>' + noteHtml + '</div>';
+}
 // Shared compute for the tracking report (screen + PDF use identical math).
-function _prodTrackingCompute(p) {
+function _prodTrackingCompute(p, asOf) {
   var est = _prodEnsureEstimate(p);
   var comp = _prodCompute(p, est);
   var defCrew = _prodCrew(est.defaultCrewId);
@@ -45212,7 +45418,7 @@ function _prodTrackingCompute(p) {
   var generalLabor = 0;
   function _catBucket(id){ return catMap[id] || (catMap[id] = { direct:0, estU:0, jtdU:0 }); }
   (est.lines || []).forEach(function(l){
-    var jtd = _prodJtdForLine(p.id, l.id);
+    var jtd = _prodJtdForLine(p.id, l.id, asOf);
     var est$ = estLineDollars(l);
     var act = jtd.f*fRate + jtd.m*mRate + jtd.l*lRate;
     var effCat = l.categoryId || generalId;
@@ -45278,6 +45484,11 @@ function _prodTrackingCompute(p) {
 function renderProdTrackingView() {
   var host = g('nprj-prod-subcontent'); if (!host) return;
   var p = _prodCurrentProject(); if (!p) return;
+  if (!hasRead('view-production')) {
+    host.innerHTML = '<div class="card"><div style="padding:16px;color:#888;font-size:13px">' +
+      'You do not have access to production tracking.</div></div>';
+    return;
+  }
   var est = _prodEnsureEstimate(p);
   var lines = est.lines || [];
   if (!lines.length) {
@@ -45390,7 +45601,7 @@ function renderProdTrackingView() {
   host.innerHTML =
     '<div style="display:flex;justify-content:flex-end;margin-bottom:14px">' +
       '<button class="btn btn-pdf btn-sm" onclick="prodExportTrackingPdf()">\u2913 Export PDF</button></div>' +
-    metrics + prodTable + fieldTable + catTable + footnote;
+    _prodWeekBandHtml(p) + metrics + prodTable + fieldTable + catTable + footnote;
 }
 
 // ── Tracking document PDF (Phase 3b) — landscape letter, jsPDF ──────────
@@ -45435,6 +45646,84 @@ function prodExportTrackingPdf() {
   doc.text('Complete ' + pct(C.pctCompleteLabor) + ' (' + num(C.prodTot.jtdU) + ' / ' + num(C.prodTot.estU) + ' units)      Est labor ' + money(C.totEst) +
     '      Earned ' + money(C.totEarned) + '      Actual ' + money(C.totAct) + '      Variance ' + (C.totVar>=0?'+':'') + money(C.totVar), LM, y);
   y += 16; ln(LM, y, RM, y, 0.8, GOLD); y += 14;
+
+  // ── Weekly band ── what moved last week, above the job-to-date tables.
+  // Same _prodWeekCompute() the screen band uses, so the two cannot diverge.
+  var Wk = _prodWeekCompute(p, _prodPrevWeekRange().start);
+  (function drawWeekBand(){
+    function n1(v){ return (Number(v)||0).toFixed(1); }
+    var rowsN = Math.min(Wk.lines.length, 8);
+    var bandH = Wk.lines.length ? (52 + 13 * (rowsN + 1) + (Wk.notes.length ? 16 : 0)) : 40;
+    doc.setFillColor(253,250,241); doc.rect(LM, y, RM-LM, bandH, 'F');
+    doc.setFillColor(200,168,75);  doc.rect(LM, y, 2.5, bandH, 'F');
+    var by = y + 15;
+    sf('bold',9,[122,100,32]);
+    doc.text('WEEK OF ' + _prodWeekRangeLabel(Wk.weekStart, Wk.weekEnd).toUpperCase(), LM+10, by);
+    sf('normal',8,[156,140,94]);
+    doc.text(Wk.days + ' day' + (Wk.days === 1 ? '' : 's') + ' worked', LM+150, by);
+    if (Wk.approval && Wk.approval.status === 'approved') {
+      doc.text('Approved' + (Number(Wk.approval.revision) > 0 ? ' \u00b7 REVISED' : ''), RM-70, by);
+    }
+    if (!Wk.lines.length) {
+      sf('normal',9,[156,140,94]);
+      doc.text('Nothing was entered for this job last week.', LM+10, by+16);
+      y += bandH + 14; return;
+    }
+    by += 15;
+    var vr = Wk.tot.earn - Wk.tot.act;
+    var cells = [
+      [ (Number(Wk.tot.hrs)||0).toLocaleString(), 'hours \u00b7 ' + Wk.tot.f + 'F / ' + Wk.tot.m + 'M / ' + Wk.tot.l + 'L', null ],
+      [ money(Wk.tot.act),  'actual labor', null ],
+      [ money(Wk.tot.earn), 'earned on production', null ],
+      [ (vr>=0?'+':'\u2212') + money(Math.abs(vr)).replace('-',''), 'production variance', vr>=0?GOOD:BAD ],
+      [ (Wk.pctBefore*100).toFixed(1) + ' \u2192 ' + (Wk.pctAfter*100).toFixed(1) + '%',
+        'complete, ' + ((Wk.pctAfter-Wk.pctBefore)>=0?'+':'\u2212') + Math.abs((Wk.pctAfter-Wk.pctBefore)*100).toFixed(1) + ' pts', null ]
+    ];
+    var sx = LM + 10;
+    cells.forEach(function(c){
+      sf('bold',11,c[2] || [0,0,0]); doc.text(String(c[0]), sx, by);
+      sf('normal',6.5,[156,140,94]); doc.text(one(c[1],132), sx, by+9);
+      sx += 142;
+    });
+    by += 22;
+    var wcols = [
+      {label:'Item', w:210, align:'left'}, {label:'Units', w:78}, {label:'Hrs', w:60},
+      {label:'Act MDU', w:70}, {label:'Est MDU', w:70}, {label:'\u0394', w:62}, {label:'\u0394%', w:62}
+    ];
+    var wx = LM + 10; wcols.forEach(function(c){ c.left = wx; c.right = wx + c.w; wx += c.w; });
+    sf('bold',6.5,[156,140,94]);
+    wcols.forEach(function(c){
+      if (c.align === 'left') doc.text(c.label, c.left, by);
+      else doc.text(c.label, c.right - 4, by, { align:'right' });
+    });
+    by += 3; ln(LM+10, by, RM-10, by, 0.4, [234,223,192]); by += 10;
+    Wk.lines.slice(0, 8).forEach(function(r){
+      sf('normal',8,[0,0,0]);
+      doc.text(one(r.name + (r.isProd ? '' : '  (field labor)'), wcols[0].w - 6), wcols[0].left, by);
+      function put(i, txt, col){
+        sf('normal',8,col || [0,0,0]);
+        doc.text(String(txt), wcols[i].right - 4, by, { align:'right' });
+      }
+      put(1, r.units == null ? '\u2014' : (num(r.units) + (r.unitLabel ? (' ' + r.unitLabel) : '')));
+      put(2, num(r.hrs));
+      put(3, r.actMdu == null ? '\u2014' : n1(r.actMdu));
+      put(4, r.estMdu == null ? '\u2014' : n1(r.estMdu));
+      var dcol = r.dMdu == null ? GREY : (r.dMdu >= 0 ? GOOD : BAD);
+      put(5, r.dMdu == null ? '\u2014' : ((r.dMdu>0?'+':'\u2212') + n1(Math.abs(r.dMdu))), dcol);
+      put(6, r.dPct == null ? '\u2014' : ((r.dPct>0?'+':'\u2212') + n1(Math.abs(r.dPct)) + '%'), dcol);
+      by += 13;
+    });
+    if (Wk.lines.length > 8) {
+      sf('normal',7,GREY);
+      doc.text('+ ' + (Wk.lines.length - 8) + ' more item(s) with activity this week', wcols[0].left, by);
+      by += 11;
+    }
+    if (Wk.notes.length) {
+      sf('normal',7.5,[107,99,80]);
+      doc.text(one(Wk.notes.map(function(nt){ return _prodWeekLabel(nt.day) + ' \u2014 ' + nt.text; }).join('   \u00b7   '), RM-LM-24), LM+10, by+2);
+    }
+    y += bandH + 14;
+  })();
 
   function header(yy){
     sf('bold',7,[90,90,90]);
@@ -50915,7 +51204,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-08-rebidcopy';
+var KMI_BUILD = '2026-09-10-prodband';
 
 var _kmiSessionId = (function(){
   try {
@@ -52041,6 +52330,30 @@ function fromSBProdWeekly(r) {
     entries: (r.entries && typeof r.entries === 'object') ? r.entries : {},
     custom: Array.isArray(r.custom) ? r.custom : [],
     note: r.note || '',
+    createdAt: r.created_at || '',
+    updatedAt: r.updated_at || ''
+  };
+}
+// Weekly approval read mapper (P6). Read-only: there is deliberately no
+// toSB* counterpart, because the table has no INSERT/UPDATE grant and all
+// writes go through the three SECURITY DEFINER RPCs.
+function fromSBProdWeekApproval(r) {
+  return {
+    id: r.id,
+    projectId: r.project_id == null ? null : String(r.project_id),
+    weekStart: r.week_start || '',
+    weekEnd: r.week_end || '',
+    status: r.status || 'open',
+    noWork: !!r.no_work,
+    revision: Number(r.revision) || 0,
+    approvalNote: r.approval_note || '',
+    approvedByUserId: r.approved_by_user_id == null ? null : String(r.approved_by_user_id),
+    approvedAt: r.approved_at || '',
+    reopenedByUserId: r.reopened_by_user_id == null ? null : String(r.reopened_by_user_id),
+    reopenedAt: r.reopened_at || '',
+    reopenReason: r.reopen_reason || '',
+    distributedAt: r.distributed_at || '',
+    distributionEmailId: r.distribution_email_id || '',
     createdAt: r.created_at || '',
     updatedAt: r.updated_at || ''
   };
@@ -53333,6 +53646,23 @@ async function pullFromSupabase() {
     } else if (prodWkRes && prodWkRes.error) {
       console.warn('kmi_prod_weekly load error (table missing?):', prodWkRes.error.message);
       if (!Array.isArray(db.prodWeekly)) db.prodWeekly = [];
+    }
+    // Weekly approvals (P6). Fetched separately rather than joining the main
+    // Promise.all so the positional destructuring above stays untouched. The
+    // table is SELECT-only for authenticated users \u2014 every write goes through
+    // kmi_prod_week_approve / _reopen / _mark_distributed \u2014 so it must never be
+    // added to pushToSupabase().
+    try {
+      var pwaRes = await supabaseClient.from('kmi_prod_week_approvals').select('*');
+      if (pwaRes && !pwaRes.error) {
+        db.prodWeekApprovals = (pwaRes.data || []).map(fromSBProdWeekApproval);
+      } else {
+        if (pwaRes && pwaRes.error) console.warn('kmi_prod_week_approvals load error:', pwaRes.error.message);
+        if (!Array.isArray(db.prodWeekApprovals)) db.prodWeekApprovals = [];
+      }
+    } catch (e) {
+      console.warn('kmi_prod_week_approvals load threw:', e);
+      if (!Array.isArray(db.prodWeekApprovals)) db.prodWeekApprovals = [];
     }
     // Production catalog (Prod Catalog Round 1) — dedicated tables with A1
     // carry-forward. These used to live in the kmi_settings JSON blob; the
