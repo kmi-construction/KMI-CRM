@@ -4217,6 +4217,15 @@ var PERMISSIONS = {
   // tracking / referencing on customer calls, but only PMs and Admins
   // create/edit/send/transition them.
   'view-cors': ['full','full','read','read','none','none','none'],
+
+  // Job Cost Report (FND-M2 / B1). Roles are Admin, PM, PC, Accounting,
+  // Superintendent, Foreman, Shop. Per Section 12 decision D8: Admin,
+  // Accounting, PM and Superintendent read job cost; PC, Foreman and Shop
+  // get nothing. R10: only Admin, Accounting and PM may override a line's
+  // percent complete. The report RPCs gate independently on fnd_jobs
+  // visibility, so these rows control the UI, not the data.
+  'view-job-cost':     ['full','full','none','full','full','none','none'],
+  'edit-job-cost-pct': ['full','full','none','full','none','none','none'],
   'create-cor': ['full','full','none','none','none','none','none'],
   'edit-cor': ['full','full','none','none','none','none','none'],
   'send-cor': ['full','full','none','none','none','none','none'],
@@ -44339,15 +44348,469 @@ function renderProjectProduction() {
       _pst('estimate', 'Estimate') +
       _pst('weekly', 'Daily Entry') +
       _pst('tracking', 'Tracking') +
+      (hasFull('view-job-cost') ? _pst('jobcost', 'Job Cost Report') : '') +
     '</div>' +
     '<div id="nprj-prod-subcontent"></div>';
   if (_prodSubTab === 'weekly') renderProdWeeklyView();
   else if (_prodSubTab === 'tracking') renderProdTrackingView();
+  else if (_prodSubTab === 'jobcost') renderJobCostView();
   else renderProdEstimateView();
 }
 function prodSwSub(sub) {
-  _prodSubTab = (sub === 'weekly' || sub === 'tracking') ? sub : 'estimate';
+  // 'jobcost' is permission-gated: falling back to the estimate view keeps a
+  // stale _prodSubTab from stranding a user who lost the permission.
+  if (sub === 'jobcost' && !hasFull('view-job-cost')) sub = 'estimate';
+  _prodSubTab = (sub === 'weekly' || sub === 'tracking' || sub === 'jobcost') ? sub : 'estimate';
   renderProjectProduction();
+}
+// ════════════════════════════════════════════════════════════════════
+// JOB COST REPORT — Production sub-tab (Foundation FND-M2 / B1)
+//
+// Reads fnd_job_cost_report() and fnd_job_cost_summary(). Both RPCs are
+// SECURITY INVOKER and gate on whether the caller can see the job in
+// fnd_jobs, so a role that slipped past the UI check still gets nothing.
+//
+// Columns: % Comp | Budget | CO's | Pending | Total | Earned | Actual | Variance
+//   Budget  = buyout factor x Foundation orig_est_dollars
+//   CO's    = approved CORs from the app (Foundation carries none)
+//   Pending = app CORs, Pending status, T&M and premium time only
+//   Total   = the three added
+//   Earned  = Total x percent complete
+//   Variance= Earned - Actual
+//
+// Percent complete defaults to the project's production figure
+// (_prodTrackingCompute().pctCompleteLabor) and is overridable per line.
+// ════════════════════════════════════════════════════════════════════
+var _jcCutoff         = null;   // yyyy-mm-dd, null = today
+var _jcInclPending    = true;
+var _jcRows           = null;
+var _jcSummary        = null;
+var _jcMeta           = null;   // { jobStatus, lastSync }
+var _jcLoading        = false;
+var _jcError          = null;
+var _jcJobNo          = null;
+
+function _jcToday() {
+  var d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function _jcMoney(v) {
+  var n = Number(v || 0);
+  return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function _jcMoney0(v) {
+  var n = Number(v || 0);
+  return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+}
+function _jcDash() { return '<span style="color:#ccc">\u2014</span>'; }
+
+// Project's computed percent complete, labor-weighted, from the Tracking
+// view. One figure across both sub-tabs so they cannot drift apart.
+function _jcDefaultPct(p) {
+  try {
+    if (typeof _prodTrackingCompute !== 'function') return 0;
+    var C = _prodTrackingCompute(p, null);
+    var v = C && C.pctCompleteLabor ? Number(C.pctCompleteLabor) : 0;
+    if (!isFinite(v) || v <= 0) return 0;
+    return Math.round(v * 1000) / 10;      // fraction -> percent, one decimal
+  } catch (e) { console.warn('_jcDefaultPct', e); return 0; }
+}
+
+function renderJobCostView() {
+  var host = g('nprj-prod-subcontent'); if (!host) return;
+  var p = _prodCurrentProject(); if (!p) return;
+
+  if (!hasFull('view-job-cost')) {
+    host.innerHTML = '<div class="card"><div style="padding:40px 20px;text-align:center;color:#888">' +
+      '<div style="font-size:15px;font-weight:600;color:#555;margin-bottom:6px">Job cost isn\u2019t part of your access</div>' +
+      '<div style="font-size:13px">Ask an admin if you need it. Estimate, Daily Entry and Tracking are unaffected.</div>' +
+      '</div></div>';
+    return;
+  }
+
+  var jobNo = String(p.number || '').trim();
+  if (!jobNo) {
+    host.innerHTML = '<div class="card"><div style="padding:16px;color:#888;font-size:13px">' +
+      'This project has no job number yet. Set one on the Project Details tab and the report will find its Foundation cost.' +
+      '</div></div>';
+    return;
+  }
+
+  // Switching projects invalidates whatever is cached.
+  if (_jcJobNo !== jobNo) { _jcJobNo = jobNo; _jcRows = null; _jcSummary = null; _jcMeta = null; _jcError = null; }
+
+  host.innerHTML = _jcShellHtml(p, jobNo);
+  if (_jcRows === null && !_jcLoading) _jcLoad(jobNo, p);
+  else _jcPaint();
+}
+
+function _jcShellHtml(p, jobNo) {
+  var cutoff = _jcCutoff || _jcToday();
+  return '' +
+    '<div id="jc-banners"></div>' +
+    '<div class="card">' +
+      '<div class="ch">' +
+        '<span class="ct">Report parameters</span>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<label class="btn" style="display:inline-flex;align-items:center;gap:7px;cursor:pointer">' +
+            '<input type="checkbox" id="jc-pending" ' + (_jcInclPending ? 'checked' : '') +
+            ' onchange="jcTogglePending(this.checked)">Include pending CO\u2019s</label>' +
+          '<button class="btn" onclick="jcReload()">Refresh</button>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;align-items:end">' +
+        '<div><label style="display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:5px">Cost cutoff</label>' +
+          '<input type="date" id="jc-cutoff" value="' + cutoff + '" onchange="jcSetCutoff(this.value)" ' +
+          'style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:12.5px;font-family:inherit"></div>' +
+        '<div><label style="display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:5px">Foundation status</label>' +
+          '<div id="jc-status" style="padding-top:4px;font-size:12.5px;color:#888">\u2014</div></div>' +
+        '<div><label style="display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:5px">Data as of</label>' +
+          '<div id="jc-sync" style="padding-top:5px;font-size:12.5px;color:#888">\u2014</div></div>' +
+        '<div><label style="display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:5px">% complete basis</label>' +
+          '<div style="padding-top:5px;font-size:12.5px">' + _jcDefaultPct(p).toFixed(1) + '% \u00b7 from Tracking</div></div>' +
+      '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:10px;line-height:1.5">Includes postings booked through ' +
+        corEsc(cutoff) + '. Foundation holds A/P booked into the future \u2014 move the cutoff forward to see it.</div>' +
+    '</div>' +
+    '<div id="jc-metrics"></div>' +
+    '<div id="jc-body"><div class="card"><div style="padding:24px;text-align:center;color:#888;font-size:13px">Loading job cost\u2026</div></div></div>';
+}
+
+async function _jcLoad(jobNo, p) {
+  _jcLoading = true; _jcError = null;
+  try {
+    var cutoff = _jcCutoff || _jcToday();
+    var args = { p_job_no: jobNo, p_cutoff: cutoff, p_default_pct: _jcDefaultPct(p), p_include_pending: _jcInclPending };
+
+    var res = await Promise.all([
+      supabaseClient.rpc('fnd_job_cost_report',  args),
+      supabaseClient.rpc('fnd_job_cost_summary', args),
+      supabaseClient.from('fnd_jobs').select('job_no,job_status,original_contract').eq('job_no', jobNo).maybeSingle(),
+      supabaseClient.from('fnd_sync_runs').select('finished_at,status').eq('status','success')
+        .order('finished_at', { ascending: false }).limit(1)
+    ]);
+
+    if (res[0].error) throw res[0].error;
+    if (res[1].error) throw res[1].error;
+
+    _jcRows    = res[0].data || [];
+    _jcSummary = res[1].data || [];
+    _jcMeta    = {
+      jobStatus: (res[2] && res[2].data) ? res[2].data.job_status : null,
+      inFnd:     !!(res[2] && res[2].data),
+      lastSync:  (res[3] && res[3].data && res[3].data[0]) ? res[3].data[0].finished_at : null
+    };
+  } catch (e) {
+    console.warn('job cost load error', e);
+    _jcError = (e && e.message) ? e.message : String(e);
+    _jcRows = []; _jcSummary = [];
+  }
+  _jcLoading = false;
+  if (_prodSubTab === 'jobcost') _jcPaint();
+}
+
+function jcReload() { _jcRows = null; _jcSummary = null; renderJobCostView(); }
+function jcSetCutoff(v) { _jcCutoff = v || null; jcReload(); }
+function jcTogglePending(on) { _jcInclPending = !!on; jcReload(); }
+
+function _jcPaint() {
+  var p = _prodCurrentProject(); if (!p) return;
+  var bEl = g('jc-banners'), mEl = g('jc-metrics'), tEl = g('jc-body');
+  if (!tEl) return;
+
+  // ── banners ──
+  var banners = '';
+  if (_jcError) {
+    banners += '<div style="border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;' +
+      'background:#FBEDED;border:0.5px solid #E8B4B4;color:#8a2b2b">Job cost could not be loaded. ' +
+      corEsc(_jcError) + '</div>';
+  } else if (_jcMeta && !_jcMeta.inFnd) {
+    banners += '<div style="border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;' +
+      'background:#FBF4E2;border:0.5px solid #E8D08A;color:#6b5518">Job <b>' + corEsc(_jcJobNo) +
+      '</b> isn\u2019t in Foundation, or isn\u2019t one you have access to. Budget and actuals will read zero.</div>';
+  } else if (_jcMeta && _jcMeta.jobStatus && _jcMeta.jobStatus !== 'A') {
+    banners += '<div style="border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;' +
+      'background:#FBF4E2;border:0.5px solid #E8D08A;color:#6b5518">This job is <b>' +
+      corEsc(_jcMeta.jobStatus) + '</b> in Foundation. Figures are no longer updating.</div>';
+  }
+  if (bEl) bEl.innerHTML = banners;
+
+  // ── header chips ──
+  var sEl = g('jc-status');
+  if (sEl && _jcMeta) {
+    var st = _jcMeta.jobStatus;
+    var lbl = st === 'A' ? 'A \u2014 Active' : (st === 'C' ? 'C \u2014 Closed' : (st || 'not in Foundation'));
+    var bg  = st === 'A' ? '#EAF3E2' : '#eee', fg = st === 'A' ? '#3B6D11' : '#666';
+    sEl.innerHTML = '<span style="display:inline-block;font-size:10.5px;font-weight:600;padding:2px 8px;' +
+      'border-radius:20px;background:' + bg + ';color:' + fg + '">' + corEsc(lbl) + '</span>';
+  }
+  var syncEl = g('jc-sync');
+  if (syncEl && _jcMeta) {
+    if (!_jcMeta.lastSync) {
+      syncEl.innerHTML = '<span style="color:var(--acd)">no successful sync recorded</span>';
+    } else {
+      var d = new Date(_jcMeta.lastSync);
+      var hrs = (Date.now() - d.getTime()) / 36e5;
+      var col = hrs > 36 ? 'var(--acd)' : '#3B6D11';
+      syncEl.innerHTML = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;' +
+        'background:' + col + '"></span>' + d.toLocaleString() +
+        (hrs > 36 ? ' <span style="color:var(--acd);font-weight:600">\u00b7 stale</span>' : '');
+    }
+  }
+
+  var rows = _jcRows || [];
+  if (!rows.length) {
+    if (mEl) mEl.innerHTML = '';
+    tEl.innerHTML = '<div class="card"><div style="padding:24px;text-align:center;color:#888;font-size:13px">' +
+      'No job cost to show for this job.</div></div>';
+    return;
+  }
+
+  var sm = {};
+  (_jcSummary || []).forEach(function(r){ sm[r.metric] = r; });
+  var direct = sm['Total direct cost'] || {}, totc = sm['Total cost'] || {},
+      contract = sm['Contract price'] || {}, profit = sm['Profit'] || {};
+
+  // ── metrics ──
+  if (mEl) {
+    var vTot = Number(direct.earned || 0) - Number(direct.actual || 0);
+    var pctAll = Number(direct.total) > 0 ? Math.round(100 * Number(direct.earned) / Number(direct.total)) : 0;
+    function met(label, val, sub, col) {
+      return '<div class="mc" style="background:#fff;border:0.5px solid #e5e5e5;border-left:3px solid var(--kmi);' +
+        'border-radius:8px;padding:14px 16px">' +
+        '<div style="font-size:11px;color:#888;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">' + label + '</div>' +
+        '<div style="font-size:22px;font-weight:600;font-variant-numeric:tabular-nums' + (col ? ';color:' + col : '') + '">' + val + '</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:2px">' + sub + '</div></div>';
+    }
+    mEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px">' +
+      met('Contract', _jcMoney0(contract.total), 'incl. change orders', '') +
+      met('Cost to date', _jcMoney0(totc.actual), (Number(direct.total) > 0 ?
+          Math.round(100 * Number(direct.actual) / Number(direct.total)) : 0) + '% of total cost', 'var(--kmi3)') +
+      met('Earned', _jcMoney0(direct.earned), pctAll + '% complete overall', '') +
+      met('Cost variance', _jcMoney0(vTot), vTot >= 0 ? 'earned above cost' : 'cost above earned',
+          vTot >= 0 ? '#3B6D11' : '#A32D2D') +
+      met('Projected profit', _jcMoney0(profit.total), 'contract less total cost',
+          Number(profit.total) >= 0 ? '#3B6D11' : '#A32D2D') +
+    '</div>';
+  }
+
+  // ── table ──
+  var canEdit = hasFull('edit-job-cost-pct');
+  var h = '<div class="card"><div class="ch"><span class="ct">Cost report</span>' +
+    '<span style="font-size:11px;color:#888">Click a line for its transactions' +
+    (canEdit ? ' \u00b7 percent complete is editable' : '') + '</span></div>' +
+    '<div style="overflow-x:auto"><table style="min-width:940px;width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums">' +
+    '<thead><tr>' + _jcTh('Line', true) + _jcTh('% Comp') + _jcTh('Budget') + _jcTh('CO\u2019s') +
+    _jcTh('Pending') + _jcTh('Total') + _jcTh('Earned') + _jcTh('Actual') + _jcTh('Variance') +
+    '</tr></thead><tbody>';
+
+  rows.forEach(function(r){
+    var v = Number(r.variance || 0);
+    h += '<tr>' +
+      '<td style="padding:7px 10px;border-bottom:0.5px solid #f0f0f0;font-size:12.5px;color:var(--kmi);' +
+        'font-weight:500;cursor:pointer" onclick="jcDrill(\'' + encodeURIComponent(r.line_key) + '\')">' +
+        corEsc(r.line_key) + '</td>' +
+      '<td style="' + _jcTd() + '">' +
+        (Number(r.total) !== 0
+          ? '<input type="number" min="0" max="100" step="0.1" value="' + Number(r.pct_complete) + '" ' +
+            (canEdit ? 'onchange="jcSetPct(\'' + encodeURIComponent(r.line_key) + '\',this.value)"' : 'disabled') +
+            ' style="width:58px;text-align:right;border:1px solid transparent;border-radius:5px;padding:3px 5px;' +
+            'font-size:12.5px;font-family:inherit;background:transparent;font-variant-numeric:tabular-nums">' +
+            (r.pct_override ? '<span title="Overridden on this line" style="display:inline-block;width:6px;height:6px;' +
+              'border-radius:50%;background:var(--ac);margin-left:5px;vertical-align:middle"></span>' : '')
+          : _jcDash()) + '</td>' +
+      '<td style="' + _jcTd() + '">' + _jcMoney(r.budget) + '</td>' +
+      '<td style="' + _jcTd() + '">' + (Number(r.co_amount) ? _jcMoney(r.co_amount) : _jcDash()) + '</td>' +
+      '<td style="' + _jcTd() + '">' + (Number(r.pending)
+          ? '<span style="color:var(--acd)">' + _jcMoney(r.pending) + '</span>' : _jcDash()) + '</td>' +
+      '<td style="' + _jcTd() + '">' + _jcMoney(r.total) + '</td>' +
+      '<td style="' + _jcTd() + '">' + _jcMoney(r.earned) + '</td>' +
+      '<td style="' + _jcTd() + '">' + _jcMoney(r.actual) + '</td>' +
+      '<td style="' + _jcTd() + ';color:' + (v >= 0 ? '#3B6D11' : '#A32D2D') + '">' + _jcMoney(v) + '</td>' +
+    '</tr>';
+  });
+
+  (_jcSummary || []).forEach(function(s){
+    var strong = (s.metric === 'Total cost' || s.metric === 'Profit');
+    var bg = strong ? 'var(--kmi)' : '#fafafa', fg = strong ? '#fff' : '#1a1a1a';
+    var sd = 'padding:8px 10px;text-align:right;font-size:12.5px;font-weight:600;background:' + bg + ';color:' + fg +
+             ';border-top:1px solid #e5e5e5';
+    var pctCell = (s.metric === 'Profit') ? '' :
+      (Number(s.total) > 0 ? Math.round(100 * Number(s.earned || 0) / Number(s.total)) + '%' : '');
+    h += '<tr>' +
+      '<td style="' + sd + ';text-align:left">' + corEsc(s.metric) + '</td>' +
+      '<td style="' + sd + '">' + pctCell + '</td>' +
+      '<td style="' + sd + '">' + _jcMoney(s.budget) + '</td>' +
+      '<td style="' + sd + '">' + _jcMoney(s.co_amount) + '</td>' +
+      '<td style="' + sd + '">' + (Number(s.pending) ? _jcMoney(s.pending) : _jcDash()) + '</td>' +
+      '<td style="' + sd + '">' + _jcMoney(s.total) + '</td>' +
+      '<td style="' + sd + '">' + _jcMoney(s.earned) + '</td>' +
+      '<td style="' + sd + '">' + (s.actual === null || s.actual === undefined ? _jcDash() : _jcMoney(s.actual)) + '</td>' +
+      '<td style="' + sd + '"></td>' +
+    '</tr>';
+  });
+
+  h += '</tbody></table></div>' +
+    '<div style="font-size:11px;color:#888;margin-top:14px;line-height:1.6">' +
+      '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ac);margin-right:5px"></span>' +
+      'Percent complete overridden on this line. Lines without a dot follow the project\u2019s Tracking figure.<br>' +
+      'Budget is the bought-out estimate (factor \u00d7 Foundation estimate). CO\u2019s are approved change orders from the app; ' +
+      'Foundation carries none. <span style="color:var(--acd)">Pending</span> is T&amp;M and premium-time CORs awaiting approval \u2014 ' +
+      'switch it off above and the report reconciles to Foundation exactly. Variance is Earned less Actual.' +
+    '</div></div>';
+
+  tEl.innerHTML = h;
+}
+
+function _jcTh(label, left) {
+  return '<th style="font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;' +
+    'padding:0 10px 8px;text-align:' + (left ? 'left' : 'right') + ';border-bottom:1px solid #e5e5e5">' + label + '</th>';
+}
+function _jcTd() {
+  return 'padding:7px 10px;text-align:right;border-bottom:0.5px solid #f0f0f0;font-size:12.5px';
+}
+
+// ── Percent complete override (R9 / R10) ────────────────────────────────
+// Only overridden lines are stored, so clearing a value removes the row and
+// the line falls back to the project's Tracking figure automatically.
+async function jcSetPct(lineKeyEnc, val) {
+  if (!hasFull('edit-job-cost-pct')) return;
+  var lineKey = decodeURIComponent(lineKeyEnc);
+  var p = _prodCurrentProject(); if (!p) return;
+  var jobNo = String(p.number || '').trim(); if (!jobNo) return;
+
+  var n = Number(val);
+  if (!isFinite(n)) return;
+  n = Math.max(0, Math.min(100, n));
+
+  try {
+    var r = await supabaseClient.from('kmi_job_cost_pct_complete').upsert({
+      job_no:       jobNo,
+      line_key:     lineKey,
+      pct_complete: n,
+      set_by:       _currentUser ? (_currentUser.email || _currentUser.name || '') : '',
+      set_at:       new Date().toISOString()
+    }, { onConflict: 'job_no,line_key' });
+    if (r.error) throw r.error;
+  } catch (e) {
+    console.warn('pct override save failed', e);
+    alert('Could not save the percent complete override: ' + ((e && e.message) ? e.message : e));
+    return;
+  }
+  jcReload();
+}
+
+// ── Drill-down (R11) ────────────────────────────────────────────────────
+// Transaction grain from fnd_job_history, filtered to the clicked report
+// line by re-running the ladder client-side against the rows returned.
+// Capped at 500 rows; PostgREST caps server-side anyway.
+async function jcDrill(lineKeyEnc) {
+  var lineKey = decodeURIComponent(lineKeyEnc);
+  var p = _prodCurrentProject(); if (!p) return;
+  var jobNo = String(p.number || '').trim(); if (!jobNo) return;
+  var cutoff = _jcCutoff || _jcToday();
+
+  showModal('<div style="padding:24px;text-align:center;color:#888;font-size:13px">Loading transactions\u2026</div>');
+
+  try {
+    var r = await supabaseClient
+      .from('fnd_job_history')
+      .select('date_booked,job_trx_type,module_from,vendor_no,employee_no,voucher_no,description_1,cost,units,cost_code_no,cost_class_no')
+      .eq('job_no', jobNo)
+      .lte('date_booked', cutoff)
+      .order('date_booked', { ascending: false })
+      .limit(500);
+    if (r.error) throw r.error;
+
+    var all = r.data || [];
+    var rows = all.filter(function(x){ return _jcLadder(x.cost_code_no, x.cost_class_no) === lineKey; });
+    _jcDrillRows = rows;
+
+    var sum = rows.reduce(function(a,x){ return a + Number(x.cost || 0); }, 0);
+    var body = rows.map(function(x){
+      var who = x.employee_no || x.vendor_no || '';
+      return '<tr>' +
+        '<td style="' + _jcDtd('left')  + '">' + corEsc(x.date_booked || '') + '</td>' +
+        '<td style="' + _jcDtd('left')  + '">' + corEsc(x.module_from || x.job_trx_type || '') + '</td>' +
+        '<td style="' + _jcDtd('left')  + '">' + corEsc(who) + '</td>' +
+        '<td style="' + _jcDtd('left')  + '">' + corEsc(x.voucher_no || '') + '</td>' +
+        '<td style="' + _jcDtd('left')  + '">' + corEsc(x.description_1 || '') + '</td>' +
+        '<td style="' + _jcDtd('right') + '">' + (Number(x.units) ? Number(x.units).toFixed(1) : '\u2014') + '</td>' +
+        '<td style="' + _jcDtd('right') + '">' + _jcMoney(x.cost) + '</td>' +
+      '</tr>';
+    }).join('');
+
+    showModal(
+      '<div class="ch"><span class="ct">' + corEsc(lineKey) + ' \u2014 transactions</span>' +
+        '<div style="display:flex;gap:8px">' +
+          (rows.length ? '<button class="btn" onclick="jcDrillCsv(\'' + encodeURIComponent(lineKey) + '\')">Export CSV</button>' : '') +
+          '<button class="btn" onclick="closeModal()">Close</button>' +
+        '</div></div>' +
+      (rows.length
+        ? '<div style="overflow-x:auto;max-height:60vh;overflow-y:auto"><table style="width:100%;min-width:760px;border-collapse:collapse;font-variant-numeric:tabular-nums">' +
+          '<thead><tr>' + _jcTh('Booked', true) + _jcTh('Source', true) + _jcTh('Vendor / employee', true) +
+          _jcTh('Voucher', true) + _jcTh('Description', true) + _jcTh('Hours') + _jcTh('Cost') + '</tr></thead>' +
+          '<tbody>' + body + '</tbody></table></div>' +
+          '<div style="font-size:11.5px;color:#888;line-height:1.6;margin-top:10px">' + rows.length +
+          ' rows, ' + _jcMoney(sum) + ', booked through ' + corEsc(cutoff) +
+          (all.length >= 500 ? '. <b>Capped at 500 rows for the job</b> \u2014 narrow the cutoff to see older cost.' : '.') + '</div>'
+        : '<div style="padding:30px;text-align:center;color:#888;font-size:13px">No cost booked to this line through ' +
+          corEsc(cutoff) + '.</div>')
+    );
+  } catch (e) {
+    console.warn('drill-down failed', e);
+    showModal('<div class="ch"><span class="ct">Transactions</span>' +
+      '<button class="btn" onclick="closeModal()">Close</button></div>' +
+      '<div style="padding:20px;color:#A32D2D;font-size:13px">Could not load transactions. ' +
+      corEsc((e && e.message) ? e.message : String(e)) + '</div>');
+  }
+}
+var _jcDrillRows = [];
+
+function jcDrillCsv(lineKeyEnc) {
+  var lineKey = decodeURIComponent(lineKeyEnc);
+  var p = _prodCurrentProject();
+  var jobNo = p ? String(p.number || '').trim() : '';
+  var head = ['Job','Line','Booked','Source','Vendor/Employee','Voucher','Description','Hours','Cost'];
+  var lines = [head.join(',')];
+  (_jcDrillRows || []).forEach(function(x){
+    lines.push([jobNo, lineKey, x.date_booked || '', x.module_from || x.job_trx_type || '',
+      x.employee_no || x.vendor_no || '', x.voucher_no || '', x.description_1 || '',
+      Number(x.units || 0), Number(x.cost || 0)]
+      .map(function(v){ return '"' + String(v).replace(/"/g, '""') + '"'; }).join(','));
+  });
+  var blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = jobNo + '-' + lineKey.replace(/[^A-Za-z0-9]+/g, '-') + '.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+}
+
+// Client-side mirror of fnd_report_line(). Used ONLY to filter drill-down
+// rows to the clicked line — every figure on the report itself comes from
+// the database function. If the SQL ladder changes, change this with it.
+function _jcLadder(code, cls) {
+  var C = String(code == null ? '' : code), K = String(cls == null ? '' : cls);
+  if (K === '3') return 'Subcontracts';
+  if (K === '21') return 'Excluded';
+  if (C === '1650') return 'Trucking';
+  if (K === '7') return 'Winter Protection';
+  if (C === '5000' && (K === '1' || K === '8')) return 'Winter Protection Labor';
+  if (K === '1' || K === '8') return 'Labor Cost';
+  if (K === '2' || K === '22' || K === '24' || K === '25') return 'Material Cost';
+  if (C === '1000') return 'General Conditions';
+  if (K === '4') return 'Small Tools';
+  if (K === '5' || K === '14' || K === '60') return 'Equipment';
+  if (K === '6') return 'Dumpsters & Other Costs';
+  if (K === '9') return 'Scaffolding';
+  if (K === '10') return 'Truck Fuel';
+  if (K === '11') return 'Safety Expense';
+  if (K === '12' || K === '17' || K === '18' || K === '19' || K === '20') return 'General Conditions';
+  return 'Unassigned';
+}
+function _jcDtd(align) {
+  return 'padding:6px 10px;text-align:' + align + ';border-bottom:0.5px solid #f0f0f0;font-size:12px';
 }
 function renderProdEstimateView() {
   var host = g('nprj-prod-subcontent'); if (!host) return;
@@ -52058,7 +52521,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-10-proddist';
+var KMI_BUILD = '2026-09-11-jc1';
 
 var _kmiSessionId = (function(){
   try {
