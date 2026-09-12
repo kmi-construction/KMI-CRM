@@ -3299,6 +3299,7 @@ tr.gc-line:hover td{background:#fafafa}
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
     <button class="btn" onclick="_smartUpCorCancel(); nav('cors');">Cancel</button>
     <button class="btn" onclick="downloadCorPDF()" id="ncor-pdf-btn" style="display:none" title="Generate the COR PDF (Standard or Hunzinger format depending on the project)">⬇ Download PDF</button>
+    <button class="btn" onclick="corOpenDistribution()" id="ncor-dist-btn" style="display:none" title="Set which cost codes this COR's cost rolls up to">⚙ Cost distribution</button>
     <button class="btn" onclick="corExportFoundationHeaderCsv()" id="ncor-fnd-header-btn" style="display:none" title="Generate the Foundation CO Header CSV (1 row)">⬇ Export Header CSV</button>
     <button class="btn" onclick="corExportFoundationDetailCsv()" id="ncor-fnd-detail-btn" style="display:none" title="Generate the Foundation CO Detail CSV (cost-code lines)">⬇ Export Detail CSV</button>
     <button class="btn" onclick="showSendCorToCustomerMenu()" id="ncor-send-btn" style="display:none" title="Send the COR to the customer (email PDF or mark as sent)">Send to customer ▾</button>
@@ -19704,6 +19705,10 @@ async function saveCor() {
           }
         }
         var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(existingCor));
+        // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
+        // the report falls back to class-only mapping if this fails.
+        try { await corSyncDistribution(existingCor, getProj(existingCor.projectId)); }
+        catch (e) { console.warn('distribution sync', e); }
         if (upRes && upRes.error) {
           console.warn('COR sync error:', upRes.error.message);
           alert('WARNING \u2014 this COR saved locally but did not reach the cloud:\n\n' +
@@ -19813,6 +19818,10 @@ async function saveCor() {
         }
       }
       var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(newCor));
+      // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
+      // the report falls back to class-only mapping if this fails.
+      try { await corSyncDistribution(newCor, getProj(newCor.projectId)); }
+      catch (e) { console.warn('distribution sync', e); }
       if (upRes && upRes.error) {
         console.warn('COR sync error:', upRes.error.message);
         alert('COR created locally but cloud sync failed: ' + upRes.error.message + '\nIt will retry on next push.');
@@ -19900,6 +19909,8 @@ function _refreshCorActionButtons(c) {
   // Foundation export buttons: visible on any saved COR (any status), gated
   // by the export-cor-foundation permission. The workflow is: create/send
   // the COR → simultaneously hand the two CSVs to Accounting for Foundation.
+  var _distBtn = g('ncor-dist-btn');
+  if (_distBtn) _distBtn.style.display = hasFull('export-cor-foundation') ? '' : 'none';
   if (hasFull('export-cor-foundation')) {
     if (g('ncor-fnd-header-btn')) g('ncor-fnd-header-btn').style.display = '';
     if (g('ncor-fnd-detail-btn')) g('ncor-fnd-detail-btn').style.display = '';
@@ -20655,6 +20666,10 @@ async function confirmSmartUploadCor() {
   try {
     if (supabaseClient) {
       var corRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(newCor));
+      // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
+      // the report falls back to class-only mapping if this fails.
+      try { await corSyncDistribution(newCor, getProj(newCor.projectId)); }
+      catch (e) { console.warn('distribution sync', e); }
       if (corRes && corRes.error) {
         // Common case: the smart_uploaded* columns don't exist yet (migration
         // not run). Surface that clearly to the user without bricking the save.
@@ -22008,6 +22023,10 @@ async function _corPersistTransition(c, opts) {
   try {
     if (supabaseClient) {
       var corRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(c));
+      // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
+      // the report falls back to class-only mapping if this fails.
+      try { await corSyncDistribution(c, getProj(c.projectId)); }
+      catch (e) { console.warn('distribution sync', e); }
       if (corRes && corRes.error) console.warn('COR transition sync error:', corRes.error.message);
       if (opts && opts.tickets && opts.tickets.length) {
         var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(opts.tickets.map(toSBTmTicket));
@@ -25822,6 +25841,269 @@ function corShowFoundationValidationAndRun(title, validation, runFn) {
 }
 
 // ── CO Header CSV export ───────────────────────────────────────────────
+
+// ════════════════════════════════════════════════════════════════════
+// COR COST DISTRIBUTION (FND-M2 / B2)
+//
+// Writes kmi_cor_distribution so the Job Cost Report can put change-order
+// cost on ANY budgeted line, not just the four the class fallback reaches.
+//
+// The amounts come from corBuildFoundationDetailRows(), which is already
+// the cost-correct path: it uses corComputeLaborCost() rather than
+// cor.totalLabor, because totalLabor is the CUSTOMER-BILLED amount, not
+// what the work costs us. Materials, subs and equipment are raw cost
+// already, with OH&P living in the header Income column.
+//
+// Manual rows survive re-derivation. The rule is per BUCKET: if a bucket
+// has any manual row, that whole bucket is user-owned and is not derived
+// again. Anything else would double-count a re-coded row.
+// ════════════════════════════════════════════════════════════════════
+
+// Foundation cost class -> COR section. Unit price is never inferred here
+// because it shares class 2 with materials; it is added explicitly below.
+function _corBucketForClass(cls) {
+  var K = String(cls == null ? '' : cls);
+  if (K === '1') return 'labor';
+  if (K === '2') return 'material';
+  if (K === '3') return 'sub';
+  if (K === '5' || K === '6' || K === '10' || K === '11') return 'equipment';
+  return 'other';
+}
+
+// Deterministic id so a re-run upserts in place rather than duplicating.
+function _corDistId(corId, bucket, code, cls) {
+  return String(corId) + ':' + bucket + ':' + String(code || '') + ':' + String(cls || '');
+}
+
+// Build the derived distribution for a COR. Returns { rows, warnings }.
+function corBuildDistributionRows(cor, project) {
+  var out = [], warnings = [];
+  if (!cor || !project) return { rows: out, warnings: ['COR or project missing.'] };
+
+  var built = corBuildFoundationDetailRows(cor, project);
+
+  (built.rows || []).forEach(function(r){
+    var code = r[0], cls = r[1], amt = Number(r[2]) || 0;
+    if (Math.abs(amt) <= 0.005) return;
+    out.push({ bucket: _corBucketForClass(cls), cost_code: String(code || ''),
+               cost_class: String(cls || ''), amount: Math.round(amt * 100) / 100, source: 'derived' });
+  });
+
+  // E3 — Unit Pricing. The Foundation export ignores this section entirely,
+  // so without this the money reaches neither Foundation nor the report.
+  var up = Number(cor.totalUnitPrice) || 0;
+  if (Math.abs(up) > 0.005) {
+    out.push({ bucket: 'unit_price',
+               cost_code: String(project.coDefaultMaterialCostCode || '4000'),
+               cost_class: '2',
+               amount: Math.round(up * 100) / 100, source: 'derived' });
+    warnings.push('Unit pricing of ' + fmtC(up) + ' coded to the project default material code, class 2. ' +
+                  'Re-code it below if it belongs elsewhere.');
+  }
+
+  // E5 — never drop cost silently.
+  function warnUnmapped(list, label) {
+    (list || []).forEach(function(u){
+      warnings.push(label + ' \u2014 ' + corEsc(u.description || u.reason || 'unmapped') +
+                    ' routed to the project default code.');
+    });
+  }
+  warnUnmapped(built.unmappedMaterials, 'Material');
+  warnUnmapped(built.unmappedSubs,      'Subcontractor');
+  warnUnmapped(built.unmappedEquipment, 'Equipment');
+
+  return { rows: out, warnings: warnings };
+}
+
+// Write the distribution for one COR. Safe to call on every save.
+async function corSyncDistribution(cor, project) {
+  if (!supabaseClient || !cor || !cor.id || !project) return { ok: false, skipped: true };
+  try {
+    var ex = await supabaseClient.from('kmi_cor_distribution').select('id,bucket,source').eq('cor_id', cor.id);
+    if (ex.error) throw ex.error;
+
+    // Buckets the user has taken ownership of are left alone (E2).
+    var manualBuckets = {};
+    (ex.data || []).forEach(function(r){ if (r.source === 'manual') manualBuckets[r.bucket] = true; });
+
+    var staleDerived = (ex.data || [])
+      .filter(function(r){ return r.source !== 'manual' && !manualBuckets[r.bucket]; })
+      .map(function(r){ return r.id; });
+
+    var built = corBuildDistributionRows(cor, project);
+    var fresh = built.rows
+      .filter(function(r){ return !manualBuckets[r.bucket]; })
+      .map(function(r){
+        return { id: _corDistId(cor.id, r.bucket, r.cost_code, r.cost_class),
+                 cor_id: cor.id, bucket: r.bucket, cost_code: r.cost_code,
+                 cost_class: r.cost_class, amount: r.amount, source: 'derived',
+                 updated_at: new Date().toISOString(),
+                 updated_by_user_id: _currentUser ? _currentUser.id : null };
+      });
+
+    var keep = {};
+    fresh.forEach(function(r){ keep[r.id] = true; });
+    var toDelete = staleDerived.filter(function(id){ return !keep[id]; });
+    if (toDelete.length) {
+      var del = await supabaseClient.from('kmi_cor_distribution').delete().in('id', toDelete);
+      if (del.error) throw del.error;
+    }
+    if (fresh.length) {
+      var up = await supabaseClient.from('kmi_cor_distribution').upsert(fresh, { onConflict: 'id' });
+      if (up.error) throw up.error;
+    }
+    return { ok: true, written: fresh.length, warnings: built.warnings, manualBuckets: Object.keys(manualBuckets) };
+  } catch (e) {
+    // Non-fatal by design: the COR itself already saved, and the report
+    // falls back to the class-only mapping until this succeeds.
+    console.warn('COR distribution sync failed:', e && e.message ? e.message : e);
+    return { ok: false, error: (e && e.message) ? e.message : String(e) };
+  }
+}
+
+// ── Review panel (E1) ───────────────────────────────────────────────────
+var _corDistRows = [];
+var _corDistCorId = null;
+
+async function corOpenDistribution() {
+  var c = _corCurrent();
+  if (!c) { alert('Save the COR first, then set its cost distribution.'); return; }
+  var p = getProj(c.projectId);
+  if (!p) { alert('This COR has no project, so there are no cost codes to distribute to.'); return; }
+  _corDistCorId = c.id;
+  showModal('<div style="padding:24px;text-align:center;color:#888;font-size:13px">Loading cost distribution\u2026</div>');
+  await corSyncDistribution(c, p);
+  await _corDistPaint(c, p);
+}
+
+async function _corDistPaint(c, p) {
+  var rows = [], err = null;
+  try {
+    var r = await supabaseClient.from('kmi_cor_distribution').select('*').eq('cor_id', c.id).order('bucket');
+    if (r.error) throw r.error;
+    rows = r.data || [];
+  } catch (e) { err = (e && e.message) ? e.message : String(e); }
+  _corDistRows = rows;
+
+  var built = corBuildDistributionRows(c, p);
+  var total = rows.reduce(function(s, x){ return s + (Number(x.amount) || 0); }, 0);
+  var isAdmin = hasFull('edit-job-cost-pct');
+
+  var body = rows.map(function(x, i){
+    return '<tr>' +
+      '<td style="' + _corDtd('left') + '">' + corEsc(x.bucket) + '</td>' +
+      '<td style="' + _corDtd('left') + '"><input value="' + corEsc(x.cost_code) + '" ' +
+        'onchange="corDistEdit(' + i + ',\'cost_code\',this.value)" ' +
+        'style="width:90px;padding:4px 6px;border:1px solid #ddd;border-radius:5px;font-size:12px;font-family:inherit"></td>' +
+      '<td style="' + _corDtd('left') + '"><input value="' + corEsc(x.cost_class) + '" ' +
+        'onchange="corDistEdit(' + i + ',\'cost_class\',this.value)" ' +
+        'style="width:60px;padding:4px 6px;border:1px solid #ddd;border-radius:5px;font-size:12px;font-family:inherit"></td>' +
+      '<td style="' + _corDtd('left') + ';color:var(--kmi);font-weight:500">' +
+        corEsc(_jcLadder(x.cost_code, x.cost_class)) + '</td>' +
+      '<td style="' + _corDtd('right') + '"><input type="number" step="0.01" value="' + (Number(x.amount) || 0) + '" ' +
+        'onchange="corDistEdit(' + i + ',\'amount\',this.value)" ' +
+        'style="width:110px;text-align:right;padding:4px 6px;border:1px solid #ddd;border-radius:5px;font-size:12px;font-family:inherit"></td>' +
+      '<td style="' + _corDtd('left') + '">' + (x.source === 'manual'
+        ? '<span style="font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:20px;background:#FBF4E2;color:#6b5518">manual</span>'
+        : '<span style="font-size:10.5px;color:#999">derived</span>') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  var warn = (built.warnings || []).length
+    ? '<div style="border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;background:#FBF4E2;' +
+      'border:0.5px solid #E8D08A;color:#6b5518">' + built.warnings.map(corEsc).join('<br>') + '</div>'
+    : '';
+
+  showModal(
+    '<div class="ch"><span class="ct">Cost distribution \u2014 COR ' + corEsc(c.corNumber || '') + '</span>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn" onclick="corDistRederive()">Re-derive</button>' +
+        (isAdmin ? '<button class="btn" onclick="corRebuildAllDistributions()">Rebuild all CORs</button>' : '') +
+        '<button class="btn" onclick="closeModal()">Close</button>' +
+      '</div></div>' +
+    (err ? '<div style="border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;background:#FBEDED;' +
+           'border:0.5px solid #E8B4B4;color:#8a2b2b">' + corEsc(err) + '</div>' : '') +
+    warn +
+    '<div style="font-size:12.5px;color:#555;line-height:1.6;margin-bottom:12px">' +
+      'These are <b>cost</b> amounts, not billed amounts \u2014 labor is priced at the project\u2019s cost rates, ' +
+      'and OH&amp;P stays on the COR total. Change a cost code and the line it rolls to updates live. ' +
+      'Editing a row marks its section <b>manual</b>, and re-deriving will leave that section alone.' +
+    '</div>' +
+    (rows.length
+      ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums">' +
+        '<thead><tr>' + _jcTh('Section', true) + _jcTh('Cost code', true) + _jcTh('Class', true) +
+        _jcTh('Rolls up to', true) + _jcTh('Amount') + _jcTh('Source', true) + '</tr></thead>' +
+        '<tbody>' + body + '</tbody></table></div>' +
+        '<div style="font-size:11.5px;color:#888;margin-top:10px">Total distributed <b>' + fmtC(total) + '</b>' +
+        ' \u00b7 COR total ' + fmtC(Number(c.totalAmount) || 0) + ' (income, incl. OH&amp;P)</div>'
+      : '<div style="padding:26px;text-align:center;color:#888;font-size:13px">Nothing to distribute \u2014 this COR has no cost rows.</div>')
+  );
+}
+
+function _corDtd(align) {
+  return 'padding:6px 10px;text-align:' + align + ';border-bottom:0.5px solid #f0f0f0;font-size:12px';
+}
+
+// Any edit takes ownership of that section (E2).
+async function corDistEdit(idx, field, val) {
+  var row = _corDistRows[idx]; if (!row) return;
+  var patch = { source: 'manual', updated_at: new Date().toISOString(),
+                updated_by_user_id: _currentUser ? _currentUser.id : null };
+  patch[field] = (field === 'amount') ? (Number(val) || 0) : String(val || '').trim();
+  try {
+    var r = await supabaseClient.from('kmi_cor_distribution').update(patch).eq('id', row.id);
+    if (r.error) throw r.error;
+    // Mark the rest of the section manual too, so a re-derive cannot
+    // re-add the row this one was moved away from.
+    var sib = await supabaseClient.from('kmi_cor_distribution')
+      .update({ source: 'manual' }).eq('cor_id', row.cor_id).eq('bucket', row.bucket);
+    if (sib.error) throw sib.error;
+  } catch (e) {
+    alert('Could not save the distribution change: ' + ((e && e.message) ? e.message : e));
+    return;
+  }
+  var c = _corCurrent();
+  if (c) await _corDistPaint(c, getProj(c.projectId));
+}
+
+// Drop manual ownership and rebuild this COR from the derivation.
+async function corDistRederive() {
+  var c = _corCurrent(); if (!c) return;
+  var p = getProj(c.projectId); if (!p) return;
+  if (!confirm('Re-derive this COR\u2019s distribution from its cost rows?\n\nAny manual coding on this COR will be discarded.')) return;
+  try {
+    var d = await supabaseClient.from('kmi_cor_distribution').delete().eq('cor_id', c.id);
+    if (d.error) throw d.error;
+  } catch (e) { alert('Could not clear the existing distribution: ' + ((e && e.message) ? e.message : e)); return; }
+  await corSyncDistribution(c, p);
+  await _corDistPaint(c, p);
+}
+
+// ── E4 backfill ─────────────────────────────────────────────────────────
+// Every COR without distribution rows falls back to a class-only mapping
+// that reads cor.totalLabor — the BILLED figure — as cost. Until this has
+// been run once, change-order labor is overstated on every job.
+async function corRebuildAllDistributions() {
+  if (!hasFull('edit-job-cost-pct')) { alert('Admins and Accounting only.'); return; }
+  var cors = (db.cors || []).filter(function(c){
+    return c && c.id && (c.status === 'Pending' || c.status === 'Approved');
+  });
+  if (!cors.length) { alert('No pending or approved CORs to rebuild.'); return; }
+  if (!confirm('Rebuild cost distribution for ' + cors.length + ' pending and approved CORs?\n\n' +
+               'Sections already coded manually are left untouched.')) return;
+
+  var ok = 0, failed = 0, skipped = 0;
+  for (var i = 0; i < cors.length; i++) {
+    var c = cors[i];
+    var p = getProj(c.projectId);
+    if (!p) { skipped++; continue; }
+    var r = await corSyncDistribution(c, p);
+    if (r && r.ok) ok++; else failed++;
+  }
+  alert('Distribution rebuild complete.\n\n' + ok + ' rebuilt\n' + failed + ' failed\n' +
+        skipped + ' skipped (no project)\n\nRe-open the Job Cost Report to see the corrected figures.');
+  closeModal();
+}
 // Public entry point — wired to the "Export Header CSV" button on the COR
 // detail page. Validates, then on confirm streams the single-row CSV.
 function corExportFoundationHeaderCsv() {
@@ -52521,7 +52803,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-11-jc1';
+var KMI_BUILD = '2026-09-11-jc2';
 
 var _kmiSessionId = (function(){
   try {
