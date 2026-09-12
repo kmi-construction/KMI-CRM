@@ -2182,13 +2182,27 @@ tr.gc-line:hover td{background:#fafafa}
   <div class="tabs" style="margin-top:16px">
     <div class="tab active" id="nprj-tabhdr-details" onclick="npSwTab('details', this)">Project Details</div>
     <div class="tab" id="nprj-tabhdr-directory" onclick="npSwTab('directory', this)">Project Directory</div>
+    <div class="tab" id="nprj-tabhdr-budget" onclick="npSwTab('budget', this)">Budget</div>
     <div class="tab" id="nprj-tabhdr-submittals" onclick="npSwTab('submittals', this)">Submittals</div>
     <div class="tab" id="nprj-tabhdr-pos" onclick="npSwTab('pos', this)">PO's &amp; Subs</div>
     <div class="tab" id="nprj-tabhdr-procurement" onclick="npSwTab('procurement', this)">Procurement</div>
+    <div class="tab" id="nprj-tabhdr-drawings" onclick="npSwTab('drawings', this)">Drawings</div>
     <div class="tab" id="nprj-tabhdr-tm" onclick="npSwTab('tm', this)">T&amp;M Tickets</div>
     <div class="tab" id="nprj-tabhdr-cors" onclick="npSwTab('cors', this)">Change Orders</div>
     <div class="tab" id="nprj-tabhdr-production" onclick="npSwTab('production', this)">Production</div>
     <div class="tab" id="nprj-tabhdr-schedule" onclick="npSwTab('schedule', this)">Schedule</div>
+  </div>
+
+  <!-- TAB: BUDGET -->
+  <!-- Empty by design. #bg-detail is a single large markup block with dozens
+       of unique element ids, so it cannot be duplicated here. npSwTab
+       relocates the live node into this host on open, and renderBudget()
+       reclaims it before the standalone Budget page renders. -->
+  <div id="nprj-tab-budget" style="display:none"></div>
+
+  <!-- TAB: DRAWINGS -->
+  <div id="nprj-tab-drawings" style="display:none">
+    <div id="nprj-dw-content"></div>
   </div>
 
   <!-- ─── TAB 1: PROJECT DETAILS ─────────────────────────────────── -->
@@ -23869,6 +23883,9 @@ function ncorRenderTotalsSection() {
 //                      extractions don't litter the bucket)
 
 var _bgProjectId        = null;
+// Set when the budget is reached from a project's Budget tab, so bgClose()
+// returns to the project instead of the standalone picker.
+var _bgReturnToProject  = null;
 var _bgVersionId        = null;
 var _bgWorking          = null;
 var _bgExtractionResult = null;
@@ -23888,6 +23905,9 @@ function bgFmtQty(n) {
 
 // ── Page entry: route to picker or detail view ─────────────────────────
 function renderBudget() {
+  // The project Budget tab borrows #bg-detail. Take it back before rendering
+  // the standalone page, or this page draws an empty shell.
+  if (typeof _bgReclaimDetail === 'function') _bgReclaimDetail();
   if (_bgProjectId) {
     bgShowDetail();
   } else {
@@ -23970,6 +23990,7 @@ function bgOpenProject(projectId) {
     return;
   }
   _bgProjectId = projectId;
+  _bgReturnToProject = null;   // global entry — exit to the picker
   _bgWorking = null;
   _bgExtractionResult = null;
   _bgPendingPdfBytes = null;
@@ -23987,16 +24008,25 @@ function bgOpenProject(projectId) {
   nav('budget');
 }
 
+// Exit the budget detail view. If it was opened from a project's Budget tab,
+// reopen that project on the tab; otherwise fall back to the standalone picker.
+// Mirrors _subExitForm / _tmExitForm.
 function bgClose() {
   if (_bgWorking && _bgWorking.dirty) {
     if (!confirm('You have unsaved changes. Discard and return to project list?')) return;
   }
+  var _retPid = _bgReturnToProject;
+  _bgReturnToProject = null;
   _bgProjectId = null;
   _bgVersionId = null;
   _bgWorking = null;
   _bgExtractionResult = null;
   _bgPendingPdfBytes = null;
   _bgPendingPdfName = '';
+  if (_retPid && typeof editProject === 'function' && getProj(_retPid)) {
+    editProject(_retPid, 'budget');
+    return;
+  }
   renderBudget();
 }
 
@@ -30096,9 +30126,17 @@ function deleteCostJob(id){
 // access ('none') is hidden, and switching to it falls back to the first
 // accessible tab. Tabs whose action is 'read' or 'full' both render (the
 // edit controls inside them are gated separately by their own perms).
+// Single source of truth for tab order. Header DOM order, the disallowed-tab
+// redirect, and the index fallback in npSwTab all read from this — keep it in
+// step with the .tabs markup in #pg-new-project.
+var NPRJ_TAB_ORDER = ['details','directory','budget','submittals','pos',
+                      'procurement','drawings','tm','cors','production','schedule'];
+
 var NPRJ_TAB_PERMS = {
   details:     'view-project',
   directory:   'view-project',
+  budget:      'view_project_budget',
+  drawings:    'view-drawings',
   submittals:  'view-submittals',
   pos:         'view-purchase-orders',
   cors:        'view-cors',
@@ -30123,13 +30161,12 @@ function applyProjectTabPermissions() {
   var split = g('nprj-save-split'); if (split) split.style.display = canSave ? '' : 'none';
 }
 function npSwTab(tab, el) {
-  if (tab !== 'details' && tab !== 'directory' && tab !== 'submittals' && tab !== 'pos' && tab !== 'cors' && tab !== 'procurement' && tab !== 'tm' && tab !== 'production' && tab !== 'schedule') tab = 'details';
+  if (NPRJ_TAB_ORDER.indexOf(tab) < 0) tab = 'details';
   // Hide tab headers the current role can't access, then redirect off any
   // disallowed tab (e.g. the hardcoded 'details' default) to the first allowed one.
   applyProjectTabPermissions();
   if (!npTabAllowed(tab)) {
-    var _order = ['details','directory','submittals','pos','procurement','tm','cors','production','schedule'];
-    var _alt = _order.find(function(t){ return npTabAllowed(t); });
+    var _alt = NPRJ_TAB_ORDER.find(function(t){ return npTabAllowed(t); });
     if (_alt && _alt !== tab) { return npSwTab(_alt, null); }
   }
   _npActiveTab = tab;
@@ -30138,9 +30175,8 @@ function npSwTab(tab, el) {
   if (el) {
     el.classList.add('active');
   } else {
-    // Header order: details(0) directory(1) submittals(2) pos(3)
-    // procurement(4) tm(5) cors(6)
-    var idx = (tab === 'directory') ? 1 : (tab === 'submittals' ? 2 : (tab === 'pos' ? 3 : (tab === 'procurement' ? 4 : (tab === 'tm' ? 5 : (tab === 'cors' ? 6 : (tab === 'production' ? 7 : (tab === 'schedule' ? 8 : 0)))))));
+    var idx = NPRJ_TAB_ORDER.indexOf(tab);
+    if (idx < 0) idx = 0;
     if (heads[idx]) heads[idx].classList.add('active');
   }
   var dTab = g('nprj-tab-details');
@@ -30161,6 +30197,15 @@ function npSwTab(tab, el) {
   if (prodTab) prodTab.style.display = (tab === 'production') ? '' : 'none';
   var schTab = g('nprj-tab-schedule');
   if (schTab) schTab.style.display = (tab === 'schedule') ? '' : 'none';
+  var bgTab = g('nprj-tab-budget');
+  if (bgTab) bgTab.style.display = (tab === 'budget') ? '' : 'none';
+  var dwTab = g('nprj-tab-drawings');
+  if (dwTab) dwTab.style.display = (tab === 'drawings') ? '' : 'none';
+  // Leaving the Budget tab hands #bg-detail back to the standalone page, so
+  // the sidebar entry is never left with an empty shell.
+  if (tab !== 'budget' && typeof _bgReclaimDetail === 'function') {
+    try { _bgReclaimDetail(); } catch(e) { console.warn('_bgReclaimDetail error', e); }
+  }
   // Render PO list lazily when the PO tab is opened, so we always reflect
   // the latest db state (including POs added in another session).
   if (tab === 'pos' && typeof renderProjectPoList === 'function') {
@@ -30186,6 +30231,100 @@ function npSwTab(tab, el) {
   if (tab === 'schedule' && typeof renderProjectSchedule === 'function') {
     try { renderProjectSchedule(); } catch(e) { console.warn('renderProjectSchedule error', e); }
   }
+  // Budget — scope the module to this project and pull #bg-detail into the tab.
+  if (tab === 'budget' && typeof renderProjectBudgetTab === 'function') {
+    try { renderProjectBudgetTab(); } catch(e) { console.warn('renderProjectBudgetTab error', e); }
+  }
+  // Drawings — same lazy pattern, rendered into the tab's own host div.
+  if (tab === 'drawings' && typeof renderProjectDrawingsTab === 'function') {
+    try { renderProjectDrawingsTab(); } catch(e) { console.warn('renderProjectDrawingsTab error', e); }
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// PROJECT TAB BRIDGES — Budget and Drawings
+// ──────────────────────────────────────────────────────
+// Both modules already render from a module-level project id, so the tabs
+// set that id and call the module's own renderer. Neither module is forked.
+//
+// Budget is the awkward one: #bg-detail carries dozens of unique element ids
+// and cannot be duplicated, so the live node is moved between #pg-budget and
+// #nprj-tab-budget. _bgReclaimDetail() is the guard — it runs on every exit
+// path (leaving the tab, and at the top of renderBudget) so the standalone
+// page can never render without its detail pane.
+// ══════════════════════════════════════════════════════
+
+function _bgReclaimDetail() {
+  var det = g('bg-detail');
+  var home = g('pg-budget');
+  if (!det || !home) return;
+  if (det.parentNode === home) return;      // already where it belongs
+  home.appendChild(det);
+  det.style.display = 'none';
+}
+
+function renderProjectBudgetTab() {
+  var host = g('nprj-tab-budget');
+  var det  = g('bg-detail');
+  if (!host || !det) return;
+  if (!_editProjectId) {
+    host.innerHTML = '<div class="card" style="text-align:center;padding:40px 20px;color:#888">' +
+      'Save the project before adding a budget.</div>';
+    return;
+  }
+  if (!hasRead('view_project_budget')) {
+    host.innerHTML = '<div class="card" style="text-align:center;padding:40px 20px;color:#888">' +
+      'You do not have permission to view budgets.</div>';
+    return;
+  }
+  // Re-scope the module only when the project actually changed, so switching
+  // away and back does not discard unsaved working state.
+  if (String(_bgProjectId) !== String(_editProjectId)) {
+    _bgProjectId         = _editProjectId;
+    _bgWorking           = null;
+    _bgExtractionResult  = null;
+    _bgPendingPdfBytes   = null;
+    _bgPendingPdfName    = '';
+    _bgIsAppendMode      = false;
+    var bs = (db.projectBudgets || []).filter(function(b){
+      return String(b.projectId) === String(_editProjectId);
+    });
+    bs.sort(function(a, b){ return (b.version || 0) - (a.version || 0); });
+    if (bs.length) {
+      _bgVersionId = bs[0].id;
+      _bgWorking   = bgCloneVersionAsWorking(bs[0]);
+    } else {
+      _bgVersionId = null;
+    }
+  }
+  _bgReturnToProject = _editProjectId;
+  if (det.parentNode !== host) host.appendChild(det);
+  bgShowDetail();
+}
+
+function renderProjectDrawingsTab() {
+  var host = g('nprj-dw-content');
+  if (!host) return;
+  if (!_editProjectId) {
+    host.innerHTML = '<div class="dw-empty"><strong>Not saved yet</strong>' +
+      'Save the project before uploading drawings.</div>';
+    return;
+  }
+  if (!hasRead('view-drawings')) {
+    host.innerHTML = '<div class="dw-empty"><strong>No access</strong>' +
+      'You do not have permission to view drawings.</div>';
+    return;
+  }
+  if (!Array.isArray(db.drawingAreas))     db.drawingAreas = [];
+  if (!Array.isArray(db.drawingSets))      db.drawingSets = [];
+  if (!Array.isArray(db.drawings))         db.drawings = [];
+  if (!Array.isArray(db.drawingRevisions)) db.drawingRevisions = [];
+  if (!Array.isArray(db.drawingMarkups))   db.drawingMarkups = [];
+  _dwProjectId = _editProjectId;
+  _dwView      = 'log';
+  _dwHostId    = 'nprj-dw-content';
+  try { _dwRenderLog(); }
+  finally { _dwHostId = 'dw-content'; }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -52842,7 +52981,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-11-jc3';
+var KMI_BUILD = '2026-09-12-pcon';
 
 var _kmiSessionId = (function(){
   try {
@@ -58021,6 +58160,9 @@ function fromSBDrawingMarkup(r){ return {
 // ─── STATE ─────────────────────────────────────────────────────────────
 var _dwView       = 'log';     // 'log' | 'review'
 var _dwProjectId  = null;
+// Render target for the drawings log. Defaults to the standalone page's host;
+// renderProjectDrawingsTab() swaps it for the duration of a tab render.
+var _dwHostId     = 'dw-content';
 var _dwAreaId     = null;
 var _dwSearch     = '';
 var _dwDiscFilter = '';
@@ -58101,7 +58243,7 @@ function _dwVisibleProjects(){
 
 // ─── LOG VIEW ──────────────────────────────────────────────────────────
 function _dwRenderLog(){
-  var host = g('dw-content'); if(!host) return;
+  var host = g(_dwHostId) || g('dw-content'); if(!host) return;
   var projs = _dwVisibleProjects();
 
   if(!projs.length){
