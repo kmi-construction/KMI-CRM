@@ -26021,6 +26021,7 @@ async function _corDistPaint(c, p) {
         (isAdmin ? '<button class="btn" onclick="corRebuildAllDistributions()">Rebuild all CORs</button>' : '') +
         '<button class="btn" onclick="closeModal()">Close</button>' +
       '</div></div>' +
+    '<div id="cor-dist-note"></div>' +
     (err ? '<div style="border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;background:#FBEDED;' +
            'border:0.5px solid #E8B4B4;color:#8a2b2b">' + corEsc(err) + '</div>' : '') +
     warn +
@@ -26083,26 +26084,62 @@ async function corDistRederive() {
 // Every COR without distribution rows falls back to a class-only mapping
 // that reads cor.totalLabor — the BILLED figure — as cost. Until this has
 // been run once, change-order labor is overstated on every job.
-async function corRebuildAllDistributions() {
-  if (!hasFull('edit-job-cost-pct')) { alert('Admins and Accounting only.'); return; }
+function corRebuildAllDistributions() {
+  // Deliberately NOT confirm(): once a browser has been asked to suppress
+  // dialogs for a page, confirm() returns false with no indication and the
+  // rebuild silently does nothing. Confirmation is rendered in the modal
+  // instead, where a missing click is visible.
+  if (!hasFull('edit-job-cost-pct')) {
+    _corDistNote('Rebuilding every COR is limited to Admin and Accounting.', 'err');
+    return;
+  }
   var cors = (db.cors || []).filter(function(c){
     return c && c.id && (c.status === 'Pending' || c.status === 'Approved');
   });
-  if (!cors.length) { alert('No pending or approved CORs to rebuild.'); return; }
-  if (!confirm('Rebuild cost distribution for ' + cors.length + ' pending and approved CORs?\n\n' +
-               'Sections already coded manually are left untouched.')) return;
+  if (!cors.length) { _corDistNote('No pending or approved CORs to rebuild.', 'warn'); return; }
+  _corDistNote('Rebuild cost distribution for <b>' + cors.length + '</b> pending and approved CORs? ' +
+    'Sections already coded manually are left untouched.' +
+    '<div style="margin-top:10px;display:flex;gap:8px">' +
+      '<button class="btn btn-p" onclick="corRunRebuildAll()">Rebuild ' + cors.length + ' CORs</button>' +
+      '<button class="btn" onclick="_corDistNote(\'\')">Cancel</button>' +
+    '</div>', 'warn');
+}
 
-  var ok = 0, failed = 0, skipped = 0;
+// Banner inside the distribution modal. Replaces alert()/confirm() so a
+// suppressed dialog cannot swallow the whole operation.
+function _corDistNote(html, kind) {
+  var el = g('cor-dist-note'); if (!el) return;
+  if (!html) { el.innerHTML = ''; return; }
+  var c = kind === 'err'  ? ['#FBEDED','#E8B4B4','#8a2b2b']
+        : kind === 'warn' ? ['#FBF4E2','#E8D08A','#6b5518']
+        :                   ['#EAF3E2','#BFD9A6','#2F5C10'];
+  return (el.innerHTML = '<div style="border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;' +
+    'background:' + c[0] + ';border:0.5px solid ' + c[1] + ';color:' + c[2] + '">' + html + '</div>');
+}
+
+async function corRunRebuildAll() {
+  var cors = (db.cors || []).filter(function(c){
+    return c && c.id && (c.status === 'Pending' || c.status === 'Approved');
+  });
+  var ok = 0, wroteNothing = 0, failed = 0, skipped = 0, firstErr = '';
   for (var i = 0; i < cors.length; i++) {
     var c = cors[i];
     var p = getProj(c.projectId);
     if (!p) { skipped++; continue; }
+    if (i % 10 === 0) {
+      _corDistNote('Rebuilding\u2026 ' + i + ' of ' + cors.length, 'warn');
+      await new Promise(function(r){ setTimeout(r, 0); });
+    }
     var r = await corSyncDistribution(c, p);
-    if (r && r.ok) ok++; else failed++;
+    if (!r || !r.ok) { failed++; if (!firstErr && r && r.error) firstErr = r.error; }
+    else if (!r.written) wroteNothing++;
+    else ok++;
   }
-  alert('Distribution rebuild complete.\n\n' + ok + ' rebuilt\n' + failed + ' failed\n' +
-        skipped + ' skipped (no project)\n\nRe-open the Job Cost Report to see the corrected figures.');
-  closeModal();
+  _corDistNote('Rebuild complete \u2014 <b>' + ok + ' rebuilt</b>, ' + wroteNothing +
+    ' had nothing to distribute, ' + failed + ' failed, ' + skipped + ' skipped (no project).' +
+    (firstErr ? '<br>First error: ' + corEsc(firstErr) : '') +
+    '<br>Re-open the Job Cost Report to see the corrected figures.',
+    failed ? 'err' : 'ok');
 }
 // Public entry point — wired to the "Export Header CSV" button on the COR
 // detail page. Validates, then on confirm streams the single-row CSV.
@@ -44898,6 +44935,7 @@ function _jcPaint() {
             (canEdit ? 'onchange="jcSetPct(\'' + encodeURIComponent(r.line_key) + '\',this.value)"' : 'disabled') +
             ' style="width:58px;text-align:right;border:1px solid transparent;border-radius:5px;padding:3px 5px;' +
             'font-size:12.5px;font-family:inherit;background:transparent;font-variant-numeric:tabular-nums">' +
+            '<span style="color:#aaa;font-size:11px">%</span>' +
             (r.pct_override ? '<span title="Overridden on this line" style="display:inline-block;width:6px;height:6px;' +
               'border-radius:50%;background:var(--ac);margin-left:5px;vertical-align:middle"></span>' : '')
           : _jcDash()) + '</td>' +
@@ -44928,7 +44966,8 @@ function _jcPaint() {
       '<td style="' + sd + '">' + _jcMoney(s.total) + '</td>' +
       '<td style="' + sd + '">' + _jcMoney(s.earned) + '</td>' +
       '<td style="' + sd + '">' + (s.actual === null || s.actual === undefined ? _jcDash() : _jcMoney(s.actual)) + '</td>' +
-      '<td style="' + sd + '"></td>' +
+      '<td style="' + sd + '">' + ((s.actual === null || s.actual === undefined)
+        ? '' : _jcMoney(Number(s.earned || 0) - Number(s.actual || 0))) + '</td>' +
     '</tr>';
   });
 
@@ -52803,7 +52842,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-11-jc2';
+var KMI_BUILD = '2026-09-11-jc3';
 
 var _kmiSessionId = (function(){
   try {
