@@ -4495,6 +4495,56 @@ var _kmiAuthReachable = false;
 var _kmiRecoveryMode  = false;
 var _sbInitKey        = null;
 
+// ── Recovery link: token_hash, verified on submit ────────────────────────
+// The old link was GET /auth/v1/verify?token=... — a one-time token spent by
+// whoever fetched the URL first. In this mail environment that was never the
+// user: auth logs showed the token consumed 1-2 seconds after send, on every
+// attempt, by a scanner. Four distinct scanner IPs touched each link; one
+// always won the race, and the real click got 403 "One-time token not found".
+//
+// So the emailed link now carries only a token_hash, and it rides in the URL
+// FRAGMENT: fragments are never sent to a server and never appear in a Referer
+// header, so the token is not leaked to the CDN that serves supabase-js.
+//
+// Nothing is verified on arrival. verifyOtp() is a POST that fires only after
+// someone types a password and clicks. That is deliberate — verifying on page
+// load would still lose to the scanners that run headless browsers.
+var _kmiRecoveryHash = null;
+
+function _kmiReadRecoveryLink() {
+  try {
+    var h = String(window.location.hash || '').replace(/^#/, '');
+    if (!h) return null;
+    var p = new URLSearchParams(h);
+    var th = p.get('token_hash');
+    if (!th) return null;
+    if (String(p.get('type') || '') !== 'recovery') return null;
+    return th;
+  } catch(e) { return null; }
+}
+
+// Landing from a DEAD link — the legacy ConfirmationURL format, or a token
+// already spent. Supabase puts the reason in the fragment. Without this the
+// user just gets a blank sign-in form and no idea why.
+function _kmiReadRecoveryError() {
+  try {
+    var h = String(window.location.hash || '').replace(/^#/, '');
+    if (!h || h.indexOf('error') === -1) return null;
+    var p = new URLSearchParams(h);
+    var c = p.get('error_code'), d = p.get('error_description');
+    if (!c && !d) return null;
+    if (String(c) === 'otp_expired') {
+      return 'That reset link has already been used or has expired. Request a new one below.';
+    }
+    return String(d || 'That link could not be used.');
+  } catch(e) { return null; }
+}
+
+function _kmiClearRecoveryUrl() {
+  _kmiRecoveryHash = null;
+  try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch(e) {}
+}
+
 // 6-C: phones keep their session across app switches and screen locks, which
 // matters for field staff. Desktops stay per-tab so a shared office machine
 // does not leave someone signed in.
@@ -5088,6 +5138,122 @@ async function sendWelcomeEmail(u, tempPw) {
       '<div class="mf"><button class="btn btn-p" onclick="closeModal()">Done</button></div>'
     );
   }
+}
+
+function showRecoveryResetModal(msg) {
+  showModal(
+    '<div class="mt">Set a new password</div>' +
+    '<div class="msb">Choose a new password for your KMI account. This link works once.</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>New password *</label><input id="rcv-new" type="password" autocomplete="new-password" placeholder="At least 8 characters"></div>' +
+      '<div class="fgr full"><label>Confirm new password *</label><input id="rcv-conf" type="password" autocomplete="new-password" placeholder="Re-enter password" onkeydown="if(event.key===\'Enter\')submitRecoveryReset()"></div>' +
+    '</div>' +
+    '<div id="rcv-err" style="color:#A32D2D;font-size:12px;min-height:16px;margin-bottom:10px">' + (msg ? _vendorEsc(msg) : '') + '</div>' +
+    '<div class="mf"><button class="btn" onclick="cancelRecoveryReset()">Cancel</button><button class="btn btn-p" id="rcv-go" onclick="submitRecoveryReset()">Set password</button></div>'
+  );
+  // showLogin() focuses the email field on a 50ms timer; outlast it.
+  setTimeout(function(){ var el = g('rcv-new'); if (el) el.focus(); }, 150);
+}
+
+function cancelRecoveryReset() {
+  _kmiClearRecoveryUrl();
+  closeModal();
+  showLogin();
+  setLoginFormState('ready');
+}
+
+async function submitRecoveryReset() {
+  var a = g('rcv-new').value || '', b = g('rcv-conf').value || '', err = g('rcv-err');
+  err.textContent = '';
+  if (a.length < 8) { err.textContent = 'Password must be at least 8 characters.'; return; }
+  if (a !== b)      { err.textContent = 'Passwords do not match.'; return; }
+  if (!supabaseClient || !_kmiRecoveryHash) {
+    err.textContent = 'This reset link can no longer be used. Request a new one from the sign-in page.';
+    return;
+  }
+
+  var btn = g('rcv-go'), btnTxt = btn ? btn.textContent : 'Set password';
+  function unlock(m) {
+    if (btn) { btn.disabled = false; btn.textContent = btnTxt; }
+    if (m) err.textContent = m;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Verifying\u2026'; }
+
+  // The one-time token is spent HERE and nowhere else in the app.
+  var v;
+  try {
+    v = await supabaseClient.auth.verifyOtp({ token_hash: _kmiRecoveryHash, type: 'recovery' });
+  } catch(e) {
+    return unlock('Could not reach the server. Please try again.');
+  }
+  if (!v || v.error || !v.data || !v.data.session) {
+    _kmiRecoveryHash = null;
+    return unlock('This reset link is invalid or has expired. Request a new one from the sign-in page.');
+  }
+  _kmiAuthSession = v.data.session;
+
+  if (btn) btn.textContent = 'Saving\u2026';
+  try {
+    var up = await supabaseClient.auth.updateUser({ password: a });
+    if (up && up.error) return unlock(up.error.message || 'Could not update password.');
+  } catch(e) {
+    return unlock('Could not reach the server. Please try again.');
+  }
+
+  // Password is changed. From here a failure must NOT look like the reset
+  // failed — it did not. Fall back to the sign-in form with the good news.
+  function toLoginWith(message) {
+    _kmiClearRecoveryUrl();
+    closeModal();
+    showLogin();
+    setLoginFormState('ready');
+    var le = g('login-err'); if (le) le.textContent = message;
+  }
+
+  var link = await kmiAuthLink();
+  if (link && link.reason === 'inactive') {
+    await kmiAuthSignOut();
+    return toLoginWith('This account is inactive. Contact an administrator.');
+  }
+
+  // Resolve from the SERVER, not db.users — the boot pull runs as anon, and
+  // anon holds no table grants after M2, so db.users is empty on any device
+  // without a cached db.
+  var email = String((v.data.session.user && v.data.session.user.email) || '').toLowerCase();
+  var u = await kmiAuthFetchUser((link && link.user_id) || null, email);
+  if (!u) {
+    await kmiAuthSignOut();
+    return toLoginWith('Your password was updated. Please sign in with it.');
+  }
+  if (u.status === 'inactive') {
+    await kmiAuthSignOut();
+    return toLoginWith('This account is inactive. Contact an administrator.');
+  }
+
+  var known = db.users.find(function(x){ return String(x.id) === String(u.id); });
+  if (known) { Object.keys(u).forEach(function(k){ known[k] = u[k]; }); u = known; }
+  else { db.users.push(u); }
+  if (_kmiAuthSession && _kmiAuthSession.user) { u.authUserId = _kmiAuthSession.user.id; }
+  _currentUser = u;
+
+  // Pull BEFORE writing the legacy hash. pullFromSupabase() rewrites db.users
+  // from the cloud, so a hash written first would be discarded.
+  if (btn) btn.textContent = 'Loading your data\u2026';
+  await kmiAuthPostLoginSync();
+  if (!_currentUser) _currentUser = u;
+
+  // Legacy hash kept in step deliberately — still the first-login path for
+  // admin-created users, and it keeps a rollback survivable. Goes away in M2.
+  var salt = generateSalt();
+  _currentUser.passwordHash = await hashPassword(a, salt);
+  _currentUser.passwordSalt = salt;
+  _currentUser.mustResetPassword = false;
+  saveDB();
+  saveSession(_currentUser);
+
+  _kmiClearRecoveryUrl();
+  closeModal();
+  enterApp();
 }
 
 function showForceResetModal() {
@@ -5791,6 +5957,11 @@ function signRenderDone() {
 async function bootSequence() {
   applySbGroupState();
 
+  // Read the recovery fragment first — supabase-js parses the URL during
+  // client init, and nothing below should be able to rewrite it first.
+  // Reading is not verifying; see _kmiReadRecoveryLink.
+  _kmiRecoveryHash = _kmiReadRecoveryLink();
+
   // 0. Sign-mode bypass (Round 3) — when the URL carries ?sign=<token>,
   //    we skip the entire login/connect flow and render the public sign
   //    page. This is for customer supes who don't have a CRM account.
@@ -5814,6 +5985,36 @@ async function bootSequence() {
   // signed in, so it has to know the answer first. Skipped for ?eq= scans,
   // which are anonymous by design and must not wait on auth.
   if (!eqParam) { await kmiAuthBootstrap(); }
+
+  // Arrived on a password-reset link. Show the set-password form over the
+  // login screen. The token stays unspent until they click.
+  if (_kmiRecoveryHash) {
+    if (!supabaseClient) {
+      showLogin();
+      setLoginFormState('blocked', 'Cannot reach the database to complete your password reset. Try again in a moment.');
+      return;
+    }
+    // Any session already on this device must go. verifyOtp would replace it
+    // anyway, but a cancelled or failed reset would otherwise drop whoever is
+    // holding the link into the previous user's app.
+    if (_kmiAuthSession) { await kmiAuthSignOut(); }
+    clearSession();
+    showLogin();
+    setLoginFormState('ready');
+    showRecoveryResetModal();
+    return;
+  }
+
+  // Arrived on a link that was already dead — say so instead of showing a
+  // bare sign-in form. Covers legacy ConfirmationURL emails still in inboxes.
+  var _rcvErr = _kmiReadRecoveryError();
+  if (_rcvErr) {
+    try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch(e) {}
+    showLogin();
+    setLoginFormState('ready');
+    var _le = g('login-err'); if (_le) _le.textContent = _rcvErr;
+    return;
+  }
 
   if (eqParam) {
     if (!loadSession()) { return _eqbEnterTruckMode(eqParam); }
@@ -53253,7 +53454,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-14-pov1';
+var KMI_BUILD = '2026-09-14-rcv1';
 
 var _kmiSessionId = (function(){
   try {
