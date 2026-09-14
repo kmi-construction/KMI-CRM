@@ -2157,16 +2157,43 @@ tr.gc-line:hover td{background:#fafafa}
     <div><h1>Projects</h1><div class="sub">Awarded and active construction projects</div><div class="stripe"></div></div>
   </div>
   <div class="mets" id="prj-mets"></div>
+  <div class="ab" style="margin-bottom:10px">
+    <button class="btn btn-p btn-sm" id="prj-mode-portfolio" onclick="_povSetMode('portfolio')">Portfolio</button>
+    <button class="btn btn-sm" id="prj-mode-directory" onclick="_povSetMode('directory')">Directory</button>
+    <span style="font-size:11.5px;color:#888" id="prj-mode-hint"></span>
+  </div>
   <div class="ab">
     <input class="si" placeholder="Search by number, name, address..." oninput="filterProj()" id="prj-s">
     <select class="fs" onchange="filterProj()" id="prj-fc"><option value="">All customers</option></select>
     <select class="fs" onchange="filterProj()" id="prj-ft"><option value="">All types</option></select>
+    <select class="fs" onchange="filterProj()" id="prj-fpm"><option value="">All PMs</option></select>
+    <select class="fs" onchange="filterProj()" id="prj-fscope">
+      <option value="active">Active jobs</option>
+      <option value="all">All projects</option>
+    </select>
     <button class="btn btn-p" style="margin-left:auto" id="prj-new-btn" onclick="nav('new-project')">+ New project</button>
   </div>
-  <div class="card" style="padding:0;overflow:hidden">
-    <table><thead><tr>
-      <th>Project #</th><th>Name</th><th>Customer</th><th>Address</th><th>Type</th><th>Contract amount</th><th>Team</th><th>Source</th><th>Actions</th>
-    </tr></thead><tbody id="prj-tbody"></tbody></table>
+  <div id="prj-portfolio-wrap">
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table><thead><tr>
+        <th>Job #</th><th>Name</th><th>Customer</th><th>PM</th>
+        <th style="text-align:right">Contract</th>
+        <th style="text-align:right">Est. cost</th>
+        <th style="text-align:right">Est. gross profit</th>
+        <th style="text-align:right">Est. GP %</th>
+        <th style="text-align:right">% complete</th>
+        <th style="text-align:right">Cost to date</th>
+        <th style="text-align:right">Labor earned vs actual</th>
+      </tr></thead><tbody id="pov-tbody"></tbody></table>
+    </div>
+    <div class="sub" id="pov-foot" style="margin-top:-4px"></div>
+  </div>
+  <div id="prj-directory-wrap" style="display:none">
+    <div class="card" style="padding:0;overflow:hidden">
+      <table><thead><tr>
+        <th>Project #</th><th>Name</th><th>Customer</th><th>Address</th><th>Type</th><th>Contract amount</th><th>Team</th><th>Source</th><th>Actions</th>
+      </tr></thead><tbody id="prj-tbody"></tbody></table>
+    </div>
   </div>
 </div>
 
@@ -3905,6 +3932,10 @@ var DB_DEFAULTS = {
   costClasses:         [],   // { id, classNo, description, active }
   glAccounts:          [],   // { id, glNo, description, accountType, active }  (Foundation GL master — AP S1)
   foundationVendors:   [],   // { id, vendorNo, name, active }  (Foundation payee master — AP B)
+  // Read-only projection of the kmi_project_overview SQL view. Never written
+  // back: it is a view, and pushToSupabase() enumerates tables explicitly, so
+  // this key is inert there. Do not add it.
+  projectOverview:     [],   // portfolio grid rows (B1)
   customersFoundation: [],   // { id, customerNo, name, sortName, address1, address2, city, state, zip, active }
   budgetTemplate:      [],   // { id, sortOrder, description, costCode, costClass, sourceType, sourceKey, defaultAmount }
   projectBudgets:      [],   // { id, projectId, version, createdAt, createdBy, sourcePdfPath, taxRate, lines, totals, notes }
@@ -32997,10 +33028,29 @@ function renderProjects() {
   // Type filter
   g('prj-ft').innerHTML = '<option value="">All types</option>' +
     db.projectTypes.map(function(t){ return '<option value="' + t + '">' + t + '</option>'; }).join('');
+  // PM filter (B1) — only the users actually assigned as PM on some project,
+  // so the list stays short rather than listing every user in the company.
+  if (g('prj-fpm')) {
+    var _pmIds = {};
+    _projectsOnly().forEach(function(p){
+      var a = _povPmAssign(p);
+      if (a && a.userId) _pmIds[a.userId] = true;
+    });
+    var _pmOpts = Object.keys(_pmIds).map(function(uid){
+      var u = (db.users || []).find(function(x){ return String(x.id) === String(uid); });
+      return { id: uid, name: (u && (u.name || u.email)) || 'Unknown' };
+    }).sort(function(a,b){ return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
+    g('prj-fpm').innerHTML = '<option value="">All PMs</option>' +
+      _pmOpts.map(function(o){ return '<option value="' + o.id + '">' + _cjEsc(o.name) + '</option>'; }).join('');
+  }
+  _povApplyMode();
   filterProj();
 }
 
 function filterProj() {
+  // B1: the Projects page has two views. Portfolio is the money grid backed by
+  // kmi_project_overview; Directory is the original table, untouched below.
+  if (_povMode === 'portfolio') { _povRender(); return; }
   var s  = (g('prj-s').value  || '').toLowerCase();
   var fc = g('prj-fc').value;
   var ft = g('prj-ft').value;
@@ -33088,6 +33138,228 @@ function filterProj() {
       '</td>' +
       '</tr>';
   }).join('');
+}
+
+// ════════════════════════════════════════════════════════════
+// PORTFOLIO GRID (B1)
+// ────────────────────────────────────────────────────────────
+// Rows come from db.projects, not from the view, so the existing Foreman and
+// Shop scoping still applies and closed jobs remain reachable. The view is
+// joined on job number to supply the money columns; a project with no view
+// row simply shows blanks.
+//
+// That join direction is deliberate. kmi_project_overview is security_invoker,
+// so a Project Coordinator gets rows with NULL cost columns rather than no
+// rows at all — they keep the job list and lose only the money.
+//
+// Percent complete and labor variance are computed here rather than in SQL.
+// _prodTrackingCompute() is the single implementation; duplicating it server
+// side would let the grid and the Production tab disagree.
+// ════════════════════════════════════════════════════════════
+
+var _povMode = 'portfolio';
+
+function _povSetMode(m) {
+  _povMode = (m === 'directory') ? 'directory' : 'portfolio';
+  _povApplyMode();
+  filterProj();
+}
+
+function _povApplyMode() {
+  var isPort = (_povMode === 'portfolio');
+  var pw = g('prj-portfolio-wrap'), dw = g('prj-directory-wrap');
+  if (pw) pw.style.display = isPort ? '' : 'none';
+  if (dw) dw.style.display = isPort ? 'none' : '';
+  var bp = g('prj-mode-portfolio'), bd = g('prj-mode-directory');
+  if (bp) bp.className = 'btn btn-sm' + (isPort ? ' btn-p' : '');
+  if (bd) bd.className = 'btn btn-sm' + (isPort ? '' : ' btn-p');
+  // Type belongs to the Directory columns; PM and scope to the Portfolio ones.
+  if (g('prj-ft'))     g('prj-ft').style.display     = isPort ? 'none' : '';
+  if (g('prj-fpm'))    g('prj-fpm').style.display    = isPort ? '' : 'none';
+  if (g('prj-fscope')) g('prj-fscope').style.display = isPort ? '' : 'none';
+  var hint = g('prj-mode-hint');
+  if (hint) hint.textContent = isPort
+    ? 'Contract, budget and cost to date'
+    : 'Address, type, team and source';
+}
+
+function _povPmAssign(p) {
+  return (p.kmiAssignments || []).find(function(a){
+    return a && a.role && /project manager/i.test(a.role);
+  });
+}
+
+function _povPmName(p) {
+  var a = _povPmAssign(p);
+  if (!a || !a.userId) return '';
+  var u = (db.users || []).find(function(x){ return String(x.id) === String(a.userId); });
+  return (u && (u.name || u.email)) || '';
+}
+
+// Index the view by job number once per render rather than scanning per row.
+function _povIndex() {
+  var ix = {};
+  (db.projectOverview || []).forEach(function(r){
+    if (r && r.number) ix[String(r.number)] = r;
+  });
+  return ix;
+}
+
+// Labor-weighted percent complete, from the same function the Production tab
+// uses. Returns null rather than 0 when it can't be computed, so a job with no
+// production estimate reads as blank instead of "nothing done".
+function _povPct(p) {
+  try {
+    var C = _prodTrackingCompute(p);
+    if (!C) return null;
+    var v = C.pctCompleteLabor;
+    return (typeof v === 'number' && isFinite(v)) ? v : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function _povMoney(v) {
+  return (v === null || v === undefined) ? '<span style="color:#ccc">—</span>' : fmtC(v);
+}
+
+function _povShort(v) {
+  if (v === null || v === undefined) return '—';
+  var a = Math.abs(v), s = v < 0 ? '-' : '';
+  if (a >= 1000000) return s + '$' + (a / 1000000).toFixed(2) + 'M';
+  if (a >= 1000)    return s + '$' + Math.round(a / 1000) + 'K';
+  return s + '$' + Math.round(a);
+}
+
+function _povSigned(v) {
+  if (v === null || v === undefined) return '<span style="color:#ccc">—</span>';
+  var n = Math.round(v), t = Math.abs(n).toLocaleString();
+  return n < 0
+    ? '<span style="color:#A32D2D">(' + t + ')</span>'
+    : t;
+}
+
+function _povRender() {
+  var s     = (g('prj-s').value || '').toLowerCase();
+  var fc    = g('prj-fc').value;
+  var fpm   = g('prj-fpm') ? g('prj-fpm').value : '';
+  var scope = g('prj-fscope') ? g('prj-fscope').value : 'active';
+  var ix    = _povIndex();
+
+  // Same scoping as the Directory view: cost jobs never appear, and Foreman
+  // is limited to assigned projects with no fallback to the full list.
+  var _scope = _projectsOnly();
+  if (_isScopedUser()) {
+    _scope = _scope.filter(function(p){ return _canAccessProject(p); });
+  }
+
+  var list = _scope.filter(function(p){
+    var ov = ix[String(p.number)];
+    // 'active' means present in the view, which already applies project
+    // status, category, exclude_from_reports and Foundation job status.
+    if (scope === 'active' && !ov) return false;
+    if (fc && String(p.customerId) !== String(fc)) return false;
+    if (fpm) {
+      var a = _povPmAssign(p);
+      if (!a || String(a.userId) !== String(fpm)) return false;
+    }
+    if (!s) return true;
+    var cust = getCust(p.customerId);
+    // Address and type stay searchable even though the Portfolio view does
+    // not show those columns, so nothing becomes unfindable by switching view.
+    var hay = [p.number, p.name, cust.name, formatProjAddress(p),
+               (p.types || []).join(' '), p.type, _povPmName(p)].join(' ').toLowerCase();
+    return hay.indexOf(s) !== -1;
+  }).sort(function(a,b){ return String(b.number || '').localeCompare(String(a.number || '')); });
+
+  // ── metric cards ──────────────────────────────────────────────────────
+  var tContract = 0, tEst = 0, tGp = 0, tVar = 0, nGp = 0, haveVar = false;
+  var rows = list.map(function(p){
+    var ov  = ix[String(p.number)] || {};
+    var pct = _povPct(p);
+    var earned = (ov.estLabor !== null && ov.estLabor !== undefined && pct !== null)
+      ? ov.estLabor * (pct / 100) : null;
+    var lvar = (earned !== null && ov.actualLabor !== null && ov.actualLabor !== undefined)
+      ? earned - ov.actualLabor : null;
+    if (ov.contract  !== null && ov.contract  !== undefined) tContract += ov.contract;
+    if (ov.estCost   !== null && ov.estCost   !== undefined) tEst      += ov.estCost;
+    if (ov.estGrossProfit !== null && ov.estGrossProfit !== undefined) { tGp += ov.estGrossProfit; nGp++; }
+    if (lvar !== null) { tVar += lvar; haveVar = true; }
+    return { p: p, ov: ov, pct: pct, lvar: lvar };
+  });
+
+  var gpPct = tContract > 0 ? (tGp / tContract * 100) : null;
+  g('prj-mets').innerHTML =
+    '<div class="mc"><div class="ml">Projects</div><div class="mv">' + list.length + '</div>' +
+      '<div class="ms">' + (scope === 'active' ? 'active jobs' : 'all projects') + '</div></div>' +
+    '<div class="mc"><div class="ml">Contract value</div><div class="mv bl">' + _povShort(tContract) + '</div>' +
+      '<div class="ms">including approved change orders</div></div>' +
+    '<div class="mc"><div class="ml">Est. gross profit</div><div class="mv gn">' + _povShort(tGp) + '</div>' +
+      '<div class="ms">' + (gpPct === null ? 'no contract data' : gpPct.toFixed(1) + '% weighted, direct cost only') + '</div></div>' +
+    '<div class="mc"><div class="ml">Labor variance</div><div class="mv ' + (tVar < 0 ? 'rd' : 'gn') + '">' +
+      (haveVar ? _povShort(tVar) : '—') + '</div>' +
+      '<div class="ms">earned against actual</div></div>';
+
+  // ── table ─────────────────────────────────────────────────────────────
+  if (!rows.length) {
+    g('pov-tbody').innerHTML = '<tr><td colspan="11" style="text-align:center;color:#aaa;padding:32px;font-size:13px">' +
+      (scope === 'active'
+        ? 'No active jobs match. Switch scope to <strong>All projects</strong> to include closed and unstarted work.'
+        : 'No projects match those filters.') + '</td></tr>';
+    if (g('pov-foot')) g('pov-foot').innerHTML = '';
+    return;
+  }
+
+  var _canOpen = !_isShopUser();
+  var nMissing = 0, nNoFnd = 0;
+
+  g('pov-tbody').innerHTML = rows.map(function(r){
+    var p = r.p, ov = r.ov, pct = r.pct;
+    var open = _canOpen ? ' style="cursor:pointer" onclick="viewProject(' + p.id + ')"' : '';
+    if (ov.contractMissing) nMissing++;
+    if (!ov.number) nNoFnd++;
+
+    var pctCell = (pct === null)
+      ? '<span style="color:#ccc">—</span>'
+      : '<div style="display:flex;align-items:center;gap:8px;justify-content:flex-end">' +
+          '<div style="position:relative;height:6px;width:54px;background:#eee;border-radius:100px;overflow:hidden">' +
+          '<i style="position:absolute;inset:0 auto 0 0;width:' + Math.max(0, Math.min(100, pct)).toFixed(0) +
+          '%;background:var(--kmi3);border-radius:100px"></i></div>' +
+          '<span>' + pct.toFixed(0) + '%</span></div>';
+
+    var contractCell = ov.contractMissing
+      ? '<span style="color:var(--acd)" title="No contract entered in the CRM">no contract</span>'
+      : _povMoney(ov.contract);
+
+    var varTitle = ov.contractVariance
+      ? ' title="Foundation shows ' + fmtC(ov.contractFoundation) + ' — differs by ' + fmtC(ov.contractVariance) + '"'
+      : '';
+
+    return '<tr>' +
+      '<td style="font-weight:600;color:var(--kmi)"' + open + '>' + (p.number || '—') + '</td>' +
+      '<td' + open + '>' + (p.name || '<span style="color:#aaa">—</span>') + '</td>' +
+      '<td style="color:#666">' + getCust(p.customerId).name + '</td>' +
+      '<td>' + (_povPmName(p) || '<span style="color:#ccc">—</span>') + '</td>' +
+      '<td style="text-align:right;white-space:nowrap"' + varTitle + '>' + contractCell +
+        (ov.contractVariance ? ' <span style="color:var(--acd);font-weight:700">•</span>' : '') + '</td>' +
+      '<td style="text-align:right;white-space:nowrap">' + _povMoney(ov.estCost) + '</td>' +
+      '<td style="text-align:right;white-space:nowrap">' + _povMoney(ov.estGrossProfit) + '</td>' +
+      '<td style="text-align:right;white-space:nowrap">' +
+        (ov.estGpPct === null || ov.estGpPct === undefined
+          ? '<span style="color:#ccc">—</span>' : ov.estGpPct.toFixed(1) + '%') + '</td>' +
+      '<td style="text-align:right">' + pctCell + '</td>' +
+      '<td style="text-align:right;white-space:nowrap">' + _povMoney(ov.costToDate) + '</td>' +
+      '<td style="text-align:right;white-space:nowrap">' + _povSigned(r.lvar) + '</td>' +
+      '</tr>';
+  }).join('');
+
+  var notes = [];
+  notes.push('Cost and budget from Foundation. Percent complete is labor-weighted production.');
+  if (nMissing) notes.push('<strong>' + nMissing + '</strong> job' + (nMissing === 1 ? '' : 's') +
+    ' carry budget with no contract entered — margin cannot be computed until one is.');
+  if (nNoFnd)   notes.push('<strong>' + nNoFnd + '</strong> project' + (nNoFnd === 1 ? '' : 's') +
+    ' have no Foundation job, so their money columns are blank.');
+  if (g('pov-foot')) g('pov-foot').innerHTML = notes.join(' ');
 }
 
 function renderProjectTypeChecksForProject(selected) {
@@ -52981,7 +53253,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-12-pcon';
+var KMI_BUILD = '2026-09-14-pov1';
 
 var _kmiSessionId = (function(){
   try {
@@ -54091,6 +54363,42 @@ function fromSBMeetingItem(r) {
 // ── T&M Ticket mappers (Round 1) ───────────────────────────────────────
 // Productivity (Phase 1) — weekly data mappers. entries is keyed by estimate
 // line id: { lineId: { u:units, f:foremanHrs, m:masonHrs, l:laborerHrs } }.
+// Portfolio grid row (B1). Read-only — there is deliberately no toSB*
+// counterpart, because kmi_project_overview is a view.
+//
+// pctComplete and laborVariance are absent on purpose. They are derived in
+// the browser from estLabor / actualLabor by _povPct(), so that
+// _prodTrackingCompute() remains the only implementation of that algorithm
+// and the grid cannot disagree with the Production tab.
+function fromSBProjectOverview(r) {
+  function n(v) { return (v === null || v === undefined || v === '') ? null : Number(v); }
+  return {
+    projectId:         r.project_id,
+    number:            r.job_no || '',
+    name:              r.job_name || '',
+    projectStatus:     r.project_status || '',
+    customerId:        r.customer_id || null,
+    customerName:      r.customer_name || '',
+    fndJobStatus:      r.fnd_job_status || '',
+    fndPmNo:           r.fnd_pm_no || '',
+    contract:          n(r.contract),
+    contractOriginal:  n(r.contract_original),
+    approvedCorAmount: n(r.approved_cor_amount),
+    approvedCorCount:  n(r.approved_cor_count),
+    contractFoundation:n(r.contract_foundation),
+    estCost:           n(r.est_cost),
+    estLabor:          n(r.est_labor),
+    costToDate:        n(r.cost_to_date),
+    actualLabor:       n(r.actual_labor),
+    lastCostBooked:    r.last_cost_booked || '',
+    fndPctComplete:    n(r.fnd_pct_complete),
+    estGrossProfit:    n(r.est_gross_profit),
+    estGpPct:          n(r.est_gp_pct),
+    contractVariance:  n(r.contract_variance),
+    contractMissing:   !!r.contract_missing
+  };
+}
+
 function toSBProdWeekly(r) {
   return {
     id: r.id,
@@ -55444,6 +55752,21 @@ async function pullFromSupabase() {
     } catch (e) {
       console.warn('kmi_prod_week_approvals load threw:', e);
       if (!Array.isArray(db.prodWeekApprovals)) db.prodWeekApprovals = [];
+    }
+    // Portfolio grid (B1). Separate fetch for the same reason as the
+    // approvals above. Read-only view; failure is non-fatal and leaves the
+    // Projects page on its Directory view with no money columns.
+    try {
+      var povRes = await supabaseClient.from('kmi_project_overview').select('*');
+      if (povRes && !povRes.error) {
+        db.projectOverview = (povRes.data || []).map(fromSBProjectOverview);
+      } else {
+        if (povRes && povRes.error) console.warn('kmi_project_overview load error:', povRes.error.message);
+        if (!Array.isArray(db.projectOverview)) db.projectOverview = [];
+      }
+    } catch (e) {
+      console.warn('kmi_project_overview load threw:', e);
+      if (!Array.isArray(db.projectOverview)) db.projectOverview = [];
     }
     // Production catalog (Prod Catalog Round 1) — dedicated tables with A1
     // carry-forward. These used to live in the kmi_settings JSON blob; the
