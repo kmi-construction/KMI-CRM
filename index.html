@@ -4103,12 +4103,39 @@ function loadDB() {
   return JSON.parse(JSON.stringify(DB_DEFAULTS));
 }
 
+// Keys held on db purely as caches of server-side reads. They are refetched
+// on every load, so persisting them to localStorage costs quota and buys
+// nothing. Anything added here must be repopulated by pullFromSupabase.
+var DB_TRANSIENT = { projectOverview: true };
+
 function saveDB() {
   try {
-    localStorage.setItem(DB_KEY, JSON.stringify(db));
+    // Shallow copy minus the transient keys. JSON.stringify does the deep work
+    // either way, so the copy itself is cheap.
+    var snap = {};
+    for (var k in db) {
+      if (!Object.prototype.hasOwnProperty.call(db, k)) continue;
+      if (DB_TRANSIENT[k]) continue;
+      snap[k] = db[k];
+    }
+    localStorage.setItem(DB_KEY, JSON.stringify(snap));
     var el = g('save-indicator');
     if (el) { el.textContent = '\u25cf Saving\u2026'; el.style.color = '#C8A84B'; setTimeout(function(){ el.textContent = '\u25cf Data saved'; el.style.color = '#639922'; }, 600); }
-  } catch(e) { console.warn('KMI CRM save error', e); }
+  } catch(e) {
+    console.warn('KMI CRM save error', e);
+    // A silent save failure is worse than a loud one: local state stops
+    // persisting with nothing on screen to say so. Quota is the expected
+    // cause, and it does not resolve on its own.
+    var el2 = g('save-indicator');
+    if (el2) {
+      var quota = e && (e.name === 'QuotaExceededError' || /quota/i.test(String(e.message || '')));
+      el2.textContent = quota ? '\u25cf Local storage full' : '\u25cf Save failed';
+      el2.style.color = '#A32D2D';
+      el2.title = quota
+        ? 'The browser will not accept more local data. Work is still being written to Supabase, but this page cannot cache it. Tell Mike.'
+        : String((e && e.message) || e);
+    }
+  }
 }
 
 function clearAllData() {
@@ -33407,15 +33434,29 @@ function _povIndex() {
 }
 
 // Labor-weighted percent complete, from the same function the Production tab
-// uses. Returns null rather than 0 when it can't be computed, so a job with no
-// production estimate reads as blank instead of "nothing done".
+// uses.
+//
+// _prodTrackingCompute() returns pctCompleteLabor as a FRACTION, not a
+// percentage — it is catEarnedSum / catLaborSum. Every caller scales it: the
+// Production tab through pc(x) = (x*100).toFixed(0), and _jcDefaultPct through
+// v*1000/10. This returns percent so the grid, the progress bar and the labor
+// variance all work in the same units.
+//
+// Returns null rather than 0 when there is no production estimate at all
+// (catLaborSum = 0). That case is "unknown", not "nothing built", and a blank
+// says so where 0% would not. A project that genuinely has an estimate but no
+// units installed still returns 0.
 function _povPct(p) {
   try {
-    var C = _prodTrackingCompute(p);
+    if (typeof _prodTrackingCompute !== 'function') return null;
+    var C = _prodTrackingCompute(p, null);
     if (!C) return null;
-    var v = C.pctCompleteLabor;
-    return (typeof v === 'number' && isFinite(v)) ? v : null;
+    if (!(Number(C.catLaborSum) > 0)) return null;
+    var v = Number(C.pctCompleteLabor);
+    if (!isFinite(v)) return null;
+    return v * 100;
   } catch (e) {
+    console.warn('_povPct', e);
     return null;
   }
 }
@@ -53454,7 +53495,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-14-rcv1';
+var KMI_BUILD = '2026-09-14-pov2';
 
 var _kmiSessionId = (function(){
   try {
@@ -56187,8 +56228,11 @@ async function pullFromSupabase() {
         .then(function(r){ if (r && r.error) console.warn('budgetQtyConversions normalize sync error:', r.error.message); });
     }
 
-    // Save to localStorage as cache
-    try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch(e) {}
+    // Save to localStorage as cache. Routed through saveDB() rather than
+    // writing directly, so it gets the same transient-key filtering and the
+    // same visible handling of a quota failure. The previous inline write
+    // swallowed errors entirely — catch(e) {} with no branch.
+    saveDB();
 
     setSyncStatus('connected', 'Connected \u2022 Up to date');
     showSBResult('\u2714 Data loaded from Supabase (' + db.customers.length + ' customers, ' + db.opportunities.length + ' opportunities)', true);
