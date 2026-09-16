@@ -4103,10 +4103,29 @@ function loadDB() {
   return JSON.parse(JSON.stringify(DB_DEFAULTS));
 }
 
-// Keys held on db purely as caches of server-side reads. They are refetched
-// on every load, so persisting them to localStorage costs quota and buys
-// nothing. Anything added here must be repopulated by pullFromSupabase.
-var DB_TRANSIENT = { projectOverview: true };
+// Keys excluded from the localStorage blob. Two reasons appear here.
+//
+// projectOverview is a read-only projection of a SQL view — caching it is
+// pure waste.
+//
+// The rest are cached purely for cold-start speed and are large enough to
+// have broken the quota: AP alone was 4.0M of a 7.0M total, and bidInbox
+// carries raw email payloads at roughly 41 KB per row across 18 rows.
+//
+// Every key here must be repopulated by pullFromSupabase. Verified safe:
+// pushToSupabase is upsert-only with no deletes, and each branch is guarded
+// by `.length && _tblDirty(...)`, so an empty local array on cold start is a
+// no-op rather than a wipe.
+//
+// Cost of listing a key here: that table renders empty until the pull
+// completes, and has no offline fallback.
+var DB_TRANSIENT = {
+  projectOverview: true,   // read-only view, never written back
+  apInvoices:      true,   // 2.13M
+  apInvoiceLog:    true,   // 1.49M — append-only audit trail
+  apInvoiceLines:  true,   // 0.39M
+  bidInbox:        true    // 0.74M across 18 rows, raw email bodies
+};
 
 function saveDB() {
   try {
@@ -53495,7 +53514,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-14-pov2';
+var KMI_BUILD = '2026-09-15-pov3';
 
 var _kmiSessionId = (function(){
   try {
