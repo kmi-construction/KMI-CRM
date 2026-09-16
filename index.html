@@ -2207,7 +2207,8 @@ tr.gc-line:hover td{background:#fafafa}
        into nprj-tab-details / nprj-tab-directory / nprj-tab-submittals /
        nprj-tab-pos / nprj-tab-procurement. -->
   <div class="tabs" style="margin-top:16px">
-    <div class="tab active" id="nprj-tabhdr-details" onclick="npSwTab('details', this)">Project Details</div>
+    <div class="tab active" id="nprj-tabhdr-overview" onclick="npSwTab('overview', this)">Overview</div>
+    <div class="tab" id="nprj-tabhdr-details" onclick="npSwTab('details', this)">Project Details</div>
     <div class="tab" id="nprj-tabhdr-directory" onclick="npSwTab('directory', this)">Project Directory</div>
     <div class="tab" id="nprj-tabhdr-budget" onclick="npSwTab('budget', this)">Budget</div>
     <div class="tab" id="nprj-tabhdr-submittals" onclick="npSwTab('submittals', this)">Submittals</div>
@@ -2218,6 +2219,12 @@ tr.gc-line:hover td{background:#fafafa}
     <div class="tab" id="nprj-tabhdr-cors" onclick="npSwTab('cors', this)">Change Orders</div>
     <div class="tab" id="nprj-tabhdr-production" onclick="npSwTab('production', this)">Production</div>
     <div class="tab" id="nprj-tabhdr-schedule" onclick="npSwTab('schedule', this)">Schedule</div>
+  </div>
+
+  <!-- TAB: OVERVIEW -->
+  <div id="nprj-tab-overview" style="display:none">
+    <div id="nprj-ov-hdr" class="card" style="border-left:3px solid var(--kmi);display:flex;gap:30px;flex-wrap:wrap;align-items:flex-end"></div>
+    <div id="nprj-ov-tiles" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start"></div>
   </div>
 
   <!-- TAB: BUDGET -->
@@ -30417,10 +30424,11 @@ function deleteCostJob(id){
 // Single source of truth for tab order. Header DOM order, the disallowed-tab
 // redirect, and the index fallback in npSwTab all read from this — keep it in
 // step with the .tabs markup in #pg-new-project.
-var NPRJ_TAB_ORDER = ['details','directory','budget','submittals','pos',
+var NPRJ_TAB_ORDER = ['overview','details','directory','budget','submittals','pos',
                       'procurement','drawings','tm','cors','production','schedule'];
 
 var NPRJ_TAB_PERMS = {
+  overview:    'view-project',
   details:     'view-project',
   directory:   'view-project',
   budget:      'view_project_budget',
@@ -30485,6 +30493,8 @@ function npSwTab(tab, el) {
   if (prodTab) prodTab.style.display = (tab === 'production') ? '' : 'none';
   var schTab = g('nprj-tab-schedule');
   if (schTab) schTab.style.display = (tab === 'schedule') ? '' : 'none';
+  var ovTab = g('nprj-tab-overview');
+  if (ovTab) ovTab.style.display = (tab === 'overview') ? '' : 'none';
   var bgTab = g('nprj-tab-budget');
   if (bgTab) bgTab.style.display = (tab === 'budget') ? '' : 'none';
   var dwTab = g('nprj-tab-drawings');
@@ -30519,6 +30529,11 @@ function npSwTab(tab, el) {
   if (tab === 'schedule' && typeof renderProjectSchedule === 'function') {
     try { renderProjectSchedule(); } catch(e) { console.warn('renderProjectSchedule error', e); }
   }
+  // Overview — recomputed on every open. Cheap, and it means the tile numbers
+  // cannot go stale behind an edit made on another tab.
+  if (tab === 'overview' && typeof renderProjectOverviewTab === 'function') {
+    try { renderProjectOverviewTab(); } catch(e) { console.warn('renderProjectOverviewTab error', e); }
+  }
   // Budget — scope the module to this project and pull #bg-detail into the tab.
   if (tab === 'budget' && typeof renderProjectBudgetTab === 'function') {
     try { renderProjectBudgetTab(); } catch(e) { console.warn('renderProjectBudgetTab error', e); }
@@ -30541,6 +30556,239 @@ function npSwTab(tab, el) {
 // path (leaving the tab, and at the top of renderBudget) so the standalone
 // page can never render without its detail pane.
 // ══════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════
+// PROJECT OVERVIEW (B2)
+// ────────────────────────────────────────────────────────────
+// Five pillars. Cost, Production and Change Orders have sources. AR and
+// Safety do not, and say so rather than showing a fabricated number:
+//
+//   AR     — billings live in Foundation A/R, which is not part of the sync.
+//   Safety — nothing in KMI.Build records incidents, toolbox talks or JSAs.
+//            Cost class 11 is a dollar figure and says nothing about how the
+//            job is running.
+//
+// No health stoplights in v1 (decision 2-B). A red light nobody can trace to
+// a rule gets ignored; thresholds come once the numbers have been watched.
+// ════════════════════════════════════════════════════════════
+
+function _ovEsc(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function _ovDash() { return '<span style="color:#ccc">\u2014</span>'; }
+
+function _ovMoney(v) {
+  return (v === null || v === undefined) ? _ovDash() : fmtC(v);
+}
+
+function _ovKv(label, value) {
+  return '<div style="display:flex;justify-content:space-between;gap:12px;padding:7px 0;' +
+    'border-bottom:.5px solid #f2f2f2;font-size:12.5px"><span>' + label +
+    '</span><span style="font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap">' +
+    value + '</span></div>';
+}
+
+function _ovTile(title, sub, body) {
+  return '<div class="card"><h3 style="font-size:12px;font-weight:600;text-transform:uppercase;' +
+    'letter-spacing:.6px;margin:0 0 2px">' + title + '</h3>' +
+    '<div style="font-size:11px;color:#888;margin-bottom:13px">' + sub + '</div>' + body + '</div>';
+}
+
+function _ovEmptyTile(title, sub, heading, body) {
+  return _ovTile(title, sub,
+    '<div style="text-align:center;padding:24px 14px">' +
+    '<div style="font-size:13px;font-weight:600;color:var(--kmi);margin-bottom:5px">' + heading + '</div>' +
+    '<div style="font-size:12px;color:#888;line-height:1.55;max-width:300px;margin:0 auto">' + body + '</div></div>');
+}
+
+function _ovDaysSince(iso) {
+  if (!iso) return null;
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
+}
+
+function renderProjectOverviewTab() {
+  var host = g('nprj-ov-tiles'), hdr = g('nprj-ov-hdr');
+  if (!host) return;
+  var p = getProj(_editProjectId);
+  if (!p) {
+    if (hdr) hdr.innerHTML = '';
+    host.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;padding:40px 20px;color:#888">' +
+      'Save the project before the overview can be built.</div>';
+    return;
+  }
+
+  var ov = (db.projectOverview || []).find(function(r){
+    return String(r.number) === String(p.number);
+  }) || {};
+
+  // ── header band ───────────────────────────────────────────────────────
+  if (hdr) {
+    function cell(lbl, val) {
+      return '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;' +
+        'margin-bottom:4px">' + lbl + '</div><div style="font-size:13.5px;font-weight:600">' + val + '</div></div>';
+    }
+    var supAssign = (p.kmiAssignments || []).find(function(a){
+      return a && a.role && /superintendent/i.test(a.role);
+    });
+    var supName = '';
+    if (supAssign && supAssign.userId) {
+      var su = (db.users || []).find(function(x){ return String(x.id) === String(supAssign.userId); });
+      supName = (su && (su.name || su.email)) || '';
+    }
+    hdr.innerHTML =
+      cell('Contract', ov.contract === null || ov.contract === undefined
+        ? _ovDash()
+        : (ov.contractMissing ? '<span style="color:var(--acd)">no contract</span>' : fmtC(ov.contract))) +
+      cell('Project manager', _ovEsc(_povPmName(p)) || _ovDash()) +
+      cell('Superintendent', _ovEsc(supName) || _ovDash()) +
+      cell('Customer', _ovEsc(getCust(p.customerId).name)) +
+      '<div style="margin-left:auto"><div style="font-size:11px;color:#888;text-transform:uppercase;' +
+      'letter-spacing:.5px;margin-bottom:4px">Last cost booked</div>' +
+      '<div style="font-size:13.5px;font-weight:500;color:#888">' +
+      (ov.lastCostBooked ? _ovEsc(ov.lastCostBooked) : 'no cost yet') + '</div></div>';
+  }
+
+  var pct = _povPct(p);
+  var tiles = [];
+
+  // ── COST ──────────────────────────────────────────────────────────────
+  var spent = (ov.estCost && ov.costToDate !== null && ov.costToDate !== undefined && ov.estCost > 0)
+    ? (ov.costToDate / ov.estCost * 100) : null;
+  var earned = (ov.estLabor !== null && ov.estLabor !== undefined && pct !== null)
+    ? ov.estLabor * (pct / 100) : null;
+  var lvar = (earned !== null && ov.actualLabor !== null && ov.actualLabor !== undefined)
+    ? earned - ov.actualLabor : null;
+
+  if (ov.estCost === null || ov.estCost === undefined) {
+    tiles.push(_ovEmptyTile('Cost', 'Foundation, direct cost only', 'No Foundation data',
+      'This project has no matching Foundation job, or your role does not have access to job cost.'));
+  } else {
+    tiles.push(_ovTile('Cost', 'Foundation, direct cost only',
+      '<div style="font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.1">' +
+        (spent === null ? _ovDash() : spent.toFixed(1) + '%') + '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:3px">of estimated cost spent' +
+        (pct === null ? '' : ', against ' + pct.toFixed(0) + '% complete') + '</div>' +
+      '<div style="margin-top:14px">' +
+        _ovKv('Estimated cost', _ovMoney(ov.estCost)) +
+        _ovKv('Cost to date', _ovMoney(ov.costToDate)) +
+        _ovKv('Est. gross profit', _ovMoney(ov.estGrossProfit)) +
+        _ovKv('Est. GP %', (ov.estGpPct === null || ov.estGpPct === undefined)
+          ? _ovDash() : ov.estGpPct.toFixed(1) + '%') +
+        _ovKv('Labor earned vs actual', lvar === null ? _ovDash()
+          : (lvar < 0 ? '<span style="color:#A32D2D">(' + Math.abs(Math.round(lvar)).toLocaleString() + ')</span>'
+                      : Math.round(lvar).toLocaleString())) +
+      '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:9px;line-height:1.5">' +
+        'Gross, not net — estimated cost is direct only, so indirect and G&amp;A are not deducted.</div>' +
+      '<button class="btn btn-sm" style="margin-top:12px;width:100%" onclick="npSwTab(\'budget\', null)">Open the budget</button>'));
+  }
+
+  // ── PRODUCTION ────────────────────────────────────────────────────────
+  var weeks = (db.prodWeekly || []).filter(function(w){
+    return String(w.projectId) === String(p.id);
+  }).sort(function(a, b){ return String(a.weekEnding).localeCompare(String(b.weekEnding)); });
+  var lastWeek = weeks.length ? weeks[weeks.length - 1] : null;
+
+  if (pct === null) {
+    tiles.push(_ovEmptyTile('Production', 'Weekly field reporting', 'No production estimate',
+      'Percent complete is labor-weighted against the production estimate. Build one on the Production tab and this fills in.'));
+  } else {
+    tiles.push(_ovTile('Production', 'Weekly field reporting',
+      '<div style="font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.1">' +
+        pct.toFixed(0) + '%</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:3px">complete, labor-weighted</div>' +
+      '<div style="margin-top:14px">' +
+        _ovKv('Weeks reported', weeks.length) +
+        _ovKv('Last week ending', lastWeek ? _ovEsc(lastWeek.weekEnding) : _ovDash()) +
+        _ovKv('Foundation % complete', (ov.fndPctComplete === null || ov.fndPctComplete === undefined)
+          ? _ovDash() : Number(ov.fndPctComplete).toFixed(0) + '%') +
+      '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:9px;line-height:1.5">' +
+        'Foundation\'s figure is cost-derived. A wide gap between the two is worth opening.</div>' +
+      '<button class="btn btn-sm" style="margin-top:12px;width:100%" onclick="npSwTab(\'production\', null)">Open production</button>'));
+  }
+
+  // ── CHANGE ORDERS ─────────────────────────────────────────────────────
+  var pcors = (db.cors || []).filter(function(c){ return String(c.projectId) === String(p.id); });
+  function corSum(st) {
+    return pcors.filter(function(c){ return (c.status || 'Draft') === st; })
+      .reduce(function(a, c){ return a + (Number(c.totalAmount) || 0); }, 0);
+  }
+  function corCount(st) {
+    return pcors.filter(function(c){ return (c.status || 'Draft') === st; }).length;
+  }
+  // Signed but not yet rolled into a COR. Same predicate the T&M list uses.
+  // Reported as count and hours, not dollars: a ticket carries laborRows,
+  // equipmentRows and materialRows, and is not priced until a COR applies
+  // rates to it. A dollar figure here would be invented.
+  var unrolled = (db.tmTickets || []).filter(function(t){
+    if (String(t.projectId) !== String(p.id)) return false;
+    var s = t.status || 'Draft';
+    return (s === 'Signed' || s === 'Signed (Uploaded)' || s === 'Approved by KMI PM') && !t.corId;
+  });
+  var unrolledHrs = unrolled.reduce(function(a, t){
+    var h = tmLaborTotals(t);
+    return a + h.st + h.ot + h.dt;
+  }, 0);
+  var oldest = null;
+  unrolled.forEach(function(t){
+    var d = _ovDaysSince(t.signedAt);
+    if (d !== null && (oldest === null || d > oldest)) oldest = d;
+  });
+
+  tiles.push(_ovTile('Change orders', 'CORs and unrolled T&amp;M',
+    '<div style="font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.1">' +
+      fmtC(corSum('Approved')) + '</div>' +
+    '<div style="font-size:11px;color:#888;margin-top:3px">approved, already inside the contract above</div>' +
+    '<div style="margin-top:14px">' +
+      _ovKv('<span class="bdg bd-won">Approved</span> ' + corCount('Approved'), fmtC(corSum('Approved'))) +
+      _ovKv('<span class="bdg bd-sent">Pending</span> ' + corCount('Pending'), fmtC(corSum('Pending'))) +
+      _ovKv('<span class="bdg bd-draft">Draft</span> ' + corCount('Draft'), fmtC(corSum('Draft'))) +
+      _ovKv('<span class="bdg bd-lost">Rejected</span> ' + corCount('Rejected'), fmtC(corSum('Rejected'))) +
+    '</div>' +
+    (unrolled.length
+      ? '<div style="margin-top:14px;padding:11px 13px;background:#faf1d6;border:.5px solid #E6D59F;border-radius:8px">' +
+        '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5518;margin-bottom:4px">' +
+        'Signed, not yet in a COR</div>' +
+        '<div style="font-size:18px;font-weight:600;color:#6b5518">' + unrolled.length +
+        ' ticket' + (unrolled.length === 1 ? '' : 's') + '</div>' +
+        '<div style="font-size:11.5px;color:#6b5518;margin-top:3px">' +
+        (unrolledHrs ? unrolledHrs.toLocaleString() + ' hours' : 'no labor hours') +
+        (oldest === null ? '' : ' · oldest signed ' + oldest + ' day' + (oldest === 1 ? '' : 's') + ' ago') +
+        '</div></div>'
+      : '') +
+    '<button class="btn btn-sm" style="margin-top:12px;width:100%" onclick="npSwTab(\'cors\', null)">Open change orders</button>'));
+
+  // ── AR ────────────────────────────────────────────────────────────────
+  tiles.push(_ovEmptyTile('Accounts receivable', 'Billings and retention',
+    'Billings aren\'t synced yet',
+    'Billed to date, retention and aging live in Foundation A/R, which is not part of the nightly sync. ' +
+    'Adding that table fills this tile and the missing columns on the Projects grid at the same time.'));
+
+  // ── SAFETY ────────────────────────────────────────────────────────────
+  tiles.push(_ovEmptyTile('Safety', 'Incidents and field observations',
+    'Safety isn\'t tracked here yet',
+    'Nothing in KMI.Build records incidents, toolbox talks or job hazard analyses. The only safety ' +
+    'figure anywhere is a cost line in Foundation, which says nothing about how the job is running.'));
+
+  // ── ROOM TO GROW ──────────────────────────────────────────────────────
+  tiles.push('<div class="card" style="border-style:dashed;background:#fbfbfa">' +
+    '<h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin:0 0 2px;color:#888">' +
+    'Room for more</h3><div style="font-size:11px;color:#888;margin-bottom:13px">As other modules fill out</div>' +
+    '<div style="font-size:12.5px;color:#666;line-height:1.85">' +
+    'Schedule float against the P6 import<br>Submittal and RFI turnaround<br>' +
+    'Procurement and long-lead exposure<br>Manpower against the plan<br>' +
+    'Rented equipment still on the job</div>' +
+    '<div style="font-size:11px;color:#888;margin-top:12px;line-height:1.5">' +
+    'Six tiles fill a row of three cleanly. A seventh means rethinking the layout.</div></div>');
+
+  host.innerHTML = tiles.join('');
+}
 
 function _bgReclaimDetail() {
   var det = g('bg-detail');
@@ -34032,7 +34280,10 @@ function editProject(id, initialTab) {
 
   // Reset to first tab on entry so the user always lands on Project Details,
   // unless a specific tab was requested (e.g. returning from the T&M form).
-  npSwTab(initialTab || 'details', null);
+  // Overview is the project home screen (B2). Callers that pass an explicit
+  // tab — deep links, and the return paths in _subExitForm / _tmExitForm /
+  // bgClose — are unaffected.
+  npSwTab(initialTab || 'overview', null);
 
   g('nprj-num').value  = p.number || '';
   g('nprj-name').value = p.name   || '';
@@ -53524,7 +53775,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-16-tmsig';
+var KMI_BUILD = '2026-09-16-ovw1';
 
 var _kmiSessionId = (function(){
   try {
