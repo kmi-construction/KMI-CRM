@@ -2200,7 +2200,7 @@ tr.gc-line:hover td{background:#fafafa}
 <!-- NEW / EDIT PROJECT -->
 <div class="pg" id="pg-new-project">
   <div class="ph" style="margin-bottom:0">
-    <div><h1 id="nprj-heading">New project</h1><div class="sub" id="nprj-id-display" style="font-weight:600;color:var(--kmi)"></div><div class="stripe"></div></div>
+    <div><h1 id="nprj-heading">New project</h1><div class="sub" id="nprj-id-display" style="font-weight:600;color:var(--kmi)"></div><div class="sub" id="nprj-addr-display" style="margin-top:1px"></div><div class="stripe"></div></div>
     <button class="btn" onclick="nav('projects')">← Cancel</button>
   </div>
   <!-- Tabbed layout (mirrors product library pattern). Tab content renders
@@ -2223,6 +2223,7 @@ tr.gc-line:hover td{background:#fafafa}
 
   <!-- TAB: OVERVIEW -->
   <div id="nprj-tab-overview" style="display:none">
+      <div id="nprj-ov-actions" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px"></div>
     <div id="nprj-ov-hdr" class="card" style="border-left:3px solid var(--kmi);display:flex;gap:30px;flex-wrap:wrap;align-items:flex-end"></div>
     <div id="nprj-ov-tiles" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start"></div>
   </div>
@@ -30493,6 +30494,16 @@ function npSwTab(tab, el) {
   if (prodTab) prodTab.style.display = (tab === 'production') ? '' : 'none';
   var schTab = g('nprj-tab-schedule');
   if (schTab) schTab.style.display = (tab === 'schedule') ? '' : 'none';
+  // Address line under the heading. Set here rather than at each of the four
+  // sites that write nprj-heading, because npSwTab runs on open, on every tab
+  // change, and again through _nprjRefreshAfterSave — so it cannot go stale.
+  var addrEl = g('nprj-addr-display');
+  if (addrEl) {
+    var _ap = _editProjectId ? getProj(_editProjectId) : null;
+    var _astr = (_ap && typeof formatProjAddress === 'function') ? formatProjAddress(_ap) : '';
+    addrEl.textContent = _astr || '';
+    addrEl.style.display = _astr ? '' : 'none';
+  }
   var ovTab = g('nprj-tab-overview');
   if (ovTab) ovTab.style.display = (tab === 'overview') ? '' : 'none';
   var bgTab = g('nprj-tab-budget');
@@ -30572,6 +30583,24 @@ function npSwTab(tab, el) {
 // a rule gets ignored; thresholds come once the numbers have been watched.
 // ════════════════════════════════════════════════════════════
 
+// Whether the Change Orders tile projects pending CORs into the contract.
+// Session state only — not persisted, because it is a way of looking at the
+// number rather than a property of the job.
+var _ovIncludePending = true;
+
+function _ovTogglePending() {
+  _ovIncludePending = !_ovIncludePending;
+  renderProjectOverviewTab();
+}
+
+// Contract with approved change orders only. The view already computes this
+// as `contract`; this reads it back defensively so the tile still renders
+// something sensible for a project with no Foundation row.
+function _ovContractApproved(ov) {
+  if (ov && ov.contract !== null && ov.contract !== undefined) return ov.contract;
+  return null;
+}
+
 function _ovEsc(s) {
   return String(s === null || s === undefined ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -30626,31 +30655,99 @@ function renderProjectOverviewTab() {
     return String(r.number) === String(p.number);
   }) || {};
 
-  // ── header band ───────────────────────────────────────────────────────
+  // ── directory band ────────────────────────────────────────────────────
+  // Who is on the job, read-only, as a plain three-column list: name, email,
+  // phone. The contract figures that used to sit here moved into the Cost and
+  // Change Orders tiles, next to the numbers they relate to. Editing stays on
+  // the Directory tab — one place to change an assignment, not two.
   if (hdr) {
-    function cell(lbl, val) {
-      return '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;' +
-        'margin-bottom:4px">' + lbl + '</div><div style="font-size:13.5px;font-weight:600">' + val + '</div></div>';
+    function contactRow(name, role, email, phone) {
+      return '<tr>' +
+        '<td style="padding:5px 14px 5px 0;vertical-align:top">' +
+          '<div style="font-size:12.5px;font-weight:600">' + _ovEsc(name) + '</div>' +
+          (role ? '<div style="font-size:11px;color:#888;margin-top:1px">' + _ovEsc(role) + '</div>' : '') +
+        '</td>' +
+        '<td style="padding:5px 14px 5px 0;font-size:12px;vertical-align:top">' +
+          (email ? '<a href="mailto:' + _ovEsc(email) + '" style="color:var(--kmi3)">' +
+            _ovEsc(email) + '</a>' : '<span style="color:#ccc">\u2014</span>') + '</td>' +
+        '<td style="padding:5px 0;font-size:12px;white-space:nowrap;vertical-align:top">' +
+          (phone ? '<a href="tel:' + _ovEsc(phone) + '" style="color:#666">' +
+            _ovEsc(phone) + '</a>' : '<span style="color:#ccc">\u2014</span>') + '</td>' +
+      '</tr>';
     }
-    var supAssign = (p.kmiAssignments || []).find(function(a){
-      return a && a.role && /superintendent/i.test(a.role);
-    });
-    var supName = '';
-    if (supAssign && supAssign.userId) {
-      var su = (db.users || []).find(function(x){ return String(x.id) === String(supAssign.userId); });
-      supName = (su && (su.name || su.email)) || '';
+    function groupRow(label) {
+      return '<tr><td colspan="3" style="padding:12px 0 4px;font-size:10px;color:#888;' +
+        'text-transform:uppercase;letter-spacing:.6px;border-bottom:.5px solid #eee">' +
+        label + '</td></tr>';
     }
+    function emptyRow(msg) {
+      return '<tr><td colspan="3" style="padding:6px 0;font-size:12px;color:#aaa">' + msg + '</td></tr>';
+    }
+
+    var kmiRows = (p.kmiAssignments || []).map(function(a){
+      var u = (typeof getUser === 'function' ? getUser(a.userId) : null) || {};
+      var nm = ((u.firstName || '') + ' ' + (u.lastName || '')).trim() || u.name || u.email || 'Unknown user';
+      return contactRow(nm, a.role || u.title || u.role || '', u.email || '', u.phone || '');
+    }).join('');
+
+    var conRows = (p.contactAssignments || []).map(function(a){
+      var pm = (db.pms || []).find(function(x){ return String(x.id) === String(a.pmId); });
+      if (!pm) return contactRow('Unknown contact', '', '', '');
+      var nm = ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim() || pm.email || 'Contact';
+      return contactRow(nm, a.role || pm.title || '', pm.email || '', pm.phone || '');
+    }).join('');
+
+    hdr.style.display = 'block';
     hdr.innerHTML =
-      cell('Contract', ov.contract === null || ov.contract === undefined
-        ? _ovDash()
-        : (ov.contractMissing ? '<span style="color:var(--acd)">no contract</span>' : fmtC(ov.contract))) +
-      cell('Project manager', _ovEsc(_povPmName(p)) || _ovDash()) +
-      cell('Superintendent', _ovEsc(supName) || _ovDash()) +
-      cell('Customer', _ovEsc(getCust(p.customerId).name)) +
-      '<div style="margin-left:auto"><div style="font-size:11px;color:#888;text-transform:uppercase;' +
-      'letter-spacing:.5px;margin-bottom:4px">Last cost booked</div>' +
-      '<div style="font-size:13.5px;font-weight:500;color:#888">' +
-      (ov.lastCostBooked ? _ovEsc(ov.lastCostBooked) : 'no cost yet') + '</div></div>';
+      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">' +
+        '<div style="font-size:13px;font-weight:600">' + _ovEsc(getCust(p.customerId).name) + '</div>' +
+        '<div style="font-size:11.5px;color:#888">Last cost booked \u00b7 ' +
+        (ov.lastCostBooked ? _ovEsc(ov.lastCostBooked) : 'no cost yet') + '</div>' +
+        '<button class="btn btn-sm" style="margin-left:auto" onclick="npSwTab(\'directory\', null)">' +
+        'Edit directory</button>' +
+      '</div>' +
+      '<table style="width:100%;border-collapse:collapse;table-layout:auto">' +
+        groupRow('KMI team') +
+        (kmiRows || emptyRow('No KMI team assigned')) +
+        groupRow('Customer contacts') +
+        (conRows || emptyRow('No customer contacts assigned')) +
+      '</table>';
+  }
+
+  // ── action strip ──────────────────────────────────────────────────────
+  // Kickoff and the source-opportunity link, the two things that had no home
+  // once the project view modal was taken off the Projects page.
+  var act = g('nprj-ov-actions');
+  if (act) {
+    var bits = [];
+    var canKick = (typeof hasFull === 'function') && hasFull('send-project-kickoff');
+    var sentAt  = p.kickoffSentAt || '';
+    var sentBy  = p.kickoffSentByUserId && typeof getUser === 'function'
+      ? getUser(p.kickoffSentByUserId) : null;
+    var sentByName = sentBy
+      ? (((sentBy.firstName || '') + ' ' + (sentBy.lastName || '')).trim() || sentBy.email || '')
+      : '';
+
+    if (canKick) {
+      bits.push('<button class="btn btn-sm' + (sentAt ? '' : ' btn-p') +
+        '" onclick="openProjectKickoffModal(' + p.id + ')">' +
+        (sentAt ? 'Resend project kickoff' : '\u2709 Send project kickoff') + '</button>');
+    }
+    // The last-sent state shows for everyone who can open the project, not
+    // only those who can send. Knowing whether the customer has been told is
+    // not the same as being allowed to tell them.
+    bits.push('<span style="font-size:11.5px;color:#888">' +
+      (sentAt
+        ? 'Kickoff sent ' + _ovEsc(sentAt) + (sentByName ? ' by ' + _ovEsc(sentByName) : '')
+        : 'Kickoff not sent') + '</span>');
+
+    if (p.opportunityId) {
+      bits.push('<span style="font-size:11.5px;color:#ccc">|</span>' +
+        '<span style="font-size:11.5px;color:var(--kmi);cursor:pointer" ' +
+        'onclick="openOppDetail(\'' + _ovEsc(p.opportunityId) + '\')">Source opportunity ' +
+        _ovEsc(p.opportunityId) + ' \u2197</span>');
+    }
+    act.innerHTML = bits.join('');
   }
 
   var pct = _povPct(p);
@@ -30674,6 +30771,8 @@ function renderProjectOverviewTab() {
       '<div style="font-size:11px;color:#888;margin-top:3px">of estimated cost spent' +
         (pct === null ? '' : ', against ' + pct.toFixed(0) + '% complete') + '</div>' +
       '<div style="margin-top:14px">' +
+        _ovKv('Contract', ov.contractMissing
+          ? '<span style="color:var(--acd)">no contract</span>' : _ovMoney(ov.contract)) +
         _ovKv('Estimated cost', _ovMoney(ov.estCost)) +
         _ovKv('Cost to date', _ovMoney(ov.costToDate)) +
         _ovKv('Est. gross profit', _ovMoney(ov.estGrossProfit)) +
@@ -30685,7 +30784,9 @@ function renderProjectOverviewTab() {
       '</div>' +
       '<div style="font-size:11px;color:#888;margin-top:9px;line-height:1.5">' +
         'Gross, not net — estimated cost is direct only, so indirect and G&amp;A are not deducted.</div>' +
-      '<button class="btn btn-sm" style="margin-top:12px;width:100%" onclick="npSwTab(\'budget\', null)">Open the budget</button>'));
+      (npTabAllowed('budget')
+        ? '<button class="btn btn-sm" style="margin-top:12px;width:100%" onclick="npSwTab(\'budget\', null)">Open the budget</button>'
+        : '')));
   }
 
   // ── PRODUCTION ────────────────────────────────────────────────────────
@@ -30741,7 +30842,10 @@ function renderProjectOverviewTab() {
     if (d !== null && (oldest === null || d > oldest)) oldest = d;
   });
 
-  tiles.push(_ovTile('Change orders', 'CORs and unrolled T&amp;M',
+  // Omitted rather than shown as "no access". A tile explaining what someone
+  // cannot see is noise, and it advertises the existence of numbers they were
+  // not meant to have.
+  if (npTabAllowed('cors')) tiles.push(_ovTile('Change orders', 'CORs and unrolled T&amp;M',
     '<div style="font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.1">' +
       fmtC(corSum('Approved')) + '</div>' +
     '<div style="font-size:11px;color:#888;margin-top:3px">approved, already inside the contract above</div>' +
@@ -30750,6 +30854,20 @@ function renderProjectOverviewTab() {
       _ovKv('<span class="bdg bd-sent">Pending</span> ' + corCount('Pending'), fmtC(corSum('Pending'))) +
       _ovKv('<span class="bdg bd-draft">Draft</span> ' + corCount('Draft'), fmtC(corSum('Draft'))) +
       _ovKv('<span class="bdg bd-lost">Rejected</span> ' + corCount('Rejected'), fmtC(corSum('Rejected'))) +
+    '</div>' +
+    // Contract as it stands, and as it would stand if everything pending were
+    // approved. Pending is a projection, not a commitment, so it is separated
+    // out and can be switched off rather than folded silently into one number.
+    '<div style="margin-top:14px;padding-top:12px;border-top:.5px solid #eee">' +
+      _ovKv('Contract, approved only', _ovMoney(_ovContractApproved(ov))) +
+      (_ovIncludePending
+        ? _ovKv('<span style="color:var(--kmi3)">With pending CORs</span>',
+                '<span style="color:var(--kmi3)">' + fmtC(_ovContractApproved(ov) + corSum('Pending')) + '</span>')
+        : '') +
+      '<label style="display:flex;align-items:center;gap:7px;font-size:12px;color:#666;' +
+      'margin-top:9px;cursor:pointer"><input type="checkbox"' +
+      (_ovIncludePending ? ' checked' : '') + ' onchange="_ovTogglePending()"> ' +
+      'Include pending change orders</label>' +
     '</div>' +
     (unrolled.length
       ? '<div style="margin-top:14px;padding:11px 13px;background:#faf1d6;border:.5px solid #E6D59F;border-radius:8px">' +
@@ -30764,6 +30882,81 @@ function renderProjectOverviewTab() {
       : '') +
     '<button class="btn btn-sm" style="margin-top:12px;width:100%" onclick="npSwTab(\'cors\', null)">Open change orders</button>'));
 
+  // ── T&M TICKETS ───────────────────────────────────────────────────────
+  // Open means not yet rolled into a COR and not rejected. Broken out by the
+  // step each ticket is actually waiting on, because "12 open" says nothing
+  // about who needs to do something next.
+  var ptm = (db.tmTickets || []).filter(function(t){
+    if (String(t.projectId) !== String(p.id)) return false;
+    var s = t.status || 'Draft';
+    return !t.corId && s !== 'Rejected' && s !== 'Voided';
+  });
+  function tmCount(st) {
+    return ptm.filter(function(t){ return (t.status || 'Draft') === st; }).length;
+  }
+  var tmSignedCt = ptm.filter(function(t){
+    var s = t.status || 'Draft';
+    return s === 'Signed' || s === 'Signed (Uploaded)';
+  }).length;
+  var tmHrs = ptm.reduce(function(a, t){
+    var h = tmLaborTotals(t);
+    return a + h.st + h.ot + h.dt;
+  }, 0);
+
+  if (!npTabAllowed('tm')) {
+    /* omitted — no view-tm-tickets */
+  } else if (!ptm.length) {
+    tiles.push(_ovEmptyTile('T&amp;M tickets', 'Open and unrolled', 'Nothing open',
+      'Every T&amp;M ticket on this job is either rolled into a change order or closed out.'));
+  } else {
+    tiles.push(_ovTile('T&amp;M tickets', 'Open and unrolled',
+      '<div style="font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.1">' +
+        ptm.length + '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:3px">open, ' +
+        (tmHrs ? tmHrs.toLocaleString() + ' labor hours' : 'no labor hours') + '</div>' +
+      '<div style="margin-top:14px">' +
+        _ovKv('Draft', tmCount('Draft')) +
+        _ovKv('Awaiting signature', tmCount('Sent for Signature')) +
+        _ovKv('Signed, awaiting KMI', tmSignedCt) +
+        _ovKv('Approved, not in a COR', tmCount('Approved by KMI PM')) +
+      '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:9px;line-height:1.5">' +
+        'Hours only \u2014 a ticket is not priced until a COR applies rates to it.</div>' +
+      '<button class="btn btn-sm" style="margin-top:12px;width:100%" onclick="npSwTab(\'tm\', null)">Open T&amp;M tickets</button>'));
+  }
+
+  // ── SUBMITTALS ────────────────────────────────────────────────────────
+  var psub = (db.submittals || []).filter(function(s){
+    return String(s.projectId) === String(p.id) && (s.status || 'draft') !== 'closed';
+  });
+  function subCt(st) {
+    return psub.filter(function(s){ return (s.status || 'draft') === st; }).length;
+  }
+  var subOverdue = psub.filter(function(s){
+    return typeof _isOverdue === 'function' && _isOverdue(s.dueDate);
+  }).length;
+
+  if (!npTabAllowed('submittals')) {
+    /* omitted — no view-submittals */
+  } else if (!psub.length) {
+    tiles.push(_ovEmptyTile('Submittals', 'Open items', 'Nothing open',
+      'Every submittal on this job is closed.'));
+  } else {
+    tiles.push(_ovTile('Submittals', 'Open items',
+      '<div style="font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.1">' +
+        psub.length + '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:3px">open' +
+        (subOverdue ? ', <span style="color:#A32D2D">' + subOverdue + ' past due</span>' : '') + '</div>' +
+      '<div style="margin-top:14px">' +
+        _ovKv('Draft', subCt('draft')) +
+        _ovKv('Open', subCt('open')) +
+        _ovKv('Pending RFI', subCt('pending-rfi')) +
+        _ovKv('Past due', subOverdue
+          ? '<span style="color:#A32D2D">' + subOverdue + '</span>' : 0) +
+      '</div>' +
+      '<button class="btn btn-sm" style="margin-top:12px;width:100%" onclick="npSwTab(\'submittals\', null)">Open submittals</button>'));
+  }
+
   // ── AR ────────────────────────────────────────────────────────────────
   tiles.push(_ovEmptyTile('Accounts receivable', 'Billings and retention',
     'Billings aren\'t synced yet',
@@ -30775,17 +30968,6 @@ function renderProjectOverviewTab() {
     'Safety isn\'t tracked here yet',
     'Nothing in KMI.Build records incidents, toolbox talks or job hazard analyses. The only safety ' +
     'figure anywhere is a cost line in Foundation, which says nothing about how the job is running.'));
-
-  // ── ROOM TO GROW ──────────────────────────────────────────────────────
-  tiles.push('<div class="card" style="border-style:dashed;background:#fbfbfa">' +
-    '<h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin:0 0 2px;color:#888">' +
-    'Room for more</h3><div style="font-size:11px;color:#888;margin-bottom:13px">As other modules fill out</div>' +
-    '<div style="font-size:12.5px;color:#666;line-height:1.85">' +
-    'Schedule float against the P6 import<br>Submittal and RFI turnaround<br>' +
-    'Procurement and long-lead exposure<br>Manpower against the plan<br>' +
-    'Rented equipment still on the job</div>' +
-    '<div style="font-size:11px;color:#888;margin-top:12px;line-height:1.5">' +
-    'Six tiles fill a row of three cleanly. A seventh means rethinking the layout.</div></div>');
 
   host.innerHTML = tiles.join('');
 }
@@ -33609,10 +33791,10 @@ function filterProj() {
       ? '<span class="tag" style="cursor:pointer;color:var(--kmi);border-color:var(--stl)" onclick="openOppDetail(\'' + p.opportunityId + '\')" title="View source opportunity">' + p.opportunityId + '</span>'
       : '<span class="tag">Manual</span>';
     var numCell = _canOpen
-      ? '<td style="font-weight:600;color:var(--kmi);cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.number || '—') + '</td>'
+      ? '<td style="font-weight:600;color:var(--kmi);cursor:pointer" onclick="editProject(' + p.id + ')">' + (p.number || '—') + '</td>'
       : '<td style="font-weight:600;color:var(--kmi)">' + (p.number || '—') + '</td>';
     var nameCell = _canOpen
-      ? '<td style="cursor:pointer" onclick="viewProject(' + p.id + ')">' + (p.name || '<span style="color:#aaa">—</span>') + '</td>'
+      ? '<td style="cursor:pointer" onclick="editProject(' + p.id + ')">' + (p.name || '<span style="color:#aaa">—</span>') + '</td>'
       : '<td>' + (p.name || '<span style="color:#aaa">—</span>') + '</td>';
     return '<tr>' +
       numCell +
@@ -33834,7 +34016,9 @@ function _povRender() {
 
   g('pov-tbody').innerHTML = rows.map(function(r){
     var p = r.p, ov = r.ov, pct = r.pct;
-    var open = _canOpen ? ' style="cursor:pointer" onclick="viewProject(' + p.id + ')"' : '';
+    // Straight into the workspace, which now lands on Overview. The view
+    // modal it used to open is redundant — see the header of edit_b2b.
+    var open = _canOpen ? ' style="cursor:pointer" onclick="editProject(' + p.id + ')"' : '';
     if (ov.contractMissing) nMissing++;
     if (!ov.number) nNoFnd++;
 
@@ -53775,7 +53959,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-16-ovw1';
+var KMI_BUILD = '2026-09-19-ovw1';
 
 var _kmiSessionId = (function(){
   try {
@@ -57602,8 +57786,17 @@ async function sendProjectKickoffEmail() {
       'success'
     );
     delete window._pendingKickoffEmail;
-    // Re-render the project modal so the "Last sent" indicator updates.
-    if (typeof viewProject === 'function') viewProject(p.id);
+    // Refresh whichever surface is showing the "last sent" state. The
+    // Overview action strip replaced the modal as its home; the modal is
+    // still refreshed when the send was launched from there.
+    if (typeof renderProjectOverviewTab === 'function'
+        && String(_editProjectId) === String(p.id)
+        && g('nprj-tab-overview')
+        && g('nprj-tab-overview').style.display !== 'none') {
+      try { renderProjectOverviewTab(); } catch(e) { console.warn('kickoff refresh', e); }
+    } else if (typeof viewProject === 'function') {
+      viewProject(p.id);
+    }
   } else {
     sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Project Kickoff';
     showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
