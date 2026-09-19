@@ -1670,11 +1670,6 @@ tr.gc-line:hover td{background:#fafafa}
     <div class="sb-group-hdr" onclick="toggleSbGroup('projects')"><span>Projects</span><span class="sb-chev">▾</span></div>
     <div class="sb-group-items">
       <div class="ni" onclick="nav('projects')"><span class="nico">⬢</span>Projects</div>
-      <div class="ni" onclick="nav('budget')"><span class="nico">$</span>Budget</div>
-      <div class="ni" onclick="nav('tm-tickets')"><span class="nico">⏱</span>T&amp;M Tickets</div>
-      <div class="ni" onclick="nav('cors')"><span class="nico">◇</span>CORs</div>
-      <div class="ni" onclick="nav('submittals')"><span class="nico">▤</span>Submittals</div>
-      <div class="ni" onclick="nav('drawings')"><span class="nico">▱</span>Drawings</div>
       <div class="ni" onclick="nav('meetings')"><span class="nico">🗒</span>Meeting Minutes</div>
       <div class="ni" onclick="nav('tasks')"><span class="nico">☑</span>Tasks</div>
       <div class="ni" onclick="nav('prod-review')"><span class="nico">◷</span>Production Review<span id="prodReviewNavCount" class="ni-count" style="display:none"></span></div>
@@ -3222,7 +3217,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="sub" id="ncor-id-display" style="font-weight:600;color:var(--kmi)"></div>
       <div class="stripe"></div>
     </div>
-    <button class="btn" onclick="nav('cors')">← Cancel</button>
+    <button class="btn" onclick="_corExitForm()">← Cancel</button>
   </div>
 
   <!-- Smart Upload mode banner — only shown when in the COR smart-upload review flow.
@@ -3346,7 +3341,7 @@ tr.gc-line:hover td{background:#fafafa}
 
   <!-- Action buttons. Most are placeholders that wire up in Round 4.3. -->
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
-    <button class="btn" onclick="_smartUpCorCancel(); nav('cors');">Cancel</button>
+    <button class="btn" onclick="_smartUpCorCancel(); _corExitForm();">Cancel</button>
     <button class="btn" onclick="downloadCorPDF()" id="ncor-pdf-btn" style="display:none" title="Generate the COR PDF (Standard or Hunzinger format depending on the project)">⬇ Download PDF</button>
     <button class="btn" onclick="corOpenDistribution()" id="ncor-dist-btn" style="display:none" title="Set which cost codes this COR's cost rolls up to">⚙ Cost distribution</button>
     <button class="btn" onclick="corExportFoundationHeaderCsv()" id="ncor-fnd-header-btn" style="display:none" title="Generate the Foundation CO Header CSV (1 row)">⬇ Export Header CSV</button>
@@ -18555,6 +18550,12 @@ async function approveTmTicket() {
 
 var _editCorId = null;
 var _newCorPrefill = null;  // { projectId, type } stashed when type-picker confirms
+// When a COR is opened/created from a project's Change Orders tab, this holds
+// that project id so the form's Cancel / save exit returns to that tab instead
+// of the global all-projects COR list. Null means the form was reached from the
+// global list or the smart-upload flow, so exit falls back to nav('cors').
+// Mirrors _tmReturnToProject / _subReturnToProject / _bgReturnToProject.
+var _corReturnToProject = null;
 
 // ── Helpers (escape, format, badges) ───────────────────────────────────
 function corEsc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -19092,7 +19093,7 @@ function renderProjectCorList() {
     var creatorName = _corCreatorName(c);
     var actions = '';
     if (hasRead('view-cors')) {
-      actions += '<button class="btn btn-sm" onclick="viewCor(' + c.id + ')">' +
+      actions += '<button class="btn btn-sm" onclick="corViewForProject(' + c.id + ')">' +
         (corCanEdit(c) ? '\u270E Edit' : '\uD83D\uDC41 View') + '</button>';
     }
     if (corCanDelete(c)) {
@@ -19118,7 +19119,44 @@ function renderProjectCorList() {
 function corNewForProject() {
   if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); return; }
   if (!_editProjectId) { alert('Save the project first before adding change orders.'); return; }
+  // showNewCorModal() sets _corReturnToProject from the locked project id,
+  // so the context survives the type-picker modal and the nav to the form.
   showNewCorModal(_editProjectId);
+}
+
+// View/Edit a COR from the project tab -- remembers to return here on close.
+function corViewForProject(id) {
+  var pid = _editProjectId;
+  viewCor(id);                   // clears _corReturnToProject internally
+  _corReturnToProject = pid;     // re-set so cancel/save returns to this tab
+}
+
+// Re-render the COR form in place after a save or a status transition.
+// viewCor() is the re-render mechanism, but it clears the return context on
+// entry -- so stash and restore it around the call. Without this, Mark
+// Approved / Send to customer would silently drop you back to the global
+// list on the next Cancel.
+function _corRefreshForm(id) {
+  var _keep = _corReturnToProject;
+  viewCor(id);
+  _corReturnToProject = _keep;
+}
+
+// Centralised exit from the COR form (Cancel / save / permission bailout).
+// If the form was reached from a project's Change Orders tab, reopen that
+// project on the tab; otherwise fall back to the global COR list (which
+// retains its own filters via renderCors).
+// Mirrors _tmExitForm / _subExitForm / bgClose.
+function _corExitForm() {
+  if (_corReturnToProject) {
+    var pid = _corReturnToProject;
+    _corReturnToProject = null;
+    if (typeof editProject === 'function' && getProj(pid)) {
+      editProject(pid, 'cors');
+      return;
+    }
+  }
+  nav('cors');
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -19677,6 +19715,10 @@ function filterCors() {
 function showNewCorModal(preselectProjectId) {
   if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); return; }
   var lock = preselectProjectId !== null && preselectProjectId !== undefined && preselectProjectId !== '';
+  // Entry gate for the project-return context. Locked = opened from a
+  // project's Change Orders tab, so remember to return there; unlocked =
+  // global entry, so clear any stale context from an earlier visit.
+  _corReturnToProject = lock ? preselectProjectId : null;
   var projOpts = '<option value="">— Select project —</option>' +
     _projectsOnly().sort(function(a,b){
       return String(a.number || '').localeCompare(String(b.number || ''));
@@ -19727,7 +19769,7 @@ function newCorContinue() {
 
 // ── Init: new COR form ────────────────────────────────────────────────
 function initNewCor() {
-  if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); nav('cors'); return; }
+  if (!hasFull('create-cor')) { alert('You do not have permission to create CORs.'); _corExitForm(); return; }
   // Clear any leftover smart-upload state from a cancelled flow (safe no-op
   // when state isn't set; just resets the banner + button visibility).
   // Skipped if we're entering FROM the smart-upload flow (mode is set
@@ -19814,6 +19856,10 @@ function initNewCor() {
 
 // ── viewCor: open COR for view/edit ───────────────────────────────────
 function viewCor(id) {
+  // Opening a COR clears any project-return context by default; the project
+  // tab's corViewForProject() re-sets it after calling us, and _corRefreshForm()
+  // preserves it across the re-render calls that follow a save or transition.
+  _corReturnToProject = null;
   var c = (db.cors || []).find(function(x){ return String(x.id) === String(id); });
   if (!c) { alert('COR not found.'); return; }
   if (!hasRead('view-cors')) { alert('You do not have permission to view CORs.'); return; }
@@ -20114,7 +20160,7 @@ async function saveCor() {
         }
       }
     } catch (e) { console.warn('COR sync exception:', e); }
-    nav('cors');
+    _corExitForm();
     return;
   }
 
@@ -20232,7 +20278,7 @@ async function saveCor() {
   }
 
   _editCorId = newCor.id;
-  viewCor(newCor.id);
+  _corRefreshForm(newCor.id);
 }
 
 // ── Status card on the COR form ───────────────────────────────────────
@@ -20664,6 +20710,9 @@ async function smartUploadCorExtract() {
 // uses our project + type, then layers on the rest of the extracted data
 // after init runs.
 function _smartUpCorOpenReviewForm(project, parsed) {
+  // Global-only entry (the project Change Orders tab has no smart-upload
+  // button) and it bypasses showNewCorModal, so clear the return context here.
+  _corReturnToProject = null;
   // Wire up the pieces initNewCor expects
   _newCorPrefill = { projectId: project.id, corType: parsed.corType || 'T&M' };
 
@@ -21107,7 +21156,7 @@ async function confirmSmartUploadCor() {
   if (g('ncor-save-btn')) g('ncor-save-btn').style.display = '';
 
   // Show the saved COR
-  viewCor(newCor.id);
+  _corRefreshForm(newCor.id);
 }
 
 // ── Round 4.3 placeholder no-ops (so onclick handlers don't ReferenceError) ─
@@ -22465,7 +22514,7 @@ async function _corPersistTransition(c, opts) {
 // Helper: re-render the form after a transition. Re-running viewCor
 // refreshes the status card, action buttons, and read-only state.
 function _corAfterTransition(c) {
-  viewCor(c.id);
+  _corRefreshForm(c.id);
 }
 
 // Helper: extract the COR's PDF as base64 (no data: prefix). Used as
@@ -54109,7 +54158,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-19-mix1';
+var KMI_BUILD = '2026-09-19-cornav';
 
 var _kmiSessionId = (function(){
   try {
