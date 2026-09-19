@@ -18601,6 +18601,52 @@ function corResolveRate(rateRow, corType) {
   }
 }
 
+// ── MIX1: hour-type vocabulary ────────────────────────────────────────
+// 'st' | 'ot' | 'dt', stored as `hourType` on every auto and manual labor
+// row. Kept as its own field rather than suffixed onto the classification
+// string, because classification is the join key back to the project rate
+// snapshot and to the trade-classification reporting.
+var COR_HOUR_TYPES = ['st', 'ot', 'dt'];
+var COR_HOUR_LABEL = { st: 'ST', ot: 'OT', dt: 'DT' };
+var COR_HOUR_FULL  = { st: 'Straight time', ot: 'Overtime', dt: 'Double time' };
+
+// Normalise a row's hourType. Returns null for rows saved before this
+// build (no back-fill was run), which is the signal to fall back to the
+// legacy COR-type matrix so their math is unchanged.
+function corHourTypeOf(row) {
+  var h = (row && row.hourType) ? String(row.hourType).toLowerCase() : '';
+  return (COR_HOUR_TYPES.indexOf(h) !== -1) ? h : null;
+}
+
+// Billing-rate resolution BY HOUR TYPE (MIX1).
+//
+// A single T&M ticket routinely carries both ST and OT hours. The old
+// matrix picked one rate for the whole COR, so those tickets either
+// under-billed the overtime or over-billed the straight time. T&M now
+// bills each bucket at its own rate on the same document.
+//
+// Every other type keeps its existing meaning, so no saved COR changes:
+//   - Overtime / Double Time stay deliberate overrides that bill EVERY
+//     hour at the premium rate (used when the GC agreed the whole COR is
+//     premium), and therefore ignore hourType.
+//   - Premium Time OT/DT still bill the premium-minus-ST delta, because
+//     the customer already paid the ST equivalent on the base contract.
+function corResolveRateByHour(rateRow, corType, hourType) {
+  if (!rateRow) return null;
+  var st = Number(rateRow.stdCoRate) || 0;
+  var ot = Number(rateRow.otCoRate)  || 0;
+  var dt = Number(rateRow.dtCoRate)  || 0;
+  switch (corType) {
+    case 'Overtime':         return ot;
+    case 'Double Time':      return dt;
+    case 'Premium Time OT':  return ot - st;
+    case 'Premium Time DT':  return dt - st;
+  }
+  if (hourType === 'ot') return ot;
+  if (hourType === 'dt') return dt;
+  return st;
+}
+
 // Resolve the INTERNAL COST rate (stdCostRate / otCostRate / dtCostRate)
 // for a given classification + COR type. Mirrors corResolveRate's matrix
 // so Premium Time CORs use the OT/DT-minus-ST delta on cost rates too.
@@ -18628,6 +18674,29 @@ function corResolveCostRate(rateRow, corType) {
     case 'Fixed Fee':        return stCost;
     default:                 return stCost;
   }
+}
+
+// Cost-rate mirror of corResolveRateByHour (MIX1). Carries the same
+// defensive fallback as corResolveCostRate: when a classification has no
+// cost rates populated at all, fall back to the CO rates so the Foundation
+// export can't silently drop to $0.
+function corResolveCostRateByHour(rateRow, corType, hourType) {
+  if (!rateRow) return null;
+  var stCost = Number(rateRow.stdCostRate) || 0;
+  var otCost = Number(rateRow.otCostRate)  || 0;
+  var dtCost = Number(rateRow.dtCostRate)  || 0;
+  if (stCost === 0 && otCost === 0 && dtCost === 0) {
+    return corResolveRateByHour(rateRow, corType, hourType);
+  }
+  switch (corType) {
+    case 'Overtime':         return otCost;
+    case 'Double Time':      return dtCost;
+    case 'Premium Time OT':  return otCost - stCost;
+    case 'Premium Time DT':  return dtCost - stCost;
+  }
+  if (hourType === 'ot') return otCost;
+  if (hourType === 'dt') return dtCost;
+  return stCost;
 }
 
 // Compute the actual labor COST for a saved COR, using the project's
@@ -18679,7 +18748,13 @@ function corComputeLaborCost(cor, project) {
     var hours = Number(r.hours) || 0;
     if (hours <= 0) return;
     var rateRow  = rateRowFor(r.classification);
-    var costRate = corResolveCostRate(rateRow, corType);
+    // MIX1: rows carrying an hourType resolve their own cost rate. Rows
+    // without one were saved before this build (no back-fill was run) and
+    // fall back to the legacy COR-type matrix, so their cost is unchanged.
+    var htA      = corHourTypeOf(r);
+    var costRate = htA
+      ? corResolveCostRateByHour(rateRow, corType, htA)
+      : corResolveCostRate(rateRow, corType);
     if (costRate === null || costRate === undefined) costRate = 0;
     autoCost += hours * costRate;
   });
@@ -18689,7 +18764,10 @@ function corComputeLaborCost(cor, project) {
     var hours = Number(r.hours) || 0;
     if (hours <= 0) return sum;
     var rateRow  = rateRowFor(r.classification);
-    var costRate = corResolveCostRate(rateRow, corType);
+    var htM      = corHourTypeOf(r);
+    var costRate = htM
+      ? corResolveCostRateByHour(rateRow, corType, htM)
+      : corResolveCostRate(rateRow, corType);
     if (costRate === null || costRate === undefined) {
       costRate = Number(r.rate) || 0;
     }
@@ -18699,21 +18777,30 @@ function corComputeLaborCost(cor, project) {
   return autoCost + manualCost;
 }
 
-// Hour-resolution matrix: given a T&M ticket's labor row and the COR
-// type, returns how many hours of THAT row roll into the COR. Premium
-// Time CORs only pull premium hours; everything else pulls all hours.
-function corResolveHours(laborRow, corType) {
+// Hour-resolution matrix (MIX1): given a T&M ticket's labor row and the
+// COR type, returns the buckets of hours that roll into the COR, each
+// tagged with its hour type. Returning an array rather than one collapsed
+// number is what lets a single COR carry ST and OT side by side.
+//
+//   - T&M splits into up to three buckets, each billed at its own rate.
+//   - Overtime / Double Time still pull every hour into one bucket tagged
+//     ot / dt, because those types bill everything at the premium rate by
+//     design.
+//   - Premium Time OT/DT pull only the premium hours, as before.
+function corResolveHourBuckets(laborRow, corType) {
   var st = Number(laborRow.stHours) || 0;
   var ot = Number(laborRow.otHours) || 0;
   var dt = Number(laborRow.dtHours) || 0;
   switch (corType) {
-    case 'T&M':
-    case 'Overtime':
-    case 'Double Time':      return st + ot + dt;
-    case 'Premium Time OT':  return ot;
-    case 'Premium Time DT':  return dt;
-    case 'Fixed Fee':        return 0;  // never rolls up
-    default:                 return st + ot + dt;
+    case 'Overtime':         return [{ hourType: 'ot', hours: st + ot + dt }];
+    case 'Double Time':      return [{ hourType: 'dt', hours: st + ot + dt }];
+    case 'Premium Time OT':  return [{ hourType: 'ot', hours: ot }];
+    case 'Premium Time DT':  return [{ hourType: 'dt', hours: dt }];
+    case 'Fixed Fee':        return [];  // never rolls up
+    default:
+      return [{ hourType: 'st', hours: st },
+              { hourType: 'ot', hours: ot },
+              { hourType: 'dt', hours: dt }];
   }
 }
 
@@ -21139,27 +21226,26 @@ function _corPdfResolveAttention(c, p) {
 function _corPdfLaborRows(c) {
   var auto = Array.isArray(c.laborRows) ? c.laborRows : [];
   var manual = Array.isArray(c.manualLaborRows) ? c.manualLaborRows : [];
-  return auto.map(function(r){
-    var hrs = Number(r.hours) || 0;
+  // MIX1: carry hourType through, plus a composed `label` for the PDFs
+  // that have a single "Labor Type" column. Legacy rows have no hourType,
+  // so their label is just the classification — exactly as printed before.
+  function pdfLaborRow(r, src) {
+    var hrs  = Number(r.hours) || 0;
     var rate = Number(r.rate) || 0;
+    var cls  = r.classification || '';
+    var ht   = corHourTypeOf(r);
     return {
-      classification: r.classification || '',
+      classification: cls,
+      hourType: ht,
+      label: cls + (ht ? ' (' + (COR_HOUR_LABEL[ht] || '') + ')' : ''),
       hours: hrs,
       rate: rate,
       total: hrs * rate,
-      source: 'auto'
+      source: src
     };
-  }).concat(manual.map(function(r){
-    var hrs = Number(r.hours) || 0;
-    var rate = Number(r.rate) || 0;
-    return {
-      classification: r.classification || '',
-      hours: hrs,
-      rate: rate,
-      total: hrs * rate,
-      source: 'manual'
-    };
-  }));
+  }
+  return auto.map(function(r){ return pdfLaborRow(r, 'auto'); })
+    .concat(manual.map(function(r){ return pdfLaborRow(r, 'manual'); }));
 }
 
 // Combined material rows (auto + manual) for PDF output.
@@ -21376,7 +21462,7 @@ function buildStandardCorPDF(c, p) {
   } else {
     laborRows.forEach(function(r){
       y = ensureRoom(16, y);
-      var clsLines = wrap(r.classification || '', 230);
+      var clsLines = wrap(r.label || r.classification || '', 230);
       doc.text(clsLines, col.cls, y);
       doc.text(_corPdfNum(r.hours), col.hours + 60, y, {align:'right'});
       doc.text('$ ' + _corPdfMoney(r.rate), col.rate + 60, y, {align:'right'});
@@ -21875,30 +21961,60 @@ function buildHunzingerCorPDF(c, p) {
     return 0;
   }
 
+  // MIX1: the split rows merge back to ONE line per classification here,
+  // with hours spread across the Reg / T&H / DT columns this sheet already
+  // has. Each column prints the rate actually used for its own hours, so
+  // the printed rates and the Extension reconcile — including on Premium
+  // Time CORs, where the sheet used to print the full OT rate beside an
+  // extension computed on the OT-minus-ST delta.
+  function hourColOf(r) {
+    var ht = corHourTypeOf(r);
+    if (ht === 'ot') return 'th';
+    if (ht === 'dt') return 'dt';
+    if (ht === 'st') return 'reg';
+    return hcol;   // legacy row, no hourType: COR-type column, as before
+  }
+  var mergedOrder = [], mergedByCls = {};
+  laborRows.forEach(function(r){
+    var mcls = r.classification || '';
+    if (!mergedByCls[mcls]) {
+      mergedByCls[mcls] = { cls: mcls, reg: 0, th: 0, dt: 0,
+                            rReg: null, rTh: null, rDt: null, ext: 0 };
+      mergedOrder.push(mcls);
+    }
+    var m = mergedByCls[mcls], mc = hourColOf(r);
+    if (mc === 'th')      { m.th  += r.hours; m.rTh  = r.rate; }
+    else if (mc === 'dt') { m.dt  += r.hours; m.rDt  = r.rate; }
+    else                  { m.reg += r.hours; m.rReg = r.rate; }
+    m.ext += r.total;
+  });
+  var mergedRows = mergedOrder.map(function(mcls){
+    var m = mergedByCls[mcls];
+    // Columns with no hours fall back to the snapshot rate, as before.
+    if (m.rReg === null) m.rReg = rateForCls(mcls, 'reg');
+    if (m.rTh  === null) m.rTh  = rateForCls(mcls, 'th');
+    if (m.rDt  === null) m.rDt  = rateForCls(mcls, 'dt');
+    return m;
+  });
+
   // 4 labor slots (Excel rows 8-11). Populated rows render with data,
   // remaining slots render as blank template rows (zeros + $0.00).
   sf('normal', 8, [0, 0, 0]);
   var totReg = 0, totTh = 0, totDt = 0;
-  var laborSlotCount = Math.max(4, laborRows.length);
+  var laborSlotCount = Math.max(4, mergedRows.length);
   for (var li = 0; li < laborSlotCount; li++) {
-    var lr = laborRows[li];
+    var lr = mergedRows[li];
     if (lr) {
-      var hReg = (hcol === 'reg') ? lr.hours : 0;
-      var hTh  = (hcol === 'th')  ? lr.hours : 0;
-      var hDt  = (hcol === 'dt')  ? lr.hours : 0;
-      totReg += hReg; totTh += hTh; totDt += hDt;
-      var rReg = rateForCls(lr.classification, 'reg') || (hcol === 'reg' ? lr.rate : 0);
-      var rTh  = rateForCls(lr.classification, 'th')  || (hcol === 'th'  ? lr.rate : 0);
-      var rDt  = rateForCls(lr.classification, 'dt')  || (hcol === 'dt'  ? lr.rate : 0);
-      doc.text(_corPdfNum(hReg), Bx, y, {align: 'right'});
-      doc.text(_corPdfNum(hTh),  Cx, y, {align: 'right'});
-      doc.text(_corPdfNum(hDt),  Dx, y, {align: 'right'});
-      doc.text(String(lr.classification || ''), Ex + 2, y);
+      totReg += lr.reg; totTh += lr.th; totDt += lr.dt;
+      doc.text(_corPdfNum(lr.reg), Bx, y, {align: 'right'});
+      doc.text(_corPdfNum(lr.th),  Cx, y, {align: 'right'});
+      doc.text(_corPdfNum(lr.dt),  Dx, y, {align: 'right'});
+      doc.text(String(lr.cls || ''), Ex + 2, y);
       doc.text('@', Gc, y, {align: 'center'});
-      doc.text('$' + _corPdfMoney(rReg), Hx, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(rTh),  Ix, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(rDt),  Jx, y, {align: 'right'});
-      doc.text('$' + _corPdfMoney(lr.total), Mx, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(lr.rReg), Hx, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(lr.rTh),  Ix, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(lr.rDt),  Jx, y, {align: 'right'});
+      doc.text('$' + _corPdfMoney(lr.ext), Mx, y, {align: 'right'});
     } else {
       doc.text('0', Bx, y, {align: 'right'});
       doc.text('0', Cx, y, {align: 'right'});
@@ -23014,8 +23130,10 @@ async function deleteCor(id) {
 // onto db.cors / Supabase on saveCor).
 //
 // Auto-pivot from rolled-up tickets:
-//   - Labor: sums hours per classification, applies the COR-type-specific
-//     CO rate (corResolveRate). One row per classification.
+//   - Labor: sums hours per classification AND hour type, applying the
+//     rate for that hour type (corResolveRateByHour). One row per
+//     classification x ST/OT/DT, so a ticket carrying both ST and OT
+//     bills each at its own rate on one COR.
 //   - Materials: pulls material_rows from each ticket; matches descriptions
 //     against the project's material list to pre-fill unitPrice. KMI can edit.
 //
@@ -23317,8 +23435,8 @@ function ncorRemoveTicket(ticketId) {
 // ─────────────────────────────────────────────────────────────────────
 // SECTION 2 — Labor breakdown (auto pivot + manual rows)
 // ─────────────────────────────────────────────────────────────────────
-// Auto rows: one per classification across all rolled-up tickets, using
-// corResolveHours + corResolveRate per the COR-type matrix.
+// Auto rows: one per classification x hour type across all rolled-up
+// tickets, using corResolveHourBuckets + corResolveRateByHour.
 function ncorComputeAutoLaborRows() {
   var w = _ncorWorking;
   if (!w) return [];
@@ -23330,41 +23448,52 @@ function ncorComputeAutoLaborRows() {
   var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
   var laborRates = corGetProjectLaborRates(p);
 
-  // Aggregate hours by classification across all rolled tickets
-  var byClass = {};  // classification -> totalHours
+  // Aggregate hours by classification AND hour type across all rolled
+  // tickets (MIX1). The bucket key is "<classification>\u0000<hourType>"
+  // so Mason ST and Mason OT stay separate lines at separate rates.
+  var buckets = {};
   (w.rolledUpTicketIds || []).forEach(function(tid){
     var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
     if (!t) return;
     (t.laborRows || []).forEach(function(r){
       var cls = (r.classification || '').trim();
       if (!cls) return;
-      var hrs = corResolveHours(r, corType);
-      if (hrs <= 0) return;
-      byClass[cls] = (byClass[cls] || 0) + hrs;
+      corResolveHourBuckets(r, corType).forEach(function(b){
+        if (!(b.hours > 0)) return;
+        var key = cls + '\u0000' + b.hourType;
+        if (!buckets[key]) buckets[key] = { classification: cls, hourType: b.hourType, hours: 0 };
+        buckets[key].hours += b.hours;
+      });
     });
   });
 
   // Build rows. Order matches the labor rate snapshot if possible (so
   // Foreman comes before Mason etc. as in the example PDF), else alpha.
+  // Within one classification: ST, then OT, then DT.
   var classOrder = laborRates.map(function(r){ return (r.classification || '').trim(); });
-  var classes = Object.keys(byClass).sort(function(a, b){
-    var ai = classOrder.indexOf(a), bi = classOrder.indexOf(b);
-    if (ai === -1 && bi === -1) return a.localeCompare(b);
-    if (ai === -1) return 1;
-    if (bi === -1) return -1;
-    return ai - bi;
+  var pivoted = Object.keys(buckets).map(function(k){ return buckets[k]; }).sort(function(a, b){
+    var ai = classOrder.indexOf(a.classification), bi = classOrder.indexOf(b.classification);
+    if (ai === -1 && bi === -1) {
+      var c = a.classification.localeCompare(b.classification);
+      if (c !== 0) return c;
+    } else if (ai === -1) { return 1; }
+    else if (bi === -1) { return -1; }
+    else if (ai !== bi)  { return ai - bi; }
+    return COR_HOUR_TYPES.indexOf(a.hourType) - COR_HOUR_TYPES.indexOf(b.hourType);
   });
 
-  return classes.map(function(cls){
-    var rateRow = laborRates.find(function(r){ return (r.classification || '').trim() === cls; });
-    var rate = corResolveRate(rateRow, corType);
+  return pivoted.map(function(b){
+    var rateRow = laborRates.find(function(r){
+      return (r.classification || '').trim() === b.classification;
+    });
+    var rate = corResolveRateByHour(rateRow, corType, b.hourType);
     if (rate === null || rate === undefined) rate = 0;
-    var hours = byClass[cls];
     return {
-      classification: cls,
-      hours: hours,
+      classification: b.classification,
+      hourType: b.hourType,
+      hours: b.hours,
       rate: rate,
-      total: hours * rate,
+      total: b.hours * rate,
       source: 'auto',
       missingRate: !rateRow
     };
@@ -23423,6 +23552,16 @@ function ncorRenderLaborSection() {
             }).join('') +
           '</select>'
         : corEsc(r.classification || ''));
+    // MIX1: ST/OT/DT. Auto rows show a badge; manual rows get a selector
+    // that re-defaults the rate (see ncorUpdateManualLabor).
+    var rowHt = corHourTypeOf(r) || 'st';
+    var typeCell = (isAuto || !canEdit)
+      ? '<span class="bdg bd-pending" title="' + corEsc(COR_HOUR_FULL[rowHt] || '') + '">' + corEsc(COR_HOUR_LABEL[rowHt] || '') + '</span>'
+      : '<select onchange="ncorUpdateManualLabor(' + manualIdx + ',\'hourType\',this.value)" style="width:100%;font-size:12px;padding:3px 4px">' +
+          COR_HOUR_TYPES.map(function(h){
+            return '<option value="' + h + '"' + (h === rowHt ? ' selected' : '') + '>' + COR_HOUR_LABEL[h] + '</option>';
+          }).join('') +
+        '</select>';
     var hoursCell = isAuto || !canEdit
       ? '<span style="font-family:monospace">' + tmFmtHrs(r.hours) + '</span>'
       : '<input type="number" step="0.25" min="0" value="' + (Number(r.hours) || 0) + '" onchange="ncorUpdateManualLabor(' + manualIdx + ',\'hours\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">';
@@ -23435,6 +23574,7 @@ function ncorRenderLaborSection() {
     return '<tr>' +
       '<td style="padding:5px 8px;width:50px">' + srcBadge + warning + '</td>' +
       '<td style="padding:5px 8px">' + clsCell + '</td>' +
+      '<td style="padding:5px 8px;width:64px">' + typeCell + '</td>' +
       '<td style="padding:5px 8px;text-align:right">' + hoursCell + '</td>' +
       '<td style="padding:5px 8px;text-align:right">' + rateCell + '</td>' +
       '<td style="padding:5px 8px;text-align:right;font-family:monospace;font-weight:600">' + corFmtMoney(r.total) + '</td>' +
@@ -23448,13 +23588,14 @@ function ncorRenderLaborSection() {
     '<table style="width:100%;font-size:12px"><thead><tr style="border-bottom:0.5px solid #eee;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px">' +
       '<th style="text-align:left;padding:6px 8px">Source</th>' +
       '<th style="text-align:left;padding:6px 8px">Classification</th>' +
+      '<th style="text-align:left;padding:6px 8px">Type</th>' +
       '<th style="text-align:right;padding:6px 8px">Hours</th>' +
       '<th style="text-align:right;padding:6px 8px">Rate</th>' +
       '<th style="text-align:right;padding:6px 8px">Total</th>' +
       '<th style="padding:6px 8px"></th>' +
     '</tr></thead><tbody>' + rowsHtml +
     '<tr style="border-top:1px solid #ccc;background:#FAF8F0">' +
-      '<td colspan="4" style="padding:8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Total labor cost</td>' +
+      '<td colspan="5" style="padding:8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Total labor cost</td>' +
       '<td style="padding:8px;text-align:right;font-family:monospace;font-weight:700;font-size:14px;color:var(--kmi)">' + corFmtMoney(totalLabor) + '</td>' +
       '<td></td>' +
     '</tr></tbody></table>';
@@ -23465,20 +23606,29 @@ function ncorAddManualLaborRow() {
   _ncorWorking.manualLaborRows = _ncorWorking.manualLaborRows || [];
   // Pre-fill rate from first classification's resolved rate? Cleaner to
   // start blank and let KMI pick the classification, which auto-fills.
-  _ncorWorking.manualLaborRows.push({ classification: '', hours: 0, rate: 0 });
+  _ncorWorking.manualLaborRows.push({ classification: '', hourType: 'st', hours: 0, rate: 0 });
   ncorRenderSections();
 }
 
 function ncorUpdateManualLabor(idx, field, value) {
   var rows = _ncorWorking.manualLaborRows || [];
   var r = rows[idx]; if (!r) return;
-  if (field === 'classification') {
-    r.classification = value;
-    // Auto-fill rate from project snapshot (KMI can override after)
+  if (field === 'classification' || field === 'hourType') {
+    if (field === 'hourType') {
+      var ht = String(value || '').toLowerCase();
+      r.hourType = (COR_HOUR_TYPES.indexOf(ht) !== -1) ? ht : 'st';
+    } else {
+      r.classification = value;
+    }
+    // Auto-fill rate from the project snapshot for this row's hour type
+    // (MIX1 — changing EITHER the classification or ST/OT/DT re-defaults
+    // it; KMI can override after).
     var p = db.projects.find(function(x){ return String(x.id) === String(_ncorWorking.projectId); });
     var laborRates = corGetProjectLaborRates(p);
-    var rateRow = laborRates.find(function(rr){ return (rr.classification || '').trim() === value; });
-    var rate = corResolveRate(rateRow, _ncorWorking.corType);
+    var rateRow = laborRates.find(function(rr){
+      return (rr.classification || '').trim() === (r.classification || '');
+    });
+    var rate = corResolveRateByHour(rateRow, _ncorWorking.corType, corHourTypeOf(r) || 'st');
     if (rate !== null && rate !== undefined) r.rate = rate;
   } else if (field === 'hours' || field === 'rate') {
     r[field] = Number(value) || 0;
@@ -53959,7 +54109,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-19-ovw1';
+var KMI_BUILD = '2026-09-19-mix1';
 
 var _kmiSessionId = (function(){
   try {
