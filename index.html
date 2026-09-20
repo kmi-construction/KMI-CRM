@@ -3839,6 +3839,14 @@ var _tmFilter = { s: '', fp: '', fs: '' };
 // cancel (instead of the global T&M list). Set by the project-tab launch
 // helpers; consumed and cleared by _tmExitForm().
 var _tmReturnToProject = null;
+// When a rolled-up T&M ticket is opened from INSIDE the COR form, this
+// holds { corId } so closing the ticket returns to the COR being built
+// rather than the global T&M list. corId is null for a new unsaved COR --
+// the restore re-shows the hidden page rather than re-opening the record,
+// so unsaved edits survive the round trip. Consumed by _tmExitForm(),
+// which checks this BEFORE _tmReturnToProject (it is the more specific
+// context: you can only reach it from within a COR).
+var _tmReturnToCor = null;
 var _calMonth = (function(){ var d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; })();
 
 var DB_DEFAULTS = {
@@ -16003,9 +16011,11 @@ function ntmProjectChanged() {
 
 // ── Form: open Edit / View ──────────────────────────────────────────────
 function viewTmTicket(id) {
-  // Opening a ticket clears any project-return context by default; the
-  // project tab's tmViewForProject() re-sets it after calling us.
+  // Opening a ticket clears any return context by default; the project
+  // tab's tmViewForProject() and the COR form's corViewTicketFromForm()
+  // each re-set their own after calling us.
   _tmReturnToProject = null;
+  _tmReturnToCor = null;
   var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(id); });
   if (!t) { alert('T&M ticket not found.'); return; }
   if (!hasRead('view-tm-tickets')) {
@@ -19277,6 +19287,50 @@ function tmViewForProject(id) {
   _tmReturnToProject = pid;      // re-set so cancel/save returns to this tab
 }
 
+// Open a rolled-up ticket from inside the COR form (the Tickets section's
+// View button). The COR page is merely hidden by viewTmTicket(), not torn
+// down, so everything needed to come back is already in memory.
+function corViewTicketFromForm(ticketId) {
+  // Flush typed Hunzinger values into _ncorWorking BEFORE leaving.
+  // ncorRenderHunzingerSection() writes the working copy back into those
+  // inputs on return, so without this the user's typing would be replaced
+  // by whatever was last saved. Safe on Standard projects (it no-ops).
+  if (_ncorWorking && typeof ncorReadHunzingerFields === 'function') {
+    ncorReadHunzingerFields();
+  }
+  var ctx = { corId: _editCorId || null };
+  viewTmTicket(ticketId);        // clears both return contexts internally
+  _tmReturnToCor = ctx;          // re-set so closing the ticket comes back here
+}
+
+// Re-show the COR form after a trip to a rolled-up ticket. Returns true if
+// it handled the navigation, false to let the caller fall through.
+function _corRestoreForm(ctx) {
+  // Preferred path: the working copy is still live, so just un-hide the
+  // page. Typed values in the plain inputs (description, date, attention,
+  // customer CO#) were never touched. Re-rendering the sections picks up
+  // any edit made to the ticket while we were away, since auto labor and
+  // material rows are recomputed from the tickets on every render and
+  // manual rows live in _ncorWorking.
+  if (_ncorWorking) {
+    setActivePage('cors');
+    document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
+    g('pg-new-cor').classList.add('active');
+    closeModal();
+    ncorRenderSections();
+    return true;
+  }
+  // Working copy is gone (defensive -- shouldn't happen on this path).
+  // Re-open the saved COR if there is one; a new unsaved COR has nothing
+  // to re-open, so fall through to the caller's own fallback.
+  if (ctx && ctx.corId &&
+      (db.cors || []).some(function(c){ return String(c.id) === String(ctx.corId); })) {
+    _corRefreshForm(ctx.corId);   // preserves _corReturnToProject
+    return true;
+  }
+  return false;
+}
+
 // Delete from the project tab, then refresh this list (not the global one).
 function deleteTmTicketFromProject(id) {
   deleteTmTicket(id);            // handles perms + confirm + saveDB
@@ -19287,6 +19341,14 @@ function deleteTmTicketFromProject(id) {
 // project's T&M tab, reopen that project on the tab; otherwise fall back to
 // the global T&M list.
 function _tmExitForm() {
+  // Checked first: reaching a ticket from inside the COR form is the more
+  // specific context, and the half-built COR is what the user wants back.
+  if (_tmReturnToCor) {
+    var corCtx = _tmReturnToCor;
+    _tmReturnToCor = null;
+    _tmReturnToProject = null;   // the COR form owns the trip back from here
+    if (_corRestoreForm(corCtx)) return;
+  }
   if (_tmReturnToProject) {
     var pid = _tmReturnToProject;
     _tmReturnToProject = null;
@@ -23358,7 +23420,7 @@ function ncorRenderTicketsSection() {
       '<td style="padding:6px 10px">' + corEsc(dateStr) + '</td>' +
       '<td style="padding:6px 10px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + corEsc(t.workDescription || '') + '">' + corEsc(t.workDescription || '') + '</td>' +
       '<td style="padding:6px 10px;text-align:right;font-family:monospace">' + tmFmtHrs(st) + '/' + tmFmtHrs(ot) + '/' + tmFmtHrs(dt) + '</td>' +
-      '<td style="padding:6px 10px"><button class="btn btn-sm" onclick="viewTmTicket(' + t.id + ')">View</button></td>' +
+      '<td style="padding:6px 10px"><button class="btn btn-sm" onclick="corViewTicketFromForm(' + t.id + ')">View</button></td>' +
       '<td style="padding:6px 10px;text-align:right">' + removeBtn + '</td>' +
     '</tr>';
   }).join('');
@@ -54158,7 +54220,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-19-cornav';
+var KMI_BUILD = '2026-09-20-tmcor';
 
 var _kmiSessionId = (function(){
   try {
