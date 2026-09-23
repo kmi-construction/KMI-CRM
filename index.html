@@ -13689,6 +13689,20 @@ function _bumpKmiRevision(originalKmiNo, projectId) {
   return attempt;
 }
 
+// SUBREV1: seed the editor's module-level picker state from the record
+// being opened, so nothing leaks in from the previously opened submittal.
+function _seedSubmittalEditorState(rec) {
+  _editingSubmittalProductIds = (rec && Array.isArray(rec.productIds))
+    ? rec.productIds.slice()
+    : (rec && rec.productId ? [rec.productId] : []);
+  _editingSubmittalDocSelection = (rec && Array.isArray(rec.selectedDocIds))
+    ? rec.selectedDocIds.slice()
+    : null;
+  _editingSubmittalFormValues = (rec && rec.formValues && typeof rec.formValues === 'object')
+    ? JSON.parse(JSON.stringify(rec.formValues))
+    : {};
+}
+
 async function createSubmittalRevision(originalId) {
   if (!requireFull('edit-submittals', 'create revision submittals')) return;
   var orig = getSubmittal(originalId);
@@ -13698,6 +13712,7 @@ async function createSubmittalRevision(originalId) {
     if (confirm('A revision (' + (existing.kmiSubmittalNo || '#' + existing.id) + ') already exists for this submittal. Open it instead?')) {
       _editSubmittalId = existing.id;
       _subSrcMode = existing.isCustom ? 'custom' : 'library';
+      _seedSubmittalEditorState(existing);   // SUBREV1
       nav('edit-submittal');
     }
     return;
@@ -13716,14 +13731,12 @@ async function createSubmittalRevision(originalId) {
     itemName:            orig.itemName,
     description:         orig.description,
     packageName:         orig.packageName,
-    productIds:          orig.isCustom ? [] : (Array.isArray(orig.productIds) ? orig.productIds.slice() : (orig.productId ? [orig.productId] : [])),
-    productId:           orig.isCustom ? null : orig.productId,
-    // Round 9: revisions inherit the same doc selection so the
-    // "Brick Samples Rev .1" still sends the same sample photo as
-    // the parent did. Custom items get null (no library docs).
-    selectedDocIds:      orig.isCustom
-                           ? null
-                           : (Array.isArray(orig.selectedDocIds) ? orig.selectedDocIds.slice() : null),
+    // SUBREV1: revisions start with a clean slate - no products, docs,
+    // listed items, or form values carried from the parent.
+    productIds:          [],
+    productId:           null,
+    selectedDocIds:      orig.isCustom ? null : [],
+    formValues:          {},
     isCustom:            !!orig.isCustom,
     status:              'draft',
     response:            '',
@@ -13734,17 +13747,7 @@ async function createSubmittalRevision(originalId) {
     notes:               '',
     customDocuments:     [],
     responseDocuments:   [],
-    // Listed items carry forward — a resubmittal of the same CMU colors
-    // shouldn't make you retype them. Fresh ids so edits on the revision
-    // never mutate the parent's array.
-    lineItems:           (Array.isArray(orig.lineItems) ? orig.lineItems : []).map(function(li){
-                           return {
-                             id:          _newSubmittalLineItemId(),
-                             description: String(li.description || ''),
-                             format:      String(li.format || 'Sample'),
-                             copies:      Math.max(1, parseInt(li.copies, 10) || 1)
-                           };
-                         }),
+    lineItems:           [],
     prevSubmittalId:     orig.id,
     createdAt:           nowIso,
     createdByUserId:     _currentUser ? _currentUser.id : null,
@@ -13768,6 +13771,7 @@ async function createSubmittalRevision(originalId) {
   // the customer's response called out and ship it.
   _editSubmittalId = newId;
   _subSrcMode = rev.isCustom ? 'custom' : 'library';
+  _seedSubmittalEditorState(rev);   // SUBREV1
   nav('edit-submittal');
 }
 
@@ -54243,7 +54247,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-23-subnew1';
+var KMI_BUILD = '2026-09-23-subrev1';
 
 var _kmiSessionId = (function(){
   try {
