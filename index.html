@@ -45107,6 +45107,24 @@ function _apExportBlockers(inv){
   return out.filter(function(v,i,a){return a.indexOf(v)===i;});
 }
 
+// Column G (header invoice description): job no + job name.
+// One job -> "25133 Oak Creek Library" (blank if no matching project).
+// Several jobs -> job numbers only, comma-joined. Overhead-only -> blank.
+function _apHeaderJobDesc(lines){
+  var jobs=[];
+  (lines||[]).forEach(function(l){
+    if(l.distType!=='job') return;
+    var j=String(l.jobNo||'').trim().toUpperCase();
+    if(j && jobs.indexOf(j)<0) jobs.push(j);
+  });
+  if(!jobs.length) return '';
+  if(jobs.length>1) return jobs.join(', ');
+  var p=(db.projects||[]).find(function(x){
+    return String(x.number==null?'':x.number).trim().toUpperCase()===jobs[0];
+  });
+  var nm=p ? String(p.name||'').trim() : '';
+  return nm ? (jobs[0]+' '+nm) : '';
+}
 function apBuildFoundationCSV(invoices){
   var rows=[];
   invoices.forEach(function(inv, idx){
@@ -45122,7 +45140,7 @@ function apBuildFoundationCSV(invoices){
       r[3]=invDate;                     // D  invoice date
       r[4]=invDate;                     // E  transaction date (= invoice date)
       r[5]=_apNum(inv.total);           // F  header amount
-      // G invoice description blank
+      r[6]=_apHeaderJobDesc(lines);     // G  job no + job name
       r[7]=inv.invoiceNo||'';           // H  invoice no
       r[8]=_apCsvDate(inv.dueDate);     // I  due date
       // J retainage blank ; K PO/Sub always blank
@@ -54220,7 +54238,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-20-tmcor';
+var KMI_BUILD = '2026-09-23-apjobdesc';
 
 var _kmiSessionId = (function(){
   try {
