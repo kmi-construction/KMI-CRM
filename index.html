@@ -2440,6 +2440,7 @@ tr.gc-line:hover td{background:#fafafa}
             <option value="Sent for Signature">Sent for Signature</option>
             <option value="Signed">Signed</option>
             <option value="Signed (Uploaded)">Signed (Uploaded)</option>
+            <option value="Approved by KMI PM">Approved by KMI PM</option>
             <option value="Rejected by Super">Rejected by Super</option>
             <option value="Voided">Voided</option>
             <option value="Rolled into COR">Rolled into COR</option>
@@ -3829,6 +3830,9 @@ var currentOppId = null;
 var _oppView = 'list';
 var _oppSort = { col: 'bidDate', dir: 'desc' };  // default: newest bid date first
 var _tmSort  = { col: 'ticketNumber', dir: 'asc' }; // default: ticket # smallest to largest
+// TMSORT1: project T&M sub-tab has its own sort so it never reorders the
+// global T&M list (and vice versa). Persists across projects for the session.
+var _tmProjSort = { col: 'ticketNumber', dir: 'asc' };
 // Persisted T&M list filters. Survives re-renders (new ticket, smart upload,
 // page navigation) so a PM focused on one project isn't reset to "All" each
 // time. filterTmTickets() writes here; renderTmTickets() restores from here
@@ -15868,7 +15872,18 @@ function getTmSortValue(t, col) {
       var tot = tmLaborTotals(t);
       return tot.st + tot.ot + tot.dt;
     }
-    case 'status':       return t.status || 'Draft';
+    case 'status': {
+      // TMSORT1: workflow order, matching what the badge shows. Tickets
+      // rolled into a COR group together regardless of their stored status.
+      if (t.corId) return 5;
+      var rank = {
+        'Draft': 0, 'Sent for Signature': 1, 'Signed': 2,
+        'Signed (Uploaded)': 3, 'Approved by KMI PM': 4,
+        'Rejected by Super': 6, 'Voided': 7
+      };
+      var r = rank[t.status || 'Draft'];
+      return (r === undefined) ? 8 : r;
+    }
     case 'creator': {
       var u = (db.users || []).find(function(x){ return String(x.id) === String(t.createdByUserId); });
       if (u) return ((u.firstName || '') + ' ' + (u.lastName || '')).trim();
@@ -15878,9 +15893,10 @@ function getTmSortValue(t, col) {
   }
 }
 
-function sortTmArray(arr) {
-  if (!_tmSort) return arr;
-  var col = _tmSort.col, dir = _tmSort.dir;
+function sortTmArray(arr, sortState) {
+  var st = sortState || _tmSort;   // TMSORT1: project tab passes _tmProjSort
+  if (!st) return arr;
+  var col = st.col, dir = st.dir;
   var sorted = arr.slice();
   sorted.sort(function(a, b) {
     var va = getTmSortValue(a, col);
@@ -19220,16 +19236,16 @@ function renderProjectTmList() {
     }
     return true;
   });
-  // Reuse the global T&M sort so this list matches the main list's behaviour.
-  rows = sortTmArray(rows);
+  // TMSORT1: project-scoped sort state, same engine as the global list.
+  rows = sortTmArray(rows, _tmProjSort);
 
   var head =
-    '<th style="padding:8px 10px;text-align:left">Ticket #</th>' +
-    '<th style="padding:8px 10px;text-align:left">Date</th>' +
-    '<th style="padding:8px 10px;text-align:left">Description</th>' +
-    '<th style="padding:8px 10px;text-align:left">Hours (ST/OT/DT)</th>' +
-    '<th style="padding:8px 10px;text-align:left">Status</th>' +
-    '<th style="padding:8px 10px;text-align:left">Created by</th>' +
+    _tmProjTh('ticketNumber', 'Ticket #') +
+    _tmProjTh('ticketDate',   'Date') +
+    _tmProjTh('description',  'Description') +
+    _tmProjTh('hours',        'Hours (ST/OT/DT)') +
+    _tmProjTh('status',       'Status') +
+    _tmProjTh('creator',      'Created by') +
     '<th style="padding:8px 10px;text-align:left">Actions</th>';
 
   if (!rows.length) {
@@ -19269,6 +19285,25 @@ function renderProjectTmList() {
 
   el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
     '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+// TMSORT1: sortable header cell for the project T&M tab. The indicator class
+// is set inline because the table is rebuilt on every render.
+function _tmProjTh(col, label) {
+  var cls = 'sortable';
+  if (_tmProjSort && _tmProjSort.col === col) cls += ' ' + _tmProjSort.dir;
+  return '<th class="' + cls + '" style="padding:8px 10px;text-align:left" onclick="sortTmProj(\'' + col + '\')">' + label + '</th>';
+}
+
+// TMSORT1: same toggle rules as sortTm() -- same column flips direction,
+// new column starts ascending. Re-renders only the project tab.
+function sortTmProj(col) {
+  if (_tmProjSort && _tmProjSort.col === col) {
+    _tmProjSort.dir = _tmProjSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _tmProjSort = { col: col, dir: 'asc' };
+  }
+  renderProjectTmList();
 }
 
 // New ticket from the project tab — pre-fills the project and remembers to
@@ -54441,7 +54476,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-24-jc4';
+var KMI_BUILD = '2026-09-24-TMSORT1';
 
 var _kmiSessionId = (function(){
   try {
