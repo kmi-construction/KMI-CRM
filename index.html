@@ -46113,6 +46113,12 @@ var _jcMeta           = null;   // { jobStatus, lastSync }
 var _jcLoading        = false;
 var _jcError          = null;
 var _jcJobNo          = null;
+// JC4: weekly labor tile, cost-code sub-rows, paged drill-down
+var _jcCodes          = null;   // fnd_job_cost_by_code rows
+var _jcWeek           = null;   // fnd_job_weekly_labor row, or null
+var _jcOpen           = {};     // line_key -> expanded
+var _jcDrillSpec      = null;   // { title, lineKeys, code, weekEnd, cutoff, token }
+var _jcDrillTotal     = null;   // { rows, cost, hours }
 
 function _jcToday() {
   var d = new Date();
@@ -46161,7 +46167,7 @@ function renderJobCostView() {
   }
 
   // Switching projects invalidates whatever is cached.
-  if (_jcJobNo !== jobNo) { _jcJobNo = jobNo; _jcRows = null; _jcSummary = null; _jcMeta = null; _jcError = null; }
+  if (_jcJobNo !== jobNo) { _jcJobNo = jobNo; _jcRows = null; _jcSummary = null; _jcMeta = null; _jcError = null; _jcCodes = null; _jcWeek = null; _jcOpen = {}; }
 
   host.innerHTML = _jcShellHtml(p, jobNo);
   if (_jcRows === null && !_jcLoading) _jcLoad(jobNo, p);
@@ -46211,7 +46217,9 @@ async function _jcLoad(jobNo, p) {
       supabaseClient.rpc('fnd_job_cost_summary', args),
       supabaseClient.from('fnd_jobs').select('job_no,job_status,original_contract').eq('job_no', jobNo).maybeSingle(),
       supabaseClient.from('fnd_sync_runs').select('finished_at,status').eq('status','success')
-        .order('finished_at', { ascending: false }).limit(1)
+        .order('finished_at', { ascending: false }).limit(1),
+      supabaseClient.rpc('fnd_job_cost_by_code',  { p_job_no: jobNo, p_cutoff: cutoff, p_include_pending: _jcInclPending }),
+      supabaseClient.rpc('fnd_job_weekly_labor',  { p_job_no: jobNo, p_cutoff: cutoff })
     ]);
 
     if (res[0].error) throw res[0].error;
@@ -46224,16 +46232,21 @@ async function _jcLoad(jobNo, p) {
       inFnd:     !!(res[2] && res[2].data),
       lastSync:  (res[3] && res[3].data && res[3].data[0]) ? res[3].data[0].finished_at : null
     };
+    // Code rows and the labor tile are additive: a failure here must not blank the report.
+    if (res[4] && res[4].error) { console.warn('job cost by code', res[4].error); _jcCodes = []; }
+    else _jcCodes = (res[4] && res[4].data) || [];
+    if (res[5] && res[5].error) { console.warn('weekly labor', res[5].error); _jcWeek = null; }
+    else _jcWeek = (res[5] && res[5].data && res[5].data[0]) || null;
   } catch (e) {
     console.warn('job cost load error', e);
     _jcError = (e && e.message) ? e.message : String(e);
-    _jcRows = []; _jcSummary = [];
+    _jcRows = []; _jcSummary = []; _jcCodes = []; _jcWeek = null;
   }
   _jcLoading = false;
   if (_prodSubTab === 'jobcost') _jcPaint();
 }
 
-function jcReload() { _jcRows = null; _jcSummary = null; renderJobCostView(); }
+function jcReload() { _jcRows = null; _jcSummary = null; _jcCodes = null; _jcWeek = null; renderJobCostView(); }
 function jcSetCutoff(v) { _jcCutoff = v || null; jcReload(); }
 function jcTogglePending(on) { _jcInclPending = !!on; jcReload(); }
 
@@ -46315,14 +46328,21 @@ function _jcPaint() {
           vTot >= 0 ? '#3B6D11' : '#A32D2D') +
       met('Projected profit', _jcMoney0(profit.total), 'contract less total cost',
           Number(profit.total) >= 0 ? '#3B6D11' : '#A32D2D') +
+      _jcLaborTile() +
     '</div>';
   }
 
   // ── table ──
   var canEdit = hasFull('edit-job-cost-pct');
+  var expKeys = rows.map(function(r){ return r.line_key; }).filter(_jcExpandable);
+  var allOpen = expKeys.length && expKeys.every(function(k){ return !!_jcOpen[k]; });
   var h = '<div class="card"><div class="ch"><span class="ct">Cost report</span>' +
-    '<span style="font-size:11px;color:#888">Click a line for its transactions' +
-    (canEdit ? ' \u00b7 percent complete is editable' : '') + '</span></div>' +
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+    '<span style="font-size:11px;color:#888">Click a line or code for its transactions' +
+    (canEdit ? ' \u00b7 percent complete is editable' : '') + '</span>' +
+    (expKeys.length ? '<button class="btn btn-sm" onclick="jcToggleAllCodes()">' +
+      (allOpen ? 'Collapse all' : 'Expand all') + '</button>' : '') +
+    '</div></div>' +
     '<div style="overflow-x:auto"><table style="min-width:940px;width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums">' +
     '<thead><tr>' + _jcTh('Line', true) + _jcTh('% Comp') + _jcTh('Budget') + _jcTh('CO\u2019s') +
     _jcTh('Pending') + _jcTh('Total') + _jcTh('Earned') + _jcTh('Actual') + _jcTh('Variance') +
@@ -46331,9 +46351,12 @@ function _jcPaint() {
   rows.forEach(function(r){
     var v = Number(r.variance || 0);
     h += '<tr>' +
-      '<td style="padding:7px 10px;border-bottom:0.5px solid #f0f0f0;font-size:12.5px;color:var(--kmi);' +
-        'font-weight:500;cursor:pointer" onclick="jcDrill(\'' + encodeURIComponent(r.line_key) + '\')">' +
-        corEsc(r.line_key) + '</td>' +
+      '<td style="padding:7px 10px;border-bottom:0.5px solid #f0f0f0;font-size:12.5px;white-space:nowrap">' +
+        _jcChevron(r.line_key) +
+        '<span style="color:var(--kmi);font-weight:500;cursor:pointer" onclick="jcDrill(\'' +
+          encodeURIComponent(r.line_key) + '\')">' + corEsc(r.line_key) + '</span>' +
+        (_jcExpandable(r.line_key) ? '<span style="font-size:11px;color:#aaa;margin-left:6px">' +
+          _jcCodesFor(r.line_key).length + ' codes</span>' : '') + '</td>' +
       '<td style="' + _jcTd() + '">' +
         (Number(r.total) !== 0
           ? '<input type="number" min="0" max="100" step="0.1" value="' + Number(r.pct_complete) + '" ' +
@@ -46353,6 +46376,7 @@ function _jcPaint() {
       '<td style="' + _jcTd() + '">' + _jcMoney(r.actual) + '</td>' +
       '<td style="' + _jcTd() + ';color:' + (v >= 0 ? '#3B6D11' : '#A32D2D') + '">' + _jcMoney(v) + '</td>' +
     '</tr>';
+    h += _jcCodeRowsHtml(r);
   });
 
   (_jcSummary || []).forEach(function(s){
@@ -46382,10 +46406,101 @@ function _jcPaint() {
       'Percent complete overridden on this line. Lines without a dot follow the project\u2019s Tracking figure.<br>' +
       'Budget is the bought-out estimate (factor \u00d7 Foundation estimate). CO\u2019s are approved change orders from the app; ' +
       'Foundation carries none. <span style="color:var(--acd)">Pending</span> is T&amp;M and premium-time CORs awaiting approval \u2014 ' +
-      'switch it off above and the report reconciles to Foundation exactly. Variance is Earned less Actual.' +
+      'switch it off above and the report reconciles to Foundation exactly. Variance is Earned less Actual.<br>' +
+      'Cost-code rows (\u25b8) use the line\u2019s factor, so they add up to the line. They carry no percent complete or Earned; ' +
+      'their <i>italic</i> figure is Total less Actual \u2014 budget remaining on that code. <b>Unallocated CO</b> is change-order ' +
+      'cost that only resolves to the cost class. The Labor tile is Labor Cost plus Winter Protection Labor for the last full ' +
+      'week (ending Sunday) on or before the cutoff.' +
     '</div></div>';
 
   tEl.innerHTML = h;
+}
+
+// ── JC4: weekly labor tile + cost-code sub-rows ─────────────────────────
+function _jcMD(iso) {
+  var p = String(iso || '').split('-');
+  return p.length === 3 ? Number(p[1]) + '/' + Number(p[2]) : String(iso || '');
+}
+function _jcLaborTile() {
+  var base = 'background:#fff;border:0.5px solid #e5e5e5;border-left:3px solid var(--ac);border-radius:8px;padding:14px 16px';
+  var lab = function(t){ return '<div style="font-size:11px;color:#888;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">' + t + '</div>'; };
+  var w = _jcWeek;
+  if (!w) {
+    return '<div class="mc" style="' + base + '">' + lab('Labor \u00b7 weekly') +
+      '<div style="font-size:22px;font-weight:600;color:#aaa">\u2014</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:2px">no labor booked through the cutoff</div></div>';
+  }
+  var amt = Number(w.labor_cost || 0) + Number(w.wp_labor || 0);
+  return '<div class="mc" style="' + base + ';cursor:pointer" ' +
+    'title="Labor Cost + Winter Protection Labor for the week. Click for postings." ' +
+    'onclick="jcDrillWeek(\'' + corEsc(String(w.week_ending)) + '\')">' +
+    lab('Labor \u00b7 wk ending ' + corEsc(_jcMD(w.week_ending))) +
+    '<div style="font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--kmi)">' + _jcMoney0(amt) + '</div>' +
+    '<div style="font-size:11px;color:#888;margin-top:2px">' + Number(w.hours || 0).toFixed(1) + ' hrs' +
+      (w.is_fallback ? ' \u00b7 latest week booked' : '') + '</div></div>';
+}
+function _jcCodesFor(lineKey) {
+  return (_jcCodes || []).filter(function(c){ return String(c.line_key) === String(lineKey); });
+}
+function _jcExpandable(lineKey) { return _jcCodesFor(lineKey).length >= 2; }
+function _jcChevron(lineKey) {
+  if (!_jcExpandable(lineKey)) return '<span style="display:inline-block;width:27px"></span>';
+  var open = !!_jcOpen[lineKey];
+  return '<button type="button" aria-label="Show cost codes for ' + corEsc(lineKey) + '" aria-expanded="' + open + '" ' +
+    'onclick="event.stopPropagation();jcToggleCodes(\'' + encodeURIComponent(lineKey) + '\')" ' +
+    'style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;' +
+    'margin-right:7px;vertical-align:middle;padding:0;cursor:pointer;font-size:10px;font-family:inherit;transition:transform .15s;' +
+    (open ? 'transform:rotate(90deg);background:#EEF0F8;border:0.5px solid var(--stl);color:var(--kmi)'
+          : 'background:#fff;border:0.5px solid #ddd;color:#666') + '">\u25b6</button>';
+}
+function jcToggleCodes(lineKeyEnc) {
+  var k = decodeURIComponent(lineKeyEnc);
+  _jcOpen[k] = !_jcOpen[k];
+  _jcPaint();
+}
+function jcToggleAllCodes() {
+  var keys = (_jcRows || []).map(function(r){ return r.line_key; }).filter(_jcExpandable);
+  var anyClosed = keys.some(function(k){ return !_jcOpen[k]; });
+  keys.forEach(function(k){ _jcOpen[k] = anyClosed; });
+  _jcPaint();
+}
+function _jcCodeRowsHtml(r) {
+  var k = r.line_key;
+  if (!_jcOpen[k] || !_jcExpandable(k)) return '';
+  var sub = ';background:#FAFAF8;font-size:12px;color:#444;padding-top:5px;padding-bottom:5px';
+  var tag = function(t, warn){
+    return '<span style="display:inline-block;font-size:10px;font-weight:600;padding:1px 6px;border-radius:20px;margin-left:6px;' +
+      'vertical-align:middle;' + (warn ? 'background:#FBF4E2;color:#6b5518;border:0.5px solid #E8D08A' : 'background:#eee;color:#666') +
+      '">' + t + '</span>';
+  };
+  var money = function(v){ return Number(v) ? _jcMoney(v) : _jcDash(); };
+  var enc = encodeURIComponent(k);
+  return _jcCodesFor(k).map(function(c){
+    var tot = Number(c.total || 0), act = Number(c.actual || 0), rem = Number(c.remaining || 0);
+    var name;
+    if (c.row_kind === 'unalloc_co') {
+      name = '<span style="color:#666"><span style="display:inline-block;min-width:38px;color:#888;font-weight:600">\u2014</span>' +
+        'Unallocated CO</span>' + tag('class only', false);
+    } else {
+      var code = String(c.cost_code_no == null ? '' : c.cost_code_no);
+      name = '<span style="color:var(--kmi3);cursor:pointer" onclick="jcDrill(\'' + enc + '\',\'' + encodeURIComponent(code) + '\')">' +
+        '<span style="display:inline-block;min-width:38px;color:#888;font-weight:600">' + (code ? corEsc(code) : '\u2014') + '</span>' +
+        (c.row_kind === 'nocode' ? 'No cost code' : corEsc(c.code_name || '')) + '</span>';
+      if (!c.in_estimate && act) name += tag('not in estimate', true);
+      else if (tot > 0 && act > tot) name += tag('over budget', true);
+    }
+    return '<tr>' +
+      '<td style="padding:5px 10px 5px 44px;text-align:left;border-bottom:0.5px solid #f0f0f0;white-space:nowrap' + sub + '">' + name + '</td>' +
+      '<td style="' + _jcTd() + sub + '">' + _jcDash() + '</td>' +
+      '<td style="' + _jcTd() + sub + '">' + money(c.budget) + '</td>' +
+      '<td style="' + _jcTd() + sub + '">' + money(c.co_amount) + '</td>' +
+      '<td style="' + _jcTd() + sub + '">' + (Number(c.pending) ? '<span style="color:var(--acd)">' + _jcMoney(c.pending) + '</span>' : _jcDash()) + '</td>' +
+      '<td style="' + _jcTd() + sub + '">' + money(tot) + '</td>' +
+      '<td style="' + _jcTd() + sub + '">' + _jcDash() + '</td>' +
+      '<td style="' + _jcTd() + sub + '">' + money(act) + '</td>' +
+      '<td style="' + _jcTd() + sub + ';font-style:italic;color:' + (rem >= 0 ? '#3B6D11' : '#A32D2D') + '">' + _jcMoney(rem) + '</td>' +
+    '</tr>';
+  }).join('');
 }
 
 function _jcTh(label, left) {
@@ -46426,63 +46541,75 @@ async function jcSetPct(lineKeyEnc, val) {
   jcReload();
 }
 
-// ── Drill-down (R11) ────────────────────────────────────────────────────
-// Transaction grain from fnd_job_history, filtered to the clicked report
-// line by re-running the ladder client-side against the rows returned.
-// Capped at 500 rows; PostgREST caps server-side anyway.
-async function jcDrill(lineKeyEnc) {
+// ── Drill-down (R11, JC4) ──────────────────────────────────────────────
+// Transaction grain from fnd_job_history via fnd_job_cost_drill(), which
+// filters by report line (and optionally cost code or week) in the
+// database. Paged 250 at a time; the count and totals always cover every
+// matching row, so nothing is silently cut off.
+var _jcDrillRows = [];
+var _JC_DRILL_PAGE = 250;
+
+async function jcDrill(lineKeyEnc, codeEnc) {
   var lineKey = decodeURIComponent(lineKeyEnc);
+  var code = (codeEnc === undefined || codeEnc === null) ? null : decodeURIComponent(codeEnc);
+  var title = lineKey;
+  if (code !== null) {
+    var c = _jcCodesFor(lineKey).filter(function(x){ return String(x.cost_code_no == null ? '' : x.cost_code_no) === code; })[0];
+    title += ' \u00b7 ' + (code ? code + (c && c.code_name ? ' ' + c.code_name : '') : 'no cost code');
+  }
+  await _jcDrillOpen({ title: title, lineKeys: [lineKey], code: code, weekEnd: null });
+}
+
+async function jcDrillWeek(weekEnd) {
+  await _jcDrillOpen({ title: 'Labor \u2014 week ending ' + _jcMD(weekEnd),
+    lineKeys: ['Labor Cost', 'Winter Protection Labor'], code: null, weekEnd: weekEnd });
+}
+
+function _jcDrillArgs(spec, offset, limit) {
+  var p = _prodCurrentProject();
+  return { p_job_no: p ? String(p.number || '').trim() : '', p_cutoff: spec.cutoff,
+    p_line_keys: spec.lineKeys, p_cost_code: spec.code, p_week_end: spec.weekEnd,
+    p_limit: limit, p_offset: offset };
+}
+
+async function _jcDrillOpen(spec) {
   var p = _prodCurrentProject(); if (!p) return;
-  var jobNo = String(p.number || '').trim(); if (!jobNo) return;
-  var cutoff = _jcCutoff || _jcToday();
+  if (!String(p.number || '').trim()) return;
+  spec.cutoff = _jcCutoff || _jcToday();
+  spec.token = Date.now() + Math.random();
+  _jcDrillSpec = spec; _jcDrillRows = []; _jcDrillTotal = null;
 
   showModal('<div style="padding:24px;text-align:center;color:#888;font-size:13px">Loading transactions\u2026</div>');
-
   try {
-    var r = await supabaseClient
-      .from('fnd_job_history')
-      .select('date_booked,job_trx_type,module_from,vendor_no,employee_no,voucher_no,description_1,cost,units,cost_code_no,cost_class_no')
-      .eq('job_no', jobNo)
-      .lte('date_booked', cutoff)
-      .order('date_booked', { ascending: false })
-      .limit(500);
+    var r = await supabaseClient.rpc('fnd_job_cost_drill', _jcDrillArgs(spec, 0, _JC_DRILL_PAGE));
     if (r.error) throw r.error;
-
-    var all = r.data || [];
-    var rows = all.filter(function(x){ return _jcLadder(x.cost_code_no, x.cost_class_no) === lineKey; });
+    if (_jcDrillSpec !== spec) return;
+    var rows = r.data || [];
     _jcDrillRows = rows;
+    _jcDrillTotal = rows.length
+      ? { rows: Number(rows[0].total_rows || 0), cost: Number(rows[0].total_cost || 0), hours: Number(rows[0].total_hours || 0) }
+      : { rows: 0, cost: 0, hours: 0 };
 
-    var sum = rows.reduce(function(a,x){ return a + Number(x.cost || 0); }, 0);
-    var body = rows.map(function(x){
-      var who = x.employee_no || x.vendor_no || '';
-      return '<tr>' +
-        '<td style="' + _jcDtd('left')  + '">' + corEsc(x.date_booked || '') + '</td>' +
-        '<td style="' + _jcDtd('left')  + '">' + corEsc(x.module_from || x.job_trx_type || '') + '</td>' +
-        '<td style="' + _jcDtd('left')  + '">' + corEsc(who) + '</td>' +
-        '<td style="' + _jcDtd('left')  + '">' + corEsc(x.voucher_no || '') + '</td>' +
-        '<td style="' + _jcDtd('left')  + '">' + corEsc(x.description_1 || '') + '</td>' +
-        '<td style="' + _jcDtd('right') + '">' + (Number(x.units) ? Number(x.units).toFixed(1) : '\u2014') + '</td>' +
-        '<td style="' + _jcDtd('right') + '">' + _jcMoney(x.cost) + '</td>' +
-      '</tr>';
-    }).join('');
+    var scope = spec.weekEnd
+      ? ' for the week ' + corEsc(_jcMD(_jcAddDays(spec.weekEnd, -6))) + '\u2013' + corEsc(_jcMD(spec.weekEnd))
+      : ', booked through ' + corEsc(spec.cutoff);
 
     showModal(
-      '<div class="ch"><span class="ct">' + corEsc(lineKey) + ' \u2014 transactions</span>' +
+      '<div class="ch"><span class="ct">' + corEsc(spec.title) + ' \u2014 transactions</span>' +
         '<div style="display:flex;gap:8px">' +
-          (rows.length ? '<button class="btn" onclick="jcDrillCsv(\'' + encodeURIComponent(lineKey) + '\')">Export CSV</button>' : '') +
+          (rows.length ? '<button class="btn" id="jc-drill-csv" onclick="jcDrillCsv()">Export CSV</button>' : '') +
           '<button class="btn" onclick="closeModal()">Close</button>' +
         '</div></div>' +
       (rows.length
-        ? '<div style="overflow-x:auto;max-height:60vh;overflow-y:auto"><table style="width:100%;min-width:760px;border-collapse:collapse;font-variant-numeric:tabular-nums">' +
-          '<thead><tr>' + _jcTh('Booked', true) + _jcTh('Source', true) + _jcTh('Vendor / employee', true) +
+        ? '<div style="overflow-x:auto;max-height:60vh;overflow-y:auto"><table style="width:100%;min-width:820px;border-collapse:collapse;font-variant-numeric:tabular-nums">' +
+          '<thead><tr>' + _jcTh('Booked', true) + _jcTh('Code', true) + _jcTh('Source', true) + _jcTh('Vendor / employee', true) +
           _jcTh('Voucher', true) + _jcTh('Description', true) + _jcTh('Hours') + _jcTh('Cost') + '</tr></thead>' +
-          '<tbody>' + body + '</tbody></table></div>' +
-          '<div style="font-size:11.5px;color:#888;line-height:1.6;margin-top:10px">' + rows.length +
-          ' rows, ' + _jcMoney(sum) + ', booked through ' + corEsc(cutoff) +
-          (all.length >= 500 ? '. <b>Capped at 500 rows for the job</b> \u2014 narrow the cutoff to see older cost.' : '.') + '</div>'
-        : '<div style="padding:30px;text-align:center;color:#888;font-size:13px">No cost booked to this line through ' +
-          corEsc(cutoff) + '.</div>')
+          '<tbody id="jc-drill-body">' + _jcDrillRowsHtml(rows) + '</tbody></table></div>' +
+          '<div id="jc-drill-foot" style="font-size:11.5px;color:#888;line-height:1.6;margin-top:10px">' + _jcDrillFootHtml(scope) + '</div>'
+        : '<div style="padding:30px;text-align:center;color:#888;font-size:13px">No cost booked to this ' +
+          (spec.weekEnd ? 'week' : (spec.code !== null ? 'code' : 'line')) + scope + '.</div>')
     );
+    spec.scope = scope;
   } catch (e) {
     console.warn('drill-down failed', e);
     showModal('<div class="ch"><span class="ct">Transactions</span>' +
@@ -46491,26 +46618,93 @@ async function jcDrill(lineKeyEnc) {
       corEsc((e && e.message) ? e.message : String(e)) + '</div>');
   }
 }
-var _jcDrillRows = [];
 
-function jcDrillCsv(lineKeyEnc) {
-  var lineKey = decodeURIComponent(lineKeyEnc);
+function _jcAddDays(iso, n) {
+  var p = String(iso).split('-');
+  var d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + n);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+
+function _jcDrillRowsHtml(rows) {
+  return rows.map(function(x){
+    var who = x.employee_no || x.vendor_no || '';
+    return '<tr>' +
+      '<td style="' + _jcDtd('left')  + '">' + corEsc(x.date_booked || '') + '</td>' +
+      '<td style="' + _jcDtd('left')  + '">' + corEsc(x.cost_code_no || '') + '</td>' +
+      '<td style="' + _jcDtd('left')  + '">' + corEsc(x.module_from || x.job_trx_type || '') + '</td>' +
+      '<td style="' + _jcDtd('left')  + '">' + corEsc(who) + '</td>' +
+      '<td style="' + _jcDtd('left')  + '">' + corEsc(x.voucher_no || '') + '</td>' +
+      '<td style="' + _jcDtd('left')  + '">' + corEsc(x.description_1 || '') + '</td>' +
+      '<td style="' + _jcDtd('right') + '">' + (Number(x.units) ? Number(x.units).toFixed(1) : '\u2014') + '</td>' +
+      '<td style="' + _jcDtd('right') + '">' + _jcMoney(x.cost) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function _jcDrillFootHtml(scope) {
+  var t = _jcDrillTotal || { rows: 0, cost: 0, hours: 0 };
+  var shown = _jcDrillRows.length;
+  return 'Showing <b>' + shown + ' of ' + t.rows + '</b> rows \u00b7 ' + _jcMoney(t.cost) +
+    (t.hours ? ' \u00b7 ' + t.hours.toFixed(1) + ' hrs' : '') + scope +
+    (shown < t.rows
+      ? ' \u00b7 <button class="btn btn-sm" id="jc-drill-more" style="margin-left:6px" onclick="jcDrillMore()">Load next ' +
+        Math.min(_JC_DRILL_PAGE, t.rows - shown) + '</button>'
+      : ' \u00b7 all rows loaded') + '.';
+}
+
+async function jcDrillMore() {
+  var spec = _jcDrillSpec; if (!spec) return;
+  var btn = g('jc-drill-more'); if (btn) { btn.disabled = true; btn.textContent = 'Loading\u2026'; }
+  try {
+    var r = await supabaseClient.rpc('fnd_job_cost_drill', _jcDrillArgs(spec, _jcDrillRows.length, _JC_DRILL_PAGE));
+    if (r.error) throw r.error;
+    if (_jcDrillSpec !== spec) return;
+    var rows = r.data || [];
+    _jcDrillRows = _jcDrillRows.concat(rows);
+    var body = g('jc-drill-body'); if (body) body.insertAdjacentHTML('beforeend', _jcDrillRowsHtml(rows));
+    var foot = g('jc-drill-foot'); if (foot) foot.innerHTML = _jcDrillFootHtml(spec.scope || '');
+  } catch (e) {
+    console.warn('drill-down more failed', e);
+    if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+  }
+}
+
+// CSV pulls every matching row, not just the pages on screen.
+async function jcDrillCsv() {
+  var spec = _jcDrillSpec; if (!spec) return;
   var p = _prodCurrentProject();
   var jobNo = p ? String(p.number || '').trim() : '';
-  var head = ['Job','Line','Booked','Source','Vendor/Employee','Voucher','Description','Hours','Cost'];
-  var lines = [head.join(',')];
-  (_jcDrillRows || []).forEach(function(x){
-    lines.push([jobNo, lineKey, x.date_booked || '', x.module_from || x.job_trx_type || '',
-      x.employee_no || x.vendor_no || '', x.voucher_no || '', x.description_1 || '',
-      Number(x.units || 0), Number(x.cost || 0)]
-      .map(function(v){ return '"' + String(v).replace(/"/g, '""') + '"'; }).join(','));
-  });
-  var blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = jobNo + '-' + lineKey.replace(/[^A-Za-z0-9]+/g, '-') + '.csv';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+  var btn = g('jc-drill-csv'); if (btn) { btn.disabled = true; btn.textContent = 'Exporting\u2026'; }
+  try {
+    var all = [], off = 0, total = null;
+    while (true) {
+      var r = await supabaseClient.rpc('fnd_job_cost_drill', _jcDrillArgs(spec, off, 1000));
+      if (r.error) throw r.error;
+      var rows = r.data || [];
+      if (total === null) total = rows.length ? Number(rows[0].total_rows || 0) : 0;
+      all = all.concat(rows); off += rows.length;
+      if (!rows.length || off >= total) break;
+    }
+    var head = ['Job','Line','Code','Booked','Source','Vendor/Employee','Voucher','Description','Hours','Cost'];
+    var lines = [head.join(',')];
+    all.forEach(function(x){
+      lines.push([jobNo, x.line_key || '', x.cost_code_no || '', x.date_booked || '', x.module_from || x.job_trx_type || '',
+        x.employee_no || x.vendor_no || '', x.voucher_no || '', x.description_1 || '',
+        Number(x.units || 0), Number(x.cost || 0)]
+        .map(function(v){ return '"' + String(v).replace(/"/g, '""') + '"'; }).join(','));
+    });
+    var blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = jobNo + '-' + spec.title.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '') + '.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+  } catch (e) {
+    console.warn('drill CSV failed', e);
+    alert('Could not export: ' + ((e && e.message) ? e.message : String(e)));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Export CSV'; }
+  }
 }
 
 // Client-side mirror of fnd_report_line(). Used ONLY to filter drill-down
@@ -54247,7 +54441,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-24-subnew1';
+var KMI_BUILD = '2026-09-24-jc4';
 
 var _kmiSessionId = (function(){
   try {
