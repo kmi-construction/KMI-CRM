@@ -3833,6 +3833,9 @@ var _tmSort  = { col: 'ticketNumber', dir: 'asc' }; // default: ticket # smalles
 // TMSORT1: project T&M sub-tab has its own sort so it never reorders the
 // global T&M list (and vice versa). Persists across projects for the session.
 var _tmProjSort = { col: 'ticketNumber', dir: 'asc' };
+// CORSORT1: sort for the COR "Add tickets" modal. Own state so it never
+// reorders the T&M lists. Persists across CORs for the session.
+var _corAddTktSort = { col: 'ticketNumber', dir: 'asc' };
 // Persisted T&M list filters. Survives re-renders (new ticket, smart upload,
 // page navigation) so a PM focused on one project isn't reset to "All" each
 // time. filterTmTickets() writes here; renderTmTickets() restores from here
@@ -23501,10 +23504,9 @@ function ncorShowAddTicketsModal() {
     if (String(t.projectId) !== String(pid)) return false;
     if (staged[String(t.id)]) return false;
     return corTicketEligible(t, corType);
-  }).sort(function(a, b){
-    return String(a.ticketDate || '').localeCompare(String(b.ticketDate || ''))
-        || (Number(a.id) - Number(b.id));
   });
+  // CORSORT1: session-remembered column sort (default Ticket # ascending)
+  eligible = sortTmArray(eligible, _corAddTktSort);
 
   if (!eligible.length) {
     showModal(
@@ -23526,7 +23528,7 @@ function ncorShowAddTicketsModal() {
     var st = 0, ot = 0, dt = 0;
     rows.forEach(function(r){ st += Number(r.stHours)||0; ot += Number(r.otHours)||0; dt += Number(r.dtHours)||0; });
     var dateStr = t.ticketDate ? new Date(t.ticketDate + 'T12:00:00').toLocaleDateString() : '';
-    return '<tr>' +
+    return '<tr data-tid="' + t.id + '">' +
       '<td style="padding:5px 8px"><input type="checkbox" name="ncm-ticket" value="' + t.id + '"></td>' +
       '<td style="padding:5px 8px"><strong style="color:var(--kmi)">' + corEsc(t.ticketNumber || '') + '</strong></td>' +
       '<td style="padding:5px 8px">' + corEsc(dateStr) + '</td>' +
@@ -23542,11 +23544,11 @@ function ncorShowAddTicketsModal() {
     '<div style="max-height:380px;overflow-y:auto;border:0.5px solid #e5e5e5;border-radius:6px;margin-bottom:14px">' +
       '<table style="width:100%;font-size:12px"><thead><tr style="background:#fafafa;border-bottom:0.5px solid #eee;color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0">' +
         '<th style="padding:6px 8px;text-align:left;width:30px"><input type="checkbox" onclick="ncorToggleAllAddTickets(this)"></th>' +
-        '<th style="padding:6px 8px;text-align:left">Ticket #</th>' +
-        '<th style="padding:6px 8px;text-align:left">Date</th>' +
-        '<th style="padding:6px 8px;text-align:left">Description</th>' +
+        _corAddTktTh('ticketNumber', 'Ticket #') +
+        _corAddTktTh('ticketDate',   'Date') +
+        _corAddTktTh('description',  'Description') +
         '<th style="padding:6px 8px;text-align:right">ST/OT/DT</th>' +
-      '</tr></thead><tbody>' + rowsHtml + '</tbody></table>' +
+      '</tr></thead><tbody id="ncm-add-tbody">' + rowsHtml + '</tbody></table>' +
     '</div>' +
     '<div class="mbtns">' +
       '<button class="btn" onclick="closeModal()">Cancel</button>' +
@@ -23557,6 +23559,44 @@ function ncorShowAddTicketsModal() {
 
 function ncorToggleAllAddTickets(chk) {
   document.querySelectorAll('input[name="ncm-ticket"]').forEach(function(cb){ cb.checked = chk.checked; });
+}
+
+// CORSORT1: sortable header cell for the Add-tickets modal.
+function _corAddTktTh(col, label) {
+  var cls = 'sortable';
+  if (_corAddTktSort && _corAddTktSort.col === col) cls += ' ' + _corAddTktSort.dir;
+  return '<th class="' + cls + '" data-col="' + col + '" style="padding:6px 8px;text-align:left" onclick="sortCorAddTickets(\'' + col + '\')">' + label + '</th>';
+}
+
+// CORSORT1: same toggle rules as sortTm(). Reorders the existing rows in
+// place (no modal re-render) so checked boxes and scroll position are kept.
+function sortCorAddTickets(col) {
+  if (_corAddTktSort && _corAddTktSort.col === col) {
+    _corAddTktSort.dir = _corAddTktSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _corAddTktSort = { col: col, dir: 'asc' };
+  }
+  var tbody = document.getElementById('ncm-add-tbody');
+  if (!tbody) return;
+  var byId = {};
+  var tickets = [];
+  Array.prototype.forEach.call(tbody.querySelectorAll('tr[data-tid]'), function(tr){
+    var tid = tr.getAttribute('data-tid');
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    if (!t) return;
+    byId[String(t.id)] = tr;
+    tickets.push(t);
+  });
+  sortTmArray(tickets, _corAddTktSort).forEach(function(t){
+    tbody.appendChild(byId[String(t.id)]);
+  });
+  var table = tbody.parentNode;
+  if (table) {
+    table.querySelectorAll('thead th.sortable').forEach(function(th){
+      th.classList.remove('asc', 'desc');
+      if (th.getAttribute('data-col') === _corAddTktSort.col) th.classList.add(_corAddTktSort.dir);
+    });
+  }
 }
 
 function ncorAddSelectedTickets() {
@@ -54476,7 +54516,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-24-TMSORT1';
+var KMI_BUILD = '2026-09-24-CORSORT1';
 
 var _kmiSessionId = (function(){
   try {
