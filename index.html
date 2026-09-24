@@ -24673,6 +24673,19 @@ function bgClose() {
 
 // Build a working copy from a saved version (for editing without mutating
 // the saved row in db.projectBudgets).
+// BPRMULTI1: every PDF a budget version is built from, oldest first.
+// Append carries the list forward; Replace starts a new one. Versions saved
+// before the column existed fall back to their single sourcePdfPath.
+function bgVersionPdfs(v) {
+  if (!v) return [];
+  if (Array.isArray(v.sourcePdfs) && v.sourcePdfs.length) {
+    return v.sourcePdfs.filter(function(x){ return x && x.path; }).map(function(x){
+      return { path: String(x.path), name: x.name || null, addedVersion: x.addedVersion || null };
+    });
+  }
+  return v.sourcePdfPath ? [{ path: String(v.sourcePdfPath), name: null, addedVersion: v.version || null }] : [];
+}
+
 function bgCloneVersionAsWorking(version) {
   var lines = (version.lines || []).map(function(l, i){
     var copy = JSON.parse(JSON.stringify(l));
@@ -24688,6 +24701,7 @@ function bgCloneVersionAsWorking(version) {
   return {
     versionId:        version.id,
     sourcePdfPath:    version.sourcePdfPath || '',
+    sourcePdfs:       bgVersionPdfs(version),
     taxRate:          Number(version.taxRate) || 0,
     totalSquareFeet:  (version.totals && version.totals.total_square_feet) || 0,
     lines:            lines,
@@ -24705,6 +24719,7 @@ function bgBuildWorkingFromTemplate() {
   return {
     versionId:        null,
     sourcePdfPath:    '',
+    sourcePdfs:       [],
     taxRate:          0,
     totalSquareFeet:  0,
     lines: tmpl.map(function(t, i){
@@ -25402,6 +25417,13 @@ async function bgBeginExtraction(file, isAppend) {
 
   _bgExtractionResult = data.data;
   // Build (or merge into) the working copy
+  // BPRMULTI1: Append with nothing loaded used to fall through to a fresh
+  // template (a Replace labelled Append). Merge into the latest version.
+  if (isAppend && !_bgWorking) {
+    var _bgLatest = (db.projectBudgets || []).filter(function(b){ return String(b.projectId) === String(_bgProjectId); })
+      .sort(function(a,b){ return (b.version || 0) - (a.version || 0); })[0];
+    if (_bgLatest) { _bgWorking = bgCloneVersionAsWorking(_bgLatest); _bgVersionId = _bgLatest.id; }
+  }
   if (isAppend && _bgWorking) {
     bgApplyExtractionToWorking(_bgWorking, data.data, /*append*/ true);
   } else {
@@ -25784,6 +25806,14 @@ async function bgSaveBudget() {
       }
     }
 
+    // BPRMULTI1: Append adds the new PDF to the carried list; Replace
+    // starts over; a values-only save keeps the list it was loaded with.
+    var pdfs = bgVersionPdfs(_bgWorking);
+    if (_bgPendingPdfBytes) {
+      var pdfEntry = { path: pdfPath, name: _bgPendingPdfName || null, addedVersion: nextV };
+      pdfs = _bgIsAppendMode ? pdfs.concat([pdfEntry]) : [pdfEntry];
+    }
+
     // 3) Build the row
     var tax = (Number(_bgWorking.taxRate) || 0) / 100;
     var totals = bgComputeTotals(_bgWorking.lines, tax);
@@ -25797,6 +25827,7 @@ async function bgSaveBudget() {
       createdAt:       nowISO,
       createdBy:       creator,
       sourcePdfPath:   pdfPath,
+      sourcePdfs:      pdfs,
       taxRate:         _bgWorking.taxRate || 0,
       lines:           JSON.parse(JSON.stringify(_bgWorking.lines)),
       totals:          totals,
@@ -38279,7 +38310,150 @@ function _bprLatestBudgetPdf(projectId) {
   });
   if (!bs.length) return null;
   bs.sort(function(a, b){ return (b.version || 0) - (a.version || 0); });
-  return { path: bs[0].sourcePdfPath, version: bs[0].version || 1 };
+  var pdfs = bgVersionPdfs(bs[0]);   // BPRMULTI1
+  return { path: bs[0].sourcePdfPath, version: bs[0].version || 1, pdfs: pdfs };
+}
+
+// BPRMULTI1 ── remap old BPR ids to a freshly parsed list ───────────────
+// Match on source|class|material first. Rows parsed before source tagging
+// have no sourcePath and are treated as coming from the first (original)
+// PDF. Failing an exact match, a class|material that appears exactly once
+// in the new list is taken. Anything else maps to null (orphaned).
+function _bprBuildIdMap(oldList, newList) {
+  var firstSrc = (newList && newList.length) ? String(newList[0].sourcePath || '') : '';
+  var byFull = {}, byCM = {};
+  (newList || []).forEach(function(b){
+    var cm = (b.classCode || '') + '|' + (b.materialCode || '');
+    byFull[String(b.sourcePath || '') + '|' + cm] = b;
+    (byCM[cm] = byCM[cm] || []).push(b);
+  });
+  var map = {};
+  (oldList || []).forEach(function(o){
+    var cm = (o.classCode || '') + '|' + (o.materialCode || '');
+    var src = o.sourcePath ? String(o.sourcePath) : firstSrc;
+    var hit = byFull[src + '|' + cm];
+    if (!hit) { var c = byCM[cm] || []; if (c.length === 1) hit = c[0]; }
+    map[String(o.id)] = hit ? String(hit.id) : null;
+  });
+  return map;
+}
+
+// Applies (commit=true) or just counts (commit=false) the id map against
+// procurement assignments and production-estimate bprRef links.
+function _bprRemap(p, map, commit) {
+  var r = { remapped: 0, orphaned: 0, estRemapped: 0, estDropped: 0 };
+  (p.procurementItems || []).forEach(function(item){
+    if (!Array.isArray(item.bprAssignments)) return;
+    item.bprAssignments.forEach(function(a){
+      var nid = map[String(a.bprMaterialId)];
+      if (nid) { r.remapped++; if (commit) { a.bprMaterialId = nid; delete a._orphaned; } }
+      else     { r.orphaned++; if (commit) a._orphaned = true; }
+    });
+  });
+  var est = p.prodEstimate;
+  if (est && Array.isArray(est.lines)) {
+    est.lines.forEach(function(l){
+      if (!Array.isArray(l.bprRef) || !l.bprRef.length) return;
+      var next = [];
+      l.bprRef.forEach(function(id){
+        var nid = map[String(id)];
+        if (nid) { next.push(nid); r.estRemapped++; } else r.estDropped++;
+      });
+      if (commit) l.bprRef = next;
+    });
+  }
+  return r;
+}
+
+// Stale when the project's BPR list doesn't cover every PDF on the latest
+// budget version. Untagged (pre-BPRMULTI1) lists are only flagged when the
+// budget has 2+ PDFs, since a single-PDF budget is what they were built from.
+function _bprStaleInfo(p) {
+  if (!p || !Array.isArray(p.bprMaterials) || !p.bprMaterials.length) return null;
+  var info = _bprLatestBudgetPdf(p.id);
+  if (!info || !info.pdfs || !info.pdfs.length) return null;
+  var have = {}, tagged = false;
+  p.bprMaterials.forEach(function(b){ if (b.sourcePath) { tagged = true; have[String(b.sourcePath)] = true; } });
+  var want = info.pdfs.map(function(x){ return String(x.path); });
+  if (!tagged) return want.length >= 2 ? info : null;
+  var same = want.length === Object.keys(have).length && want.every(function(w){ return have[w]; });
+  return same ? null : info;
+}
+
+function _bprSrcBadge(b) {
+  if (!b || !(Number(b.sourceCount) > 1)) return '';
+  var i = Number(b.sourceIdx) || 0;
+  var t = 'PDF ' + (i + 1) + (b.sourceName ? ': ' + b.sourceName : (i === 0 ? ' (original)' : ''));
+  return ' <span title="' + _procEsc(t) + '" style="display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;font-size:9px;font-weight:600;vertical-align:middle;background:' +
+    (i === 0 ? '#EEF0F3;color:#666' : '#F8F6E6;color:#9A7A2E') + '">BPR ' + (i + 1) + '</span>';
+}
+
+function bprShowStaleNotice(p, info) {
+  var canRefresh = (typeof hasFull !== 'function') || hasFull('edit_project_budget');
+  var n = info.pdfs.length;
+  var list = info.pdfs.map(function(x, i){
+    return '<div>&middot; PDF ' + (i + 1) + (i === 0 ? ' (original)' : '') + (x.name ? ': ' + _procEsc(x.name) : '') + '</div>';
+  }).join('');
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Budget has BPR content this list is missing</div>' +
+    '<div class="msb">Budget v' + info.version + ' is built from ' + n + ' Bid Price Report' + (n === 1 ? '' : 's') +
+      ', and this project\u2019s BPR list doesn\u2019t cover ' + (n === 1 ? 'it' : 'all of them') +
+      '. Refresh pulls every PDF on the budget into the list. You\u2019ll see how procurement assignments and estimate lines carry over before anything changes.</div>' +
+    '<div class="sb3" style="font-size:12px;line-height:1.7;margin-bottom:12px">' + list + '</div>' +
+    (canRefresh ? '' : '<div style="font-size:12px;color:#9A7A2E;margin-bottom:10px">Refreshing needs budget edit access.</div>') +
+    '<div id="bpr-upload-status" style="font-size:12px;color:#666;margin:8px 0"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="bprStaleUseCurrent()">Use current list</button>' +
+      (canRefresh ? '<button class="btn btn-p" id="bpr-use-budget-btn" onclick="procUseBudgetBpr()">Refresh from budget</button>' : '') +
+    '</div>'
+  );
+}
+function bprStaleUseCurrent() {
+  closeModal();
+  if (typeof _bprPickerDest !== 'undefined' && _bprPickerDest === 'prod') prodOpenBprPicker();
+  else procOpenBprPicker();
+}
+
+var _bprPendingRefresh = null;
+function _bprShowRefreshPreview(p, parsed, info) {
+  var r = _bprRemap(p, _bprBuildIdMap(p.bprMaterials || [], parsed), false);
+  _bprPendingRefresh = { projectId: String(p.id), parsed: parsed };
+  var n = (info.pdfs || []).length;
+  var loss = r.orphaned || r.estDropped;
+  function row(label, val, bad) {
+    return '<div style="display:flex;justify-content:space-between;gap:16px"><span>' + label + '</span><strong' +
+      (bad ? ' style="color:#A32D2D"' : '') + '>' + val + '</strong></div>';
+  }
+  showModal(
+    '<button class="xbtn" onclick="_bprPendingRefresh=null;closeModal()">&#215;</button>' +
+    '<div class="mt">Refresh BPR list from Budget v' + info.version + '</div>' +
+    '<div class="msb">' + n + ' PDF' + (n === 1 ? '' : 's') + ' parsed. Nothing has changed yet.</div>' +
+    '<div class="sb3" style="font-size:13px;line-height:1.9;margin-bottom:12px">' +
+      row('Materials', (p.bprMaterials || []).length + ' &rarr; ' + parsed.length) +
+      row('Procurement assignments re-pointed', r.remapped) +
+      row('Procurement assignments orphaned', r.orphaned, r.orphaned > 0) +
+      row('Estimate line links carried over', r.estRemapped) +
+      row('Estimate line links dropped', r.estDropped, r.estDropped > 0) +
+    '</div>' +
+    (loss ? '<div style="font-size:12px;color:#A32D2D;margin-bottom:10px">Orphaned assignments stay visible but stop reconciling. Dropped estimate links only affect the picker\u2019s \u201calready imported\u201d marker; the estimate lines themselves are kept.</div>' : '') +
+    '<div id="bpr-upload-status" style="font-size:12px;color:#666;margin:8px 0"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="_bprPendingRefresh=null;closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" id="bpr-refresh-apply-btn" onclick="bprConfirmRefresh()">Apply refresh</button>' +
+    '</div>'
+  );
+}
+function bprConfirmRefresh() {
+  var pend = _bprPendingRefresh;
+  _bprPendingRefresh = null;
+  if (!pend || String(pend.projectId) !== String(_editProjectId)) {
+    closeModal();
+    alert('The project changed since the refresh was prepared. Start it again from + From BPR.');
+    return;
+  }
+  var btn = g('bpr-refresh-apply-btn'); if (btn) btn.disabled = true;
+  _bprApplyParsed(pend.parsed, g('bpr-upload-status'));
 }
 
 // Shared post-parse handler: carry existing procurement assignments forward
@@ -38291,40 +38465,19 @@ function _bprApplyParsed(parsed, statusEl) {
   var p = getProj(_editProjectId);
   if (!p) { if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">Project not found.</span>'; return; }
 
-  var oldById = {};
-  (p.bprMaterials || []).forEach(function(b){ oldById[String(b.id)] = b; });
-  var newByKey = {};
-  parsed.forEach(function(b){
-    newByKey[(b.classCode || '') + '|' + (b.materialCode || '')] = b;
-  });
-
-  // Remap assignments
-  var remapped = 0, orphaned = 0;
-  (p.procurementItems || []).forEach(function(item){
-    if (!Array.isArray(item.bprAssignments)) return;
-    item.bprAssignments.forEach(function(a){
-      var oldMat = oldById[String(a.bprMaterialId)];
-      if (!oldMat) { a._orphaned = true; orphaned++; return; }
-      var key = (oldMat.classCode || '') + '|' + (oldMat.materialCode || '');
-      var newMat = newByKey[key];
-      if (newMat) {
-        a.bprMaterialId = newMat.id;
-        delete a._orphaned;
-        remapped++;
-      } else {
-        a._orphaned = true;
-        orphaned++;
-      }
-    });
-  });
+  // BPRMULTI1: one remap for procurement assignments AND estimate bprRef.
+  var map = _bprBuildIdMap(p.bprMaterials || [], parsed);
+  var r = _bprRemap(p, map, true);
 
   p.bprMaterials = parsed;
   saveDB();
 
   if (statusEl) {
     var summary = 'Parsed ' + parsed.length + ' material' + (parsed.length === 1 ? '' : 's') + '.';
-    if (remapped) summary += ' Re-pointed ' + remapped + ' existing assignment' + (remapped === 1 ? '' : 's') + '.';
-    if (orphaned) summary += ' ' + orphaned + ' orphaned (no match in new BPR).';
+    if (r.remapped) summary += ' Re-pointed ' + r.remapped + ' existing assignment' + (r.remapped === 1 ? '' : 's') + '.';
+    if (r.orphaned) summary += ' ' + r.orphaned + ' orphaned (no match in new BPR).';
+    if (r.estRemapped) summary += ' Carried ' + r.estRemapped + ' estimate link' + (r.estRemapped === 1 ? '' : 's') + '.';
+    if (r.estDropped) summary += ' ' + r.estDropped + ' estimate link' + (r.estDropped === 1 ? '' : 's') + ' dropped.';
     statusEl.innerHTML = '<span style="color:#1E6B36">' + _procEsc(summary) + '</span>';
   }
 
@@ -38355,27 +38508,44 @@ async function procUseBudgetBpr() {
   var statusEl = g('bpr-upload-status');
   var useBtn = g('bpr-use-budget-btn');
   if (useBtn) useBtn.disabled = true;
-  if (statusEl) statusEl.innerHTML = '<span style="color:#1F5A8A">Fetching BPR from budget v' + info.version + '\u2026</span>';
+  // BPRMULTI1: parse every PDF on the budget version, tag rows by source.
+  var pdfs = (info.pdfs && info.pdfs.length) ? info.pdfs : [{ path: info.path, name: null }];
+  var nPdf = pdfs.length;
+  if (statusEl) statusEl.innerHTML = '<span style="color:#1F5A8A">Fetching BPR from budget v' + info.version + (nPdf > 1 ? ' (' + nPdf + ' PDFs)' : '') + '\u2026</span>';
 
   try {
-    var signed = await supabaseClient.storage.from('kmi-budget-pdfs').createSignedUrl(info.path, 300);
-    if (signed && signed.error) throw new Error(signed.error.message);
-    var url = signed && signed.data && signed.data.signedUrl;
-    if (!url) throw new Error('Could not generate a download link for the budget PDF.');
+    var parsed = [];
+    for (var pi = 0; pi < nPdf; pi++) {
+      var src = pdfs[pi];
+      var srcLabel = nPdf > 1 ? ('PDF ' + (pi + 1) + ' of ' + nPdf) : 'the budget PDF';
+      var signed = await supabaseClient.storage.from('kmi-budget-pdfs').createSignedUrl(src.path, 300);
+      if (signed && signed.error) throw new Error(srcLabel + ': ' + signed.error.message);
+      var url = signed && signed.data && signed.data.signedUrl;
+      if (!url) throw new Error('Could not generate a download link for ' + srcLabel + '.');
 
-    var resp = await fetch(url);
-    if (!resp.ok) throw new Error('Download failed (HTTP ' + resp.status + ').');
-    var blob = await resp.blob();   // _bprFileToArrayBuffer reads Blobs and Files alike
+      var resp = await fetch(url);
+      if (!resp.ok) throw new Error(srcLabel + ' download failed (HTTP ' + resp.status + ').');
+      var blob = await resp.blob();   // _bprFileToArrayBuffer reads Blobs and Files alike
 
-    if (statusEl) statusEl.innerHTML = '<span style="color:#1F5A8A">Parsing BPR from budget v' + info.version + '\u2026</span>';
-    var parsed = await _bprParsePdf(blob);
+      if (statusEl) statusEl.innerHTML = '<span style="color:#1F5A8A">Parsing ' + _procEsc(srcLabel) + ' from budget v' + info.version + '\u2026</span>';
+      var rows = await _bprParsePdf(blob);
+      if (!rows || !rows.length) {
+        throw new Error('No Material Totals rows found in ' + srcLabel + (src.name ? ' (' + src.name + ')' : '') + '. Is it a Tradesmen Quantity/Bid Price Report?');
+      }
+      for (var ri = 0; ri < rows.length; ri++) {
+        rows[ri].sourcePath = String(src.path);
+        rows[ri].sourceName = src.name || null;
+        rows[ri].sourceIdx  = pi;
+      }
+      parsed = parsed.concat(rows);
+    }
+    for (var ci = 0; ci < parsed.length; ci++) parsed[ci].sourceCount = nPdf;
 
-    if (!parsed || !parsed.length) {
-      if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">No Material Totals rows found in the budget PDF. Is it a Tradesmen Quantity/Bid Price Report?</span>';
-      if (useBtn) useBtn.disabled = false;
+    var pCur = getProj(_editProjectId);
+    if (pCur && Array.isArray(pCur.bprMaterials) && pCur.bprMaterials.length) {
+      _bprShowRefreshPreview(pCur, parsed, info);   // preview, commit on confirm
       return;
     }
-
     _bprApplyParsed(parsed, statusEl);
   } catch (e) {
     console.error('procUseBudgetBpr error', e);
@@ -38396,7 +38566,8 @@ function procOpenBprFlow() {
   var p = getProj(_editProjectId); if (!p) return;
   p.bprMaterials = p.bprMaterials || [];
   if (p.bprMaterials.length) {
-    procOpenBprPicker();
+    var stale = _bprStaleInfo(p);   // BPRMULTI1
+    if (stale) bprShowStaleNotice(p, stale); else procOpenBprPicker();
   } else {
     procOpenBprUploadModal();
   }
@@ -38409,7 +38580,7 @@ function procOpenBprUploadModal(reUpload) {
   var useBudgetBlock = budgetPdf ?
     '<div class="sb3" style="background:#EEF5EE;border:0.5px solid #C2D6C2;margin-bottom:14px">' +
       '<div style="font-size:13px;color:#1E6B36;margin-bottom:10px">A BPR is already on file from <strong>Budget v' + budgetPdf.version + '</strong> — use it directly, no re-upload required.</div>' +
-      '<button class="btn btn-p" id="bpr-use-budget-btn" onclick="procUseBudgetBpr()">\u2713 Use BPR on file (Budget v' + budgetPdf.version + ')</button>' +
+      '<button class="btn btn-p" id="bpr-use-budget-btn" onclick="procUseBudgetBpr()">\u2713 Use BPR on file (Budget v' + budgetPdf.version + ((budgetPdf.pdfs || []).length > 1 ? ' \u00b7 ' + budgetPdf.pdfs.length + ' PDFs' : '') + ')</button>' +
     '</div>' +
     '<div style="text-align:center;font-size:11px;color:#aaa;margin:0 0 12px">\u2014 or upload manually \u2014</div>'
     : '';
@@ -38653,7 +38824,7 @@ function _bprPickerHtml(p, groups, classOrder, assignedById) {
 
       html += '<tr style="' + rowStyle + '">' +
         '<td style="padding:5px 8px;text-align:center"><input type="checkbox" data-bpr-pick="' + _procEsc(b.id) + '"' + checked + disabled + ' onchange="procBprToggle(this)"></td>' +
-        '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.description || '(no description)') + statusBadge + rodHint + groupBadge + '</td>' +
+        '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.description || '(no description)') + statusBadge + rodHint + groupBadge + _bprSrcBadge(b) + '</td>' +
         '<td style="padding:5px 8px;font-size:10px;color:#888;font-family:monospace">' + _procEsc(b.materialCode || '') + '</td>' +
         '<td style="padding:5px 8px;font-size:11px;text-align:right">' + _procFmtBprQty(b.quantity) + '</td>' +
         '<td style="padding:5px 8px;font-size:11px">' + _procEsc(b.unit || '') + '</td>' +
@@ -39116,7 +39287,10 @@ function prodOpenBprFlow(){
   _bprPickerDest = 'prod';
   var p = getProj(_editProjectId); if (!p) return;
   p.bprMaterials = p.bprMaterials || [];
-  if (p.bprMaterials.length) prodOpenBprPicker();
+  if (p.bprMaterials.length) {
+    var stale = _bprStaleInfo(p);   // BPRMULTI1
+    if (stale) bprShowStaleNotice(p, stale); else prodOpenBprPicker();
+  }
   else procOpenBprUploadModal();   // shared upload/budget modal; routes back via _bprPickerDest
 }
 function prodBprReupload(){ _bprPickerDest = 'prod'; procOpenBprUploadModal(true); }
@@ -39313,7 +39487,7 @@ function _prodBprPickerHtml(p, bpr, imported){
       }
       html += '<tr style="border-top:1px solid #f3f3f3;' + rowStyle + '">' +
         '<td style="padding:5px 4px;text-align:center"><input type="checkbox"' + checked + disabled + ' onchange="prodBprToggle(\'' + id + '\',this.checked)"></td>' +
-        '<td style="padding:5px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + _prodEsc(b.description || '') + '">' + _prodEsc(b.description || b.materialCode || '(material)') + badge + '</td>' +
+        '<td style="padding:5px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + _prodEsc(b.description || '') + '">' + _prodEsc(b.description || b.materialCode || '(material)') + badge + _bprSrcBadge(b) + '</td>' +
         '<td style="padding:5px 8px;text-align:right">' + _prodFmtQty(b.quantity) + '</td>' +
         '<td style="padding:5px 4px;color:#888">' + _prodEsc(b.unit || '') + '</td>' +
         '<td style="padding:5px 8px;text-align:right">' + mduCellInner + '</td>' +
@@ -54516,7 +54690,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-09-24-CORSORT1';
+var KMI_BUILD = '2026-09-24-BPRMULTI1';
 
 var _kmiSessionId = (function(){
   try {
@@ -56378,7 +56552,8 @@ function toSBProjBudget(r) {
     created_at:r.createdAt||null, created_by:r.createdBy||null,
     source_pdf_path:r.sourcePdfPath||null,
     tax_rate:r.taxRate||0,
-    lines:r.lines||[], totals:r.totals||{}, notes:r.notes||null
+    lines:r.lines||[], totals:r.totals||{}, notes:r.notes||null,
+    source_pdfs: Array.isArray(r.sourcePdfs) ? r.sourcePdfs : bgVersionPdfs(r)   // BPRMULTI1
   };
 }
 function fromSBProjBudget(r) {
@@ -56387,7 +56562,8 @@ function fromSBProjBudget(r) {
     createdAt:r.created_at||null, createdBy:r.created_by||null,
     sourcePdfPath:r.source_pdf_path||null,
     taxRate:r.tax_rate||0,
-    lines:r.lines||[], totals:r.totals||{}, notes:r.notes||null
+    lines:r.lines||[], totals:r.totals||{}, notes:r.notes||null,
+    sourcePdfs: Array.isArray(r.source_pdfs) ? r.source_pdfs : []   // BPRMULTI1
   };
 }
 
