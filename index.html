@@ -3169,6 +3169,19 @@ tr.gc-line:hover td{background:#fafafa}
     </div>
   </div>
 
+  <!-- TMATT1: supporting attachments (photos / PDFs) - rendered by tmAttRender().
+       The Add button is deliberately NOT .btn-sm: viewTmTicket() hides every
+       '.ch .btn-sm' on read-only tickets, but attachments follow their own
+       lock rule (open until the ticket's COR is sent). -->
+  <div class="card" id="ntm-att-card">
+    <div class="ch">
+      <span class="ct">Attachments <span id="ntm-att-count" style="color:#888;font-weight:500"></span></span>
+      <button class="btn" id="ntm-att-add-btn" onclick="tmAttOpenAdd()" style="display:none;padding:4px 10px;font-size:12px">+ Add attachment</button>
+    </div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Photos or documents that back up this ticket. Each one prints after the ticket in the ticket PDF and the COR packet, captioned with its description.</div>
+    <div id="ntm-att-body"></div>
+  </div>
+
   <div style="display:flex;gap:10px;justify-content:flex-end;padding-bottom:32px;flex-wrap:wrap">
     <button class="btn" onclick="_smartUpCancel(); _tmExitForm();">Cancel</button>
     <button class="btn" onclick="downloadTmTicketPDF()" id="ntm-pdf-btn" style="display:none">⬇ Download PDF</button>
@@ -15949,6 +15962,7 @@ function _ntmResetNewFormState() {
     b.style.display = '';
   });
   var saveBtn = g('ntm-save-btn'); if (saveBtn) saveBtn.style.display = '';
+  if (typeof tmAttRender === 'function') tmAttRender(null); // TMATT1
 }
 
 function initNewTmTicket(prefillProjectId) {
@@ -16131,6 +16145,7 @@ function viewTmTicket(id) {
   // Round 3: status card + action button visibility
   renderTmStatusCard(t);
   _refreshTmActionButtons(t);
+  tmAttRender(t); // TMATT1
 }
 
 // Decide which Round 3 action buttons are visible for the current
@@ -16948,6 +16963,563 @@ async function _appendUploadedFileToJsPdf(doc, uploadedFile) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// TMATT1 — T&M ticket CC on send + supporting attachments
+// ═══════════════════════════════════════════════════════════════════════
+// Decisions locked with Mike (Oct 2026):
+//   1   CC list = project contacts only (checkbox list; signer excluded).
+//   2-A CC'd contacts get a SEPARATE FYI email with the ticket PDF and no
+//       sign link (the link is a bearer token - only the signer gets it).
+//   3-A CC on the initial send only. The list is stored in
+//       kmi_tm_tickets.signature_cc by a TARGETED update; it is deliberately
+//       not in toSBTmTicket so a stale wholesale push can't clobber it.
+//       Reminders (manual + 6 AM cron) stay signer-only.
+//   4-A Attachments live in kmi_tm_ticket_attachments, one row per file,
+//       targeted insert/delete only. Do NOT add this table to the push arrays.
+//   5-A Editable at any ticket status until the ticket's COR leaves Draft.
+//       This intentionally ignores the t.corId edit lock: attachments don't
+//       feed COR math, and the Draft-COR window is when backup gets gathered.
+//       Server-side: kmi_tm_attachments_unlocked() in the RLS policies.
+//   6-A Shown on the ticket; appended (captioned) to the ticket PDF and the
+//       COR packet. Not shown on the public sign page (phase 2).
+//   7-A Images re-encoded to JPEG, max 2400 px long edge, on upload (also
+//       bakes in EXIF rotation and strips GPS). PDF/JPG/PNG up to 20 MB.
+
+var TM_ATT_TABLE     = 'kmi_tm_ticket_attachments';
+var TM_ATT_MAX_BYTES = 20 * 1024 * 1024;
+var TM_ATT_MAX_EDGE  = 2400;
+var TM_ATT_BAND      = 64;      // caption band height on PDF pages (pt)
+var _tmAttRows = {};            // ticketId -> rows from the last fetch
+var _tmAttBusy = false;
+
+function _tmAttTicket() {
+  if (!_editTmTicketId) return null;
+  return (db.tmTickets || []).find(function(x){ return String(x.id) === String(_editTmTicketId); }) || null;
+}
+
+function _tmAttKind(contentType, name) {
+  var ct = String(contentType || '').toLowerCase();
+  var nm = String(name || '').toLowerCase();
+  if (ct.indexOf('pdf') !== -1 || /\.pdf$/.test(nm)) return 'pdf';
+  if (ct === 'image/jpeg' || ct === 'image/jpg' || ct === 'image/png' || /\.(jpe?g|png)$/.test(nm)) return 'image';
+  return null;
+}
+
+// null when attachments can change; otherwise a human-readable reason.
+function _tmAttLockReason(t) {
+  if (!t || !t.corId) return null;
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(t.corId); });
+  if (!c) return null; // COR not cached locally - the RLS policy still enforces
+  var s = c.status || 'Draft';
+  if (s === 'Draft') return null;
+  var num = c.corNumber || t.corNumber || '';
+  var when = c.sentAt ? ' on ' + new Date(c.sentAt).toLocaleDateString() : '';
+  return 'COR ' + num + ' was sent to the customer' + when + ' with these attachments (now ' + s + '), so they can no longer be added or removed.';
+}
+
+function _tmAttCanAdd(t) {
+  if (!t || !t.id) return false;
+  if (typeof hasFull === 'function' && !hasFull('edit-tm-ticket')) return false;
+  return !_tmAttLockReason(t);
+}
+
+// Field roles may only remove what they uploaded; office roles any.
+function _tmAttCanRemove(t, row) {
+  if (!row || !_tmAttCanAdd(t)) return false;
+  var role = _currentUser ? normalizeRole(_currentUser.role) : '';
+  if (role === 'Foreman' || role === 'Superintendent') {
+    return !!(_currentUser && String(row.uploaded_by_user_id) === String(_currentUser.id));
+  }
+  return true;
+}
+
+async function _tmAttFetch(ticketId) {
+  if (!supabaseClient) throw new Error('Not connected to Supabase.');
+  var r = await supabaseClient.from(TM_ATT_TABLE).select('*')
+    .eq('ticket_id', ticketId)
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true });
+  if (r.error) throw new Error(r.error.message);
+  _tmAttRows[String(ticketId)] = r.data || [];
+  return r.data || [];
+}
+
+function _tmAttFmtSize(n) {
+  n = Number(n || 0);
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+}
+
+// ── Card render ────────────────────────────────────────────────────────
+async function tmAttRender(t) {
+  var body = g('ntm-att-body'), countEl = g('ntm-att-count'), addBtn = g('ntm-att-add-btn');
+  if (!body) return;
+  if (addBtn) addBtn.style.display = 'none';
+  if (countEl) countEl.textContent = '';
+  if (!t || !t.id) {
+    body.innerHTML = '<div style="font-size:12px;color:#888">Save the ticket first, then add photos or documents.</div>';
+    return;
+  }
+  var ticketId = t.id;
+  body.innerHTML = '<div style="font-size:12px;color:#888">Loading attachments\u2026</div>';
+  var rows;
+  try {
+    rows = await _tmAttFetch(ticketId);
+  } catch (e) {
+    if (String(_editTmTicketId) !== String(ticketId)) return;
+    body.innerHTML = '<div style="font-size:12px;color:#A32D2D">Could not load attachments: ' + tmEsc(e.message || String(e)) + '</div>';
+    return;
+  }
+  if (String(_editTmTicketId) !== String(ticketId)) return; // user opened something else
+  _tmAttPaint(t, rows);
+}
+
+function _tmAttPaint(t, rows) {
+  var body = g('ntm-att-body'), countEl = g('ntm-att-count'), addBtn = g('ntm-att-add-btn');
+  if (!body) return;
+  if (countEl) countEl.textContent = '(' + rows.length + ')';
+  if (addBtn) addBtn.style.display = _tmAttCanAdd(t) ? '' : 'none';
+
+  var html = '';
+  var lock = _tmAttLockReason(t);
+  if (lock) {
+    html += '<div style="background:#FAF8F0;border:0.5px solid var(--ac);border-radius:8px;padding:10px 14px;font-size:12px;color:#5C4510;margin-bottom:12px;line-height:1.5"><strong>Locked.</strong> ' + tmEsc(lock) + '</div>';
+  }
+  html += '<div id="ntm-att-add" style="display:none"></div>';
+
+  if (!rows.length) {
+    html += '<div style="font-size:12px;color:#888;padding:6px 0">No attachments yet.</div>';
+  } else {
+    html += '<div style="border:0.5px solid #e5e5e5;border-radius:8px;overflow:hidden">';
+    rows.forEach(function(r){
+      var isPdf = _tmAttKind(r.content_type, r.file_name) === 'pdf';
+      var badge = isPdf
+        ? '<div style="width:56px;height:44px;border-radius:6px;background:#F6E3D5;color:#8A3B12;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">PDF</div>'
+        : '<div style="width:56px;height:44px;border-radius:6px;background:#DDE1F0;color:var(--kmi3);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">PHOTO</div>';
+      var meta = [
+        r.file_name || '',
+        _tmAttFmtSize(r.size_bytes),
+        r.uploaded_by_name || '',
+        r.created_at ? new Date(r.created_at).toLocaleDateString() : ''
+      ].filter(Boolean).map(tmEsc).join(' &middot; ');
+      var actions = '<button class="btn" style="padding:4px 10px;font-size:12px" onclick="tmAttView(' + r.id + ')">View</button>';
+      if (_tmAttCanRemove(t, r)) {
+        actions += '<button class="btn" style="padding:4px 10px;font-size:12px;color:#A32D2D;border-color:#E8B8B8" onclick="tmAttRemove(' + r.id + ')">Remove</button>';
+      }
+      html +=
+        '<div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-bottom:0.5px solid #eee;flex-wrap:wrap;background:#fff">' +
+          badge +
+          '<div style="flex:1 1 260px;min-width:0">' +
+            '<div style="font-size:13px;font-weight:600;word-break:break-word">' + tmEsc(r.description || '') + '</div>' +
+            '<div style="font-size:12px;color:#666;margin-top:2px;word-break:break-word">' + meta + '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:6px">' + actions + '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+  body.innerHTML = html;
+}
+
+// ── Add ────────────────────────────────────────────────────────────────
+function tmAttOpenAdd() {
+  var t = _tmAttTicket();
+  if (!_tmAttCanAdd(t)) { alert('Attachments are locked for this ticket.'); return; }
+  var box = g('ntm-att-add');
+  if (!box) return;
+  box.style.display = '';
+  box.innerHTML =
+    '<div style="border:0.5px solid var(--stl);background:#F7F8FC;border-radius:8px;padding:14px;margin-bottom:12px">' +
+      '<div class="fg">' +
+        '<div class="fgr full"><label>File * (PDF, JPG or PNG, up to 20 MB)</label>' +
+          '<input type="file" id="ntm-att-file" accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png"></div>' +
+        '<div class="fgr full"><label>Description *</label>' +
+          '<input id="ntm-att-desc" maxlength="300" placeholder="e.g. Damaged wall at grid C-4 before rebuild"></div>' +
+      '</div>' +
+      '<div style="font-size:11px;color:#888;margin-top:6px">Photos are resized to 2400 px on the long edge. The description becomes the caption in the ticket PDF and COR packet.</div>' +
+      '<div id="ntm-att-err" style="color:#A32D2D;font-size:12px;min-height:16px;margin:8px 0"></div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+        '<button class="btn" onclick="tmAttCancelAdd()">Cancel</button>' +
+        '<button class="btn btn-p" id="ntm-att-upload-btn" onclick="tmAttUpload()">Upload</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function tmAttCancelAdd() {
+  var box = g('ntm-att-add');
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+}
+
+// Re-encode an image: JPEG, max TM_ATT_MAX_EDGE px. Always redrawn so EXIF
+// rotation is baked in (jsPDF ignores EXIF) and location metadata dropped.
+async function _tmAttPrepareImage(file) {
+  var url = URL.createObjectURL(file);
+  try {
+    var img = await new Promise(function(resolve, reject){
+      var im = new Image();
+      im.onload  = function(){ resolve(im); };
+      im.onerror = function(){ reject(new Error('This image could not be read. If it is an iPhone HEIC photo, export or share it as JPG first.')); };
+      im.src = url;
+    });
+    var w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+    if (!w || !h) throw new Error('This image has no size.');
+    var scale = Math.min(1, TM_ATT_MAX_EDGE / Math.max(w, h));
+    var cw = Math.max(1, Math.round(w * scale)), chh = Math.max(1, Math.round(h * scale));
+    var cv = document.createElement('canvas');
+    cv.width = cw; cv.height = chh;
+    var ctx = cv.getContext('2d');
+    ctx.fillStyle = '#ffffff';            // PNG transparency -> white, not black
+    ctx.fillRect(0, 0, cw, chh);
+    ctx.drawImage(img, 0, 0, cw, chh);
+    var blob = await new Promise(function(resolve, reject){
+      cv.toBlob(function(b){ b ? resolve(b) : reject(new Error('Image resize failed.')); }, 'image/jpeg', 0.85);
+    });
+    cv.width = 0; cv.height = 0;
+    var base = String(file.name || 'photo').replace(/\.[^.]+$/, '') || 'photo';
+    return { blob: blob, contentType: 'image/jpeg', name: base + '.jpg' };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function tmAttUpload() {
+  if (_tmAttBusy) return;
+  var t = _tmAttTicket();
+  var err = g('ntm-att-err'), btn = g('ntm-att-upload-btn');
+  if (err) err.textContent = '';
+  if (!t || !_tmAttCanAdd(t)) { if (err) err.textContent = 'Attachments are locked for this ticket.'; return; }
+  var fileEl = g('ntm-att-file');
+  var file = fileEl && fileEl.files ? fileEl.files[0] : null;
+  var desc = ((g('ntm-att-desc') || {}).value || '').trim();
+  if (!file) { if (err) err.textContent = 'Choose a file first.'; return; }
+  if (!desc) { if (err) err.textContent = 'A description is required. It becomes the caption in the COR packet.'; return; }
+  var kind = _tmAttKind(file.type, file.name);
+  if (!kind) { if (err) err.textContent = 'Only PDF, JPG or PNG files can be attached. (iPhone HEIC photos: export or share as JPG first.)'; return; }
+  if (file.size > TM_ATT_MAX_BYTES) { if (err) err.textContent = 'File is larger than 20 MB. Try a smaller scan or photo.'; return; }
+  if (!supabaseClient) { if (err) err.textContent = 'Not connected to Supabase.'; return; }
+
+  _tmAttBusy = true;
+  if (btn) { btn.disabled = true; btn.textContent = kind === 'image' ? 'Resizing\u2026' : 'Uploading\u2026'; }
+  var path = null;
+  try {
+    var blob = file, contentType = 'application/pdf', name = file.name || 'attachment.pdf';
+    if (kind === 'image') {
+      var prep = await _tmAttPrepareImage(file);
+      blob = prep.blob; contentType = prep.contentType; name = prep.name;
+      if (btn) btn.textContent = 'Uploading\u2026';
+    }
+    var safe = String(name).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+    path = 'tm-tickets/' + t.id + '/attachments/' + Date.now() + '_' + safe;
+    var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).upload(path, blob, { contentType: contentType, upsert: false });
+    if (up && up.error) throw new Error(up.error.message);
+
+    var ins = await supabaseClient.from(TM_ATT_TABLE).insert({
+      ticket_id:           t.id,
+      storage_path:        path,
+      file_name:           name,
+      content_type:        contentType,
+      size_bytes:          blob.size,
+      description:         desc,
+      uploaded_by_user_id: _currentUser ? String(_currentUser.id) : null,
+      uploaded_by_name:    _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : ''
+    }).select().single();
+    if (ins.error) throw new Error(ins.error.message);
+    path = null; // committed - nothing to clean up
+
+    _tmAttBusy = false;
+    if (typeof showToast === 'function') showToast('Attachment added.', 'success');
+    await tmAttRender(t);
+  } catch (e) {
+    if (path) {
+      try { await supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([path]); } catch (_) {}
+    }
+    var msg = (e && e.message) ? e.message : String(e);
+    if (/row-level security/i.test(msg)) msg = 'attachments are locked for this ticket (its COR has been sent), or you do not have permission.';
+    if (err) err.textContent = 'Upload failed: ' + msg;
+    if (btn) { btn.disabled = false; btn.textContent = 'Upload'; }
+  } finally {
+    _tmAttBusy = false;
+  }
+}
+
+// ── View / remove ──────────────────────────────────────────────────────
+async function tmAttView(id) {
+  var t = _tmAttTicket();
+  var row = ((t && _tmAttRows[String(t.id)]) || []).find(function(r){ return String(r.id) === String(id); });
+  if (!row || !supabaseClient) return;
+  // Open the tab synchronously so mobile popup blockers allow it.
+  var win = null;
+  try { win = window.open('', '_blank'); } catch (_) {}
+  try {
+    var r = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).createSignedUrl(row.storage_path, 300);
+    if (r.error || !r.data || !r.data.signedUrl) throw new Error(r.error ? r.error.message : 'No signed URL.');
+    if (win) win.location = r.data.signedUrl;
+    else window.open(r.data.signedUrl, '_blank');
+  } catch (e) {
+    if (win) try { win.close(); } catch (_) {}
+    alert('Could not open attachment: ' + (e.message || e));
+  }
+}
+
+async function tmAttRemove(id) {
+  var t = _tmAttTicket();
+  var row = ((t && _tmAttRows[String(t.id)]) || []).find(function(r){ return String(r.id) === String(id); });
+  if (!row) return;
+  if (!_tmAttCanRemove(t, row)) { alert('You cannot remove this attachment.'); return; }
+  if (!confirm('Remove attachment "' + (row.description || row.file_name || '') + '"?\n\nThis cannot be undone.')) return;
+  var r = await supabaseClient.from(TM_ATT_TABLE).delete().eq('id', row.id).select('id');
+  if (r.error) { alert('Could not remove attachment: ' + r.error.message); return; }
+  if (!r.data || !r.data.length) {
+    alert('Could not remove attachment: it is locked (the COR has been sent) or you do not have permission.');
+    await tmAttRender(t);
+    return;
+  }
+  // Row is gone; the file is best-effort (bucket may not grant delete).
+  try { await supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([row.storage_path]); } catch (_) {}
+  await tmAttRender(t);
+}
+
+// ── PDF: captioned attachment pages ────────────────────────────────────
+function _tmAttAbToDataUrl(ab, mediaType) {
+  var bytes = new Uint8Array(ab), binary = '', CHUNK = 0x8000;
+  for (var i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return 'data:' + mediaType + ';base64,' + btoa(binary);
+}
+
+function _tmAttDrawBand(doc, pw, t, row, idx, total, cont) {
+  var M = 36;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.setTextColor(30, 36, 72);
+  doc.text('KMI Construction  |  T&M Ticket ' + (t.ticketNumber || ''), M, 26);
+  doc.text('Attachment ' + idx + ' of ' + total + (cont ? ' (cont.)' : ''), pw - M, 26, { align: 'right' });
+  doc.setFontSize(10);
+  doc.setTextColor(26, 26, 26);
+  var lines = doc.splitTextToSize(String(row.description || ''), pw - 2 * M - 14);
+  doc.text((lines[0] || '') + (lines.length > 1 ? '...' : ''), M, 41);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(102, 102, 102);
+  var meta = [
+    row.file_name || '',
+    row.uploaded_by_name ? 'uploaded by ' + row.uploaded_by_name : '',
+    row.created_at ? new Date(row.created_at).toLocaleDateString() : ''
+  ].filter(Boolean).join('  |  ');
+  doc.text(doc.splitTextToSize(meta, pw - 2 * M)[0] || '', M, 52);
+  doc.setDrawColor(30, 36, 72);
+  doc.setLineWidth(1.2);
+  doc.line(M, 58, pw - M, 58);
+  doc.setTextColor(0, 0, 0);
+}
+
+function _tmAttFit(srcW, srcH, bx, by, bw, bh) {
+  var r = (srcH > 0) ? srcW / srcH : 1, w, h;
+  if (r > bw / bh) { w = bw; h = w / r; } else { h = bh; w = h * r; }
+  return { x: bx + (bw - w) / 2, y: by + (bh - h) / 2, w: w, h: h };
+}
+
+function _tmAttAddPage(doc, landscape) {
+  doc.addPage([landscape ? 792 : 612, landscape ? 612 : 792], landscape ? 'landscape' : 'portrait');
+  return { pw: doc.internal.pageSize.getWidth(), ph: doc.internal.pageSize.getHeight() };
+}
+
+async function _tmAttAppendImage(doc, ab, contentType, t, row, idx, total) {
+  var isPng = /png/i.test(contentType || '');
+  var dataUrl = _tmAttAbToDataUrl(ab, isPng ? 'image/png' : 'image/jpeg');
+  var img = await new Promise(function(resolve, reject){
+    var im = new Image();
+    im.onload  = function(){ resolve(im); };
+    im.onerror = function(){ reject(new Error('Image load failed')); };
+    im.src = dataUrl;
+  });
+  var pg = _tmAttAddPage(doc, img.width > img.height);
+  _tmAttDrawBand(doc, pg.pw, t, row, idx, total, false);
+  var f = _tmAttFit(img.width, img.height, 36, TM_ATT_BAND + 6, pg.pw - 72, pg.ph - TM_ATT_BAND - 36);
+  doc.addImage(dataUrl, isPng ? 'PNG' : 'JPEG', f.x, f.y, f.w, f.h);
+  return 1;
+}
+
+// Each source page -> a letter page in its orientation, scaled to fit below
+// the caption band (nothing on the source page gets covered).
+async function _tmAttAppendPdf(doc, ab, t, row, idx, total) {
+  if (!window.pdfjsLib) throw new Error('pdf.js not loaded.');
+  var pdf = await pdfjsLib.getDocument({ data: ab }).promise;
+  for (var i = 1; i <= pdf.numPages; i++) {
+    var page = await pdf.getPage(i);
+    var base = page.getViewport({ scale: 1.0 });
+    var vp = page.getViewport({ scale: 2.0 });
+    var canvas = document.createElement('canvas');
+    canvas.width = vp.width; canvas.height = vp.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    var imgData = canvas.toDataURL('image/jpeg', 0.85);
+    canvas.width = 0; canvas.height = 0;
+    var pg = _tmAttAddPage(doc, base.width > base.height);
+    _tmAttDrawBand(doc, pg.pw, t, row, idx, total, i > 1);
+    var f = _tmAttFit(base.width, base.height, 18, TM_ATT_BAND + 4, pg.pw - 36, pg.ph - TM_ATT_BAND - 18);
+    doc.addImage(imgData, 'JPEG', f.x, f.y, f.w, f.h);
+  }
+  return pdf.numPages;
+}
+
+// A missing file still gets a page, so a gap in the backup is visible.
+function _tmAttAppendPlaceholder(doc, t, row, idx, total, reason) {
+  var pg = _tmAttAddPage(doc, false);
+  _tmAttDrawBand(doc, pg.pw, t, row, idx, total, false);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(11);
+  doc.setTextColor(122, 46, 46);
+  doc.text('This attachment could not be included: ' + (reason || 'file unavailable') + '.', 36, TM_ATT_BAND + 40);
+  doc.setTextColor(0, 0, 0);
+  return 1;
+}
+
+async function _tmAttAppendAllToJsPdf(doc, t) {
+  if (!t || !t.id || !supabaseClient) return 0;
+  var rows;
+  try {
+    rows = await _tmAttFetch(t.id);
+  } catch (e) {
+    console.warn('[TMATT1] attachment list unavailable for ticket ' + (t.ticketNumber || t.id) + ':', e);
+    return 0;
+  }
+  var added = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    try {
+      var ab = await _fetchUploadedFileBytes({ path: row.storage_path });
+      if (!ab) throw new Error('file not found in storage');
+      if (_tmAttKind(row.content_type, row.file_name) === 'pdf') {
+        added += await _tmAttAppendPdf(doc, ab, t, row, i + 1, rows.length);
+      } else {
+        added += await _tmAttAppendImage(doc, ab, row.content_type, t, row, i + 1, rows.length);
+      }
+    } catch (e) {
+      console.warn('[TMATT1] attachment ' + row.id + ' on ticket ' + (t.ticketNumber || t.id) + ' failed:', e);
+      added += _tmAttAppendPlaceholder(doc, t, row, i + 1, rows.length, (e && e.message) || '');
+    }
+  }
+  return added;
+}
+
+// ── Send-for-signature: CC picker ──────────────────────────────────────
+function _sfsCcSectionHtml(contactCount) {
+  if (!contactCount) return '';
+  return '<div style="border-top:0.5px solid #eee;padding-top:14px;margin-bottom:12px">' +
+    '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:4px">' +
+      '<label style="margin:0">CC \u2014 FYI copy (optional)</label>' +
+      '<span id="sfs-cc-count" style="font-size:12px;color:var(--kmi);font-weight:600"></span>' +
+    '</div>' +
+    '<div style="font-size:12px;color:#666;line-height:1.5;margin-bottom:8px">CC\'d contacts get a separate email with the ticket PDF attached for their records. They do <strong>not</strong> receive the signing link.</div>' +
+    '<div id="sfs-cc-list" style="border:0.5px solid #ddd;border-radius:6px;padding:4px 10px;background:#fafafa;max-height:220px;overflow-y:auto"></div>' +
+  '</div>';
+}
+
+function _sfsRenderCc() {
+  var box = g('sfs-cc-list');
+  if (!box) return;
+  var contacts = window._sfsContacts || [];
+  var checked = window._sfsCcChecked = window._sfsCcChecked || {};
+  var signer = ((g('sfs-email') || {}).value || '').trim().toLowerCase();
+  if (signer) delete checked[signer];
+  var html = '';
+  contacts.forEach(function(c, i){
+    var em = String(c.email || '').toLowerCase();
+    if (!em || em === signer) return;
+    html +=
+      '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;cursor:pointer;text-transform:none;letter-spacing:0;color:#1a1a1a;font-weight:400">' +
+        '<input type="checkbox" data-idx="' + i + '" onchange="_sfsCcToggle(this)" style="width:16px;height:16px;flex-shrink:0;padding:0"' + (checked[em] ? ' checked' : '') + '>' +
+        '<span><strong>' + tmEsc(c.name || c.email) + '</strong>' + (c.title ? ' \u2014 ' + tmEsc(c.title) : '') + ' &lt;' + tmEsc(c.email) + '&gt;</span>' +
+      '</label>';
+  });
+  box.innerHTML = html || '<div style="font-size:12px;color:#888;padding:6px 0">No other project contacts with email addresses.</div>';
+  _sfsCcCount();
+}
+
+function _sfsCcToggle(cb) {
+  var c = (window._sfsContacts || [])[Number(cb.getAttribute('data-idx'))];
+  if (!c || !c.email) return;
+  window._sfsCcChecked = window._sfsCcChecked || {};
+  window._sfsCcChecked[String(c.email).toLowerCase()] = !!cb.checked;
+  _sfsCcCount();
+}
+
+function _sfsCcCount() {
+  var el = g('sfs-cc-count');
+  if (!el) return;
+  var n = _sfsSelectedCc(((g('sfs-email') || {}).value || '')).length;
+  el.textContent = n ? n + ' selected' : 'None selected';
+}
+
+// Checked contacts, signer excluded, de-duplicated by email.
+function _sfsSelectedCc(signerEmail) {
+  var signer = String(signerEmail || '').trim().toLowerCase();
+  var checked = window._sfsCcChecked || {};
+  var seen = {}, out = [];
+  (window._sfsContacts || []).forEach(function(c){
+    var em = String(c.email || '').trim().toLowerCase();
+    if (!em || em === signer || !checked[em] || seen[em]) return;
+    seen[em] = true;
+    out.push({ name: c.name || '', email: c.email, title: c.title || '' });
+  });
+  return out;
+}
+
+// One email: first CC in To, the rest in Cc. Ticket PDF attached, no link.
+async function _sfsSendCcCopy(t, ccList, info) {
+  var note = '';
+  var attachments = [];
+  try {
+    var doc = await _buildTmTicketPdfWithSource(t.id);
+    if (doc) {
+      var uri = doc.output('datauristring');
+      var b64 = uri.substring(uri.indexOf(',') + 1);
+      if (b64.length > 28000000) {
+        note = 'The ticket PDF was too large to attach.';
+      } else {
+        attachments.push({ filename: 'TM_Ticket_' + (t.ticketNumber || t.id) + '.pdf', content: b64 });
+      }
+    }
+  } catch (e) {
+    console.warn('[TMATT1] CC copy PDF build failed:', e);
+    note = 'The ticket PDF could not be generated, so the CC email went without it.';
+  }
+  var signerLine = info.signerName + (info.signerTitle ? ' (' + info.signerTitle + ')' : '');
+  var bodyLines = [
+    'Hello,',
+    '',
+    'For your records: KMI Construction has sent T&M Ticket ' + (t.ticketNumber || '') + ' for ' + (info.projectLabel || 'the project') + ' to ' + signerLine + ' for signature.',
+    '',
+    attachments.length
+      ? 'A copy of the ticket is attached. No action is needed from you.'
+      : 'Reply to this email if you would like a copy of the ticket. No action is needed from you.',
+    '',
+    '\u2014 ' + (info.fromName || 'KMI Construction')
+  ];
+  var payload = {
+    to:                ccList[0].email,
+    subject:           'KMI Construction \u2014 T&M Ticket [' + (t.ticketNumber || '') + '] sent for signature (FYI)',
+    text:              bodyLines.join('\r\n'),
+    flowType:          'tm_signature_cc',
+    sentBy:            (_currentUser ? _currentUser.id : null),
+    sentByEmail:       info.fromEmail || null,
+    relatedEntityType: 'tm_ticket',
+    relatedEntityId:   String(t.id)
+  };
+  if (ccList.length > 1) payload.cc = ccList.slice(1).map(function(c){ return c.email; });
+  if (attachments.length) payload.attachments = attachments;
+  if (info.fromEmail) {
+    payload.from = info.fromEmail;
+    payload.fromName = info.fromName;
+    payload.replyTo = info.fromEmail;
+  }
+  var res = await sendEmail(payload);
+  res.note = note;
+  return res;
+}
+
 // Build a T&M ticket PDF and append its uploadedSignedFile (if any) as
 // additional pages. Returns the jsPDF doc, or null on error.
 async function _buildTmTicketPdfWithSource(id) {
@@ -16957,6 +17529,7 @@ async function _buildTmTicketPdfWithSource(id) {
   if (t && t.uploadedSignedFile) {
     await _appendUploadedFileToJsPdf(doc, t.uploadedSignedFile);
   }
+  if (t) await _tmAttAppendAllToJsPdf(doc, t); // TMATT1
   return doc;
 }
 
@@ -17345,6 +17918,11 @@ function renderTmStatusCard(t) {
         ' &lt;' + tmEsc(t.signatureRecipientEmail) + '&gt;' +
         (t.signatureRecipientTitle ? ' (' + tmEsc(t.signatureRecipientTitle) + ')' : '') +
         '<br>' +
+        (Array.isArray(t.signatureCc) && t.signatureCc.length // TMATT1
+          ? '<strong>CC (FYI copy):</strong> ' + t.signatureCc.map(function(c){
+              return tmEsc(c.name || c.email) + ' &lt;' + tmEsc(c.email) + '&gt;';
+            }).join(', ') + '<br>'
+          : '') +
         (sentLine ? sentLine + '<br>' : '') +
         (lastRem ? lastRem + '<br>' : '') +
         (expires ? expires : '') +
@@ -17437,6 +18015,7 @@ function showSendForSignatureModal() {
       var pm = (db.pms || []).find(function(x){ return String(x.id) === String(pmId); });
       if (pm && pm.email) {
         contacts.push({
+          id: pm.id,
           name: ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim(),
           email: pm.email,
           title: pm.title || ca.role || ''
@@ -17457,7 +18036,7 @@ function showSendForSignatureModal() {
   var modalBody =
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Send for signature</div>' +
-    '<div class="msb">Pick a recipient (or enter manually) and we\'ll generate a signing link plus send them an email. The link is valid for 45 days. If they don\'t sign within 7 days, automatic reminders go out daily at 6 AM CT.</div>';
+    '<div class="msb">Pick a recipient (or enter manually) and we\'ll generate a signing link plus send them an email. The link is valid for 30 days. If they don\'t sign within 7 days, automatic reminders go out daily at 6 AM CT.</div>';
 
   if (contacts.length) {
     modalBody +=
@@ -17476,9 +18055,10 @@ function showSendForSignatureModal() {
   modalBody +=
     '<div class="fg" style="margin-bottom:14px">' +
       '<div class="fgr full"><label>Recipient name *</label><input id="sfs-name" placeholder="Full name"></div>' +
-      '<div class="fgr"><label>Email *</label><input id="sfs-email" type="email" placeholder="name@company.com"></div>' +
+      '<div class="fgr"><label>Email *</label><input id="sfs-email" type="email" placeholder="name@company.com" oninput="_sfsRenderCc()"></div>' +
       '<div class="fgr"><label>Title</label><input id="sfs-title" placeholder="e.g. Site Superintendent"></div>' +
     '</div>' +
+    _sfsCcSectionHtml(contacts.length) + // TMATT1
     '<div id="sfs-err" style="color:#A32D2D;font-size:12px;margin-bottom:10px;min-height:14px"></div>' +
     '<div class="mbtns">' +
       '<button class="btn" onclick="closeModal()">Cancel</button>' +
@@ -17488,6 +18068,8 @@ function showSendForSignatureModal() {
   showModal(modalBody);
   // Stash contacts on a global so onSendSigContactPick can read them
   window._sfsContacts = contacts;
+  window._sfsCcChecked = {}; // TMATT1
+  _sfsRenderCc();
 }
 
 function onSendSigContactPick(sel) {
@@ -17498,6 +18080,7 @@ function onSendSigContactPick(sel) {
   g('sfs-name').value  = c.name  || '';
   g('sfs-email').value = c.email || '';
   g('sfs-title').value = c.title || '';
+  _sfsRenderCc(); // TMATT1
 }
 
 async function sendForSignature() {
@@ -17513,6 +18096,8 @@ async function sendForSignature() {
   if (!name)  { err.textContent = 'Please enter a recipient name.';  return; }
   if (!email) { err.textContent = 'Please enter a recipient email.'; return; }
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { err.textContent = 'That doesn\'t look like a valid email address.'; return; }
+
+  var ccList = _sfsSelectedCc(email); // TMATT1
 
   var btn = g('sfs-btn');
   btn.disabled = true;
@@ -17537,6 +18122,7 @@ async function sendForSignature() {
   t.signatureRecipientName = name;
   t.signatureRecipientTitle = title;
   t.sentForSignatureAt = nowIso;
+  t.signatureCc = ccList; // TMATT1
   t.lastReminderSentAt = null;
   t.reminderCount = 0;
   t.updatedAt = nowIso;
@@ -17548,6 +18134,12 @@ async function sendForSignature() {
     if (supabaseClient) {
       var up = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(t));
       if (up && up.error) throw new Error(up.error.message);
+      // TMATT1: targeted column write - signature_cc is deliberately NOT in
+      // toSBTmTicket so a stale wholesale push can never overwrite it.
+      if (ccList.length) {
+        var ccUp = await supabaseClient.from('kmi_tm_tickets').update({ signature_cc: ccList }).eq('id', t.id);
+        if (ccUp && ccUp.error) throw new Error(ccUp.error.message);
+      }
     }
   } catch (e) {
     err.textContent = 'Sync failed: ' + (e.message || e) + '. Try again.';
@@ -17559,6 +18151,7 @@ async function sendForSignature() {
     t.signatureRecipientName = null;
     t.signatureRecipientTitle = null;
     t.sentForSignatureAt = null;
+    t.signatureCc = []; // TMATT1
     btn.disabled = false; btn.textContent = 'Generate link & send email';
     return;
   }
@@ -17590,7 +18183,7 @@ async function sendForSignature() {
     'Click the link below to view the ticket details and sign:',
     '  ' + signUrl,
     '',
-    'The link is valid for 45 days. If you have questions or need to dispute any of the work captured, you can reject the ticket directly from that page with a reason.',
+    'The link is valid for 30 days. If you have questions or need to dispute any of the work captured, you can reject the ticket directly from that page with a reason.',
     '',
     '— ' + fromName
   ].filter(function(line, idx, arr){
@@ -17618,6 +18211,21 @@ async function sendForSignature() {
 
   var sendResult = await sendEmail(sendPayload);
 
+  // TMATT1: FYI copy to CC'd contacts - ticket PDF attached, NO sign link.
+  // Only after the signer's email went out; a CC failure never undoes the send.
+  var ccHtml = '';
+  if (sendResult.success && ccList.length) {
+    btn.textContent = 'Sending CC copy\u2026';
+    var ccResult = await _sfsSendCcCopy(t, ccList, {
+      signerName: name, signerTitle: title, projectLabel: projectLabel,
+      fromEmail: fromEmail, fromName: fromName
+    });
+    var ccNames = ccList.map(function(c){ return tmEsc(c.name || c.email); }).join(', ');
+    ccHtml = ccResult.success
+      ? '<div style="background:#EEF0F8;border:0.5px solid var(--stl);border-radius:7px;padding:11px 13px;margin-bottom:14px;font-size:12px;color:var(--kmi)">FYI copy with the ticket PDF sent to <strong>' + ccNames + '</strong>.' + (ccResult.note ? '<br>' + tmEsc(ccResult.note) : '') + '</div>'
+      : '<div style="background:#FBE9E9;border:1px solid #E8B8B8;border-radius:7px;padding:11px 13px;margin-bottom:14px;font-size:12px;color:#7A2E2E">The signing email went out, but the CC copy failed: ' + tmEsc(ccResult.error || 'Unknown error') + '. Download the ticket PDF and forward it to ' + ccNames + '.</div>';
+  }
+
   closeModal();
 
   if (sendResult.success) {
@@ -17625,6 +18233,7 @@ async function sendForSignature() {
       '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
       '<div class="mt">Sent for signature</div>' +
       '<div class="msb">An email has been sent to <strong>' + tmEsc(email) + '</strong> with a link to sign this ticket.</div>' +
+      ccHtml + // TMATT1
       (sendResult.testMode
         ? '<div style="background:#FFF8DC;border:1px solid #E8D08A;border-radius:7px;padding:11px 13px;margin-bottom:14px;font-size:12px;color:#6B5A2E"><strong>Test mode:</strong> the email was redirected. Real recipient: ' + tmEsc(sendResult.intendedRecipient || email) + '</div>'
         : '') +
@@ -22738,6 +23347,13 @@ async function _corBuildFullPDF(c, p) {
       } catch (e) {
         console.warn('Could not append source file for ticket ' + (t.ticketNumber || t.id) + ':', e);
       }
+    }
+
+    // TMATT1: the ticket's supporting attachments, captioned
+    try {
+      await _tmAttAppendAllToJsPdf(doc, t);
+    } catch (e) {
+      console.warn('Could not append attachments for ticket ' + (t.ticketNumber || t.id) + ':', e);
     }
   }
 
@@ -54706,7 +55322,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-06-tm-new-ticket-reset';
+var KMI_BUILD = '2026-10-06-TMATT1';
 
 var _kmiSessionId = (function(){
   try {
@@ -55977,7 +56593,10 @@ function fromSBTmTicket(r) {
     signedIp:                r.signed_ip                 || '',
     sentForSignatureAt:      r.sent_for_signature_at     || null,
     corId: r.cor_id || null,
-    corNumber: r.cor_number || null
+    corNumber: r.cor_number || null,
+    // TMATT1: read-only here. Written by targeted update in sendForSignature;
+    // intentionally absent from toSBTmTicket.
+    signatureCc: Array.isArray(r.signature_cc) ? r.signature_cc : []
   };
 }
 
