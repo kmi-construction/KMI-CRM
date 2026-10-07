@@ -2408,6 +2408,7 @@ tr.gc-line:hover td{background:#fafafa}
             <option value="Voided">Voided</option>
           </select>
           <button class="btn btn-sm" onclick="showCorLogModal()" id="nprj-cor-log-btn" title="Download a Change Order Log PDF with a contract summary">&#8595; Download log</button>
+          <button class="btn btn-sm" onclick="corSmartUploadForProject()" id="nprj-cor-smart-up-btn" title="Upload a historical COR PDF (e.g. exported from Excel) &#8212; AI fills in the form, COR goes straight to Pending for PM disposition">&#10024; Smart upload</button>
           <button class="btn btn-sm btn-p" onclick="corNewForProject()" id="nprj-cor-new-btn">+ New COR</button>
         </div>
       </div>
@@ -19221,7 +19222,8 @@ var _newCorPrefill = null;  // { projectId, type } stashed when type-picker conf
 // When a COR is opened/created from a project's Change Orders tab, this holds
 // that project id so the form's Cancel / save exit returns to that tab instead
 // of the global all-projects COR list. Null means the form was reached from the
-// global list or the smart-upload flow, so exit falls back to nav('cors').
+// retired global list, so exit falls back to nav('cors'). Smart Upload sets
+// it too when launched from the project tab (see _smartUpCorReturnProject).
 // Mirrors _tmReturnToProject / _subReturnToProject / _bgReturnToProject.
 var _corReturnToProject = null;
 
@@ -19729,15 +19731,20 @@ function renderProjectCorList() {
   if (newBtn) newBtn.style.display = hasFull('create-cor') ? '' : 'none';
   // Log button needs only read access to CORs.
   if (logBtn) logBtn.style.display = hasRead('view-cors') ? '' : 'none';
+  // Smart upload needs both create-cor and smart-upload-cor.
+  var suBtn = g('nprj-cor-smart-up-btn');
+  if (suBtn) suBtn.style.display = (hasFull('create-cor') && hasFull('smart-upload-cor')) ? '' : 'none';
 
   if (!pid) {
     el.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px">Save the project first to start adding change orders.</div>';
     if (newBtn) newBtn.disabled = true;
     if (logBtn) logBtn.disabled = true;
+    if (suBtn) suBtn.disabled = true;
     return;
   }
   if (newBtn) newBtn.disabled = false;
   if (logBtn) logBtn.disabled = false;
+  if (suBtn) suBtn.disabled = false;
 
   var statusFilter = (g('nprj-cor-status-filter') && g('nprj-cor-status-filter').value) || '';
   var rows = (db.cors || []).filter(function(c){
@@ -19790,6 +19797,16 @@ function corNewForProject() {
   // showNewCorModal() sets _corReturnToProject from the locked project id,
   // so the context survives the type-picker modal and the nav to the form.
   showNewCorModal(_editProjectId);
+}
+
+// Launch COR Smart Upload with this project pre-selected and locked. The
+// global COR list was retired, so the project tab is the entry point.
+// showSmartUploadCorModal() stashes the project so the review form's
+// Cancel / post-save exit returns to this tab.
+function corSmartUploadForProject() {
+  if (!hasFull('create-cor') || !hasFull('smart-upload-cor')) { alert('You do not have permission to use COR Smart Upload.'); return; }
+  if (!_editProjectId) { alert('Save the project first before uploading change orders.'); return; }
+  showSmartUploadCorModal(_editProjectId);
 }
 
 // View/Edit a COR from the project tab -- remembers to return here on close.
@@ -21173,8 +21190,13 @@ function _smartUpCorCancel() {
   if (confirmSave) confirmSave.style.display = 'none';
 }
 
-// Show the entry modal — project + file picker.
-function showSmartUploadCorModal() {
+// Set when Smart Upload is launched from a project's Change Orders tab;
+// consumed by _smartUpCorOpenReviewForm() to set _corReturnToProject.
+var _smartUpCorReturnProject = null;
+
+// Show the entry modal — project + file picker. Pass a project id to
+// pre-select and lock the project (project Change Orders tab entry).
+function showSmartUploadCorModal(preselectProjectId) {
   if (!hasFull('smart-upload-cor') || !hasFull('create-cor')) {
     alert('You do not have permission to use COR Smart Upload.'); return;
   }
@@ -21194,9 +21216,12 @@ function showSmartUploadCorModal() {
   var projects = _projectsOnly().sort(function(a,b){
     return String(a.number || '').localeCompare(String(b.number || ''));
   });
+  var lock = preselectProjectId !== null && preselectProjectId !== undefined && preselectProjectId !== '';
+  _smartUpCorReturnProject = lock ? preselectProjectId : null;
   var projOpts = '<option value="">Select project...</option>' +
     projects.map(function(p){
-      return '<option value="' + p.id + '">' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
+      var sel = (lock && String(p.id) === String(preselectProjectId)) ? ' selected' : '';
+      return '<option value="' + p.id + '"' + sel + '>' + corEsc((p.number || '') + ' — ' + (p.name || '')) + '</option>';
     }).join('');
 
   showModal(
@@ -21205,7 +21230,8 @@ function showSmartUploadCorModal() {
     '<div class="msb">Upload a PDF of a historical Change Order Request (e.g. an Excel-compiled COR you previously sent to a customer). AI will extract the header, line items, and totals into a draft for your review. After you confirm, the COR is saved with status <strong>Pending</strong> and the original PDF attached.</div>' +
     '<div class="fg" style="margin-bottom:12px">' +
       '<div class="fgr full"><label>Project *</label>' +
-        '<select id="suc-project">' + projOpts + '</select>' +
+        '<select id="suc-project"' + (lock ? ' disabled style="background:#f5f5f5;color:#666"' : '') + '>' + projOpts + '</select>' +
+        (lock ? '<div style="font-size:11px;color:#888;margin-top:4px">Locked to this project &mdash; you opened Smart upload from its Change Orders tab.</div>' : '') +
       '</div>' +
       '<div class="fgr full"><label>COR PDF *</label>' +
         '<input type="file" id="suc-file" accept="' + SMART_UP_COR_ACCEPT + '">' +
@@ -21449,9 +21475,10 @@ async function smartUploadCorExtract() {
 // uses our project + type, then layers on the rest of the extracted data
 // after init runs.
 function _smartUpCorOpenReviewForm(project, parsed) {
-  // Global-only entry (the project Change Orders tab has no smart-upload
-  // button) and it bypasses showNewCorModal, so clear the return context here.
-  _corReturnToProject = null;
+  // Bypasses showNewCorModal, so set the return context here: when launched
+  // from a project's Change Orders tab, Cancel / post-save exit return there.
+  _corReturnToProject = _smartUpCorReturnProject ? project.id : null;
+  _smartUpCorReturnProject = null;
   // Wire up the pieces initNewCor expects
   _newCorPrefill = { projectId: project.id, corType: parsed.corType || 'T&M' };
 
@@ -21653,7 +21680,7 @@ function _smartUpCorApplyPrefill(project, parsed) {
 // fields, file upload step.
 async function confirmSmartUploadCor() {
   if (!_smartUpCorMode || !_smartUpCorFile || !_smartUpCorProjectId) {
-    alert('Smart Upload state is missing — please start over from the COR list.');
+    alert('Smart Upload state is missing — please start over from the project Change Orders tab.');
     return;
   }
   if (!supabaseClient) { alert('Not connected to Supabase.'); return; }
@@ -55327,7 +55354,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-06-TMPROJ1';
+var KMI_BUILD = '2026-10-07-CORSMARTPRJ1';
 
 var _kmiSessionId = (function(){
   try {
