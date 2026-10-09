@@ -1681,6 +1681,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="ni" onclick="nav('ap-invoices')"><span class="nico">▦</span>AP Invoices</div>
       <div class="ni" onclick="nav('ap-approvals')"><span class="nico">✓</span>AP Approvals</div>
       <div class="ni" onclick="nav('ap-checks')"><span class="nico">▤</span>Check Register</div>
+      <div class="ni" onclick="nav('fin-statements')"><span class="nico">▥</span>Financial Statements</div>
     </div>
   </div>
   <div class="sb-group" data-group="resources">
@@ -2722,6 +2723,51 @@ tr.gc-line:hover td{background:#fafafa}
     <div class="card" style="padding:0;overflow:hidden"><div id="ap-list"></div></div>
   </div>
   <div id="ap-code" style="display:none"></div>
+</div>
+
+<!-- FINANCIAL STATEMENTS (FS1) -->
+<div class="pg" id="pg-fin-statements">
+  <style>
+    #pg-fin-statements .fs-pill{min-height:34px;padding:0 13px;border-radius:17px;border:1px solid var(--stl);background:#fff;color:var(--kmi);font-size:12.5px;cursor:pointer;font-family:inherit}
+    #pg-fin-statements .fs-pill.on{background:var(--kmi);border-color:var(--kmi);color:#fff;font-weight:600}
+    #pg-fin-statements .fs-pill:disabled{opacity:.35;cursor:default}
+    #pg-fin-statements .fs-pill .fs-fin{display:inline-block;width:6px;height:6px;border-radius:3px;background:var(--ac);margin-left:5px;vertical-align:middle}
+    #pg-fin-statements .fs-tab{min-height:40px;padding:0 16px;border:0;border-bottom:3px solid transparent;margin-bottom:-2px;background:none;color:#555;font-size:13.5px;cursor:pointer;font-family:inherit}
+    #pg-fin-statements .fs-tab.on{border-bottom-color:var(--ac);color:var(--kmi);font-weight:700}
+    #pg-fin-statements .fs-lv{min-height:32px;padding:0 12px;border-radius:7px;border:1px solid var(--stl);background:#fff;color:var(--kmi);font-size:12.5px;cursor:pointer;font-family:inherit}
+    #pg-fin-statements .fs-lv.on{background:#EEF0F7;border-color:var(--kmi);font-weight:600}
+    #pg-fin-statements table.fs-t{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+    #pg-fin-statements table.fs-t th{background:var(--kmi);color:#fff;font-weight:600;font-size:11.5px;padding:9px 8px;text-align:right;white-space:nowrap;position:sticky;top:0}
+    #pg-fin-statements table.fs-t th:first-child{text-align:left;padding-left:14px}
+    #pg-fin-statements table.fs-t td{padding:6px 8px;text-align:right;border-top:1px solid #f0f0ec;white-space:nowrap}
+    #pg-fin-statements table.fs-t td:first-child{text-align:left;padding-left:14px;white-space:normal}
+    #pg-fin-statements table.fs-t td.pct{color:#6b7080;font-size:11.5px}
+    #pg-fin-statements tr.fs-sec td{color:var(--acd);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding-top:12px;cursor:pointer;border-top:1px solid #e5e5e5}
+    #pg-fin-statements tr.fs-line{cursor:pointer}
+    #pg-fin-statements tr.fs-line:hover td{background:#fafaf7}
+    #pg-fin-statements tr.fs-line.open td{background:#FAF8F0}
+    #pg-fin-statements tr.fs-acct td{background:#FAF8F0;font-size:11.5px;color:#444;border-top:0;padding-top:3px;padding-bottom:3px}
+    #pg-fin-statements tr.fs-acct td:first-child{padding-left:44px}
+    #pg-fin-statements tr.fs-tot td{font-weight:700;border-top:1px solid var(--stl)}
+    #pg-fin-statements tr.fs-tot td:first-child{padding-left:34px}
+    #pg-fin-statements tr.fs-key td{font-weight:800;background:#EEF0F7;color:var(--kmi);border-top:2px solid var(--kmi);font-size:13px}
+    #pg-fin-statements tr.fs-big td{font-weight:800;color:var(--kmi);font-size:13.5px;border-top:2px solid var(--kmi);padding-top:12px;cursor:default}
+    #pg-fin-statements .fs-chev{display:inline-block;width:12px;color:var(--acd)}
+    #pg-fin-statements .fs-code{color:#9a9eac;font-size:10.5px;margin-left:6px}
+    #pg-fin-statements .fs-mono{font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--kmi2)}
+    #pg-fin-statements .fs-badge{display:inline-block;min-width:46px;text-align:center;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
+    #pg-fin-statements .fs-b-pass{background:#E4E9F7;color:var(--kmi)}
+    #pg-fin-statements .fs-b-fail{background:#FCEBEB;color:#A32D2D}
+    #pg-fin-statements .fs-b-warn{background:#FBEFD5;color:#7A4E00}
+    #pg-fin-statements .fs-b-final{background:#F3E9C8;color:#6B5216}
+    #pg-fin-statements .fs-b-draft{background:#EEF0F7;color:var(--kmi3)}
+    #pg-fin-statements .fs-scroll{overflow-x:auto}
+  </style>
+  <div class="ph"><div><h1>Financial Statements</h1><div class="sub" id="fs-sub">Compiled from the Foundation general ledger.</div><div class="stripe"></div></div>
+    <div style="display:flex;gap:8px;align-items:center"><span id="fs-sync" style="font-size:11.5px;color:#888"></span><button class="btn btn-sm" onclick="fsExportCsv()">Export CSV</button></div></div>
+  <div id="fs-periods" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px"></div>
+  <div id="fs-tabs" style="display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid #e5e5e5;margin-bottom:14px"></div>
+  <div id="fs-body"></div>
 </div>
 
 <!-- AP CHECK REGISTER -->
@@ -4294,6 +4340,9 @@ var PERMISSIONS = {
   'ap-invoices': ['full','none','none','full','none','none','none'],
   'ap-approvals': ['full','full','none','full','none','none','full'],
   'ap-checks': ['full','none','none','full','none','none','none'],
+  // Financial statements (FS1): Admin + Accounting. RLS (kmi_fs_can_read) is
+  // the real gate; this row only shapes the sidebar and router.
+  'fin-statements': ['full','none','none','full','none','none','none'],
   'email-log': ['full','none','none','none','none','none','none'],
   'email-settings': ['full','none','none','none','none','none','none'],
   // Projects module: the project record itself + its workspace. view-project
@@ -4473,6 +4522,7 @@ var PAGE_ACTION_MAP = {
   'ap-approvals':   'ap-approvals',
   'prod-review':    'approve-production-week',
   'ap-checks':      'ap-checks',
+  'fin-statements': 'fin-statements',
   'budget':         'view_project_budget',
   'tm-tickets':     'view-tm-tickets',
   'new-tm-ticket':  'create-tm-ticket',
@@ -6371,6 +6421,7 @@ function nav(page) {
     'ap-approvals':   renderApApprovals,
     'prod-review':    renderProdReview,
     'ap-checks':      renderApChecks,
+    'fin-statements': renderFinStatements,
     projects:         renderProjects,
     'new-project':    initNewProject,
     budget:           renderBudget,
@@ -45648,6 +45699,516 @@ async function apChkCommit(){
   }
 }
 
+// ═══ FINANCIAL STATEMENTS (FS1) ═══════════════════════════════════════════
+// Monthly income statement + balance sheet compiled in the database from the
+// Foundation GL (fnd_gl_balances, synced by fnd_gl_sync.py on the VM) through
+// kmi_fs_account_map. All math lives in the FS-M1 RPCs:
+//   kmi_fs_statement(period)      lines + GL accounts per line, 4 columns
+//   kmi_fs_close_checks(period)   TB / unmapped / BS / prior-year close / sync
+//   kmi_fs_finalize / kmi_fs_reopen   Draft -> Final snapshot (reopen: Admin)
+// Access is Admin + Accounting, enforced by RLS (kmi_fs_can_read); the
+// 'fin-statements' permission row only shapes the UI.
+var _fs = {
+  year: null, month: null,          // selected period (month 1-12)
+  tab: 'is',                        // 'is' | 'bs' | 'ck'
+  open: {}, shut: {},               // line -> accounts expanded; section -> folded
+  cache: {},                        // 'YYYY-MM-01' -> {rows, checks}
+  periods: {},                      // 'YYYY-MM-01' -> kmi_fs_periods row
+  map: null,                        // mapping tab data
+  mapFilter: 'attention', mapSearch: '',
+  loading: false
+};
+var _FS_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+var _FS_FIRST_YEAR = 2025;
+
+function _fsKey(y, m){ return y + '-' + (m < 10 ? '0' : '') + m + '-01'; }
+function _fsLabel(y, m){ return _FS_MONTHS[m - 1] + ' ' + y; }
+function _fsNum(v){ var n = Number(v); return isFinite(n) ? n : 0; }
+function _fsMoney(v){
+  var n = _fsNum(v), a = Math.abs(n);
+  if (a < 0.5) return '\u2013';
+  var s = Math.round(a).toLocaleString('en-US');
+  return n < 0 ? '(' + s + ')' : s;
+}
+function _fsShort(v){
+  var n = _fsNum(v), a = Math.abs(n), s;
+  s = a >= 1e6 ? '$' + (a / 1e6).toFixed(2) + 'M' : '$' + Math.round(a / 1000).toLocaleString('en-US') + 'K';
+  return n < 0 ? '(' + s + ')' : s;
+}
+function _fsPct(v, base){
+  var b = _fsNum(base), n = _fsNum(v);
+  if (!b || Math.abs(n) < 0.5) return '';
+  return (n / b * 100).toFixed(1) + '%';
+}
+function _fsEsc(v){ return escapeHtml(v == null ? '' : v); }
+function _fsIsAdmin(){ return _currentUser && normalizeRole(_currentUser.role) === 'Admin'; }
+
+function _fsDefaultPeriod(){
+  var d = new Date(), y = d.getFullYear(), m = d.getMonth();   // previous month
+  if (m === 0) { y -= 1; m = 12; }
+  _fs.year = y; _fs.month = m;
+}
+
+async function renderFinStatements(){
+  if (!hasRead('fin-statements')) return;
+  if (!_fs.year) _fsDefaultPeriod();
+  _fsRenderChrome();
+  await _fsLoadPeriods();
+  _fsRenderChrome();
+  await _fsLoad(false);
+}
+
+async function _fsLoadPeriods(){
+  if (!supabaseClient) return;
+  var r = await supabaseClient.from('kmi_fs_periods').select('*');
+  if (r.error) return;
+  _fs.periods = {};
+  (r.data || []).forEach(function(p){ _fs.periods[p.period] = p; });
+}
+
+async function _fsLoad(force){
+  var body = g('fs-body'); if (!body) return;
+  if (!supabaseClient){ body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Not connected.</div>'; return; }
+  var key = _fsKey(_fs.year, _fs.month);
+  if (force) delete _fs.cache[key];
+  if (!_fs.cache[key]) {
+    body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Compiling ' + _fsLabel(_fs.year, _fs.month) + ' from the general ledger\u2026</div>';
+    _fs.loading = true;
+    try {
+      var res = await Promise.all([
+        supabaseClient.rpc('kmi_fs_statement', { p_period: key }),
+        supabaseClient.rpc('kmi_fs_close_checks', { p_period: key })
+      ]);
+      if (res[0].error) throw res[0].error;
+      if (res[1].error) throw res[1].error;
+      _fs.cache[key] = { rows: res[0].data || [], checks: res[1].data || [] };
+    } catch (e) {
+      _fs.loading = false;
+      body.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not load statements: ' + _fsEsc(e.message || e) + '</div>';
+      return;
+    }
+    _fs.loading = false;
+  }
+  if (key !== _fsKey(_fs.year, _fs.month)) return;   // user moved on meanwhile
+  _fsRenderChrome();
+  _fsRenderBody();
+}
+
+function _fsCur(){ return _fs.cache[_fsKey(_fs.year, _fs.month)] || null; }
+function _fsStatus(){
+  var p = _fs.periods[_fsKey(_fs.year, _fs.month)];
+  return p && p.status === 'final' ? 'final' : 'draft';
+}
+
+// ── chrome: subtitle, sync stamp, period pills, tabs ────────────────────
+function _fsRenderChrome(){
+  var now = new Date(), cy = now.getFullYear(), cm = now.getMonth() + 1;
+  var st = _fsStatus();
+  var tabName = _fs.tab === 'is' ? 'Income Statement' : _fs.tab === 'bs' ? 'Balance Sheet' : 'Checks & Mapping';
+  var sub = g('fs-sub');
+  if (sub) sub.innerHTML = 'KMI Construction LLC \u00b7 ' + tabName + ' \u00b7 period ending ' + _fsLabel(_fs.year, _fs.month)
+    + ' \u00b7 <span class="fs-badge ' + (st === 'final' ? 'fs-b-final' : 'fs-b-draft') + '">' + (st === 'final' ? 'FINAL' : 'DRAFT') + '</span>';
+  var cur = _fsCur(), sync = g('fs-sync');
+  if (sync) {
+    var ck = cur && cur.checks.filter(function(c){ return c.check_key === 'sync_fresh'; })[0];
+    sync.textContent = ck ? ck.detail.replace('Last GL sync: ', 'GL synced ') : '';
+    sync.style.color = ck && ck.status !== 'PASS' ? '#A32D2D' : '#888';
+  }
+  var ph = g('fs-periods');
+  if (ph) {
+    var h = '<select onchange="fsPickYear(this.value)" style="font-family:inherit;border:1px solid var(--stl);border-radius:7px;padding:6px 8px;font-size:12.5px;margin-right:4px" aria-label="Year">';
+    for (var y = cy; y >= _FS_FIRST_YEAR; y--) h += '<option' + (y === _fs.year ? ' selected' : '') + '>' + y + '</option>';
+    h += '</select>';
+    for (var m = 1; m <= 12; m++) {
+      var fut = _fs.year > cy || (_fs.year === cy && m > cm);
+      var fin = _fs.periods[_fsKey(_fs.year, m)] && _fs.periods[_fsKey(_fs.year, m)].status === 'final';
+      h += '<button class="fs-pill' + (m === _fs.month ? ' on' : '') + '"' + (fut ? ' disabled' : '') + ' onclick="fsPickMonth(' + m + ')"'
+        + (fin ? ' title="Final"' : '') + '>' + _FS_MONTHS[m - 1] + (fin ? '<span class="fs-fin"></span>' : '') + '</button>';
+    }
+    ph.innerHTML = h;
+  }
+  var th = g('fs-tabs');
+  if (th) {
+    th.innerHTML = [['is','Income Statement'],['bs','Balance Sheet'],['ck','Checks &amp; Mapping']].map(function(t){
+      return '<button class="fs-tab' + (_fs.tab === t[0] ? ' on' : '') + '" onclick="fsPickTab(\'' + t[0] + '\')">' + t[1] + '</button>';
+    }).join('');
+  }
+}
+
+function fsPickYear(y){
+  _fs.year = Number(y);
+  var now = new Date();
+  if (_fs.year === now.getFullYear() && _fs.month > now.getMonth() + 1) _fs.month = now.getMonth() + 1;
+  _fsRenderChrome(); _fsLoad(false);
+}
+function fsPickMonth(m){ _fs.month = m; _fsRenderChrome(); _fsLoad(false); }
+function fsPickTab(t){ _fs.tab = t; _fsRenderChrome(); _fsRenderBody(); }
+
+// ── shared shaping ──────────────────────────────────────────────────────
+function _fsSections(statement){
+  var cur = _fsCur(); if (!cur) return [];
+  var out = [], idx = {};
+  cur.rows.forEach(function(r){
+    if (r.statement !== statement) return;
+    if (!idx[r.section_key]) { idx[r.section_key] = { key: r.section_key, title: r.section_title, rows: [] }; out.push(idx[r.section_key]); }
+    idx[r.section_key].rows.push(r);
+  });
+  out.forEach(function(s){
+    s.tot = { m: 0, c: 0, pm: 0, p: 0 };
+    s.rows.forEach(function(r){
+      s.tot.m += _fsNum(r.amt_month); s.tot.c += _fsNum(r.amt_current);
+      s.tot.pm += _fsNum(r.amt_py_month); s.tot.p += _fsNum(r.amt_py);
+    });
+  });
+  return out;
+}
+function _fsSec(list, key){ return list.filter(function(s){ return s.key === key; })[0] || { tot: { m: 0, c: 0, pm: 0, p: 0 }, rows: [] }; }
+function _fsCombine(fn){ return { m: fn('m'), c: fn('c'), pm: fn('pm'), p: fn('p') }; }
+function _fsIsTotals(){
+  var s = _fsSections('IS');
+  var rev = _fsSec(s, 'rev').tot, dir = _fsSec(s, 'dir').tot, ind = _fsSec(s, 'ind').tot,
+      ga = _fsSec(s, 'ga').tot, dep = _fsSec(s, 'dep').tot;
+  var gp = _fsCombine(function(k){ return rev[k] - dir[k]; });
+  var gpi = _fsCombine(function(k){ return gp[k] - ind[k]; });
+  var nibd = _fsCombine(function(k){ return gpi[k] - ga[k]; });
+  var ni = _fsCombine(function(k){ return nibd[k] - dep[k]; });
+  return { sections: s, rev: rev, gp: gp, gpi: gpi, nibd: nibd, ni: ni };
+}
+
+function fsToggleLine(code){ _fs.open[code] = !_fs.open[code]; _fsRenderBody(); }
+function fsToggleSec(key){ _fs.shut[key] = !_fs.shut[key]; _fsRenderBody(); }
+function fsSetLevel(lv){
+  var stmt = _fs.tab === 'bs' ? 'BS' : 'IS';
+  _fsSections(stmt).forEach(function(s){
+    _fs.shut[stmt + s.key] = (lv === 'sum' && s.rows.length > 1);
+    s.rows.forEach(function(r){ _fs.open[r.line_code] = (lv === 'gl' && (r.accounts || []).length > 0); });
+  });
+  _fsRenderBody();
+}
+function _fsLevelNow(stmt){
+  var secs = _fsSections(stmt), anyShut = false, allOpen = true;
+  secs.forEach(function(s){
+    if (_fs.shut[stmt + s.key]) anyShut = true;
+    s.rows.forEach(function(r){ if ((r.accounts || []).length && !_fs.open[r.line_code]) allOpen = false; });
+  });
+  return anyShut ? 'sum' : allOpen ? 'gl' : 'line';
+}
+function _fsLevelBar(stmt){
+  var lv = _fsLevelNow(stmt);
+  return '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px">'
+    + '<span style="font-size:11px;color:#888;margin-right:2px">Detail</span>'
+    + [['sum','Summary'],['line','Statement lines'],['gl','All GL accounts']].map(function(l){
+        return '<button class="fs-lv' + (lv === l[0] ? ' on' : '') + '" onclick="fsSetLevel(\'' + l[0] + '\')">' + l[1] + '</button>';
+      }).join('')
+    + '<span style="font-size:11.5px;color:#888;margin-left:6px">Click a section header to fold it, or a line to show its GL accounts.</span></div>';
+}
+
+// ── body dispatch ───────────────────────────────────────────────────────
+function _fsRenderBody(){
+  var body = g('fs-body'); if (!body) return;
+  var cur = _fsCur();
+  if (!cur) { if (!_fs.loading) _fsLoad(false); return; }
+  if (_fs.tab === 'is') body.innerHTML = _fsKpis() + _fsLevelBar('IS') + _fsIsHtml();
+  else if (_fs.tab === 'bs') body.innerHTML = _fsKpis() + _fsLevelBar('BS') + _fsBsHtml() + _fsRatios();
+  else body.innerHTML = _fsChecksHtml() + '<div id="fs-map"></div>';
+  if (_fs.tab === 'ck') {
+    if (_fs.map && _fs.map.key === _fsKey(_fs.year, _fs.month)) _fsRenderMap(); else _fsLoadMap();
+  }
+}
+
+function _fsKpis(){
+  var t = _fsIsTotals(), r = t.rev, mon = _FS_MONTHS[_fs.month - 1];
+  var gp = r.c ? t.gp.c / r.c * 100 : 0, gpPy = r.p ? t.gp.p / r.p * 100 : 0, gpi = r.c ? t.gpi.c / r.c * 100 : 0;
+  function tile(l, v, s){ return '<div class="mc"><div class="ml">' + l + '</div><div class="mv">' + v + '</div><div class="ms">' + s + '</div></div>'; }
+  return '<div class="mets">'
+    + tile('Revenue \u00b7 ' + mon, _fsShort(r.m), 'YTD ' + _fsShort(r.c) + ' vs ' + _fsShort(r.p) + ' PY')
+    + tile('Gross profit % \u00b7 YTD', gp.toFixed(1) + '%', 'PY ' + gpPy.toFixed(1) + '% \u00b7 after indirect ' + gpi.toFixed(1) + '%')
+    + tile('Net income \u00b7 ' + mon, _fsShort(t.ni.m), 'PY month ' + _fsShort(t.ni.pm))
+    + tile('Net income \u00b7 YTD', _fsShort(t.ni.c), 'PY YTD ' + _fsShort(t.ni.p) + (r.c ? ' \u00b7 ' + (t.ni.c / r.c * 100).toFixed(1) + '% of revenue' : ''))
+    + '</div>';
+}
+
+// ── income statement ────────────────────────────────────────────────────
+function _fsIsHtml(){
+  var t = _fsIsTotals(), r = t.rev, y = _fs.year, m = _fs.month;
+  function cells(o){
+    return '<td>' + _fsMoney(o.m) + '</td><td class="pct">' + _fsPct(o.m, r.m) + '</td>'
+      + '<td>' + _fsMoney(o.pm) + '</td><td class="pct">' + _fsPct(o.pm, r.pm) + '</td>'
+      + '<td style="font-weight:600">' + _fsMoney(o.c) + '</td><td class="pct">' + _fsPct(o.c, r.c) + '</td>'
+      + '<td>' + _fsMoney(o.p) + '</td><td class="pct">' + _fsPct(o.p, r.p) + '</td>';
+  }
+  var after = { dir: [t.gp, 'GROSS PROFIT'], ind: [t.gpi, 'GROSS PROFIT AFTER INDIRECT COSTS'], ga: [t.nibd, 'NET INCOME (BEFORE DEPRECIATION)'], dep: [t.ni, 'NET INCOME (AFTER DEPRECIATION)'] };
+  var h = '<div class="card fs-scroll" style="padding:0"><table class="fs-t" style="min-width:1000px"><thead><tr>'
+    + '<th>Statement line</th><th>' + _fsLabel(y, m) + '</th><th>%</th><th>' + _fsLabel(y - 1, m) + '</th><th>%</th>'
+    + '<th style="color:var(--acl)">YTD ' + y + '</th><th>%</th><th>YTD ' + (y - 1) + '</th><th>%</th></tr></thead><tbody>';
+  t.sections.forEach(function(s){
+    var fold = s.rows.length > 1, shut = fold && _fs.shut['IS' + s.key];
+    h += '<tr class="fs-sec" ' + (fold ? 'onclick="fsToggleSec(\'IS' + s.key + '\')"' : '') + '><td colspan="9"><span class="fs-chev">' + (fold ? (shut ? '\u25b8' : '\u25be') : '') + '</span>'
+      + _fsEsc(s.title) + (shut ? ' <span style="color:#9a9eac;font-weight:400;text-transform:none;letter-spacing:0">' + s.rows.length + ' lines</span>' : '') + '</td></tr>';
+    if (!shut) s.rows.forEach(function(row){ h += _fsIsLine(row, r); });
+    if (s.rows.length > 1) h += '<tr class="fs-tot"><td>Total ' + _fsEsc(s.title) + '</td>' + cells(s.tot) + '</tr>';
+    if (after[s.key]) h += '<tr class="fs-key"><td>' + after[s.key][1] + '</td>' + cells(after[s.key][0]) + '</tr>';
+  });
+  return h + '</tbody></table></div>';
+}
+function _fsIsLine(row, r){
+  var acc = row.accounts || [], has = acc.length > 0, open = has && _fs.open[row.line_code];
+  var o = { m: _fsNum(row.amt_month), pm: _fsNum(row.amt_py_month), c: _fsNum(row.amt_current), p: _fsNum(row.amt_py) };
+  var h = '<tr class="fs-line' + (open ? ' open' : '') + '"' + (has ? ' onclick="fsToggleLine(\'' + row.line_code + '\')"' : '') + '>'
+    + '<td><span class="fs-chev">' + (has ? (open ? '\u25be' : '\u25b8') : '') + '</span>' + _fsEsc(row.caption) + '<span class="fs-code">' + _fsEsc(row.line_code) + '</span></td>'
+    + '<td>' + _fsMoney(o.m) + '</td><td class="pct">' + _fsPct(o.m, r.m) + '</td>'
+    + '<td>' + _fsMoney(o.pm) + '</td><td class="pct">' + _fsPct(o.pm, r.pm) + '</td>'
+    + '<td style="font-weight:600">' + _fsMoney(o.c) + '</td><td class="pct">' + _fsPct(o.c, r.c) + '</td>'
+    + '<td>' + _fsMoney(o.p) + '</td><td class="pct">' + _fsPct(o.p, r.p) + '</td></tr>';
+  if (open) acc.forEach(function(a){
+    h += '<tr class="fs-acct"><td><span class="fs-mono">' + _fsEsc(a.account_no) + '</span> &nbsp;' + _fsEsc(a.description || '') + '</td>'
+      + '<td>' + _fsMoney(a.month) + '</td><td></td><td>' + _fsMoney(a.py_month) + '</td><td></td>'
+      + '<td>' + _fsMoney(a.current) + '</td><td></td><td>' + _fsMoney(a.py) + '</td><td></td></tr>';
+  });
+  return h;
+}
+
+// ── balance sheet ───────────────────────────────────────────────────────
+function _fsBsHtml(){
+  var secs = _fsSections('BS'), y = _fs.year, m = _fs.month;
+  function cells(c, p){ return '<td style="font-weight:600">' + _fsMoney(c) + '</td><td>' + _fsMoney(p) + '</td><td style="color:#6b7080">' + _fsMoney(c - p) + '</td>'; }
+  var ta = { c: 0, p: 0 }, tle = { c: 0, p: 0 };
+  secs.forEach(function(s){
+    var tgt = (s.key === 'ca' || s.key === 'fa' || s.key === 'oa') ? ta : tle;
+    tgt.c += s.tot.c; tgt.p += s.tot.p;
+  });
+  var h = '<div class="card fs-scroll" style="padding:0"><table class="fs-t" style="min-width:680px"><thead><tr>'
+    + '<th>Statement line</th><th style="color:var(--acl)">' + _fsLabel(y, m) + '</th><th>' + _fsLabel(y - 1, m) + '</th><th>Change</th></tr></thead><tbody>';
+  secs.forEach(function(s){
+    if (s.key === 'ca') h += '<tr class="fs-big"><td colspan="4">ASSETS</td></tr>';
+    if (s.key === 'cl') h += '<tr class="fs-big"><td colspan="4">LIABILITIES &amp; STOCKHOLDERS\u2019 EQUITY</td></tr>';
+    var shut = _fs.shut['BS' + s.key];
+    h += '<tr class="fs-sec" onclick="fsToggleSec(\'BS' + s.key + '\')"><td colspan="4"><span class="fs-chev">' + (shut ? '\u25b8' : '\u25be') + '</span>' + _fsEsc(s.title)
+      + (shut ? ' <span style="color:#9a9eac;font-weight:400;text-transform:none;letter-spacing:0">' + s.rows.length + ' lines</span>' : '') + '</td></tr>';
+    if (!shut) s.rows.forEach(function(row){
+      var acc = row.accounts || [], has = acc.length > 0 && !row.is_computed, open = has && _fs.open[row.line_code];
+      h += '<tr class="fs-line' + (open ? ' open' : '') + '"' + (has ? ' onclick="fsToggleLine(\'' + row.line_code + '\')"' : '') + '>'
+        + '<td><span class="fs-chev">' + (has ? (open ? '\u25be' : '\u25b8') : '') + '</span>' + _fsEsc(row.caption) + '<span class="fs-code">' + _fsEsc(row.line_code) + '</span>'
+        + (row.is_computed ? ' <span style="color:#9a9eac;font-size:11px">(from income statement)</span>' : '') + '</td>'
+        + cells(_fsNum(row.amt_current), _fsNum(row.amt_py)) + '</tr>';
+      if (open) acc.forEach(function(a){
+        h += '<tr class="fs-acct"><td><span class="fs-mono">' + _fsEsc(a.account_no) + '</span> &nbsp;' + _fsEsc(a.description || '') + '</td>'
+          + '<td>' + _fsMoney(a.current) + '</td><td>' + _fsMoney(a.py) + '</td><td>' + _fsMoney(_fsNum(a.current) - _fsNum(a.py)) + '</td></tr>';
+      });
+    });
+    h += '<tr class="fs-tot"><td>Total ' + _fsEsc(s.title) + '</td>' + cells(s.tot.c, s.tot.p) + '</tr>';
+    if (s.key === 'oa') h += '<tr class="fs-key"><td>TOTAL ASSETS</td>' + cells(ta.c, ta.p) + '</tr>';
+    if (s.key === 'eq') h += '<tr class="fs-key"><td>TOTAL LIABILITIES &amp; EQUITY</td>' + cells(tle.c, tle.p) + '</tr>';
+  });
+  return h + '</tbody></table></div>';
+}
+function _fsRatios(){
+  var s = _fsSections('BS'), t = _fsIsTotals();
+  var ca = _fsSec(s, 'ca').tot.c, cl = _fsSec(s, 'cl').tot.c, lt = _fsSec(s, 'lt').tot.c, eq = _fsSec(s, 'eq').tot.c;
+  var ub = 0; _fsSec(s, 'ca').rows.forEach(function(r){ if (r.line_code === '204') ub = _fsNum(r.amt_current); });
+  function q(a, b, pct){ if (!b) return '\u2013'; return pct ? (a / b * 100).toFixed(1) + '%' : (a / b).toFixed(2); }
+  function tile(l, v){ return '<div class="card" style="margin:0;padding:12px 16px;display:flex;justify-content:space-between;align-items:baseline;gap:8px"><span style="font-size:12.5px;color:#666">' + l + '</span><span style="font-size:18px;font-weight:700;color:var(--kmi)">' + v + '</span></div>'; }
+  return '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">'
+    + tile('Current ratio', q(ca, cl)) + tile('Debt to equity', q(cl + lt, eq)) + tile('Underbillings to equity', q(ub, eq)) + tile('Return on equity (YTD)', q(t.ni.c, eq, true))
+    + '</div>';
+}
+
+// ── checks + finalize ───────────────────────────────────────────────────
+function _fsChecksHtml(){
+  var cur = _fsCur(), st = _fsStatus(), p = _fs.periods[_fsKey(_fs.year, _fs.month)] || {};
+  var fails = cur.checks.filter(function(c){ return c.status === 'FAIL'; }).length;
+  var h = '<div class="card"><div class="ch"><span class="ct">Close checks \u00b7 ' + _fsLabel(_fs.year, _fs.month) + '</span>'
+    + '<button class="btn btn-sm" onclick="fsRefresh()">Re-run checks</button></div>';
+  cur.checks.forEach(function(c){
+    var cls = c.status === 'PASS' ? 'fs-b-pass' : c.status === 'FAIL' ? 'fs-b-fail' : c.status === 'FINAL' ? 'fs-b-final' : c.status === 'DRAFT' ? 'fs-b-draft' : 'fs-b-warn';
+    h += '<div style="display:flex;gap:12px;align-items:flex-start;padding:9px 0;border-top:1px solid #f0f0ec">'
+      + '<span class="fs-badge ' + cls + '">' + _fsEsc(c.status) + '</span><div><div style="font-size:13px;font-weight:600">' + _fsEsc(c.label) + '</div>'
+      + '<div style="font-size:12px;color:#666;margin-top:2px">' + _fsEsc(c.detail) + '</div></div></div>';
+  });
+  h += '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-top:1px solid #e5e5e5;padding-top:12px;margin-top:6px">';
+  if (st === 'final') {
+    h += '<span style="font-size:12.5px;color:#555">Finalized ' + (p.finalized_at ? new Date(p.finalized_at).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '')
+      + (p.final_note ? ' \u2014 ' + _fsEsc(p.final_note) : '') + '. Statements read from the locked snapshot; mapping changes and late GL postings won\u2019t change them.</span>';
+    if (_fsIsAdmin()) h += '<button class="btn btn-sm" style="margin-left:auto" onclick="fsReopen()">Reopen period</button>';
+  } else {
+    h += '<span style="font-size:12.5px;color:#555">' + (fails ? 'Resolve the failing check' + (fails > 1 ? 's' : '') + ' before this period can be finalized.' : 'Finalizing locks a snapshot of every account balance and its mapping for this month.') + '</span>'
+      + '<button class="btn btn-p" style="margin-left:auto' + (fails ? ';opacity:.45;cursor:default' : '') + '"' + (fails ? ' disabled' : ' onclick="fsFinalize()"') + '>Mark ' + _fsLabel(_fs.year, _fs.month) + ' Final</button>';
+  }
+  if (p.reopen_reason) h += '<div style="width:100%;font-size:11.5px;color:#7A4E00">Previously reopened: ' + _fsEsc(p.reopen_reason) + '</div>';
+  return h + '</div></div>';
+}
+
+async function fsRefresh(){ _fs.map = null; await _fsLoadPeriods(); await _fsLoad(true); }
+
+function fsFinalize(){
+  showModal('<h2 style="margin:0 0 6px;font-size:17px">Mark ' + _fsLabel(_fs.year, _fs.month) + ' Final?</h2>'
+    + '<div style="font-size:13px;color:#555;line-height:1.6;margin-bottom:12px">The statements for this month will be locked to today\u2019s GL balances and mappings. Entries posted later in Foundation, or mapping edits, won\u2019t change them. An Admin can reopen the period with a reason.</div>'
+    + '<div class="fgr"><label>Note (optional)</label><input id="fs-fin-note" placeholder="e.g. Reviewed with CPA, sent to bank"></div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="fsFinalizeGo()">Mark Final</button></div>');
+}
+async function fsFinalizeGo(){
+  var note = (g('fs-fin-note') || {}).value || null;
+  var r = await supabaseClient.rpc('kmi_fs_finalize', { p_period: _fsKey(_fs.year, _fs.month), p_note: note });
+  closeModal();
+  if (r.error) { showToast('Could not finalize: ' + (r.error.message || r.error), 'error'); return; }
+  showToast(_fsLabel(_fs.year, _fs.month) + ' is final (' + r.data + ' account balances locked)');
+  fsRefresh();
+}
+function fsReopen(){
+  showModal('<h2 style="margin:0 0 6px;font-size:17px">Reopen ' + _fsLabel(_fs.year, _fs.month) + '?</h2>'
+    + '<div style="font-size:13px;color:#555;line-height:1.6;margin-bottom:12px">The locked snapshot is discarded and the statements go back to reading the live GL. Statements already sent out will no longer match until it\u2019s finalized again.</div>'
+    + '<div class="fgr"><label>Reason (required)</label><input id="fs-reopen-why" placeholder="e.g. CPA year-end adjustment"></div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="fsReopenGo()">Reopen</button></div>');
+}
+async function fsReopenGo(){
+  var why = ((g('fs-reopen-why') || {}).value || '').trim();
+  if (!why) { showToast('A reason is required', 'error'); return; }
+  var r = await supabaseClient.rpc('kmi_fs_reopen', { p_period: _fsKey(_fs.year, _fs.month), p_reason: why });
+  closeModal();
+  if (r.error) { showToast('Could not reopen: ' + (r.error.message || r.error), 'error'); return; }
+  showToast(_fsLabel(_fs.year, _fs.month) + ' reopened');
+  fsRefresh();
+}
+
+// ── account mapping ─────────────────────────────────────────────────────
+async function _fsLoadMap(){
+  var key = _fsKey(_fs.year, _fs.month);
+  if (_fs.map && _fs.map.key === key) { _fsRenderMap(); return; }
+  var el = g('fs-map'); if (el) el.innerHTML = '<div class="card" style="color:#888;font-size:12px">Loading account mapping\u2026</div>';
+  try {
+    var res = await Promise.all([
+      supabaseClient.from('fnd_gl_accounts').select('account_no,description,record_status').limit(2000),
+      supabaseClient.from('kmi_fs_account_map').select('account_no,line_code,note,updated_at').limit(2000),
+      supabaseClient.from('kmi_fs_lines').select('line_code,statement,section_title,caption,sort_order,is_computed').order('sort_order'),
+      supabaseClient.rpc('kmi_fs_account_balances', { p_period: key })
+    ]);
+    res.forEach(function(x){ if (x.error) throw x.error; });
+    var map = {}, bal = {};
+    res[1].data.forEach(function(m){ map[m.account_no] = m; });
+    res[3].data.forEach(function(b){ bal[b.account_no] = b; });
+    var rows = res[0].data.map(function(a){
+      var b = bal[a.account_no] || {}, m = map[a.account_no] || null;
+      return { account_no: a.account_no, description: a.description, inactive: a.record_status && a.record_status !== 'A',
+               line_code: m ? m.line_code : '', note: m ? (m.note || '') : '', mapped: !!m,
+               balance: _fsNum(b.ending_balance), activity: _fsNum(b.month_net) + _fsNum(b.month_close) };
+    });
+    rows.sort(function(a, b){ return (Number(a.account_no) || 0) - (Number(b.account_no) || 0) || String(a.account_no).localeCompare(String(b.account_no)); });
+    _fs.map = { key: key, rows: rows, lines: res[2].data.filter(function(l){ return !l.is_computed; }) };
+  } catch (e) {
+    if (el) el.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not load mapping: ' + _fsEsc(e.message || e) + '</div>';
+    return;
+  }
+  _fsRenderMap();
+}
+// Seed notes are just the mapping basis ("Excel column C", "fold into Excel
+// row 5000"). Anything beyond that is a review note -- it stays in "Needs
+// attention" until Accounting edits the note back down to the basis.
+function _fsNeedsAttention(r){
+  if (!r.mapped) return Math.abs(r.balance) >= 0.005 || Math.abs(r.activity) >= 0.005;
+  var n = String(r.note || '').trim();
+  return !!n && !/^(Excel column C|fold into Excel row \S+)$/.test(n);
+}
+function fsMapFilter(f){ _fs.mapFilter = f; _fsRenderMap(); }
+function fsMapSearch(v){ _fs.mapSearch = v; _fsRenderMap(true); }
+function _fsRenderMap(keepFocus){
+  var el = g('fs-map'); if (!el || !_fs.map || _fs.tab !== 'ck') return;
+  var M = _fs.map, q = (_fs.mapSearch || '').toLowerCase();
+  var unm = M.rows.filter(function(r){ return !r.mapped && (Math.abs(r.balance) >= 0.005 || Math.abs(r.activity) >= 0.005); }).length;
+  var att = M.rows.filter(_fsNeedsAttention).length;
+  var list = M.rows.filter(function(r){
+    if (_fs.mapFilter === 'attention' && !_fsNeedsAttention(r)) return false;
+    if (_fs.mapFilter === 'unmapped' && r.mapped) return false;
+    if (_fs.mapFilter === 'balance' && Math.abs(r.balance) < 0.005) return false;
+    if (q && (r.account_no + ' ' + (r.description || '') + ' ' + r.line_code + ' ' + r.note).toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  });
+  var opts = '<option value="">\u2014 not mapped \u2014</option>', lastSec = null;
+  M.lines.forEach(function(l){
+    var sec = (l.statement === 'IS' ? 'Income Stmt \u00b7 ' : 'Balance Sheet \u00b7 ') + l.section_title;
+    if (sec !== lastSec) { if (lastSec) opts += '</optgroup>'; opts += '<optgroup label="' + _fsEsc(sec) + '">'; lastSec = sec; }
+    opts += '<option value="' + _fsEsc(l.line_code) + '">' + _fsEsc(l.line_code + ' ' + l.caption) + '</option>';
+  });
+  opts += '</optgroup>';
+  function fbtn(k, label){ return '<button class="fs-lv' + (_fs.mapFilter === k ? ' on' : '') + '" onclick="fsMapFilter(\'' + k + '\')">' + label + '</button>'; }
+  var h = '<div class="card"><div class="ch"><span class="ct">Account mapping</span><span style="font-size:12px;color:#888">' + M.rows.length + ' GL accounts \u00b7 '
+    + M.rows.filter(function(r){ return r.mapped; }).length + ' mapped' + (unm ? ' \u00b7 <span style="color:#A32D2D;font-weight:600">' + unm + ' unmapped with a balance</span>' : '') + '</span></div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">'
+    + fbtn('attention', 'Needs attention (' + att + ')') + fbtn('unmapped', 'Unmapped') + fbtn('balance', 'Has a balance') + fbtn('all', 'All')
+    + '<input id="fs-map-q" value="' + _fsEsc(_fs.mapSearch) + '" oninput="fsMapSearch(this.value)" placeholder="Search account, name, line, note\u2026" style="margin-left:auto;min-width:220px;border:1px solid var(--stl);border-radius:7px;padding:6px 9px;font-size:12.5px;font-family:inherit"></div>'
+    + '<div style="font-size:11.5px;color:#888;margin-bottom:8px">Changes apply to Draft periods immediately and are logged. Final periods keep the mapping they were locked with. Balances shown are as of ' + _fsLabel(_fs.year, _fs.month) + '.</div>'
+    + '<div class="fs-scroll"><table class="fs-t" style="min-width:860px"><thead><tr><th>GL account</th><th style="text-align:right">Balance</th><th style="text-align:left">Statement line</th><th style="text-align:left">Note</th></tr></thead><tbody>';
+  if (!list.length) h += '<tr><td colspan="4" style="color:#888;padding:14px">Nothing here.</td></tr>';
+  list.slice(0, 400).forEach(function(r){
+    var flag = !r.mapped && (Math.abs(r.balance) >= 0.005 || Math.abs(r.activity) >= 0.005);
+    h += '<tr' + (flag ? ' style="background:#FDF3F3"' : '') + '><td><span class="fs-mono">' + _fsEsc(r.account_no) + '</span> &nbsp;' + _fsEsc(r.description || '')
+      + (r.inactive ? ' <span style="color:#9a9eac;font-size:11px">(inactive)</span>' : '') + '</td>'
+      + '<td>' + _fsMoney(r.balance) + '</td>'
+      + '<td style="text-align:left"><select data-acct="' + _fsEsc(r.account_no) + '" onchange="fsMapSave(this.getAttribute(\'data-acct\'), this.value)" style="font-family:inherit;font-size:12px;border:1px solid var(--stl);border-radius:6px;padding:4px 6px;max-width:300px">'
+      + opts.replace('value="' + _fsEsc(r.line_code) + '"', 'value="' + _fsEsc(r.line_code) + '" selected') + '</select></td>'
+      + '<td style="text-align:left;white-space:normal;color:#555;font-size:11.5px;max-width:340px">'
+      + (r.mapped ? '<button class="btn btn-sm" style="float:right;margin-left:8px;padding:2px 8px" data-acct="' + _fsEsc(r.account_no) + '" onclick="fsMapNote(this.getAttribute(\'data-acct\'))">Edit note</button>' : '')
+      + _fsEsc(r.note) + '</td></tr>';
+  });
+  if (list.length > 400) h += '<tr><td colspan="4" style="color:#888">Showing 400 of ' + list.length + '. Narrow the search.</td></tr>';
+  el.innerHTML = h + '</tbody></table></div></div>';
+  if (keepFocus) { var qi = g('fs-map-q'); if (qi) { qi.focus(); qi.setSelectionRange(qi.value.length, qi.value.length); } }
+}
+async function fsMapSave(acct, line){
+  var row = (_fs.map && _fs.map.rows.filter(function(r){ return r.account_no === acct; })[0]) || null;
+  var r;
+  if (!line) {
+    if (!confirm('Remove the mapping for account ' + acct + '? Any balance on it will fail the close check until it is mapped again.')) { _fsRenderMap(); return; }
+    r = await supabaseClient.from('kmi_fs_account_map').delete().eq('account_no', acct);
+  } else {
+    r = await supabaseClient.from('kmi_fs_account_map').upsert({ account_no: acct, line_code: line, note: row ? (row.note || null) : null }, { onConflict: 'account_no' });
+  }
+  if (r.error) { showToast('Mapping not saved: ' + (r.error.message || r.error), 'error'); _fsRenderMap(); return; }
+  if (row) { row.line_code = line; row.mapped = !!line; }
+  Object.keys(_fs.cache).forEach(function(k){ delete _fs.cache[k]; });   // statements recompile
+  showToast('Account ' + acct + (line ? ' mapped to line ' + line : ' unmapped'));
+  await _fsLoad(true);
+}
+
+async function fsMapNote(acct){
+  var row = _fs.map && _fs.map.rows.filter(function(r){ return r.account_no === acct; })[0];
+  if (!row || !row.mapped) return;
+  var v = prompt('Note for account ' + acct + ' (clear the review text once it is resolved):', row.note || '');
+  if (v === null) return;
+  var r = await supabaseClient.from('kmi_fs_account_map').update({ note: v.trim() || null }).eq('account_no', acct);
+  if (r.error) { showToast('Note not saved: ' + (r.error.message || r.error), 'error'); return; }
+  row.note = v.trim();
+  showToast('Note saved');
+  _fsRenderMap();
+}
+
+// ── export ──────────────────────────────────────────────────────────────
+function fsExportCsv(){
+  var cur = _fsCur(); if (!cur) return;
+  var stmt = _fs.tab === 'bs' ? 'BS' : 'IS', y = _fs.year, m = _fs.month;
+  function q(v){ v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+  function n(v){ return _fsNum(v).toFixed(2); }
+  var head = stmt === 'IS'
+    ? ['Section','Line','Caption','GL account','Description', _fsLabel(y, m), _fsLabel(y - 1, m), 'YTD ' + y, 'YTD ' + (y - 1)]
+    : ['Section','Line','Caption','GL account','Description', _fsLabel(y, m), _fsLabel(y - 1, m)];
+  var out = [head.map(q).join(',')];
+  cur.rows.filter(function(r){ return r.statement === stmt; }).forEach(function(r){
+    out.push((stmt === 'IS'
+      ? [r.section_title, r.line_code, r.caption, '', '', n(r.amt_month), n(r.amt_py_month), n(r.amt_current), n(r.amt_py)]
+      : [r.section_title, r.line_code, r.caption, '', '', n(r.amt_current), n(r.amt_py)]).map(q).join(','));
+    (r.accounts || []).forEach(function(a){
+      out.push((stmt === 'IS'
+        ? [r.section_title, r.line_code, r.caption, a.account_no, a.description, n(a.month), n(a.py_month), n(a.current), n(a.py)]
+        : [r.section_title, r.line_code, r.caption, a.account_no, a.description, n(a.current), n(a.py)]).map(q).join(','));
+    });
+  });
+  var blob = new Blob([out.join('\r\n')], { type: 'text/csv' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'KMI_' + (stmt === 'IS' ? 'Income_Statement' : 'Balance_Sheet') + '_' + _fsKey(y, m).slice(0, 7) + (_fsStatus() === 'final' ? '_FINAL' : '_DRAFT') + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
+}
+
 async function renderApChecks(){
   var el=g('ap-chk-list'); if(!el) return;
   if(!supabaseClient){ el.innerHTML='<div class="card"><div style="color:#888;font-size:12px">Not connected.</div></div>'; return; }
@@ -55354,7 +55915,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-07-CORSMARTPRJ1';
+var KMI_BUILD = '2026-10-08-2026-10-08-FS1';
 
 var _kmiSessionId = (function(){
   try {
