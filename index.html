@@ -46243,6 +46243,16 @@ function fsExportCsv(){
 var RR_RENTAL_CLASSES = { '5':1, '60':1, '9':1, '7':1 };
 var RR_SITE_STATUSES = ['Active','Wrapping Up','Ready for Pickup','Complete - Call Off'];
 var RR_ACTIONS = ['Keep','Call Off','Verify on Site','Dispute Invoice'];
+// A coded AP line is a rental when it is a job line in a rental class, or a
+// GL line on an active rental GL account (kmi_rental_gl_accounts).
+function _rrIsRentalLine(l){
+  if(!l) return false;
+  if(l.distType==='gl'){
+    var gl = String(l.glNo||'').trim();
+    return !!gl && (db.rentalGlAccounts||[]).some(function(a){ return a.active && a.glNo===gl; });
+  }
+  return !!RR_RENTAL_CLASSES[String(l.costClass||'')];
+}
 
 function _rrIsoFromUS(s){
   var t = String(s==null?'':s).trim(), y, mo, d, m;
@@ -46297,7 +46307,8 @@ function _apRpShow(i, d){
   if(ex.rental_period_start || ex.rental_period_end || ex.rental_unit_no) return true;
   if(!d) return false;
   if(RR_RENTAL_CLASSES[String(d.costClass||'')]) return true;
-  return (d.lines||[]).some(function(l){ return RR_RENTAL_CLASSES[String(l.costClass||'')]; });
+  if((d.lines||[]).some(_rrIsRentalLine)) return true;
+  return (db.apInvoiceLines||[]).some(function(l){ return String(l.invoiceId)===String(i.id) && _rrIsRentalLine(l); });
 }
 function _apRpSourceHtml(src, note){
   if(src==='extracted')   return '<span style="color:#3B6D11">Read from invoice'+(note?' \u00b7 '+apEsc(note):'')+'</span>';
@@ -46334,7 +46345,7 @@ function _apRentalBlock(i, d){
 // invoice has a period or any coded line is a rental class (5/60/9/7).
 function _apRpReviewHtml(i, lines){
   var rental = !!(i.rentalPeriodStart || i.rentalPeriodEnd || i.rentalUnitNo || i.rentalPeriodSource) ||
-    (lines||[]).some(function(l){ return RR_RENTAL_CLASSES[String(l.costClass||'')]; });
+    (lines||[]).some(_rrIsRentalLine);
   if(!rental) return '';
   function kv(l,v){ return '<div><div style="font-size:10px;text-transform:uppercase;color:#9aa0b4;letter-spacing:.4px">'+l+'</div>'+(v?apEsc(v):'\u2014')+'</div>'; }
   return '<div style="border-top:1px solid #eef0f4;margin-top:10px;padding-top:10px">'+
@@ -46512,7 +46523,7 @@ function _rrFiltered(){
   return _rrRows.filter(function(r){
     if(_rrF.vendor && r.vendor!==_rrF.vendor) return false;
     if(_rrF.type && r.rental_type!==_rrF.type) return false;
-    if(_rrF.nopay && r.payroll_prev_week) return false;
+    if(_rrF.nopay && r.payroll_prev_week!==false) return false;
     if(_rrF.newwk && !r.new_this_week) return false;
     if(_rrF.review && !_rrIsReview(r)) return false;
     if(_rrF.flags && !_rrFlags(r).length) return false;
@@ -46530,7 +46541,7 @@ function _rrJobs(rows){
   var m = {};
   rows.forEach(function(r){
     var k = r.job_no;
-    if(!m[k]) m[k] = { job_no:k, project:r.project, project_id:r.project_id, n:0, eq:0, sc:0, pw:!!r.payroll_prev_week, cm:!!r.payroll_current_month, last:r.last_payroll_date, status:r.project_status||'', invs:{} };
+    if(!m[k]) m[k] = { job_no:k, project:r.project, project_id:r.project_id, n:0, eq:0, sc:0, pw:(r.payroll_prev_week==null?null:!!r.payroll_prev_week), cm:(r.payroll_current_month==null?null:!!r.payroll_current_month), last:r.last_payroll_date, status:r.project_status||'', invs:{} };
     var j = m[k];
     if(!j.invs[r.invoice_id]){ j.invs[r.invoice_id]=1; j.n++; }
     if(r.rental_type==='Scaffold') j.sc += Number(r.amount)||0; else j.eq += Number(r.amount)||0;
@@ -46545,13 +46556,14 @@ function _rrVendors(rows){
     var v = m[k];
     v.invs[r.invoice_id]=1; v.jobs[r.job_no]=1;
     v.total += Number(r.amount)||0;
-    if(!r.payroll_prev_week) v.nopay += Number(r.amount)||0;
+    if(r.payroll_prev_week===false) v.nopay += Number(r.amount)||0;
     if(r.period_source==='extracted' || r.period_source==='ap_entered') v.read++; else v.review++;
   });
   return Object.keys(m).map(function(k){ var v=m[k]; v.n=Object.keys(v.invs).length; v.nj=Object.keys(v.jobs).length; return v; })
     .sort(function(a,b){ return b.total-a.total; });
 }
 function _rrPill(yes){
+  if(yes===null || yes===undefined) return '<span style="color:#999">n/a</span>';
   return yes ? '<span style="display:inline-block;min-width:20px;padding:1px 6px;border-radius:4px;background:#E3EFD6;color:#2d5410;font-weight:700">Y</span>'
              : '<span style="display:inline-block;min-width:20px;padding:1px 6px;border-radius:4px;background:#F8D7D3;color:#8a1f1f;font-weight:700">N</span>';
 }
@@ -46568,7 +46580,7 @@ function _rrRender(){
   var tot = 0, invs = {}, jobs = {}, npAmt = 0, npJobs = {}, ending = 0, review = 0;
   rows.forEach(function(r){
     tot += Number(r.amount)||0; invs[r.invoice_id]=1; jobs[r.job_no]=1;
-    if(!r.payroll_prev_week){ npAmt += Number(r.amount)||0; npJobs[r.job_no]=1; }
+    if(r.payroll_prev_week===false){ npAmt += Number(r.amount)||0; npJobs[r.job_no]=1; }
     if(r.rental_end && r.rental_end >= today && r.rental_end <= in7Iso) ending++;
     if(_rrIsReview(r)) review++;
   });
@@ -46649,8 +46661,8 @@ function _rrDetailHtml(){
       '<td style="padding:7px 9px;text-align:center">'+(r.new_this_week?'Y':'')+'</td>'+
       '<td style="padding:7px 9px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums">'+_rrMoney(r.amount)+'</td>'+
       '<td style="padding:7px 9px;text-transform:capitalize">'+_rrEsc(r.ap_status)+'</td>'+
-      '<td style="padding:7px 9px;text-align:center">'+_rrPill(!!r.payroll_prev_week)+'</td>'+
-      '<td style="padding:7px 9px;text-align:center">'+_rrPill(!!r.payroll_current_month)+'</td>'+
+      '<td style="padding:7px 9px;text-align:center">'+_rrPill(r.payroll_prev_week)+'</td>'+
+      '<td style="padding:7px 9px;text-align:center">'+_rrPill(r.payroll_current_month)+'</td>'+
       '<td style="padding:5px 9px">'+_rrSelect(RR_SITE_STATUSES, r.project_status||'', '_rrSetStatus('+_rrEsc(JSON.stringify(r.project_id))+',this.value)', !canEdit || !r.project_id, 'Project status')+'</td>'+
       '<td style="padding:5px 9px">'+_rrSelect(RR_ACTIONS, r.action||'', '_rrSetAction('+key+',\'action\',this.value)', !canEdit, 'Action')+'</td>'+
       '<td style="padding:7px 9px;color:#A32D2D;font-size:11px;min-width:150px">'+_rrEsc(_rrFlags(r).join('; '))+'</td>'+
@@ -46679,14 +46691,14 @@ function _rrProjectHtml(){
   var T = { n:0, eq:0, sc:0 };
   jobs.forEach(function(j){
     T.n += j.n; T.eq += j.eq; T.sc += j.sc;
-    var flag = (!j.pw && !j.cm) ? 'No payroll \u2014 review' : (!j.pw ? 'No payroll last week' : '');
+    var flag = (j.pw===false && j.cm===false) ? 'No payroll \u2014 review' : (j.pw===false ? 'No payroll last week' : '');
     h += '<tr style="border-top:1px solid #eee">'+
       '<td style="padding:7px 9px">'+_rrEsc(j.job_no)+'</td><td style="padding:7px 9px">'+_rrEsc(j.project)+'</td>'+
       '<td style="padding:7px 9px;text-align:center">'+j.n+'</td>'+
       '<td style="padding:7px 9px;text-align:right">'+_rrMoney(j.eq)+'</td><td style="padding:7px 9px;text-align:right">'+_rrMoney(j.sc)+'</td>'+
       '<td style="padding:7px 9px;text-align:right;font-weight:600">'+_rrMoney(j.eq+j.sc)+'</td>'+
       '<td style="padding:7px 9px;text-align:center">'+_rrPill(j.pw)+'</td><td style="padding:7px 9px;text-align:center">'+_rrPill(j.cm)+'</td>'+
-      '<td style="padding:7px 9px">'+(j.last?_rrFmtDate(j.last):'None (120 days)')+'</td>'+
+      '<td style="padding:7px 9px">'+(j.pw===null?'n/a':(j.last?_rrFmtDate(j.last):'None (120 days)'))+'</td>'+
       '<td style="padding:7px 9px;color:#A32D2D;font-weight:600">'+flag+'</td>'+
       '<td style="padding:5px 9px">'+_rrSelect(RR_SITE_STATUSES, j.status, '_rrSetStatus('+_rrEsc(JSON.stringify(j.project_id))+',this.value)', !canEdit || !j.project_id, 'Project status')+'</td>'+
       '<td style="padding:5px 9px;min-width:200px">'+(canEdit
@@ -46719,6 +46731,7 @@ function _rrNotesHtml(){
   var vs = _rrVendors(_rrRows);
   var h = '<div style="font-size:12px;color:#555;margin-bottom:10px;max-width:820px;line-height:1.6">Tell the AP reader where each rental vendor prints the rental period and unit #. '+
     'Notes apply to every invoice from that vendor, including emailed ones. After adding a note, filter Detail to that vendor and use <b>Re-read rental periods</b>.</div>';
+  h += _rrGlEditorHtml();
   vs.forEach(function(v){
     var rec = v.vendor_id != null ? (db.vendors||[]).find(function(x){ return String(x.id)===String(v.vendor_id); }) : null;
     h += '<div class="card" style="max-width:820px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">'+
@@ -46735,6 +46748,43 @@ function _rrNotesHtml(){
       '<div style="margin-top:8px"><button class="btn" onclick="_rrSaveNote('+id+')">Save note</button></div></div>';
   });
   return h;
+}
+function _rrGlEditorHtml(){
+  var list = (db.rentalGlAccounts||[]).filter(function(a){ return a.active; }).sort(function(a,b){ return a.glNo.localeCompare(b.glNo); });
+  var inp = 'padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit';
+  return '<div class="card" style="max-width:820px;margin-bottom:14px">'+
+    '<div style="font-weight:600;margin-bottom:4px">Rental GL accounts</div>'+
+    '<div style="font-size:12px;color:#555;margin-bottom:10px">Invoices coded to these GL accounts (shop / overhead rentals) appear in Rental Review as \u201cShop / Overhead\u201d. Payroll columns show n/a for them.</div>'+
+    (list.length ? list.map(function(a){
+      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid #eee;font-size:12.5px">'+
+        '<b style="min-width:70px">'+_rrEsc(a.glNo)+'</b><span style="flex:1">'+_rrEsc(a.label||'')+'</span><span style="color:#666">'+_rrEsc(a.rentalType)+'</span>'+
+        '<button class="btn btn-sm" onclick="_rrGlRemove('+_rrEsc(JSON.stringify(a.glNo))+')">Remove</button></div>';
+    }).join('') : '<div style="font-size:12px;color:#888">None yet.</div>')+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px">'+
+      '<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#555">GL #<input id="rr-gl-no" style="'+inp+';width:90px"></label>'+
+      '<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#555;flex:1;min-width:180px">Label<input id="rr-gl-label" placeholder="e.g. Shop equipment rental" style="'+inp+'"></label>'+
+      '<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#555">Type<select id="rr-gl-type" style="'+inp+'"><option>Equipment</option><option>Scaffold</option></select></label>'+
+      '<button class="btn" onclick="_rrGlAdd()">Add</button>'+
+    '</div></div>';
+}
+async function _rrGlAdd(){
+  if(!requireFull('ap-invoices','edit rental GL accounts')) return;
+  var no = (g('rr-gl-no').value||'').trim(), label = (g('rr-gl-label').value||'').trim(), type = g('rr-gl-type').value || 'Equipment';
+  if(!no){ alert('Enter a GL account number.'); return; }
+  var r = await supabaseClient.from('kmi_rental_gl_accounts').upsert({ gl_no:no, label:label||null, rental_type:type, active:true,
+    created_by:(_currentUser?(_currentUser.email||''):'') }, { onConflict:'gl_no' });
+  if(r && r.error){ _rrBanner('error','Could not add GL '+_rrEsc(no)+': '+_rrEsc(r.error.message)); return; }
+  db.rentalGlAccounts = (db.rentalGlAccounts||[]).filter(function(a){ return a.glNo!==no; }).concat([{ glNo:no, label:label, rentalType:type, active:true }]);
+  await renderRentalReview();
+  _rrBanner('success','GL '+_rrEsc(no)+' added. Invoices coded to it now appear as Shop / Overhead.');
+}
+async function _rrGlRemove(no){
+  if(!requireFull('ap-invoices','edit rental GL accounts')) return;
+  if(!confirm('Stop treating GL '+no+' as a rental account? Its invoices will drop off Rental Review.')) return;
+  var r = await supabaseClient.from('kmi_rental_gl_accounts').update({ active:false }).eq('gl_no', no);
+  if(r && r.error){ _rrBanner('error','Could not remove GL '+_rrEsc(no)+': '+_rrEsc(r.error.message)); return; }
+  (db.rentalGlAccounts||[]).forEach(function(a){ if(a.glNo===no) a.active = false; });
+  await renderRentalReview();
 }
 async function _rrSaveNote(id){
   if(!requireFull('ap-invoices','edit vendor layout notes')) return;
@@ -46856,7 +46906,7 @@ function _rrExport(){
   if(!_rrRows.length){ alert('Nothing to export yet.'); return; }
   var today = _rrTodayIso(), money = '$#,##0.00;($#,##0.00);"-"', dfmt = 'm/d/yyyy';
   var wk = _rrFmtDate(_rrRows[0].payroll_week_start)+' \u2013 '+_rrFmtDate(_rrRows[0].payroll_week_end);
-  var src = 'Source: KMI.Build AP module (rental classes 5/60/9/7, invoices dated last 60 days, not voided) + Foundation payroll sync. Prev payroll week = '+wk+'.';
+  var src = 'Source: KMI.Build AP module (rental classes 5/60/9/7 + rental GL accounts, invoices dated last 60 days, not voided) + Foundation payroll sync. Prev payroll week = '+wk+'.';
   var notesByJob = {}; _rrJobNotes.forEach(function(n){ notesByJob[n.rental_key.slice(4)] = n.notes||''; });
   function sheet(title, head, body, foot, widths, moneyCols, dateCols){
     var aoa = [[title], ['Report date:', _rrDateObj(today)], [src], head].concat(body);
@@ -46871,11 +46921,11 @@ function _rrExport(){
     ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s:{ r:3, c:0 }, e:{ r:3+body.length, c:head.length-1 } }) };
     return ws;
   }
-  var yn = function(b){ return b ? 'Y' : 'N'; };
+  var yn = function(b){ return (b===null || b===undefined) ? 'n/a' : (b ? 'Y' : 'N'); };
   var jobs = _rrJobs(_rrRows);
   var pBody = jobs.map(function(j){
-    var flag = (!j.pw && !j.cm) ? 'No payroll \u2014 review' : (!j.pw ? 'No payroll last week' : '');
-    return [Number(j.job_no)||j.job_no, j.project, j.n, j.eq, j.sc, j.eq+j.sc, yn(j.pw), yn(j.cm), j.last ? _rrDateObj(j.last) : 'None (120 days)', flag, j.status||'', notesByJob[j.job_no]||''];
+    var flag = (j.pw===false && j.cm===false) ? 'No payroll \u2014 review' : (j.pw===false ? 'No payroll last week' : '');
+    return [Number(j.job_no)||j.job_no||'Shop / Overhead', j.project, j.n, j.eq, j.sc, j.eq+j.sc, yn(j.pw), yn(j.cm), j.pw===null ? 'n/a' : (j.last ? _rrDateObj(j.last) : 'None (120 days)'), flag, j.status||'', notesByJob[j.job_no]||''];
   });
   var pT = jobs.reduce(function(a,j){ a[0]+=j.n; a[1]+=j.eq; a[2]+=j.sc; return a; }, [0,0,0]);
   var wsP = sheet('Rental Review \u2014 Equipment & Scaffold on Rent by Project',
@@ -46888,7 +46938,7 @@ function _rrExport(){
     dSum += Number(r.amount)||0;
     return [r.vendor, Number(r.job_no)||r.job_no, r.project, r.rental_type, r.cost_class, r.eq_no||'', r.eq_desc||'', r.invoice_no,
       _rrDateObj(r.invoice_date), _rrDateObj(r.rental_start)||'', _rrDateObj(r.rental_end)||'', r.days_on_rent!=null ? r.days_on_rent : '',
-      r.new_this_week ? 'Y' : '', Number(r.amount)||0, r.ap_status||'', yn(!!r.payroll_prev_week), yn(!!r.payroll_current_month),
+      r.new_this_week ? 'Y' : '', Number(r.amount)||0, r.ap_status||'', yn(r.payroll_prev_week), yn(r.payroll_current_month),
       r.project_status||'', r.action||'', _rrFlags(r).join('; '), r.notes||''];
   });
   var wsD = sheet('Rental Review \u2014 Invoice Detail',
@@ -56960,7 +57010,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-10-RR1b';
+var KMI_BUILD = '2026-10-10-RR1c';
 
 var _kmiSessionId = (function(){
   try {
@@ -59327,6 +59377,8 @@ async function pullFromSupabase() {
     };
     try { db.foundationVendors = await _selAll('kmi_foundation_vendors', fromSBFoundationVendor); }
     catch (e) { console.warn('kmi_foundation_vendors load error (table missing?):', e && e.message); if (!Array.isArray(db.foundationVendors)) db.foundationVendors = []; }
+    try { db.rentalGlAccounts = await _selAll('kmi_rental_gl_accounts', function(r){ return { glNo:String(r.gl_no||''), label:r.label||'', rentalType:r.rental_type||'Equipment', active:r.active!==false }; }); }
+    catch (e) { console.warn('kmi_rental_gl_accounts load error (MR1b not run?):', e && e.message); db.rentalGlAccounts = []; }
     try { db.apInvoices = await _selAll('kmi_ap_invoices', fromSBApInvoice); }
     catch (e) { console.warn('kmi_ap_invoices load error (table missing?):', e && e.message); if (!Array.isArray(db.apInvoices)) db.apInvoices = []; }
     try { db.apInvoiceLines = await _selAll('kmi_ap_invoice_lines', fromSBApLine); }
