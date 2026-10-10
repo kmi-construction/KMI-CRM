@@ -2645,13 +2645,16 @@ tr.gc-line:hover td{background:#fafafa}
 
 <!-- VENDORS -->
 <div class="pg" id="pg-vendors">
-  <div class="ph"><div><h1>Vendors</h1><div class="sub">Subcontractors, suppliers, and other vendor companies</div><div class="stripe"></div></div></div>
-  <div class="ab">
-    <input class="si" placeholder="Search vendors..." oninput="filterV()" id="v-s">
+  <div class="ph"><div><h1>Vendors</h1><div class="sub" id="v-sub">From Foundation · synced nightly</div><div class="stripe"></div></div></div>
+  <div id="v-banner"></div>
+  <div id="v-link"></div>
+  <div class="ab" style="flex-wrap:wrap;gap:8px">
+    <input class="si" placeholder="Search all vendors: name, vendor #, city, contact..." oninput="filterV()" id="v-s">
     <select class="fs" onchange="filterV()" id="v-ft"><option value="">All vendor types</option></select>
-    <button class="btn btn-p" style="margin-left:auto" onclick="showAddVendor()">+ Add vendor</button>
+    <div id="v-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    <button class="btn" style="margin-left:auto" onclick="showAddVendor()">+ Add app-only vendor</button>
   </div>
-  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px" id="v-grid"></div>
+  <div id="v-grid"></div>
 </div>
 
 <!-- VENDOR CONTACTS -->
@@ -2963,35 +2966,16 @@ tr.gc-line:hover td{background:#fafafa}
           Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'glAccounts')">
         </label>
       </div>
-      <!-- Vendor master (AP S1) -->
+      <!-- Vendor master: synced nightly from Foundation (fnd_vendor_sync.py -> fnd_vendors). VD1 -->
       <div style="background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
         <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:6px">Vendor master</div>
-        <div style="font-size:11px;color:#888;margin-bottom:8px;min-height:30px">
-          Required: <code>vendor_no</code>, <code>name</code>. Imports the full Foundation payee master and links matching app vendors.
+        <div style="font-size:11px;color:#555;line-height:1.5">
+          Synced automatically every night from Foundation. No upload needed — manage vendors on the <a href="#" onclick="event.preventDefault();nav('vendors')" style="color:var(--kmi)">Vendors</a> page.
         </div>
-        <div id="t-fnd-vendor-status" style="font-size:11px;color:#555;margin-bottom:8px"></div>
-        <label class="btn btn-sm" style="cursor:pointer;display:inline-block">
-          Choose CSV file <input type="file" accept=".csv" style="display:none" onchange="importFoundationCSV(event,'vendorsFoundation')">
-        </label>
+        <div id="t-fnd-vendor-status" style="display:none"></div>
       </div>
     </div>
-    <!-- Vendor reconciliation (AP S1) -->
-    <div style="margin-top:14px;background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
-      <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:4px">Vendor reconciliation</div>
-      <div style="font-size:11px;color:#888;margin-bottom:10px">
-        Foundation vendor master &harr; app vendors. <strong>Review</strong> rows are near matches awaiting confirmation; confirm to link or reject to keep them separate.
-      </div>
-      <div id="t-fnd-vendor-reconcile"></div>
-    </div>
-    <!-- Foundation payee master browser (searchable) -->
-    <div style="margin-top:14px;background:#fff;border:1px solid #EEE;border-radius:6px;padding:12px">
-      <div style="font-weight:600;font-size:13px;color:var(--kmi);margin-bottom:4px">Foundation payee master</div>
-      <div style="font-size:11px;color:#888;margin-bottom:10px">
-        Search the full Foundation payee list by name or vendor #, including payees not linked to an app vendor.
-      </div>
-      <input id="t-fnd-master-search" oninput="foundationMasterSearch(this.value)" placeholder="Search payees by name or #\u2026"
-             style="width:100%;max-width:340px;padding:6px 10px;border:1px solid #d8dce6;border-radius:6px;font-size:12px;margin-bottom:10px">
-      <div id="t-fnd-master-list"></div>
+    <div style="display:none"><div id="t-fnd-vendor-reconcile"></div><input id="t-fnd-master-search"><div id="t-fnd-master-list"></div>
     </div>
   </div>
 
@@ -30753,39 +30737,374 @@ function delPM(id) {
 var _editVendorId = null;
 function _vendorEsc(v){ return (v == null ? '' : String(v)).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-function renderVendors() {
-  // Populate filter dropdown options from current vendor types
+// renderVendors / filterV moved to VENDOR DIRECTORY (VD1).
+
+// ════════════════════════════════════════════════════════════════════════
+// VENDOR DIRECTORY (VD1) — Foundation-backed Vendors page.
+//   Source: kmi_vendor_directory view = every Foundation vendor (fnd_vendors,
+//   synced nightly) with its app record merged on, plus app-only vendors.
+//   App records (kmi_vendors) hold only app-owned details and are created on
+//   demand, one per Foundation vendor # (unique index in MV1).
+//   Links from app-only vendors to Foundation are always confirmed by a person.
+// ════════════════════════════════════════════════════════════════════════
+var _vdRows = [], _vdSugg = [], _vdLoaded = false, _vdBusy = false;
+var _vdF = { all:false, expired:false, appOnly:false, details:false, deleted:false };
+var VD_MAX_ROWS = 400;
+
+function _vdEsc(s){ return _vendorEsc(s); }
+function _vdToday(){ var d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function _vdFmt(iso){ var m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? ((+m[2])+'/'+(+m[3])+'/'+m[1].slice(2)) : ''; }
+function _vdExpired(iso){ return !!iso && String(iso).slice(0,10) < _vdToday(); }
+function _vdNorm(s){
+  return String(s||'').toUpperCase().replace(/\b(INC|LLC|LLP|LP|CORP|CORPORATION|CO|COMPANY|LTD|THE)\b/g,' ').replace(/[^A-Z0-9]/g,'');
+}
+function _vdCert(iso, flag){
+  if(!iso) return '<span style="color:#888">'+(flag==='Y'?'On file':'\u2014')+'</span>';
+  return _vdExpired(iso)
+    ? '<span style="display:inline-block;padding:1px 7px;border-radius:9px;background:#F8D7D3;color:#8a1f1f;font-weight:600">Expired '+_vdFmt(iso)+'</span>'
+    : _vdFmt(iso);
+}
+function _vdAddr(r){
+  var line2 = [r.city, r.state].filter(Boolean).join(', ') + (r.zip_code ? ' ' + r.zip_code : '');
+  return [r.address_1, r.address_2, line2].filter(function(x){ return x && String(x).trim(); }).join(' \u00b7 ');
+}
+function _vdBanner(kind, html){
+  var b = g('v-banner'); if(!b) return;
+  if(!html){ b.innerHTML=''; return; }
+  var c = kind==='error' ? ['#fdeceb','#E24B4A','#A32D2D'] : kind==='success' ? ['#eef6e6','#97C459','#3B6D11'] : ['#eef1f8','#8B93B8','#2A3260'];
+  b.innerHTML = '<div style="background:'+c[0]+';border:1px solid '+c[1]+';color:'+c[2]+';border-radius:6px;padding:9px 12px;margin-bottom:12px;font-size:12.5px">'+html+'</div>';
+}
+
+async function _vdLoad(){
+  if(!supabaseClient) throw new Error('Not connected');
+  var all = [], from = 0, page = 1000;
+  for(;;){
+    var r = await supabaseClient.from('kmi_vendor_directory').select('*').range(from, from+page-1);
+    if(r.error) throw r.error;
+    all = all.concat(r.data||[]);
+    if(!r.data || r.data.length < page) break;
+    from += page;
+  }
+  _vdRows = all;
+  var s = await supabaseClient.from('kmi_vendor_link_suggestions').select('*');
+  _vdSugg = (s && !s.error) ? (s.data||[]) : [];
+  _vdLoaded = true;
+}
+
+async function renderVendors(){
   var vt = (db.vendorTypes && db.vendorTypes.length) ? db.vendorTypes : DB_DEFAULTS.vendorTypes;
-  g('v-ft').innerHTML = '<option value="">All vendor types</option>' + vt.map(function(t){ return '<option>' + _vendorEsc(t) + '</option>'; }).join('');
+  var ft = g('v-ft');
+  if(ft){ var cur = ft.value; ft.innerHTML = '<option value="">All vendor types</option>' + vt.map(function(t){ return '<option'+(t===cur?' selected':'')+'>' + _vendorEsc(t) + '</option>'; }).join(''); }
+  if(!_vdLoaded && g('v-grid')) g('v-grid').innerHTML = '<div class="card"><div style="color:#888;font-size:12px">Loading vendors\u2026</div></div>';
+  try{ await _vdLoad(); }
+  catch(e){
+    if(g('v-grid')) g('v-grid').innerHTML = '<div class="card"><div style="color:#A32D2D;font-size:12px">Could not load vendors: '+_vdEsc(e && e.message ? e.message : String(e))+'</div></div>';
+    return;
+  }
   filterV();
 }
 
-function filterV() {
-  var s  = (g('v-s').value || '').toLowerCase();
-  var tf = g('v-ft').value;
-  var f = (db.vendors || []).filter(function(v){
-    var hay = (v.name || '') + ' ' + (v.primaryContact || '') + ' ' + (v.email || '') + ' ' + (v.cityState || '') + ' ' + (v.vendorType || '');
-    return (!s || hay.toLowerCase().includes(s)) && (!tf || (v.vendorType || '') === tf);
+function _vdSetF(k){ _vdF[k] = !_vdF[k]; filterV(); }
+
+function filterV(){
+  var el = g('v-grid'); if(!el) return;
+  var q = ((g('v-s')||{}).value || '').trim().toLowerCase();
+  var tf = (g('v-ft')||{}).value || '';
+  var today = _vdToday();
+  var dismissed = {};
+  (db.vendors||[]).forEach(function(v){ if(v.reconcileStatus==='no_match') dismissed[String(v.id)] = 1; });
+
+  // Header counts
+  var nFnd = 0, nUsed = 0, nApp = 0, nExp = 0, nDet = 0, last = '';
+  _vdRows.forEach(function(r){
+    if(r.app_only) nApp++; else { nFnd++; if(r.synced_at && r.synced_at > last) last = r.synced_at; }
+    if(r.used_24mo && !r.is_deleted) nUsed++;
+    if(!r.is_deleted && (_vdExpired(r.ins_date_expires) || _vdExpired(r.wc_date_expires))) nExp++;
+    if(!r.app_only && r.app_vendor_id) nDet++;
   });
-  g('v-grid').innerHTML = f.length ? f.map(function(v){
-    var ini    = v.primaryContact ? v.primaryContact.split(' ').map(function(x){ return x[0]; }).join('').slice(0,2) : (v.name||'?')[0].toUpperCase();
-    var ctCount = (db.vendorContacts || []).filter(function(c){ return c.vendorId === v.id; }).length;
-    var oppCount = (db.opportunities || []).filter(function(o){
-      var arr = Array.isArray(o.vendorAssignments) ? o.vendorAssignments : [];
-      return arr.some(function(a){ return a.vendorId === v.id; });
-    }).length;
-    return '<div class="card" style="cursor:pointer;position:relative" onclick="viewVendor(' + v.id + ')">' +
-      '<button class="btn btn-sm" title="Edit vendor" onclick="event.stopPropagation();showEditVendor(' + v.id + ')" style="position:absolute;top:10px;right:10px;padding:4px 8px;font-size:12px">✎ Edit</button>' +
-      '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">' +
-        '<div style="width:42px;height:42px;border-radius:50%;background:var(--ac);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;color:#fff">' + _vendorEsc(ini) + '</div>' +
-        '<div><div style="font-weight:600;font-size:14px">' + _vendorEsc(v.name) + '</div><div style="font-size:12px;color:#888">' + _vendorEsc(v.cityState || '') + (v.vendorType ? ' \u00b7 ' + _vendorEsc(v.vendorType) : '') + '</div></div></div>' +
-      '<div style="display:flex;gap:12px;font-size:12px">' +
-        '<div><span style="color:#888">Contacts: </span><strong>' + ctCount + '</strong></div>' +
-        '<div><span style="color:#888">On bids: </span><strong>' + oppCount + '</strong></div>' +
-      '</div></div>';
-  }).join('') : '<div style="grid-column:1/-1;text-align:center;padding:40px;color:#aaa;font-size:13px">No vendors yet \u2014 <button class="btn btn-sm btn-p" onclick="showAddVendor()">Add your first vendor</button></div>';
+  var sub = g('v-sub');
+  if(sub) sub.textContent = 'From Foundation \u00b7 synced nightly' + (last ? (' \u00b7 last sync ' + new Date(last).toLocaleString()) : '');
+
+  // Link suggestions (each confirmed by a person)
+  var sugg = _vdSugg.filter(function(s){ return !dismissed[String(s.app_vendor_id)]; });
+  // Links the old CSV import made on a near-name match and never confirmed.
+  var pend = (db.vendors||[]).filter(function(v){ return v.reconcileStatus==='review' && v.foundationVendorNo; });
+  var lk = g('v-link');
+  if(lk){
+    lk.innerHTML = ((pend.length && hasFull('edit-vendors')) ?
+      '<div class="card" style="border-left:3px solid #C8A84B;margin-bottom:12px"><div style="font-weight:600;font-size:13px;margin-bottom:6px">'+pend.length+' link'+(pend.length===1?'':'s')+' from the old vendor import still '+(pend.length===1?'needs':'need')+' confirming</div>'+
+      pend.map(function(v){
+        var f = _vdRows.find(function(r){ return r.vendor_no===v.foundationVendorNo; }) || {};
+        return '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:7px 0;border-top:1px solid #eee;font-size:12.5px">'+
+          '<span><b>'+_vdEsc(v.name)+'</b> (app)</span><span style="color:#888">\u2192</span>'+
+          '<span><b>'+_vdEsc(f.name||v.foundationVendorName||'')+'</b> <code>'+_vdEsc(v.foundationVendorNo)+'</code> \u00b7 '+_vdEsc([f.city,f.state].filter(Boolean).join(', ')||'\u2014')+' \u00b7 '+_vdEsc(f.phone_no||'no phone')+'</span>'+
+          '<span style="margin-left:auto;display:flex;gap:6px"><button class="btn btn-sm btn-p" onclick="_vdConfirmLink('+_vdEsc(JSON.stringify(String(v.id)))+')">Confirm</button>'+
+          '<button class="btn btn-sm" onclick="_vdUnlink('+_vdEsc(JSON.stringify(String(v.id)))+')">Not a match</button></span></div>';
+      }).join('')+'</div>' : '') +
+      ((sugg.length && hasFull('edit-vendors')) ?
+      '<div class="card" style="border-left:3px solid #C8A84B;margin-bottom:12px"><div style="font-weight:600;font-size:13px;margin-bottom:6px">'+sugg.length+' app-only vendor'+(sugg.length===1?'':'s')+' may already be in Foundation</div>'+
+      '<div style="font-size:12px;color:#555;margin-bottom:8px">Linking keeps the app vendor\u2019s contacts and notes and attaches them to the Foundation vendor. Check the vendor #, city and phone \u2014 Foundation has several vendors that share a name.</div>'+
+      sugg.map(function(s){
+        return '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:7px 0;border-top:1px solid #eee;font-size:12.5px">'+
+          '<span><b>'+_vdEsc(s.app_name)+'</b> (app)</span><span style="color:#888">\u2192</span>'+
+          '<span><b>'+_vdEsc(s.fnd_name)+'</b> <code>'+_vdEsc(s.vendor_no)+'</code> \u00b7 '+_vdEsc([s.city,s.state].filter(Boolean).join(', ')||'\u2014')+' \u00b7 '+_vdEsc(s.phone_no||'no phone')+'</span>'+
+          '<span style="font-size:11px;color:#666">'+_vdEsc(s.match_kind)+' match</span>'+
+          '<span style="margin-left:auto;display:flex;gap:6px"><button class="btn btn-sm btn-p" onclick="_vdLink('+_vdEsc(JSON.stringify(String(s.app_vendor_id)))+','+_vdEsc(JSON.stringify(s.vendor_no))+','+_vdEsc(JSON.stringify(s.fnd_name||''))+')">Link</button>'+
+          '<button class="btn btn-sm" onclick="_vdNotMatch('+_vdEsc(JSON.stringify(String(s.app_vendor_id)))+')">Not a match</button></span></div>';
+      }).join('')+'</div>' : '');
+  }
+
+  function chip(k, label){
+    var on = !!_vdF[k];
+    return '<button type="button" aria-pressed="'+on+'" onclick="_vdSetF(\''+k+'\')" style="padding:5px 11px;font-size:12px;border-radius:16px;cursor:pointer;font-family:inherit;border:1px solid '+(on?'var(--kmi)':'#ccc')+';background:'+(on?'var(--kmi)':'#fff')+';color:'+(on?'#fff':'#333')+'">'+label+'</button>';
+  }
+  var chips = g('v-chips');
+  if(chips){
+    chips.innerHTML = chip('all','Show all (not just last 24 mo)')+chip('expired','Insurance / WC expired ('+nExp+')')+chip('appOnly','Not in Foundation ('+nApp+')')+chip('details','Has app details ('+nDet+')')+chip('deleted','Include deleted');
+  }
+
+  // Search always covers every vendor; without a search the list defaults to
+  // vendors used in the last 24 months (Foundation job history or AP).
+  var rows = _vdRows.filter(function(r){
+    if(r.is_deleted && !_vdF.deleted) return false;
+    if(!q && !_vdF.all && !_vdF.expired && !_vdF.appOnly && !_vdF.details && !r.used_24mo) return false;
+    if(_vdF.expired && !(_vdExpired(r.ins_date_expires) || _vdExpired(r.wc_date_expires))) return false;
+    if(_vdF.appOnly && !r.app_only) return false;
+    if(_vdF.details && !(r.app_vendor_id && !r.app_only)) return false;
+    if(tf && (r.vendor_type||'') !== tf) return false;
+    if(q){
+      var hay = [r.vendor_no, r.name, r.sort_name, r.city, r.contact, r.phone_no, r.email_address, r.vendor_type].join(' ').toLowerCase();
+      if(hay.indexOf(q) < 0) return false;
+    }
+    return true;
+  }).sort(function(a,b){ return String(a.name||'').localeCompare(String(b.name||'')); });
+
+  var shown = rows.slice(0, VD_MAX_ROWS);
+  var th = function(t){ return '<th style="padding:8px 9px;font-weight:600;white-space:nowrap">'+t+'</th>'; };
+  var h = '<div style="font-size:12px;color:#555;margin-bottom:8px">'+
+      (q || _vdF.all ? '' : nUsed+' used in the last 24 months \u00b7 ')+nFnd+' in Foundation \u00b7 '+nApp+' app-only'+
+      ' \u2014 showing '+shown.length+(rows.length>shown.length?(' of '+rows.length+' (refine the search to narrow)'):'')+'</div>'+
+    '<div class="card" style="padding:0;overflow-x:auto"><table style="border-collapse:collapse;font-size:12.5px;width:100%;min-width:1080px">'+
+    '<thead><tr style="background:var(--kmi);color:#fff;text-align:left">'+
+      th('Vendor #')+th('Name')+th('City')+th('Phone')+th('Contact')+th('Terms')+th('Insurance exp.')+th('WC exp.')+th('Type')+th('Last used')+
+    '</tr></thead><tbody>';
+  shown.forEach(function(r){
+    var badges = (r.app_only ? ' <span style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;background:#FFF3D6;color:#7a5f1f;font-size:10.5px;font-weight:600">Not in Foundation</span>' : '')+
+                 (r.is_deleted ? ' <span style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;background:#eee;color:#555;font-size:10.5px;font-weight:600">Deleted in Foundation</span>' : '');
+    var city = r.app_only ? (r.city||'') : [r.city, r.state].filter(Boolean).join(', ');
+    h += '<tr style="border-top:1px solid #eee;cursor:pointer" onclick="openVendorDir('+_vdEsc(JSON.stringify(r.dir_key))+')">'+
+      '<td style="padding:7px 9px;font-family:ui-monospace,monospace;white-space:nowrap">'+_vdEsc(r.vendor_no||'\u2014')+'</td>'+
+      '<td style="padding:7px 9px"><a href="#" onclick="event.preventDefault()" style="font-weight:600;text-decoration:none;color:var(--kmi)">'+_vdEsc(r.name||'(no name)')+'</a>'+badges+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+_vdEsc(city||'\u2014')+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+_vdEsc(r.phone_no||'\u2014')+'</td>'+
+      '<td style="padding:7px 9px">'+_vdEsc(r.contact||'\u2014')+'</td>'+
+      '<td style="padding:7px 9px">'+_vdEsc(r.terms_no||'\u2014')+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+(r.app_only?'\u2014':_vdCert(r.ins_date_expires, r.ins_certificate))+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+(r.app_only?'\u2014':_vdCert(r.wc_date_expires, r.wc_certificate))+'</td>'+
+      '<td style="padding:7px 9px">'+_vdEsc(r.vendor_type||'')+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+(_vdFmt(r.last_used)||'\u2014')+'</td>'+
+    '</tr>';
+  });
+  if(!shown.length) h += '<tr><td colspan="10" style="padding:14px;color:#888">No vendors match.</td></tr>';
+  h += '</tbody></table></div>'+
+    '<div style="font-size:11px;color:#777;margin-top:6px">Vendor # through WC exp. come from Foundation and change only there. Type, notes, contacts and rental layout notes are kept in KMI.Build.</div>';
+  el.innerHTML = h;
 }
 
+// ── Vendor detail ───────────────────────────────────────────────────────
+function _vdRow(key){ return _vdRows.find(function(r){ return r.dir_key===key; }) || null; }
+
+function openVendorDir(key){
+  var r = _vdRow(key); if(!r) return;
+  var app = r.app_vendor_id ? getVendor(isNaN(+r.app_vendor_id) ? r.app_vendor_id : +r.app_vendor_id) || getVendor(r.app_vendor_id) : null;
+  var canEdit = hasFull('edit-vendors');
+  var kv = function(l, v, full){ return '<div'+(full?' style="grid-column:1/-1"':'')+'><div style="font-size:10.5px;color:#666;text-transform:uppercase;letter-spacing:.4px">'+l+'</div><div style="font-size:13px">'+(v||'\u2014')+'</div></div>'; };
+  var yn = function(x){ return x==='Y' ? 'Yes' : (x==='N' ? 'No' : (x||'')); };
+  var h = '<button class="xbtn" onclick="closeModal()">&#215;</button>'+
+    '<div class="mt" style="margin-bottom:2px">'+_vdEsc(r.name||'(no name)')+
+      (r.vendor_no ? ' <span style="font-size:12px;font-weight:700;padding:2px 8px;border-radius:9px;background:#E3EFD6;color:#2d5410;vertical-align:middle">'+_vdEsc(r.vendor_no)+'</span>' : '')+
+      (r.app_only ? ' <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:9px;background:#FFF3D6;color:#7a5f1f;vertical-align:middle">Not in Foundation</span>' : '')+'</div>'+
+    '<div style="font-size:12.5px;color:#666;margin-bottom:14px">'+(r.app_only ? 'App-only vendor' : (r.is_deleted ? 'Deleted in Foundation' : 'Active in Foundation'))+(r.vendor_type ? ' \u00b7 '+_vdEsc(r.vendor_type) : '')+(r.last_used ? ' \u00b7 last used '+_vdFmt(r.last_used) : '')+'</div>'+
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">';
+
+  if(!r.app_only){
+    h += '<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px">'+
+      '<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:600">From Foundation</div>'+
+      '<div style="font-size:10.5px;color:#666">Read-only \u00b7 change it in Foundation'+(r.synced_at?(' \u00b7 synced '+new Date(r.synced_at).toLocaleDateString()):'')+'</div></div>'+
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px 14px">'+
+        kv('Vendor #', _vdEsc(r.vendor_no))+kv('Terms', _vdEsc(r.terms_no))+
+        kv('Contact', _vdEsc(r.contact))+kv('Phone', _vdEsc(r.phone_no)+(r.extension_num?(' x'+_vdEsc(r.extension_num)):''))+
+        kv('Address', _vdEsc(_vdAddr(r)), true)+
+        kv('Fax', _vdEsc(r.fax_no))+kv('Email', r.email_address ? '<a href="mailto:'+_vdEsc(r.email_address)+'">'+_vdEsc(r.email_address)+'</a>' : '')+
+        kv('Insurance certificate', _vdCert(r.ins_date_expires, r.ins_certificate))+kv('WC certificate', _vdCert(r.wc_date_expires, r.wc_certificate))+
+        kv('Hold payment', _vdEsc(yn(r.hold_payment)))+kv('1099', _vdEsc(r.print_1099))+
+        kv('Default coding', _vdEsc([r.default_gl_account!=null?('GL '+r.default_gl_account):'', r.default_cost_code_no, r.default_cost_class_no].filter(Boolean).join(' / ')))+
+        kv('Vendor since', _vdFmt(r.vendor_since))+
+      '</div></div>';
+  } else if(app){
+    h += '<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px">'+
+      '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-bottom:10px">Vendor info (KMI.Build)</div>'+
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px 14px">'+
+        kv('Contact', _vdEsc(app.primaryContact))+kv('Phone', _vdEsc(app.phone))+
+        kv('Email', _vdEsc(app.email))+kv('Website', _vdEsc(app.website))+
+        kv('Address', _vdEsc([app.address, app.cityState].filter(Boolean).join(', ')), true)+
+      '</div>'+
+      (canEdit ? '<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-sm" onclick="closeModal();showEditVendor('+_vdEsc(JSON.stringify(app.id))+')">\u270e Edit</button>'+
+                 '<button class="btn btn-sm" style="color:#A32D2D" onclick="closeModal();delVendor('+_vdEsc(JSON.stringify(app.id))+')">Delete</button></div>' : '')+
+    '</div>';
+  }
+
+  var vt = (db.vendorTypes && db.vendorTypes.length) ? db.vendorTypes : DB_DEFAULTS.vendorTypes;
+  var dis = canEdit ? '' : ' disabled';
+  var inp = 'width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit';
+  h += '<div style="border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px;display:flex;flex-direction:column;gap:9px">'+
+    '<div style="display:flex;justify-content:space-between"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:600">KMI.Build details</div><div style="font-size:10.5px;color:#666">'+(canEdit?'Editable here':'Read-only')+'</div></div>'+
+    '<label style="font-size:11px;color:#555;display:flex;flex-direction:column;gap:3px">Vendor type<select id="vdd-type"'+dis+' style="'+inp+'"><option value="">\u2014</option>'+
+      vt.map(function(t){ return '<option'+(t===(r.vendor_type||'')?' selected':'')+'>'+_vdEsc(t)+'</option>'; }).join('')+'</select></label>'+
+    '<label style="font-size:11px;color:#555;display:flex;flex-direction:column;gap:3px">Notes<textarea id="vdd-notes" rows="2"'+dis+' style="'+inp+'">'+_vdEsc(r.notes||'')+'</textarea></label>'+
+    '<label style="font-size:11px;color:#555;display:flex;flex-direction:column;gap:3px">Rental period location (AP reader)<textarea id="vdd-rph" rows="2"'+dis+' placeholder="e.g. First line item, Date column, M/D/YYYY to M/D/YYYY" style="'+inp+'">'+_vdEsc(r.rental_period_hint||'')+'</textarea></label>'+
+    '<label style="font-size:11px;color:#555;display:flex;flex-direction:column;gap:3px">Unit # location<textarea id="vdd-ruh" rows="1"'+dis+' placeholder="e.g. Unit No column" style="'+inp+'">'+_vdEsc(r.rental_unit_hint||'')+'</textarea></label>'+
+    (canEdit ? '<div><button class="btn btn-p" onclick="_vdSaveDetails('+_vdEsc(JSON.stringify(key))+')">Save details</button></div>' : '')+
+  '</div></div>';
+
+  // Contacts
+  var contacts = app ? (db.vendorContacts||[]).filter(function(c){ return String(c.vendorId)===String(app.id); }) : [];
+  h += '<div style="margin-top:14px;border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Contacts</div>'+
+    (hasFull('add-vendor-contacts') ? '<button class="btn btn-sm" onclick="_vdAddContact('+_vdEsc(JSON.stringify(key))+')">+ Add contact</button>' : '')+'</div>'+
+    (contacts.length ? '<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="text-align:left;color:#555"><th style="padding:5px 8px">Name</th><th style="padding:5px 8px">Title</th><th style="padding:5px 8px">Cell</th><th style="padding:5px 8px">Email</th></tr></thead><tbody>'+
+      contacts.map(function(c){ return '<tr style="border-top:1px solid #eee"><td style="padding:6px 8px;font-weight:600">'+_vdEsc((c.firstName||'')+' '+(c.lastName||''))+'</td><td style="padding:6px 8px">'+_vdEsc(c.title||'')+'</td><td style="padding:6px 8px">'+_vdEsc(c.cell||c.office||'')+'</td><td style="padding:6px 8px">'+_vdEsc(c.email||'')+'</td></tr>'; }).join('')+
+      '</tbody></table>' : '<div style="font-size:12px;color:#888">No contacts yet.</div>')+
+  '</div>';
+
+  // Recent AP invoices (by Foundation vendor #)
+  if(r.vendor_no && hasRead('ap-invoices')){
+    var invs = (db.apInvoices||[]).filter(function(i){ return String(i.foundationVendorNo||'')===String(r.vendor_no) && !i.voidedAt; })
+      .sort(function(a,b){ return String(b.createdAt||'').localeCompare(String(a.createdAt||'')); }).slice(0, 8);
+    if(invs.length){
+      h += '<div style="margin-top:14px;border:1px solid #e7e9f0;border-radius:9px;padding:13px 15px">'+
+        '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-bottom:8px">Recent AP invoices</div>'+
+        '<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="text-align:left;color:#555"><th style="padding:5px 8px">Invoice #</th><th style="padding:5px 8px">Date</th><th style="padding:5px 8px">Rental period</th><th style="padding:5px 8px">Status</th><th style="padding:5px 8px;text-align:right">Amount</th></tr></thead><tbody>'+
+        invs.map(function(i){
+          var per = (i.rentalPeriodStart||i.rentalPeriodEnd) ? (_vdFmt(i.rentalPeriodStart)+' \u2013 '+_vdFmt(i.rentalPeriodEnd)) : '';
+          return '<tr style="border-top:1px solid #eee"><td style="padding:6px 8px"><a href="#" onclick="event.preventDefault();closeModal();nav(\'ap-invoices\');setTimeout(function(){apOpenCode('+_vdEsc(JSON.stringify(String(i.id)))+')},60)" style="color:var(--kmi)">'+_vdEsc(i.invoiceNo)+'</a></td>'+
+            '<td style="padding:6px 8px">'+_vdEsc(i.invoiceDate||'')+'</td><td style="padding:6px 8px">'+_vdEsc(per)+'</td>'+
+            '<td style="padding:6px 8px;text-transform:capitalize">'+_vdEsc(i.status||'')+'</td><td style="padding:6px 8px;text-align:right">'+apMoney(i.total)+'</td></tr>';
+        }).join('')+'</tbody></table></div>';
+    }
+  }
+
+  h += '<div class="mf"><button class="btn" onclick="closeModal()">Close</button></div>';
+  showModal(h);
+}
+
+// Returns the app record for a directory row, creating it (once per
+// Foundation vendor #) when someone first saves app-owned details.
+async function _vdEnsureApp(r){
+  if(r.app_vendor_id){
+    var ex = getVendor(+r.app_vendor_id) || getVendor(r.app_vendor_id);
+    if(ex) return ex;
+  }
+  if(!r.vendor_no) throw new Error('This vendor has no app record.');
+  var rec = { id: Date.now(), name: r.name || r.vendor_no, primaryContact: '', vendorType: '', email: '', phone: '',
+              address: '', cityState: '', website: '', notes: '',
+              foundationVendorNo: r.vendor_no, foundationVendorName: r.name || '', reconcileStatus: 'linked' };
+  var ins = await supabaseClient.from('kmi_vendors').insert(toSBVendor(rec));
+  if(ins && ins.error){
+    // Someone else created it first (one record per vendor # is enforced): use theirs.
+    var q = await supabaseClient.from('kmi_vendors').select('*').eq('foundation_vendor_no', r.vendor_no).maybeSingle();
+    if(q && !q.error && q.data){
+      var other = fromSBVendor(q.data);
+      if(!getVendor(other.id)) db.vendors.push(other);
+      r.app_vendor_id = String(other.id);
+      return other;
+    }
+    throw new Error(ins.error.message);
+  }
+  if(!Array.isArray(db.vendors)) db.vendors = [];
+  db.vendors.push(rec);
+  r.app_vendor_id = String(rec.id);
+  saveDB();
+  return rec;
+}
+
+async function _vdSaveDetails(key){
+  if(!requireFull('edit-vendors','edit vendor details')) return;
+  var r = _vdRow(key); if(!r) return;
+  var vals = { type:(g('vdd-type')||{}).value||'', notes:((g('vdd-notes')||{}).value||'').trim(),
+               p:((g('vdd-rph')||{}).value||'').trim(), u:((g('vdd-ruh')||{}).value||'').trim() };
+  try{
+    var app = await _vdEnsureApp(r);
+    var up = await supabaseClient.from('kmi_vendors').update({ vendor_type: vals.type, notes: vals.notes,
+      rental_period_hint: vals.p || null, rental_unit_hint: vals.u || null }).eq('id', app.id);
+    if(up && up.error) throw up.error;
+    app.vendorType = vals.type; app.notes = vals.notes; app.rentalPeriodHint = vals.p; app.rentalUnitHint = vals.u;
+    r.vendor_type = vals.type; r.notes = vals.notes; r.rental_period_hint = vals.p; r.rental_unit_hint = vals.u;
+    saveDB();
+    openVendorDir(key);
+    filterV();
+  }catch(e){ alert('Could not save vendor details: '+(e && e.message ? e.message : String(e))); }
+}
+
+async function _vdAddContact(key){
+  if(!requireFull('add-vendor-contacts','add vendor contacts')) return;
+  var r = _vdRow(key); if(!r) return;
+  try{
+    var app = await _vdEnsureApp(r);
+    showAddVendorContact();
+    var sel = g('vc-v'); if(sel) sel.value = String(app.id);
+  }catch(e){ alert('Could not add a contact: '+(e && e.message ? e.message : String(e))); }
+}
+
+async function _vdLink(appId, vendorNo, fndName){
+  if(!requireFull('edit-vendors','link vendors')) return;
+  if(!confirm('Link the app vendor to Foundation vendor '+vendorNo+' ('+fndName+')?\n\nIts contacts, notes and bid history move onto that Foundation vendor.')) return;
+  var up = await supabaseClient.from('kmi_vendors').update({ foundation_vendor_no: vendorNo, foundation_vendor_name: fndName, reconcile_status: 'linked' }).eq('id', appId);
+  if(up && up.error){ _vdBanner('error','Could not link: '+_vdEsc(up.error.message)+' (the Foundation vendor may already have an app record).'); return; }
+  var v = getVendor(+appId) || getVendor(appId);
+  if(v){ v.foundationVendorNo = vendorNo; v.foundationVendorName = fndName; v.reconcileStatus = 'linked'; saveDB(); }
+  _vdBanner('success','Linked to Foundation vendor '+_vdEsc(vendorNo)+'.');
+  await renderVendors();
+}
+async function _vdNotMatch(appId){
+  if(!requireFull('edit-vendors','review vendor links')) return;
+  var up = await supabaseClient.from('kmi_vendors').update({ reconcile_status: 'no_match' }).eq('id', appId);
+  if(up && up.error){ _vdBanner('error','Could not save: '+_vdEsc(up.error.message)); return; }
+  var v = getVendor(+appId) || getVendor(appId);
+  if(v){ v.reconcileStatus = 'no_match'; saveDB(); }
+  filterV();
+}
+
+async function _vdConfirmLink(appId){
+  if(!requireFull('edit-vendors','confirm vendor links')) return;
+  var up = await supabaseClient.from('kmi_vendors').update({ reconcile_status: 'linked' }).eq('id', appId);
+  if(up && up.error){ _vdBanner('error','Could not confirm: '+_vdEsc(up.error.message)); return; }
+  var v = getVendor(+appId) || getVendor(appId); if(v){ v.reconcileStatus = 'linked'; saveDB(); }
+  filterV();
+}
+async function _vdUnlink(appId){
+  if(!requireFull('edit-vendors','unlink vendors')) return;
+  if(!confirm('Unlink this app vendor from Foundation? It becomes an app-only vendor and keeps its contacts and notes.')) return;
+  var up = await supabaseClient.from('kmi_vendors').update({ foundation_vendor_no: '', foundation_vendor_name: '', reconcile_status: 'no_match' }).eq('id', appId);
+  if(up && up.error){ _vdBanner('error','Could not unlink: '+_vdEsc(up.error.message)); return; }
+  var v = getVendor(+appId) || getVendor(appId); if(v){ v.foundationVendorNo = ''; v.foundationVendorName = ''; v.reconcileStatus = 'no_match'; saveDB(); }
+  await renderVendors();
+}
+
+// Before adding an app-only vendor, look for it in Foundation first.
+function _vdConfirmNotInFoundation(name){
+  var nk = _vdNorm(name);
+  if(nk.length < 3 || !_vdRows.length) return true;
+  var hits = _vdRows.filter(function(r){
+    if(r.app_only || r.is_deleted) return false;
+    var rk = _vdNorm(r.name);
+    return rk && (rk === nk || rk.indexOf(nk) === 0 || nk.indexOf(rk) === 0);
+  }).slice(0, 6);
+  if(!hits.length) return true;
+  return confirm('These Foundation vendors look similar:\n\n'+hits.map(function(r){
+    return '\u2022 '+r.name+'  ('+r.vendor_no+(r.city?(', '+r.city):'')+')';
+  }).join('\n')+'\n\nFoundation vendors are already in the directory \u2014 open one of those instead of adding a duplicate.\n\nAdd "'+name+'" as an app-only vendor anyway?');
+}
 function viewVendor(id) {
   var v = getVendor(id); if (!v) { alert('Vendor not found.'); return; }
   var contacts = (db.vendorContacts || []).filter(function(c){ return c.vendorId === id; });
@@ -30881,6 +31200,7 @@ function saveVendor() {
   if (nameClash)  { alert('A vendor has already been created with this company name.\n\nExisting vendor: ' + nameClash.name + '\n\nUse a different name or edit the existing vendor instead.'); return; }
   if (emailClash) { alert('A vendor has already been created with this email address.\n\nExisting vendor: ' + emailClash.name + '\n\nUse a different email or edit the existing vendor instead.'); return; }
 
+  if (!_editVendorId && !_vdConfirmNotInFoundation(n)) return;
   var data = {
     name:           n,
     primaryContact: (g('vd-pc').value    || '').trim(),
@@ -46595,7 +46915,7 @@ function _rrVendors(rows){
   var m = {};
   rows.forEach(function(r){
     var k = r.vendor;
-    if(!m[k]) m[k] = { vendor:k, vendor_id:r.vendor_id, type:r.rental_type, invs:{}, jobs:{}, total:0, nopay:0, read:0, review:0 };
+    if(!m[k]) m[k] = { vendor:k, vendor_id:r.vendor_id, fv:r.foundation_vendor_no||'', type:r.rental_type, invs:{}, jobs:{}, total:0, nopay:0, read:0, review:0 };
     var v = m[k];
     v.invs[r.invoice_id]=1; v.jobs[r.job_no]=1;
     v.total += Number(r.amount)||0;
@@ -46776,9 +47096,19 @@ function _rrNotesHtml(){
     'Notes apply to every invoice from that vendor, including emailed ones. After adding a note, filter Detail to that vendor and use <b>Re-read rental periods</b>.</div>';
   h += _rrGlEditorHtml();
   vs.forEach(function(v){
-    var rec = v.vendor_id != null ? (db.vendors||[]).find(function(x){ return String(x.id)===String(v.vendor_id); }) : null;
+    var rec = (v.vendor_id != null ? (db.vendors||[]).find(function(x){ return String(x.id)===String(v.vendor_id); }) : null) ||
+      (v.fv ? (db.vendors||[]).find(function(x){ return String(x.foundationVendorNo||'')===String(v.fv); }) : null);
     h += '<div class="card" style="max-width:820px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">'+
       '<div style="font-weight:600">'+_rrEsc(v.vendor)+'</div><div style="font-size:11.5px;color:#666">'+v.n+' invoices \u00b7 '+v.read+' read \u00b7 <span style="color:'+(v.review?'#8a5a00':'#666')+'">'+v.review+' need review</span></div></div>';
+    if(!rec && v.fv){
+      var fid = _rrEsc(String(v.fv).replace(/[^A-Za-z0-9_-]/g,''));
+      h += '<label style="display:block;font-size:11px;color:#555;margin-bottom:3px">Where the rental period is</label>'+
+        '<textarea id="rr-rph-fnd-'+fid+'" rows="2" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit"></textarea>'+
+        '<label style="display:block;font-size:11px;color:#555;margin:8px 0 3px">Where the unit # is</label>'+
+        '<textarea id="rr-ruh-fnd-'+fid+'" rows="1" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit"></textarea>'+
+        '<div style="margin-top:8px"><button class="btn" onclick="_rrSaveNoteFnd('+_rrEsc(JSON.stringify(String(v.fv)))+','+_rrEsc(JSON.stringify(v.vendor))+')">Save note</button></div></div>';
+      return;
+    }
     if(!rec){
       h += '<div style="font-size:12px;color:#8a5a00">Not linked to a vendor record, so a note can\u2019t be saved yet. Add \u201c'+_rrEsc(v.vendor)+'\u201d under Vendors (or link the invoice to an existing vendor in AP) and it will appear here.</div></div>';
       return;
@@ -46828,6 +47158,17 @@ async function _rrGlRemove(no){
   if(r && r.error){ _rrBanner('error','Could not remove GL '+_rrEsc(no)+': '+_rrEsc(r.error.message)); return; }
   (db.rentalGlAccounts||[]).forEach(function(a){ if(a.glNo===no) a.active = false; });
   await renderRentalReview();
+}
+async function _rrSaveNoteFnd(vendorNo, name){
+  if(!requireFull('ap-invoices','edit vendor layout notes')) return;
+  var fid = String(vendorNo).replace(/[^A-Za-z0-9_-]/g,'');
+  var p = g('rr-rph-fnd-'+fid), u = g('rr-ruh-fnd-'+fid);
+  try{
+    var app = await _vdEnsureApp({ vendor_no:vendorNo, name:name, app_vendor_id:null });
+    await _vendorSaveRentalHints(app.id, { p:p?(p.value||'').trim():'', u:u?(u.value||'').trim():'' });
+    _rrRender();
+    _rrBanner('success','Layout note saved. The next read or re-read from this vendor will use it.');
+  }catch(e){ _rrBanner('error','Could not save the note: '+_rrEsc(e && e.message ? e.message : String(e))); }
 }
 async function _rrSaveNote(id){
   if(!requireFull('ap-invoices','edit vendor layout notes')) return;
@@ -57053,7 +57394,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-10-RR1d';
+var KMI_BUILD = '2026-10-10-VD1';
 
 var _kmiSessionId = (function(){
   try {
@@ -59172,7 +59513,7 @@ async function pushToSupabase() {
       if (r && r.error) errs.push('rfq_responses: ' + r.error.message);
     }
     // AP invoices (Session 2) — non-fatal if tables missing (ap_s2 migration).
-    if ((db.foundationVendors || []).length && _tblDirty('foundationVendors')) {
+    if (false && (db.foundationVendors || []).length && _tblDirty('foundationVendors')) {  // VD1: fnd_vendors is sync-owned
       var r = await supabaseClient.from('kmi_foundation_vendors').upsert(db.foundationVendors.map(toSBFoundationVendor));
       if (r && r.error) errs.push('foundation_vendors: ' + r.error.message);
     }
@@ -59418,7 +59759,7 @@ async function pullFromSupabase() {
       }
       return out;
     };
-    try { db.foundationVendors = await _selAll('kmi_foundation_vendors', fromSBFoundationVendor); }
+    try { db.foundationVendors = await _selAll('fnd_vendors', function(r){ return { id:'fv-' + String(r.vendor_no||'').replace(/[^A-Za-z0-9_-]/g, ''), vendorNo:r.vendor_no||'', name:r.name||'', fullName:[r.name, r.name_2].filter(Boolean).join(' '), city:r.city||'', active:r.record_status!=='D' }; }); }
     catch (e) { console.warn('kmi_foundation_vendors load error (table missing?):', e && e.message); if (!Array.isArray(db.foundationVendors)) db.foundationVendors = []; }
     try { db.rentalGlAccounts = await _selAll('kmi_rental_gl_accounts', function(r){ return { glNo:String(r.gl_no||''), label:r.label||'', rentalType:r.rental_type||'Equipment', active:r.active!==false }; }); }
     catch (e) { console.warn('kmi_rental_gl_accounts load error (MR1b not run?):', e && e.message); db.rentalGlAccounts = []; }
