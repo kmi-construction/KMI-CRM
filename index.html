@@ -49704,6 +49704,327 @@ function prodPacketCoverDoc(weekStart, rows) {
   return doc;
 }
 
+// ── PJC1: job cost page in the weekly production packet ────────────
+// Decisions (Oct 2026): one page per job, directly behind its production
+// report (D1-A); same job set as the production pages (D2-A); costs
+// through the production week end, the Saturday (D3); pending CO's
+// included (D4-A); line level on one page (D5-A); Accounting added to the
+// recipients (D6-A); stale or failed data ships with a banner (D7-A);
+// payroll not yet posted ships with a banner and a send-dialog warning
+// (D12-A).
+var _PJC_STALE_HRS = 36;
+
+function _pjcLongDate(iso) {
+  var d = new Date(String(iso || '').slice(0,10) + 'T00:00:00');
+  if (isNaN(d.getTime())) return String(iso || '');
+  return d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+}
+function _pjcStamp(ts) {
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' }) + ', ' +
+    d.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+}
+
+// The jobs that get a production page are the jobs that get a cost page.
+function _pjcPacketRows(weekStart, rows) {
+  return (rows || _prodBacklogRows(weekStart)).filter(function(r){ return r.moved && r.status !== 'nowork'; });
+}
+
+// Payroll is booked on the Saturday that ends the production week.
+// Foundation's weekly labor buckets end on Sunday, so the bucket ending the
+// day after the production week holds that payroll.
+function _pjcLaborWeekEnd(weekStart) { return _prodAddDays(weekStart, 7); }
+
+function _pjcLaborPosted(w, weekStart) {
+  if (!w || w.is_fallback) return false;
+  if (String(w.week_ending || '').slice(0,10) !== _pjcLaborWeekEnd(weekStart)) return false;
+  return (Number(w.labor_cost || 0) + Number(w.wp_labor || 0)) !== 0 || Number(w.hours || 0) !== 0;
+}
+
+async function _pjcPacketMeta() {
+  var meta = { lastSync:null, stale:false, ind:null, ga:null };
+  try {
+    var s = await supabaseClient.from('fnd_sync_runs').select('finished_at,status').eq('status','success')
+      .order('finished_at', { ascending:false }).limit(1);
+    if (!s.error && s.data && s.data[0]) meta.lastSync = s.data[0].finished_at;
+  } catch (e) { console.warn('pjc sync lookup', e); }
+  meta.stale = !meta.lastSync || ((Date.now() - new Date(meta.lastSync).getTime()) / 36e5 > _PJC_STALE_HRS);
+  try {
+    var k = await supabaseClient.from('kmi_job_cost_settings').select('indirect_rate,ga_rate').limit(1);
+    if (!k.error && k.data && k.data[0]) {
+      meta.ind = (k.data[0].indirect_rate == null) ? null : Number(k.data[0].indirect_rate);
+      meta.ga  = (k.data[0].ga_rate == null) ? null : Number(k.data[0].ga_rate);
+    }
+  } catch (e) { console.warn('pjc settings lookup', e); }
+  return meta;
+}
+
+// One job's figures for the packet. Never throws: a failure becomes .error
+// and the job still gets a page that says so (D7-A).
+async function _pjcLoadJob(r, weekStart) {
+  var jobNo = String((r.p && r.p.number) || '').trim();
+  var out = { jobNo:jobNo, name:String((r.p && r.p.name) || ''), rows:[], summary:[], week:null, error:null };
+  if (!jobNo) { out.error = 'this project has no job number, so its Foundation cost cannot be found'; return out; }
+  if (!supabaseClient) { out.error = 'not connected to the database'; return out; }
+  var cutoff = _prodAddDays(weekStart, 6);
+  var args = { p_job_no:jobNo, p_cutoff:cutoff, p_default_pct:_jcDefaultPct(r.p), p_include_pending:true };
+  try {
+    var res = await Promise.all([
+      supabaseClient.rpc('fnd_job_cost_report',  args),
+      supabaseClient.rpc('fnd_job_cost_summary', args),
+      supabaseClient.rpc('fnd_job_weekly_labor', { p_job_no:jobNo, p_cutoff:_pjcLaborWeekEnd(weekStart) })
+    ]);
+    if (res[0].error) throw res[0].error;
+    if (res[1].error) throw res[1].error;
+    out.rows = res[0].data || [];
+    out.summary = res[1].data || [];
+    if (res[2] && res[2].error) console.warn('pjc weekly labor', jobNo, res[2].error);
+    else out.week = (res[2] && res[2].data && res[2].data[0]) || null;
+    if (!out.rows.length) out.error = 'job ' + jobNo + ' has no cost in Foundation, or is not a job you have access to';
+  } catch (e) {
+    console.warn('pjc load', jobNo, e);
+    out.error = 'fnd_job_cost_report: ' + ((e && e.message) ? e.message : String(e));
+  }
+  return out;
+}
+
+// Four jobs at a time, so a 25-job week does not fire 75 RPCs at once.
+async function _pjcLoadAll(list, weekStart) {
+  var results = new Array(list.length), next = 0;
+  async function worker() {
+    while (next < list.length) { var i = next++; results[i] = await _pjcLoadJob(list[i], weekStart); }
+  }
+  var ws = [];
+  for (var k = 0; k < Math.min(4, list.length); k++) ws.push(worker());
+  await Promise.all(ws);
+  return results;
+}
+
+// D12: does any packet job show payroll booked for the week yet?
+async function _pjcPayrollStatus(weekStart) {
+  var list = _pjcPacketRows(weekStart).filter(function(r){ return String((r.p && r.p.number) || '').trim(); });
+  if (!list.length || !supabaseClient) return { checked:false, posted:true };
+  var res = await Promise.all(list.map(function(r){
+    return supabaseClient.rpc('fnd_job_weekly_labor',
+      { p_job_no:String(r.p.number).trim(), p_cutoff:_pjcLaborWeekEnd(weekStart) })
+      .then(function(x){ return (x && !x.error && x.data && x.data[0]) || null; }, function(){ return null; });
+  }));
+  return { checked:true, posted:res.some(function(w){ return _pjcLaborPosted(w, weekStart); }) };
+}
+
+async function _pjcFillSendWarning(weekStart) {
+  var el = g('prod-em-warn'); if (!el) return;
+  if (!(typeof hasFull === 'function' && hasFull('view-job-cost'))) return;
+  el.innerHTML = '<div style="font-size:11.5px;color:#888;margin:6px 0">Checking Foundation payroll for the week\u2026</div>';
+  var st;
+  try { st = await _pjcPayrollStatus(weekStart); }
+  catch (e) { console.warn('pjc payroll check', e); st = { checked:false, posted:true }; }
+  el = g('prod-em-warn'); if (!el) return;
+  if (st.checked && !st.posted) {
+    el.innerHTML = '<div style="border-radius:8px;padding:9px 12px;font-size:12px;margin:6px 0;background:#FBF4E2;' +
+      'border:0.5px solid #E8D08A;color:#6b5518"><strong>Payroll for the week ending ' +
+      _prodEsc(_pjcLongDate(_prodAddDays(weekStart, 6))) + ' isn\u2019t posted in Foundation yet.</strong> ' +
+      'If you send now, labor on the job cost pages runs through the prior week and each page says so. ' +
+      'Payroll usually posts about three days after the week ends.</div>';
+  } else {
+    el.innerHTML = '';
+  }
+}
+
+// Job cost page, letter landscape, matching the production tracking pages.
+// job: from _pjcLoadJob. opts: { weekStart, unapproved, meta, payrollPosted }.
+function prodJobCostPdfDoc(job, opts) {
+  opts = opts || {};
+  if (!window.jspdf || !window.jspdf.jsPDF) return null;
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ unit:'pt', format:'letter', orientation:'landscape' });
+  var PAGE_W = 792, PAGE_H = 612, LM = 36, RM = 756, FOOTER_TOP = 572;
+  var NAVY = [30,36,72], GOOD = [31,122,77], BAD = [163,45,45], GREY = [74,80,99], RULE = [213,217,226],
+      INK = [20,22,31], DIM = [154,160,174];
+  function sf(st,sz,col){ doc.setFont('helvetica',st); doc.setFontSize(sz); doc.setTextColor(col?col[0]:0, col?col[1]:0, col?col[2]:0); }
+  function ln(x1,y1,x2,y2,w,c){ doc.setDrawColor(c?c[0]:0,c?c[1]:0,c?c[2]:0); doc.setLineWidth(w||0.5); doc.line(x1,y1,x2,y2); }
+  function one(t,w){ var a = doc.splitTextToSize(String(t||''), w); return a.length ? a[0] : ''; }
+  function money(v){ var n = Number(v)||0; return (n<0?'-$':'$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
+  function money0(v){ var n = Number(v)||0; return (n<0?'-$':'$') + Math.abs(Math.round(n)).toLocaleString('en-US'); }
+
+  var weekStart = opts.weekStart, weekEnd = _prodAddDays(weekStart, 6);
+  var meta = opts.meta || {};
+  var title = String(job.jobNo || '') + (job.name ? ('  ' + job.name) : '');
+
+  function letterhead() {
+    if (typeof KMI_LOGO_IMG === 'string' && KMI_LOGO_IMG) { try { doc.addImage(KMI_LOGO_IMG,'JPEG',LM,24,100,45); } catch(e){} }
+    sf('bold',18,[0,0,0]); doc.text('JOB COST REPORT', LM+120, 46);
+    sf('normal',10,[0,0,0]); doc.text(one(title, 330), LM+120, 62);
+    sf('bold',10,[0,0,0]); doc.text('Week of ' + _prodWeekRangeLabel(weekStart, weekEnd), RM, 40, { align:'right' });
+    sf('normal',8,GREY);
+    doc.text('Costs posted through ' + _pjcLongDate(weekEnd) + ' \u00b7 Pending CO\u2019s included', RM, 52, { align:'right' });
+    if (meta.lastSync) {
+      sf('normal',8, meta.stale ? [138,43,43] : GREY);
+      doc.text('Foundation data as of ' + _pjcStamp(meta.lastSync) + (meta.stale ? ' (stale)' : ''), RM, 63, { align:'right' });
+    } else {
+      sf('normal',8,[138,43,43]); doc.text('No successful Foundation sync on record', RM, 63, { align:'right' });
+    }
+    ln(LM, 76, RM, 76, 1.5, NAVY);
+  }
+
+  var y = 88;
+  function banner(fill, edge, ink, head, body) {
+    sf('normal',8.5,ink);
+    var lines = doc.splitTextToSize(body, RM - LM - 20);
+    var h = 22 + lines.length * 10;
+    doc.setFillColor(fill[0],fill[1],fill[2]); doc.setDrawColor(edge[0],edge[1],edge[2]); doc.setLineWidth(0.6);
+    doc.rect(LM, y, RM - LM, h, 'FD');
+    sf('bold',9,ink); doc.text(one(head, RM - LM - 20), LM + 10, y + 13);
+    sf('normal',8.5,ink); doc.text(lines, LM + 10, y + 25);
+    y += h + 8;
+  }
+
+  letterhead();
+  var AMBER = [[251,244,226],[217,190,110],[92,72,19]];
+  if (job.error) {
+    banner([251,237,237],[224,168,168],[122,36,36], 'Job cost unavailable for ' + (job.jobNo || 'this job'),
+      'The report could not be loaded when this packet was built (' + job.error + '). The production report ahead of ' +
+      'this page is unaffected. Open the Job Cost tab in KMI.Build for current figures.');
+  } else {
+    if (meta.stale) {
+      banner(AMBER[0], AMBER[1], AMBER[2], 'Foundation data may be out of date.',
+        meta.lastSync
+          ? ('The last successful Foundation sync finished ' + _pjcStamp(meta.lastSync) + '. Postings since then are missing from Actual and Cost to date.')
+          : 'No successful Foundation sync is on record, so Actual and Cost to date may be incomplete.');
+    }
+    if (opts.payrollPosted === false) {
+      banner(AMBER[0], AMBER[1], AMBER[2], 'Payroll for the week ending ' + _pjcLongDate(weekEnd) + ' was not posted when this packet was built.',
+        'Labor in Actual runs through the prior week, so this week\u2019s labor cost is missing and the variance reads more favorable than it is.');
+    }
+
+    // ── metric strip ──
+    var sm = {}; (job.summary || []).forEach(function(s){ sm[s.metric] = s; });
+    var direct = sm['Total direct cost'] || {}, totc = sm['Total cost'] || {},
+        contract = sm['Contract price'] || {}, profit = sm['Profit'] || {};
+    var dTot = Number(direct.total) || 0, vTot = (Number(direct.earned)||0) - (Number(direct.actual)||0);
+    var pTot = Number(profit.total) || 0, cTot = Number(contract.total) || 0;
+    var w = job.week, posted = _pjcLaborPosted(w, weekStart);
+    var tiles = [
+      ['Contract', money0(contract.total), 'incl. change orders', null],
+      ['Cost to date', money0(totc.actual), (dTot ? Math.round(100 * (Number(direct.actual)||0) / dTot) : 0) + '% of total direct', null],
+      ['Earned', money0(direct.earned), (dTot ? Math.round(100 * (Number(direct.earned)||0) / dTot) : 0) + '% complete overall', null],
+      ['Cost variance', money0(vTot), vTot >= 0 ? 'earned above cost' : 'cost above earned', vTot >= 0 ? GOOD : BAD],
+      ['Projected profit', money0(pTot), cTot ? ((100 * pTot / cTot).toFixed(1) + '% of contract') : 'contract less total cost', pTot >= 0 ? GOOD : BAD],
+      ['Labor, wk ending ' + _jcMD(weekEnd),
+        posted ? money0(Number(w.labor_cost||0) + Number(w.wp_labor||0)) : '\u2014',
+        posted ? (Number(w.hours||0).toFixed(1) + ' hrs \u00b7 labor + WP labor') : 'no payroll posted for the week', posted ? null : DIM]
+    ];
+    var tw = (RM - LM) / tiles.length, th = 46;
+    ln(LM, y, RM, y, 0.6, RULE); ln(LM, y + th, RM, y + th, 0.6, RULE);
+    tiles.forEach(function(t, i){
+      var x = LM + i * tw;
+      if (i) ln(x, y, x, y + th, 0.6, RULE);
+      sf('bold',7.5,GREY);       doc.text(one(t[0], tw - 16), x + 9, y + 13);
+      sf('bold',14, t[3] || INK); doc.text(one(t[1], tw - 16), x + 9, y + 30);
+      sf('normal',7.5,GREY);     doc.text(one(t[2], tw - 16), x + 9, y + 40);
+    });
+    y += th + 18;
+
+    // ── table ──
+    var cols = [ { k:'LINE', w:160, left:true } ];
+    ['% COMP','BUDGET','CO\u2019S','PENDING','TOTAL','EARNED','ACTUAL','VARIANCE'].forEach(function(l){
+      cols.push({ k:l, w:(RM - LM - 160) / 8 });
+    });
+    var cx = LM; cols.forEach(function(c){ c.l = cx; c.r = cx + c.w; cx += c.w; });
+    function head(yy) {
+      sf('bold',7.5,GREY);
+      cols.forEach(function(c){ if (c.left) doc.text(c.k, c.l + 5, yy); else doc.text(c.k, c.r - 5, yy, { align:'right' }); });
+      ln(LM, yy + 4, RM, yy + 4, 1.1, NAVY);
+      return yy + 16;
+    }
+    function cell(i, txt, col, bold) { sf(bold ? 'bold' : 'normal', 8.5, col || INK); doc.text(String(txt), cols[i].r - 5, y, { align:'right' }); }
+    var RH = 14;
+    y = head(y);
+    (job.rows || []).forEach(function(r, i){
+      if (y + RH > FOOTER_TOP) { doc.addPage(); letterhead(); y = head(96); }
+      if (i % 2) { doc.setFillColor(246,247,250); doc.rect(LM, y - 10, RM - LM, RH, 'F'); }
+      var tot = Number(r.total)||0, v = Number(r.variance)||0, pend = Number(r.pending)||0, co = Number(r.co_amount)||0;
+      sf('normal',8.5,INK); doc.text(one(r.line_key, 150), LM + 5, y);
+      if (tot !== 0) {
+        var pt = (Number(r.pct_complete)||0).toFixed(1) + '%';
+        cell(1, pt);
+        if (r.pct_override) {
+          var pw = doc.getTextWidth(pt);
+          doc.setFillColor(200,168,75); doc.circle(cols[1].r - 5 - pw - 5, y - 3, 2, 'F');
+        }
+      } else cell(1, '\u2014', DIM);
+      cell(2, money(r.budget));
+      cell(3, co ? money(co) : '\u2014', co ? null : DIM);
+      cell(4, pend ? money(pend) : '\u2014', pend ? [138,109,31] : DIM);
+      cell(5, money(tot)); cell(6, money(r.earned)); cell(7, money(r.actual));
+      cell(8, money(v), v >= 0 ? GOOD : BAD, true);
+      y += RH;
+    });
+    (job.summary || []).forEach(function(s){
+      if (y + RH + 1 > FOOTER_TOP) { doc.addPage(); letterhead(); y = head(96); }
+      var strong = (s.metric === 'Total cost' || s.metric === 'Profit');
+      var fill = strong ? NAVY : [238,240,245], ink = strong ? [255,255,255] : INK;
+      doc.setFillColor(fill[0],fill[1],fill[2]); doc.rect(LM, y - 10, RM - LM, RH, 'F');
+      ln(LM, y - 10, RM, y - 10, 0.8, [255,255,255]);
+      var hasAct = !(s.actual === null || s.actual === undefined);
+      var pct = (s.metric === 'Profit') ? '' :
+        (Number(s.total) > 0 ? Math.round(100 * (Number(s.earned)||0) / Number(s.total)) + '%' : '');
+      sf('bold',8.5,ink); doc.text(one(s.metric, 150), LM + 5, y);
+      cell(1, pct, ink, true); cell(2, money(s.budget), ink, true); cell(3, money(s.co_amount), ink, true);
+      cell(4, Number(s.pending) ? money(s.pending) : '\u2014', ink, true);
+      cell(5, money(s.total), ink, true); cell(6, money(s.earned), ink, true);
+      cell(7, hasAct ? money(s.actual) : '\u2014', ink, true);
+      cell(8, hasAct ? money((Number(s.earned)||0) - (Number(s.actual)||0)) : '', ink, true);
+      y += RH + 1;
+    });
+
+    // ── notes ──
+    y += 8;
+    var burdenTxt = (meta.ind != null && meta.ga != null && isFinite(meta.ind) && isFinite(meta.ga))
+      ? (' Indirect (' + (meta.ind * 100).toFixed(2) + '%) and G&A (' + (meta.ga * 100).toFixed(2) + '%) are applied to contract revenue.')
+      : '';
+    var notes = [
+      'Gold dot: percent complete overridden on that line; other lines follow the job\u2019s production tracking figure. ' +
+        'Budget is the bought-out estimate (factor \u00d7 Foundation estimate). CO\u2019s are approved change orders from KMI.Build.',
+      'Pending is T&M and premium-time CORs awaiting approval, with their indirect and G&A; pending revenue is on the contract line. ' +
+        'Variance is Earned less Actual.' + burdenTxt,
+      'Labor is Labor Cost plus Winter Protection Labor booked for the production week (payroll is booked on the Saturday that ends it).'
+    ];
+    sf('normal',7,GREY);
+    notes.forEach(function(t){
+      var ls = doc.splitTextToSize(t, RM - LM);
+      if (y + ls.length * 8.5 > FOOTER_TOP + 8) { doc.addPage(); letterhead(); y = 96; sf('normal',7,GREY); }
+      doc.text(ls, LM, y); y += ls.length * 8.5 + 1.5;
+    });
+  }
+
+  // Footer on every page; D13 stamp for unapproved jobs, same as the production page.
+  var np = doc.getNumberOfPages();
+  for (var pi = 1; pi <= np; pi++) {
+    doc.setPage(pi);
+    ln(LM, 584, RM, 584, 0.6, RULE);
+    sf('normal',7.5,GREY);
+    doc.text('KMI Construction LLC \u00b7 Weekly Production Packet \u00b7 Job cost', LM, 595);
+    doc.text(String(job.jobNo || '') + ' \u00b7 generated ' + new Date().toLocaleDateString('en-US'), RM, 595, { align:'right' });
+    if (opts.unapproved) {
+      doc.setFillColor(163,45,45); doc.rect(0, 0, PAGE_W, 15, 'F');
+      sf('bold',8,[255,255,255]);
+      doc.text('UNAPPROVED - these figures were not approved before distribution', PAGE_W/2, 10.5, { align:'center' });
+      if (doc.saveGraphicsState && doc.GState) {
+        doc.saveGraphicsState(); doc.setGState(new doc.GState({ opacity:0.10 }));
+      } else {
+        doc.setTextColor(238,214,214);
+      }
+      sf('bold',82,[163,45,45]);
+      doc.text('UNAPPROVED', PAGE_W/2, PAGE_H/2 + 26, { align:'center', angle:26 });
+      if (doc.restoreGraphicsState) doc.restoreGraphicsState();
+    }
+  }
+  doc.setPage(np);
+  return doc;
+}
+
 // Merge the cover and every included job report into one PDF.
 // D10/D11: no-work jobs are excluded from the body but stay on the cover;
 // unapproved jobs with hours are included and stamped.
@@ -49715,6 +50036,14 @@ async function prodPacketBuild(weekStart) {
 
   var parts = [ cover.output('arraybuffer') ];
   var included = [];
+  // PJC1: cost figures load before the merge so each cost page can sit
+  // directly behind its production report.
+  var pjcOn = (typeof hasFull === 'function') && hasFull('view-job-cost') && !!supabaseClient;
+  var pjcList = pjcOn ? _pjcPacketRows(weekStart, rows) : [];
+  var pjcData = pjcOn ? await _pjcLoadAll(pjcList, weekStart) : [];
+  var pjcMeta = pjcOn ? await _pjcPacketMeta() : null;
+  var pjcPosted = !pjcData.length || pjcData.some(function(j){ return _pjcLaborPosted(j.week, weekStart); });
+  var pjcByRow = new Map(); pjcList.forEach(function(r, i){ pjcByRow.set(r, pjcData[i]); });
   rows.forEach(function(r){
     if (!r.moved) return;                      // nothing happened: no report page
     if (r.status === 'nowork') return;         // D11: cover line only
@@ -49723,6 +50052,12 @@ async function prodPacketBuild(weekStart) {
     if (!doc) return;
     parts.push(doc.output('arraybuffer'));
     included.push(r);
+    var jc = pjcByRow.get(r);
+    if (jc) {
+      var jdoc = prodJobCostPdfDoc(jc, { weekStart:weekStart, unapproved:(r.status === 'unapproved'),
+        meta:pjcMeta, payrollPosted:pjcPosted });
+      if (jdoc) parts.push(jdoc.output('arraybuffer'));
+    }
   });
 
   var merged = await PDFLib.PDFDocument.create();
@@ -49733,7 +50068,9 @@ async function prodPacketBuild(weekStart) {
   }
   var bytes = await merged.save();
   return { bytes:bytes, rows:rows, included:included,
-           unapproved:included.filter(function(r){ return r.status === 'unapproved'; }).length };
+           unapproved:included.filter(function(r){ return r.status === 'unapproved'; }).length,
+           jobCost: pjcOn ? { payrollPosted:pjcPosted, stale:!!(pjcMeta && pjcMeta.stale),
+             failed:pjcData.filter(function(j){ return j.error; }).length } : null };
 }
 
 async function prodPacketPreview() {
@@ -49783,7 +50120,7 @@ function _prodPacketRecipients() {
     if (!u || u.status === 'inactive') return false;
     if (!u.email || String(u.email).indexOf('@') < 0) return false;
     var r = String(u.role || '');
-    return /project manager/i.test(r) || /superintendent/i.test(r) || /admin/i.test(r);
+    return /project manager/i.test(r) || /superintendent/i.test(r) || /admin/i.test(r) || /accounting/i.test(r);
   }).sort(function(a,b){
     return String(_prodUserName(a.id) || a.email).localeCompare(String(_prodUserName(b.id) || b.email));
   });
@@ -49809,7 +50146,7 @@ function prodPacketOpenSend() {
     showModal(
       '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
       '<div class="mt" style="color:#7A2E2E">No recipients on file</div>' +
-      '<div class="msb">No active Admin, Project Manager or Superintendent has an email address. ' +
+      '<div class="msb">No active Admin, Project Manager, Superintendent or Accounting user has an email address. ' +
       'Add one on the Users page, then send from here.</div>' +
       '<div class="mbtns"><button class="btn" onclick="closeModal()">Close</button></div>');
     return;
@@ -49825,7 +50162,8 @@ function prodPacketOpenSend() {
     'Attached is the KMI production packet for ' + label + '.',
     '',
     'The first page is the current backlog across every job with open quantities.',
-    'Behind it is one report per job that had production entered last week.',
+    'Behind it, each job that had production entered last week has its production report',
+    'followed by its job cost report.',
     '',
     'KMI Construction LLC'
   ].join('\n');
@@ -49837,7 +50175,7 @@ function prodPacketOpenSend() {
     '<div class="fg">' +
       '<div class="fgr full"><label>Recipients (pick one or more)</label>' +
         '<div style="border:0.5px solid #ddd;border-radius:6px;padding:8px 10px;background:#fafafa;max-height:210px;overflow-y:auto">' + rows + '</div>' +
-        '<div style="font-size:11px;color:#888;margin-top:4px">Admins, Project Managers and Superintendents with an email on file. Each gets their own copy.</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:4px">Admins, Project Managers, Superintendents and Accounting with an email on file. Each gets their own copy.</div>' +
       '</div>' +
       '<div class="fgr full"><label>Subject *</label>' +
         '<input type="text" id="prod-em-subject" value="' + _prodEsc('KMI Production Packet \u2014 ' + label) + '">' +
@@ -49846,11 +50184,13 @@ function prodPacketOpenSend() {
         '<textarea id="prod-em-body" rows="9" style="font-family:monospace;font-size:12px">' + _prodEsc(body) + '</textarea>' +
       '</div>' +
     '</div>' +
+    '<div id="prod-em-warn"></div>' +
     '<div id="prod-em-err" style="color:#A32D2D;font-size:12px;margin:6px 0;min-height:14px"></div>' +
     '<div class="mbtns">' +
       '<button class="btn" onclick="closeModal()" id="prod-em-cancel-btn">Cancel</button>' +
       '<button class="btn btn-p" onclick="prodPacketSend()" id="prod-em-send-btn">&#9993;&#65039; Send</button>' +
     '</div>');
+  _pjcFillSendWarning(_prodReviewWeek);
 }
 
 async function prodPacketSend() {
@@ -49898,6 +50238,13 @@ async function prodPacketSend() {
   var body = bodyTxt +
     (res.unapproved ? ('\n\n' + res.unapproved + ' job report' + (res.unapproved === 1 ? ' is' : 's are') +
       ' marked UNAPPROVED \u2014 those figures had not been approved when the packet went out.') : '');
+  if (res.jobCost && !res.jobCost.payrollPosted) {
+    body += '\n\nPayroll for the week had not posted in Foundation when this packet was built, ' +
+      'so labor on the job cost pages runs through the prior week.';
+  }
+  if (res.jobCost && res.jobCost.stale) {
+    body += '\n\nFoundation data was out of date when this packet was built. Each job cost page notes when it was last synced.';
+  }
   var filename = 'KMI Weekly Production - ' + _prodReviewWeek + '.pdf';
 
   for (var i = 0; i < rcpts.length; i++) {
@@ -55915,7 +56262,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-08-2026-10-08-FS1';
+var KMI_BUILD = '2026-10-09-PJC1';
 
 var _kmiSessionId = (function(){
   try {
