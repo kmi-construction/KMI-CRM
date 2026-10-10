@@ -1679,6 +1679,7 @@ tr.gc-line:hover td{background:#fafafa}
     <div class="sb-group-hdr" onclick="toggleSbGroup('accounting')"><span>Accounting</span><span class="sb-chev">▾</span></div>
     <div class="sb-group-items">
       <div class="ni" onclick="nav('ap-invoices')"><span class="nico">▦</span>AP Invoices</div>
+      <div class="ni" onclick="nav('rental-review')"><span class="nico">▣</span>Rental Review</div>
       <div class="ni" onclick="nav('ap-approvals')"><span class="nico">✓</span>AP Approvals</div>
       <div class="ni" onclick="nav('ap-checks')"><span class="nico">▤</span>Check Register</div>
       <div class="ni" onclick="nav('fin-statements')"><span class="nico">▥</span>Financial Statements</div>
@@ -2771,6 +2772,12 @@ tr.gc-line:hover td{background:#fafafa}
 </div>
 
 <!-- AP CHECK REGISTER -->
+<div class="pg" id="pg-rental-review">
+  <div class="ph"><div><h1>Rental Review</h1><div class="sub" id="rr-sub">Equipment &amp; scaffold on rent</div><div class="stripe"></div></div><div id="rr-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div></div>
+  <div id="rr-banner" style="display:none"></div>
+  <div id="rr-body"></div>
+</div>
+
 <div class="pg" id="pg-ap-checks">
   <div class="ph"><div><h1>Check Register</h1><div class="sub">Import the Foundation A/P Check Register and tie check payments back to AP invoices.</div><div class="stripe"></div></div></div>
   <div id="ap-chk-banner" style="display:none"></div>
@@ -4340,6 +4347,9 @@ var PERMISSIONS = {
   'ap-invoices': ['full','none','none','full','none','none','none'],
   'ap-approvals': ['full','full','none','full','none','none','full'],
   'ap-checks': ['full','none','none','full','none','none','none'],
+  // Rental Review (MR1): office + supers set Project Status / Action; PC reads.
+  // Re-read and vendor layout notes additionally require full 'ap-invoices'.
+  'rental-review': ['full','full','read','full','full','none','none'],
   // Financial statements (FS1): Admin + Accounting. RLS (kmi_fs_can_read) is
   // the real gate; this row only shapes the sidebar and router.
   'fin-statements': ['full','none','none','full','none','none','none'],
@@ -4522,6 +4532,7 @@ var PAGE_ACTION_MAP = {
   'ap-approvals':   'ap-approvals',
   'prod-review':    'approve-production-week',
   'ap-checks':      'ap-checks',
+  'rental-review':  'rental-review',
   'fin-statements': 'fin-statements',
   'budget':         'view_project_budget',
   'tm-tickets':     'view-tm-tickets',
@@ -6421,6 +6432,7 @@ function nav(page) {
     'ap-approvals':   renderApApprovals,
     'prod-review':    renderProdReview,
     'ap-checks':      renderApChecks,
+    'rental-review':  renderRentalReview,
     'fin-statements': renderFinStatements,
     projects:         renderProjects,
     'new-project':    initNewProject,
@@ -30833,6 +30845,7 @@ function _vendorFormHtml(v) {
       '<div class="fgr"><label>City, State ZIP</label><input id="vd-cs" value="' + _vendorEsc(v.cityState || '') + '" placeholder="Chicago, IL 60631"></div>' +
       '<div class="fgr"><label>Website</label><input id="vd-w" value="' + _vendorEsc(v.website || '') + '" placeholder="https://..."></div>' +
       '<div class="fgr full"><label>Notes</label><textarea id="vd-notes" placeholder="Any notes about this vendor...">' + _vendorEsc(v.notes || '') + '</textarea></div>' +
+      _vendorRentalHintsHtml(v) +
     '</div>';
 }
 
@@ -30879,6 +30892,7 @@ function saveVendor() {
     website:        (g('vd-w').value     || '').trim(),
     notes:          (g('vd-notes').value || '').trim()
   };
+  var _rhVals = _vendorReadRentalHints();
   if (!Array.isArray(db.vendors)) db.vendors = [];
   if (_editVendorId) {
     var existing = getVendor(_editVendorId);
@@ -30887,7 +30901,9 @@ function saveVendor() {
     data.id = Date.now();
     db.vendors.push(data);
   }
+  var _rhVendorId = _editVendorId;
   saveDB(); closeModal(); _editVendorId = null;
+  _vendorSaveRentalHints(_rhVendorId, _rhVals);
   // Refresh whichever vendor view is currently active
   var activePg = document.querySelector('.pg.active');
   if (activePg && activePg.id === 'pg-vendors') renderVendors();
@@ -44310,6 +44326,7 @@ async function apHandleUpload(evt){
     db.apInvoices.push(rec);
     apLog(id, readFailed?'read-failed':'received', readFailed?('Upload '+file.name+' \u2014 could not read ('+readErr+'); enter manually'):('Uploaded '+file.name+(rec.isDuplicate?' \u2014 flagged duplicate':'')));
     await apPushInvoice(rec);
+    await _apRpSaveFromExtract(rec, ex, readFailed);
     if(readFailed) fail++; else ok++;
   }
   saveDB();
@@ -44480,7 +44497,8 @@ function apOpenCode(id){
       pickedViaSearch: false,
       saveAlias: false,
       dupDismissed: true,
-      vendorSearch: ''
+      vendorSearch: '',
+      rental: _apRpDraft(i)
     };
   } else {
     _apCodeDraft = {
@@ -44498,7 +44516,8 @@ function apOpenCode(id){
       pickedViaSearch: false,
       saveAlias: false,
       dupDismissed: !i.isDuplicate,
-      vendorSearch: ''
+      vendorSearch: '',
+      rental: _apRpDraft(i)
     };
   }
   g('ap-inbox-view').style.display = 'none';
@@ -44525,6 +44544,7 @@ function _apCodeSync(){
   // the total current for the split tie-out.
   var inv = (db.apInvoices||[]).find(function(x){return String(x.id)===String(_apCodeId);});
   if(inv && g('apc-invno')!=null) _apReadHeader(inv);
+  _apRpSync(d);
   function val(id){ var e=g(id); return e?e.value:undefined; }
   if(g('apc-job')!=null) d.jobNo = val('apc-job');
   if(g('apc-code')!=null) d.costCode = val('apc-code');
@@ -44688,7 +44708,7 @@ function apRenderCode(){
       f2('Terms','apc-terms',i.terms)+f2('PO #','apc-po',i.poNo)+f2('Job # (printed)','apc-jobno',i.jobNo)+
       f2('Subtotal','apc-sub',i.subtotal)+f2('Sales tax','apc-taxamt',i.salesTax)+f2('Freight','apc-freight',i.freight)+
     '</div>'+
-    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px"><div></div><div></div>'+f2('Total','apc-total',i.total,'oninput="apCodeSumPreview()"')+'</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px"><div></div><div></div>'+f2('Total','apc-total',i.total,'oninput="apCodeSumPreview()"')+'</div>'+_apRentalBlock(i,d)+
   '</div>';
 
   // coding section
@@ -44916,6 +44936,7 @@ async function apCodeSave(submit){
         var ar = await supabaseClient.from('kmi_ap_vendor_aliases').upsert(toSBApAlias(aliasRec));
         if(ar && ar.error) throw new Error('alias \u2014 '+ar.error.message);
       }
+      await _apRpPersist(i, d);
     }catch(e){
       var pillE=g('apc-status-pill'); if(pillE) pillE.innerHTML = apStatusPill(i.status);
       apSetBanner('error', 'Coding saved on this device, but the cloud sync failed and it will be lost on reload: '+apEsc(e&&e.message?e.message:String(e))+'. Send me this message and I\u2019ll fix it.');
@@ -45000,8 +45021,8 @@ function _apRentalFlowStart(i, lines){
   _apRentalQueue = places;
   _apRentalPos = 0;
   var ex = i.extractedJson || {};
-  _apRentalUnitNo = ex.unit_no || ex.unitNo || ex.serial || '';
-  _apRentalDate   = ex.rental_period_start || ex.period_start || (new Date().toISOString().slice(0,10));
+  _apRentalUnitNo = i.rentalUnitNo || ex.rental_unit_no || ex.unit_no || ex.unitNo || ex.serial || '';
+  _apRentalDate   = i.rentalPeriodStart || _rrIsoFromUS(ex.rental_period_start) || ex.period_start || (new Date().toISOString().slice(0,10));
   _apRentalStep();
 }
 
@@ -46207,6 +46228,663 @@ function fsExportCsv(){
   a.download = 'KMI_' + (stmt === 'IS' ? 'Income_Statement' : 'Balance_Sheet') + '_' + _fsKey(y, m).slice(0, 7) + (_fsStatus() === 'final' ? '_FINAL' : '_DRAFT') + '.csv';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// RENTAL REVIEW (MR1) — rental periods on AP invoices, vendor layout notes,
+// and the Rental Review page (By Project / Detail / Vendor Totals / Layout
+// Notes) fed by the kmi_rental_report_rows view.
+//
+// Write rules (stale-write safety): the rental columns on kmi_ap_invoices,
+// the layout notes on kmi_vendors and rental_site_status on kmi_projects are
+// written ONLY by targeted .update() calls below — never through the
+// wholesale toSB* mappers — so a stale device can't blank them.
+// ════════════════════════════════════════════════════════════════════════
+var RR_RENTAL_CLASSES = { '5':1, '60':1, '9':1, '7':1 };
+var RR_SITE_STATUSES = ['Active','Wrapping Up','Ready for Pickup','Complete - Call Off'];
+var RR_ACTIONS = ['Keep','Call Off','Verify on Site','Dispute Invoice'];
+
+function _rrIsoFromUS(s){
+  var t = String(s==null?'':s).trim(), y, mo, d, m;
+  if((m = t.match(/^(\d{4})-(\d{2})-(\d{2})/))){ y=+m[1]; mo=+m[2]; d=+m[3]; }
+  else if((m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/))){ y = m[3].length===2 ? 2000+(+m[3]) : +m[3]; mo=+m[1]; d=+m[2]; }
+  else return '';
+  var dt = new Date(Date.UTC(y, mo-1, d));
+  if(dt.getUTCFullYear()!==y || dt.getUTCMonth()!==mo-1 || dt.getUTCDate()!==d) return '';
+  return dt.toISOString().slice(0,10);
+}
+function _rrFmtDate(iso){
+  if(!iso) return '';
+  var m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? ((+m[2])+'/'+(+m[3])+'/'+m[1].slice(2)) : String(iso);
+}
+function _rrDateObj(iso){
+  var m = String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? new Date(+m[1], +m[2]-1, +m[3]) : null;
+}
+function _rrTodayIso(){
+  var d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function _rrEsc(s){ return escapeHtml(String(s==null?'':s)); }
+function _rrMoney(n){ return apMoney(n); }
+function _rrFnUrl(){
+  var creds = getSBCreds();
+  if((!creds||!creds.url||!creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) creds = {url:DEFAULT_SB_URL, key:DEFAULT_SB_KEY};
+  if(!creds||!creds.url||!creds.key) return null;
+  return { url: normalizeSBUrl(creds.url) + '/functions/v1/extract-invoice', key: creds.key };
+}
+// One call to extract-invoice re-read mode (max 5 ids). Returns results[].
+async function _rrRereadCall(ids){
+  var fn = _rrFnUrl();
+  if(!fn) throw new Error('Supabase not configured');
+  var resp = await fetch(fn.url, { method:'POST',
+    headers:{ 'Content-Type':'application/json', 'apikey':fn.key, 'Authorization':'Bearer '+kmiAuthToken(fn.key) },
+    body: JSON.stringify({ reread_invoice_ids: ids }) });
+  var data = await resp.json().catch(function(){ return null; });
+  if(!resp.ok || !data || !data.ok) throw new Error((data && data.error) ? data.error : ('reader returned status '+resp.status));
+  return data.results || [];
+}
+
+// ── AP coding screen: rental period block ───────────────────────────────
+function _apRpDraft(i){
+  var v = { start:i.rentalPeriodStart||'', end:i.rentalPeriodEnd||'', unit:i.rentalUnitNo||'' };
+  return { start:v.start, end:v.end, unit:v.unit, orig:{ start:v.start, end:v.end, unit:v.unit } };
+}
+function _apRpShow(i, d){
+  if(i.rentalPeriodStart || i.rentalPeriodEnd || i.rentalUnitNo || i.rentalPeriodSource) return true;
+  if(!d) return false;
+  if(RR_RENTAL_CLASSES[String(d.costClass||'')]) return true;
+  return (d.lines||[]).some(function(l){ return RR_RENTAL_CLASSES[String(l.costClass||'')]; });
+}
+function _apRpSourceHtml(src, note){
+  if(src==='extracted')   return '<span style="color:#3B6D11">Read from invoice'+(note?' \u00b7 '+apEsc(note):'')+'</span>';
+  if(src==='ap_entered')  return '<span style="color:#3A4478">Entered by AP'+(note?' \u00b7 '+apEsc(note):'')+'</span>';
+  if(src==='needs_review')return '<span style="color:#8a5a00;font-weight:600">Needs review'+(note?' \u2014 '+apEsc(note):'')+'</span>';
+  return '<span style="color:#888">Not read yet</span>';
+}
+function _apRentalBlock(i, d){
+  if(!d || !_apRpShow(i, d)) return '';
+  if(!d.rental) d.rental = _apRpDraft(i);
+  var r = d.rental;
+  var inp = 'width:100%;padding:6px 8px;border:1px solid #d8dce6;border-radius:6px;font-size:12.5px;font-family:inherit;box-sizing:border-box';
+  var lab = 'display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#888;font-weight:600;margin-bottom:3px';
+  var v = i.vendorId ? getVendor(i.vendorId) : null;
+  var canReread = !!i.pdfPath && hasFull('ap-invoices');
+  return '<div style="border-top:1px solid #eef0f4;margin-top:6px;padding-top:10px">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">'+
+      '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Rental period</div>'+
+      '<div style="font-size:11px">'+_apRpSourceHtml(i.rentalPeriodSource, i.rentalPeriodNote)+'</div>'+
+    '</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px">'+
+      '<div style="margin-bottom:10px"><label for="apc-rstart" style="'+lab+'">Start</label><input id="apc-rstart" type="date" value="'+apEsc(r.start)+'" style="'+inp+'"></div>'+
+      '<div style="margin-bottom:10px"><label for="apc-rend" style="'+lab+'">End</label><input id="apc-rend" type="date" value="'+apEsc(r.end)+'" style="'+inp+'"></div>'+
+      '<div style="margin-bottom:10px"><label for="apc-runit" style="'+lab+'">Eq / Unit #</label><input id="apc-runit" value="'+apEsc(r.unit)+'" style="'+inp+'"></div>'+
+    '</div>'+
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:11.5px">'+
+      (canReread ? '<button type="button" class="btn" onclick="_apRpReread()" style="font-size:12px;padding:5px 12px">Re-read from invoice</button>' : '')+
+      (v ? '<a href="#" onclick="event.preventDefault();showEditVendor('+JSON.stringify(v.id)+')" style="color:var(--kmi)">'+apEsc(v.name)+' layout note</a>' : '')+
+      '<span style="color:#999">Changes save with Save / Submit and are marked \u201centered by AP.\u201d</span>'+
+    '</div>'+
+  '</div>';
+}
+function _apRpSync(d){
+  if(!d || !d.rental) return;
+  var s = g('apc-rstart'), e = g('apc-rend'), u = g('apc-runit');
+  if(s) d.rental.start = s.value || '';
+  if(e) d.rental.end = e.value || '';
+  if(u) d.rental.unit = (u.value || '').trim();
+}
+// Called inside apCodeSave's cloud try-block: throws on failure so the
+// existing error banner reports it.
+async function _apRpPersist(i, d){
+  if(!d || !d.rental || !supabaseClient) return;
+  var r = d.rental, o = r.orig;
+  if(r.start===o.start && r.end===o.end && r.unit===o.unit) return;
+  if(r.start && r.end && r.start > r.end) throw new Error('rental period start is after the end');
+  var who = _currentUser ? (_currentUser.email || '') : '';
+  var patch = {
+    rental_period_start: r.start || null,
+    rental_period_end: r.end || null,
+    rental_unit_no: r.unit || null,
+    rental_period_source: (r.start || r.end || r.unit) ? 'ap_entered' : null,
+    rental_period_note: (r.start || r.end || r.unit) ? ('by '+who) : null
+  };
+  var u = await supabaseClient.from('kmi_ap_invoices').update(patch).eq('id', String(i.id));
+  if(u && u.error) throw new Error('rental period \u2014 '+u.error.message);
+  i.rentalPeriodStart = r.start; i.rentalPeriodEnd = r.end; i.rentalUnitNo = r.unit;
+  i.rentalPeriodSource = patch.rental_period_source || ''; i.rentalPeriodNote = patch.rental_period_note || '';
+  r.orig = { start:r.start, end:r.end, unit:r.unit };
+}
+// Upload path: extract-invoice already ran the date checks.
+async function _apRpSaveFromExtract(rec, ex, readFailed){
+  if(readFailed || !ex || !supabaseClient) return;
+  var s = _rrIsoFromUS(ex.rental_period_start), e = _rrIsoFromUS(ex.rental_period_end), u = String(ex.rental_unit_no||'').trim();
+  if(!s && !e && !u) return;
+  var check = String(ex.rental_period_check || 'Period not found');
+  var patch = {
+    rental_period_start: s || null, rental_period_end: e || null, rental_unit_no: u || null,
+    rental_period_source: check==='ok' ? 'extracted' : 'needs_review',
+    rental_period_note: check==='ok' ? (String(ex.rental_period_found_at||'').trim() || null) : check
+  };
+  try{
+    var r = await supabaseClient.from('kmi_ap_invoices').update(patch).eq('id', String(rec.id));
+    if(r && r.error){ console.warn('rental period save:', r.error.message); return; }
+    rec.rentalPeriodStart = s; rec.rentalPeriodEnd = e; rec.rentalUnitNo = u;
+    rec.rentalPeriodSource = patch.rental_period_source; rec.rentalPeriodNote = patch.rental_period_note || '';
+  }catch(err){ console.warn('rental period save exception:', err); }
+}
+async function _apRpRefresh(i){
+  var q = await supabaseClient.from('kmi_ap_invoices')
+    .select('rental_period_start,rental_period_end,rental_unit_no,rental_period_source,rental_period_note')
+    .eq('id', String(i.id)).maybeSingle();
+  if(q && !q.error && q.data){
+    i.rentalPeriodStart = q.data.rental_period_start||''; i.rentalPeriodEnd = q.data.rental_period_end||'';
+    i.rentalUnitNo = q.data.rental_unit_no||''; i.rentalPeriodSource = q.data.rental_period_source||'';
+    i.rentalPeriodNote = q.data.rental_period_note||'';
+  }
+}
+async function _apRpReread(){
+  if(!requireFull('ap-invoices','re-read rental periods')) return;
+  var i = (db.apInvoices||[]).find(function(x){ return String(x.id)===String(_apCodeId); });
+  if(!i || !supabaseClient) return;
+  _apCodeSync();
+  if(i.rentalPeriodSource==='ap_entered'){
+    if(!confirm('This rental period was entered by hand. Re-reading replaces it with what the invoice says. Continue?')) return;
+    var c = await supabaseClient.from('kmi_ap_invoices').update({ rental_period_source:null }).eq('id', String(i.id));
+    if(c && c.error){ apSetBanner('error','Could not clear the hand-entered period: '+apEsc(c.error.message)); return; }
+  }
+  apSetBanner('info','Re-reading the rental period from the invoice\u2026 (10\u201330s)');
+  try{
+    var res = (await _rrRereadCall([String(i.id)]))[0] || {};
+    if(res.status!=='updated') throw new Error(String(res.status||'no result')+(res.detail?(' \u2014 '+res.detail):''));
+    await _apRpRefresh(i);
+    if(_apCodeDraft) _apCodeDraft.rental = _apRpDraft(i);
+    apRenderCode();
+    apSetBanner(res.check==='ok'?'success':'error', res.check==='ok' ? 'Rental period read from the invoice.' : ('Rental period needs review: '+apEsc(res.check)));
+  }catch(e){
+    apSetBanner('error','Re-read failed: '+apEsc(e && e.message ? e.message : String(e)));
+  }
+}
+
+// ── Vendor record: rental layout notes ──────────────────────────────────
+function _vendorRentalHintsHtml(v){
+  if(!v || !v.id) return '';
+  var help = '<span style="font-weight:400;text-transform:none;letter-spacing:0;color:#aaa;font-size:10px">(rental vendors \u2014 tells the AP reader where to look)</span>';
+  return '<div class="fgr full"><label>Rental period location '+help+'</label><textarea id="vd-rph" rows="2" placeholder="e.g. Top-right box labeled \u201cRental Period\u201d, MM/DD/YY \u2013 MM/DD/YY">'+_vendorEsc(v.rentalPeriodHint||'')+'</textarea></div>'+
+         '<div class="fgr full"><label>Unit # location</label><textarea id="vd-ruh" rows="1" placeholder="e.g. Line item description, after \u201cUnit\u201d">'+_vendorEsc(v.rentalUnitHint||'')+'</textarea></div>';
+}
+function _vendorReadRentalHints(){
+  var p = g('vd-rph'), u = g('vd-ruh');
+  if(!p && !u) return null;
+  return { p: p ? (p.value||'').trim() : '', u: u ? (u.value||'').trim() : '' };
+}
+async function _vendorSaveRentalHints(id, vals){
+  if(id==null || !vals || !supabaseClient) return;
+  var v = getVendor(id); if(!v) return;
+  if((v.rentalPeriodHint||'')===vals.p && (v.rentalUnitHint||'')===vals.u) return;
+  try{
+    var r = await supabaseClient.from('kmi_vendors').update({ rental_period_hint: vals.p || null, rental_unit_hint: vals.u || null }).eq('id', id);
+    if(r && r.error) throw r.error;
+    v.rentalPeriodHint = vals.p; v.rentalUnitHint = vals.u;
+  }catch(e){
+    alert('The vendor saved, but the rental layout note did not: '+(e && e.message ? e.message : String(e)));
+  }
+}
+
+// ── Rental Review page ──────────────────────────────────────────────────
+var _rrRows = [], _rrTab = 'detail', _rrLoaded = false, _rrBusy = false;
+var _rrF = { q:'', vendor:'', type:'', nopay:false, newwk:false, review:false, flags:false };
+
+function _rrBanner(kind, html){
+  var b = g('rr-banner'); if(!b) return;
+  if(!html){ b.style.display='none'; b.innerHTML=''; return; }
+  var c = kind==='error' ? ['#fdeceb','#E24B4A','#A32D2D'] : kind==='success' ? ['#eef6e6','#97C459','#3B6D11'] : ['#eef1f8','#8B93B8','#2A3260'];
+  b.style.display='block';
+  b.innerHTML = '<div style="background:'+c[0]+';border:1px solid '+c[1]+';color:'+c[2]+';border-radius:6px;padding:9px 12px;margin-bottom:12px;font-size:12.5px">'+html+'</div>';
+}
+
+async function renderRentalReview(){
+  if(!hasRead('rental-review')) return;
+  var el = g('rr-body'); if(!el) return;
+  var bx = g('rr-actions');
+  if(bx){
+    bx.innerHTML =
+      (hasFull('ap-invoices') ? '<button class="btn" onclick="_rrRereadOpen()">Re-read rental periods</button>' : '')+
+      '<button class="btn btn-p" onclick="_rrExport()">Export to Excel</button>';
+  }
+  if(!supabaseClient){ el.innerHTML = '<div class="card"><div style="color:#888;font-size:12px">Not connected.</div></div>'; return; }
+  if(!_rrLoaded) el.innerHTML = '<div class="card"><div style="color:#888;font-size:12px">Loading\u2026</div></div>';
+  try{
+    var all = [], from = 0, page = 1000;
+    for(;;){
+      var r = await supabaseClient.from('kmi_rental_report_rows').select('*').range(from, from+page-1);
+      if(r.error) throw r.error;
+      all = all.concat(r.data||[]);
+      if(!r.data || r.data.length < page) break;
+      from += page;
+    }
+    _rrRows = all;
+    await _rrLoadJobNotes();
+    _rrLoaded = true;
+    _rrRender();
+  }catch(e){
+    el.innerHTML = '<div class="card"><div style="color:#A32D2D;font-size:12px">Could not load the rental report: '+_rrEsc(e && e.message ? e.message : String(e))+'</div></div>';
+  }
+}
+
+function _rrFlags(r){
+  var f = [];
+  if(!r.vendor || r.vendor==='(vendor missing)') f.push('Vendor missing in AP');
+  if(String(r.ap_status||'').toLowerCase()==='rejected') f.push('Rejected in AP');
+  if(String(r.ap_status||'').toLowerCase()==='pending') f.push('Pending approval');
+  if(Number(r.amount)===0) f.push('$0 invoice');
+  if(Number(r.amount)<0) f.push('Credit');
+  if(r.board_status==='Not on board') f.push('Not on Equipment board');
+  if(r.invoice_date_missing) f.push('No invoice date (received date used)');
+  if(r.period_source==='needs_review') f.push('Period: '+(r.period_note||'needs review'));
+  if(r.period_source==='missing') f.push('Period not read');
+  return f;
+}
+function _rrIsReview(r){ return r.period_source==='needs_review' || r.period_source==='missing'; }
+function _rrFiltered(){
+  var q = _rrF.q.toLowerCase();
+  return _rrRows.filter(function(r){
+    if(_rrF.vendor && r.vendor!==_rrF.vendor) return false;
+    if(_rrF.type && r.rental_type!==_rrF.type) return false;
+    if(_rrF.nopay && r.payroll_prev_week) return false;
+    if(_rrF.newwk && !r.new_this_week) return false;
+    if(_rrF.review && !_rrIsReview(r)) return false;
+    if(_rrF.flags && !_rrFlags(r).length) return false;
+    if(q){
+      var hay = [r.vendor, r.job_no, r.project, r.invoice_no, r.eq_no, r.eq_desc].join(' ').toLowerCase();
+      if(hay.indexOf(q) < 0) return false;
+    }
+    return true;
+  }).sort(function(a,b){
+    return (Number(a.job_no)||0)-(Number(b.job_no)||0) || String(a.rental_type).localeCompare(String(b.rental_type)) ||
+      String(a.vendor).localeCompare(String(b.vendor)) || String(a.invoice_date).localeCompare(String(b.invoice_date));
+  });
+}
+function _rrJobs(rows){
+  var m = {};
+  rows.forEach(function(r){
+    var k = r.job_no;
+    if(!m[k]) m[k] = { job_no:k, project:r.project, project_id:r.project_id, n:0, eq:0, sc:0, pw:!!r.payroll_prev_week, cm:!!r.payroll_current_month, last:r.last_payroll_date, status:r.project_status||'', invs:{} };
+    var j = m[k];
+    if(!j.invs[r.invoice_id]){ j.invs[r.invoice_id]=1; j.n++; }
+    if(r.rental_type==='Scaffold') j.sc += Number(r.amount)||0; else j.eq += Number(r.amount)||0;
+  });
+  return Object.keys(m).map(function(k){ return m[k]; }).sort(function(a,b){ return (Number(a.job_no)||0)-(Number(b.job_no)||0); });
+}
+function _rrVendors(rows){
+  var m = {};
+  rows.forEach(function(r){
+    var k = r.vendor;
+    if(!m[k]) m[k] = { vendor:k, vendor_id:r.vendor_id, type:r.rental_type, invs:{}, jobs:{}, total:0, nopay:0, read:0, review:0 };
+    var v = m[k];
+    v.invs[r.invoice_id]=1; v.jobs[r.job_no]=1;
+    v.total += Number(r.amount)||0;
+    if(!r.payroll_prev_week) v.nopay += Number(r.amount)||0;
+    if(r.period_source==='extracted' || r.period_source==='ap_entered') v.read++; else v.review++;
+  });
+  return Object.keys(m).map(function(k){ var v=m[k]; v.n=Object.keys(v.invs).length; v.nj=Object.keys(v.jobs).length; return v; })
+    .sort(function(a,b){ return b.total-a.total; });
+}
+function _rrPill(yes){
+  return yes ? '<span style="display:inline-block;min-width:20px;padding:1px 6px;border-radius:4px;background:#E3EFD6;color:#2d5410;font-weight:700">Y</span>'
+             : '<span style="display:inline-block;min-width:20px;padding:1px 6px;border-radius:4px;background:#F8D7D3;color:#8a1f1f;font-weight:700">N</span>';
+}
+function _rrSelect(opts, val, onchange, disabled, label){
+  return '<select aria-label="'+label+'" onchange="'+onchange+'"'+(disabled?' disabled':'')+' style="padding:4px 6px;border:1px solid #d8c88f;border-radius:5px;font-size:12px;background:'+(disabled?'#f6f6f6':'#FFF8E1')+';font-family:inherit">'+
+    '<option value="">\u2014</option>'+opts.map(function(o){ return '<option'+(o===val?' selected':'')+'>'+_rrEsc(o)+'</option>'; }).join('')+'</select>';
+}
+
+function _rrRender(){
+  var el = g('rr-body'); if(!el) return;
+  var rows = _rrRows, today = _rrTodayIso();
+  var in7 = new Date(); in7.setDate(in7.getDate()+7);
+  var in7Iso = in7.getFullYear()+'-'+String(in7.getMonth()+1).padStart(2,'0')+'-'+String(in7.getDate()).padStart(2,'0');
+  var tot = 0, invs = {}, jobs = {}, npAmt = 0, npJobs = {}, ending = 0, review = 0;
+  rows.forEach(function(r){
+    tot += Number(r.amount)||0; invs[r.invoice_id]=1; jobs[r.job_no]=1;
+    if(!r.payroll_prev_week){ npAmt += Number(r.amount)||0; npJobs[r.job_no]=1; }
+    if(r.rental_end && r.rental_end >= today && r.rental_end <= in7Iso) ending++;
+    if(_rrIsReview(r)) review++;
+  });
+  var wk = rows.length ? (_rrFmtDate(rows[0].payroll_week_start)+' \u2013 '+_rrFmtDate(rows[0].payroll_week_end)) : '';
+  var sub = g('rr-sub'); if(sub) sub.textContent = 'Equipment & scaffold on rent \u00b7 as of '+_rrFmtDate(today)+(wk?(' \u00b7 payroll week '+wk):'');
+
+  function card(label, val, note, color){
+    return '<div class="card" style="margin:0;border-top:3px solid '+color+'"><div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">'+label+'</div>'+
+      '<div style="font-size:22px;font-weight:600;color:'+(color==='#1E2448'?'inherit':color)+'">'+val+'</div><div style="font-size:11px;color:#666;margin-top:2px">'+note+'</div></div>';
+  }
+  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px">'+
+    card('On rent', _rrMoney(tot), Object.keys(invs).length+' invoices \u00b7 '+Object.keys(jobs).length+' jobs', '#1E2448')+
+    card('No payroll last week', _rrMoney(npAmt), Object.keys(npJobs).length+' jobs', '#A32D2D')+
+    card('Period ends in 7 days', String(ending), 'call off or renew', '#7a5f1f')+
+    card('Period needs review', String(review), 'not read, or failed checks', '#3A4478')+
+  '</div>';
+
+  var tabs = [['project','By Project'],['detail','Detail'],['vendor','Vendor Totals']];
+  if(hasFull('ap-invoices')) tabs.push(['notes','Layout Notes']);
+  h += '<div role="tablist" style="display:flex;gap:4px;border-bottom:1px solid #ddd;margin-bottom:12px;flex-wrap:wrap">'+
+    tabs.map(function(t){
+      var on = _rrTab===t[0];
+      return '<button role="tab" aria-selected="'+on+'" onclick="_rrSetTab(\''+t[0]+'\')" style="border:0;background:none;padding:9px 14px;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:-1px;'+
+        (on?'border-bottom:2px solid var(--ac);color:var(--kmi);font-weight:600':'border-bottom:2px solid transparent;color:#555')+'">'+t[1]+'</button>';
+    }).join('')+'</div>';
+
+  if(_rrTab==='detail') h += _rrDetailHtml();
+  else if(_rrTab==='project') h += _rrProjectHtml();
+  else if(_rrTab==='vendor') h += _rrVendorHtml();
+  else h += _rrNotesHtml();
+  el.innerHTML = h;
+}
+function _rrSetTab(t){ _rrTab = t; _rrRender(); }
+function _rrSetF(k, v){ _rrF[k] = v; _rrRender(); var q=g('rr-q'); if(k==='q' && q){ q.focus(); q.setSelectionRange(q.value.length,q.value.length); } }
+
+function _rrDetailHtml(){
+  var canEdit = hasFull('rental-review');
+  var vendors = _rrVendors(_rrRows).map(function(v){ return v.vendor; }).sort();
+  function chip(k, label){
+    var on = !!_rrF[k];
+    return '<button aria-pressed="'+on+'" onclick="_rrSetF(\''+k+'\','+(!on)+')" style="padding:6px 12px;font-size:12px;border-radius:16px;cursor:pointer;font-family:inherit;border:1px solid '+(on?'var(--kmi)':'#ccc')+';background:'+(on?'var(--kmi)':'#fff')+';color:'+(on?'#fff':'#333')+'">'+label+'</button>';
+  }
+  var h = '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:10px">'+
+    '<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#555">Search<input id="rr-q" type="search" value="'+_rrEsc(_rrF.q)+'" oninput="_rrSetF(\'q\',this.value)" placeholder="Vendor, job, invoice #" style="padding:6px 9px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;width:210px;font-family:inherit"></label>'+
+    '<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#555">Vendor<select onchange="_rrSetF(\'vendor\',this.value)" style="padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit"><option value="">All vendors</option>'+
+      vendors.map(function(v){ return '<option'+(v===_rrF.vendor?' selected':'')+'>'+_rrEsc(v)+'</option>'; }).join('')+'</select></label>'+
+    '<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#555">Type<select onchange="_rrSetF(\'type\',this.value)" style="padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit">'+
+      '<option value="">Equipment + Scaffold</option><option'+(_rrF.type==='Equipment'?' selected':'')+'>Equipment</option><option'+(_rrF.type==='Scaffold'?' selected':'')+'>Scaffold</option></select></label>'+
+    chip('nopay','No payroll last week')+chip('newwk','New this week')+chip('review','Period needs review')+chip('flags','Has flags')+
+  '</div>';
+  var rows = _rrFiltered();
+  var th = function(t, right){ return '<th style="padding:8px 9px;font-weight:600;white-space:nowrap'+(right?';text-align:right':'')+'">'+t+'</th>'; };
+  h += '<div class="card" style="padding:0;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:2000px;width:100%">'+
+    '<thead><tr style="background:var(--kmi);color:#fff;text-align:left">'+
+    th('Vendor')+th('Job #')+th('Project')+th('Type')+th('Cost Class')+th('Eq #')+th('Eq Description')+th('Invoice #')+th('Invoice Date')+
+    th('Rental Start')+th('Rental End')+th('Days on Rent')+th('New')+th('Amount',1)+th('AP Status')+th('Payroll Prev Wk')+th('Payroll Cur Mo')+
+    th('Project Status')+th('Action')+th('Flags')+th('Notes')+'</tr></thead><tbody>';
+  var sum = 0;
+  rows.forEach(function(r){
+    sum += Number(r.amount)||0;
+    var key = _rrEsc(JSON.stringify(r.rental_key));
+    var src = r.period_source==='extracted' ? '<div style="font-size:10px;color:#3B6D11">read from invoice</div>'
+            : r.period_source==='ap_entered' ? '<div style="font-size:10px;color:#3A4478">entered by AP</div>'
+            : '<div style="font-size:10px;color:#8a5a00;font-weight:600">needs review</div>';
+    h += '<tr style="border-top:1px solid #eee;vertical-align:top">'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+_rrEsc(r.vendor)+'</td>'+
+      '<td style="padding:7px 9px">'+_rrEsc(r.job_no)+'</td>'+
+      '<td style="padding:7px 9px;min-width:170px">'+_rrEsc(r.project)+'</td>'+
+      '<td style="padding:7px 9px">'+_rrEsc(r.rental_type)+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+_rrEsc(r.cost_class)+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+_rrEsc(r.eq_no||'\u2014')+'</td>'+
+      '<td style="padding:7px 9px">'+_rrEsc(r.eq_desc||'')+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+(r.pdf_path?'<a href="#" onclick="event.preventDefault();_rrOpenPdf('+_rrEsc(JSON.stringify(r.pdf_path))+')" style="color:var(--kmi)">'+_rrEsc(r.invoice_no)+'</a>':_rrEsc(r.invoice_no))+'</td>'+
+      '<td style="padding:7px 9px">'+_rrFmtDate(r.invoice_date)+'</td>'+
+      '<td style="padding:7px 9px">'+(_rrFmtDate(r.rental_start)||'\u2014')+'</td>'+
+      '<td style="padding:7px 9px">'+(_rrFmtDate(r.rental_end)||'\u2014')+src+'</td>'+
+      '<td style="padding:7px 9px;white-space:nowrap">'+(r.days_on_rent!=null?(r.days_on_rent+' days'):'\u2014')+'</td>'+
+      '<td style="padding:7px 9px;text-align:center">'+(r.new_this_week?'Y':'')+'</td>'+
+      '<td style="padding:7px 9px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums">'+_rrMoney(r.amount)+'</td>'+
+      '<td style="padding:7px 9px;text-transform:capitalize">'+_rrEsc(r.ap_status)+'</td>'+
+      '<td style="padding:7px 9px;text-align:center">'+_rrPill(!!r.payroll_prev_week)+'</td>'+
+      '<td style="padding:7px 9px;text-align:center">'+_rrPill(!!r.payroll_current_month)+'</td>'+
+      '<td style="padding:5px 9px">'+_rrSelect(RR_SITE_STATUSES, r.project_status||'', '_rrSetStatus('+_rrEsc(JSON.stringify(r.project_id))+',this.value)', !canEdit || !r.project_id, 'Project status')+'</td>'+
+      '<td style="padding:5px 9px">'+_rrSelect(RR_ACTIONS, r.action||'', '_rrSetAction('+key+',\'action\',this.value)', !canEdit, 'Action')+'</td>'+
+      '<td style="padding:7px 9px;color:#A32D2D;font-size:11px;min-width:150px">'+_rrEsc(_rrFlags(r).join('; '))+'</td>'+
+      '<td style="padding:5px 9px;min-width:170px">'+(canEdit
+        ? '<input aria-label="Notes" value="'+_rrEsc(r.notes||'')+'" onchange="_rrSetAction('+key+',\'notes\',this.value)" style="width:100%;padding:4px 6px;border:1px solid #d8c88f;border-radius:5px;font-size:12px;background:#FFF8E1;font-family:inherit;box-sizing:border-box">'
+        : _rrEsc(r.notes||''))+'</td>'+
+    '</tr>';
+  });
+  if(!rows.length) h += '<tr><td colspan="21" style="padding:14px;color:#888">No rentals match these filters.</td></tr>';
+  h += '</tbody><tfoot><tr style="border-top:2px solid var(--kmi);font-weight:700"><td colspan="13" style="padding:8px 9px">Total \u00b7 '+rows.length+' rows</td>'+
+    '<td style="padding:8px 9px;text-align:right">'+_rrMoney(sum)+'</td><td colspan="7"></td></tr></tfoot></table></div>'+
+    '<div style="font-size:11px;color:#777;margin-top:6px">Project Status is set once per job and shows on every row for that job. Action and Notes follow the rental from invoice to invoice.</div>';
+  return h;
+}
+
+function _rrProjectHtml(){
+  var canEdit = hasFull('rental-review');
+  var jobs = _rrJobs(_rrRows);
+  var notesByJob = {};
+  _rrJobNotes.forEach(function(n){ notesByJob[n.rental_key.slice(4)] = n.notes||''; });
+  var h = '<div class="card" style="padding:0;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:1150px;width:100%">'+
+    '<thead><tr style="background:var(--kmi);color:#fff;text-align:left">'+
+    ['Job #','Project','Invoices','Equipment $','Scaffold $','Total $','Payroll Prev Wk','Payroll Cur Mo','Last Payroll','Review Flag','Project Status','Notes / Next Step'].map(function(t,ix){
+      return '<th style="padding:8px 9px;font-weight:600'+((ix>=3&&ix<=5)?';text-align:right':'')+'">'+t+'</th>'; }).join('')+
+    '</tr></thead><tbody>';
+  var T = { n:0, eq:0, sc:0 };
+  jobs.forEach(function(j){
+    T.n += j.n; T.eq += j.eq; T.sc += j.sc;
+    var flag = (!j.pw && !j.cm) ? 'No payroll \u2014 review' : (!j.pw ? 'No payroll last week' : '');
+    h += '<tr style="border-top:1px solid #eee">'+
+      '<td style="padding:7px 9px">'+_rrEsc(j.job_no)+'</td><td style="padding:7px 9px">'+_rrEsc(j.project)+'</td>'+
+      '<td style="padding:7px 9px;text-align:center">'+j.n+'</td>'+
+      '<td style="padding:7px 9px;text-align:right">'+_rrMoney(j.eq)+'</td><td style="padding:7px 9px;text-align:right">'+_rrMoney(j.sc)+'</td>'+
+      '<td style="padding:7px 9px;text-align:right;font-weight:600">'+_rrMoney(j.eq+j.sc)+'</td>'+
+      '<td style="padding:7px 9px;text-align:center">'+_rrPill(j.pw)+'</td><td style="padding:7px 9px;text-align:center">'+_rrPill(j.cm)+'</td>'+
+      '<td style="padding:7px 9px">'+(j.last?_rrFmtDate(j.last):'None (120 days)')+'</td>'+
+      '<td style="padding:7px 9px;color:#A32D2D;font-weight:600">'+flag+'</td>'+
+      '<td style="padding:5px 9px">'+_rrSelect(RR_SITE_STATUSES, j.status, '_rrSetStatus('+_rrEsc(JSON.stringify(j.project_id))+',this.value)', !canEdit || !j.project_id, 'Project status')+'</td>'+
+      '<td style="padding:5px 9px;min-width:200px">'+(canEdit
+        ? '<input aria-label="Job notes" value="'+_rrEsc(notesByJob[j.job_no]||'')+'" onchange="_rrSetJobNote('+_rrEsc(JSON.stringify(j.job_no))+',this.value)" style="width:100%;padding:4px 6px;border:1px solid #d8c88f;border-radius:5px;font-size:12px;background:#FFF8E1;font-family:inherit;box-sizing:border-box">'
+        : _rrEsc(notesByJob[j.job_no]||''))+'</td></tr>';
+  });
+  h += '</tbody><tfoot><tr style="border-top:2px solid var(--kmi);font-weight:700"><td colspan="2" style="padding:8px 9px">Total</td>'+
+    '<td style="padding:8px 9px;text-align:center">'+T.n+'</td><td style="padding:8px 9px;text-align:right">'+_rrMoney(T.eq)+'</td>'+
+    '<td style="padding:8px 9px;text-align:right">'+_rrMoney(T.sc)+'</td><td style="padding:8px 9px;text-align:right">'+_rrMoney(T.eq+T.sc)+'</td><td colspan="6"></td></tr></tfoot></table></div>';
+  return h;
+}
+
+function _rrVendorHtml(){
+  var vs = _rrVendors(_rrRows), T = { n:0, total:0, nopay:0 };
+  var h = '<div class="card" style="padding:0;overflow-x:auto;max-width:960px"><table style="border-collapse:collapse;font-size:12px;width:100%;min-width:640px">'+
+    '<thead><tr style="background:var(--kmi);color:#fff;text-align:left"><th style="padding:8px 9px">Vendor</th><th style="padding:8px 9px">Type</th><th style="padding:8px 9px">Invoices</th><th style="padding:8px 9px"># of Jobs</th>'+
+    '<th style="padding:8px 9px;text-align:right">Total $</th><th style="padding:8px 9px;text-align:right">On No-Payroll Jobs</th></tr></thead><tbody>';
+  vs.forEach(function(v){
+    T.n += v.n; T.total += v.total; T.nopay += v.nopay;
+    h += '<tr style="border-top:1px solid #eee"><td style="padding:7px 9px">'+_rrEsc(v.vendor)+'</td><td style="padding:7px 9px">'+_rrEsc(v.type)+'</td>'+
+      '<td style="padding:7px 9px;text-align:center">'+v.n+'</td><td style="padding:7px 9px;text-align:center">'+v.nj+'</td>'+
+      '<td style="padding:7px 9px;text-align:right">'+_rrMoney(v.total)+'</td><td style="padding:7px 9px;text-align:right;color:#A32D2D">'+_rrMoney(v.nopay)+'</td></tr>';
+  });
+  h += '</tbody><tfoot><tr style="border-top:2px solid var(--kmi);font-weight:700"><td colspan="2" style="padding:8px 9px">Total</td><td style="padding:8px 9px;text-align:center">'+T.n+'</td><td></td>'+
+    '<td style="padding:8px 9px;text-align:right">'+_rrMoney(T.total)+'</td><td style="padding:8px 9px;text-align:right">'+_rrMoney(T.nopay)+'</td></tr></tfoot></table></div>';
+  return h;
+}
+
+function _rrNotesHtml(){
+  var vs = _rrVendors(_rrRows);
+  var h = '<div style="font-size:12px;color:#555;margin-bottom:10px;max-width:820px;line-height:1.6">Tell the AP reader where each rental vendor prints the rental period and unit #. '+
+    'Notes apply to every invoice from that vendor, including emailed ones. After adding a note, filter Detail to that vendor and use <b>Re-read rental periods</b>.</div>';
+  vs.forEach(function(v){
+    var rec = v.vendor_id != null ? (db.vendors||[]).find(function(x){ return String(x.id)===String(v.vendor_id); }) : null;
+    h += '<div class="card" style="max-width:820px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">'+
+      '<div style="font-weight:600">'+_rrEsc(v.vendor)+'</div><div style="font-size:11.5px;color:#666">'+v.n+' invoices \u00b7 '+v.read+' read \u00b7 <span style="color:'+(v.review?'#8a5a00':'#666')+'">'+v.review+' need review</span></div></div>';
+    if(!rec){
+      h += '<div style="font-size:12px;color:#8a5a00">Not linked to a vendor record, so a note can\u2019t be saved yet. Add \u201c'+_rrEsc(v.vendor)+'\u201d under Vendors (or link the invoice to an existing vendor in AP) and it will appear here.</div></div>';
+      return;
+    }
+    var id = _rrEsc(JSON.stringify(rec.id));
+    h += '<label style="display:block;font-size:11px;color:#555;margin-bottom:3px">Where the rental period is</label>'+
+      '<textarea id="rr-rph-'+_rrEsc(String(rec.id))+'" rows="2" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit">'+_rrEsc(rec.rentalPeriodHint||'')+'</textarea>'+
+      '<label style="display:block;font-size:11px;color:#555;margin:8px 0 3px">Where the unit # is</label>'+
+      '<textarea id="rr-ruh-'+_rrEsc(String(rec.id))+'" rows="1" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit">'+_rrEsc(rec.rentalUnitHint||'')+'</textarea>'+
+      '<div style="margin-top:8px"><button class="btn" onclick="_rrSaveNote('+id+')">Save note</button></div></div>';
+  });
+  return h;
+}
+async function _rrSaveNote(id){
+  if(!requireFull('ap-invoices','edit vendor layout notes')) return;
+  var p = g('rr-rph-'+id), u = g('rr-ruh-'+id);
+  await _vendorSaveRentalHints(id, { p:p?(p.value||'').trim():'', u:u?(u.value||'').trim():'' });
+  _rrBanner('success','Layout note saved. The next read or re-read from this vendor will use it.');
+}
+
+var _rrJobNotes = [];
+async function _rrLoadJobNotes(){
+  if(!supabaseClient) return;
+  var r = await supabaseClient.from('kmi_rental_actions').select('rental_key,notes').like('rental_key','job:%');
+  _rrJobNotes = (r && !r.error) ? (r.data||[]) : [];
+}
+
+async function _rrSetStatus(projectId, val){
+  if(!requireFull('rental-review','set project status')) return;
+  if(!projectId) return;
+  var who = _currentUser ? (_currentUser.email||'') : '';
+  var r = await supabaseClient.from('kmi_projects')
+    .update({ rental_site_status: val || null, rental_site_status_at: new Date().toISOString(), rental_site_status_by: who })
+    .eq('id', projectId);
+  if(r && r.error){ _rrBanner('error','Could not save project status: '+_rrEsc(r.error.message)); return; }
+  _rrRows.forEach(function(x){ if(String(x.project_id)===String(projectId)) x.project_status = val || null; });
+  _rrRender();
+}
+async function _rrSetAction(key, field, val){
+  if(!requireFull('rental-review','update rentals')) return;
+  var row = _rrRows.find(function(x){ return x.rental_key===key; });
+  var cur = { action: row ? (row.action||null) : null, notes: row ? (row.notes||null) : null };
+  cur[field] = (String(val||'').trim()) || null;
+  var r = await supabaseClient.from('kmi_rental_actions').upsert({
+    rental_key:key, action:cur.action, notes:cur.notes,
+    updated_at:new Date().toISOString(), updated_by:(_currentUser?(_currentUser.email||''):'')
+  }, { onConflict:'rental_key' });
+  if(r && r.error){ _rrBanner('error','Could not save: '+_rrEsc(r.error.message)); return; }
+  _rrRows.forEach(function(x){ if(x.rental_key===key){ x.action = cur.action; x.notes = cur.notes; } });
+  if(field==='action') _rrRender();
+}
+async function _rrSetJobNote(jobNo, val){
+  if(!requireFull('rental-review','update job notes')) return;
+  var key = 'job:'+jobNo, notes = String(val||'').trim() || null;
+  var r = await supabaseClient.from('kmi_rental_actions').upsert({
+    rental_key:key, action:null, notes:notes, updated_at:new Date().toISOString(), updated_by:(_currentUser?(_currentUser.email||''):'')
+  }, { onConflict:'rental_key' });
+  if(r && r.error){ _rrBanner('error','Could not save: '+_rrEsc(r.error.message)); return; }
+  _rrJobNotes = _rrJobNotes.filter(function(n){ return n.rental_key!==key; }).concat([{ rental_key:key, notes:notes }]);
+}
+async function _rrOpenPdf(path){
+  try{
+    var r = await supabaseClient.storage.from('ap-invoices').createSignedUrl(path, 600);
+    if(r.error) throw r.error;
+    window.open(r.data.signedUrl, '_blank', 'noopener');
+  }catch(e){ _rrBanner('error','Could not open the invoice PDF: '+_rrEsc(e && e.message ? e.message : String(e))); }
+}
+
+// ── Re-read rental periods (bulk) ──────────────────────────────────────
+function _rrRereadCandidates(includeRead, perVendor){
+  var seen = {}, byVendor = {}, out = [];
+  _rrFiltered().forEach(function(r){
+    if(seen[r.invoice_id]) return;
+    if(r.period_source==='ap_entered') return;
+    if(!includeRead && r.period_source==='extracted') return;
+    if(!r.pdf_path) return;
+    if(perVendor > 0){ byVendor[r.vendor] = (byVendor[r.vendor]||0) + 1; if(byVendor[r.vendor] > perVendor) return; }
+    seen[r.invoice_id] = 1; out.push(r.invoice_id);
+  });
+  return out;
+}
+function _rrRereadOpen(){
+  if(!requireFull('ap-invoices','re-read rental periods')) return;
+  if(_rrBusy){ alert('A re-read is already running.'); return; }
+  showModal('<button class="xbtn" onclick="closeModal()">&#215;</button><div class="mt">Re-read rental periods</div>'+
+    '<div class="msb">Reads the rental period and unit # from each invoice PDF. Works on the rows currently shown on the Detail tab (use the filters to narrow it). Periods AP entered by hand are never touched.</div>'+
+    '<div class="fg">'+
+      '<div class="fgr full"><label><input type="checkbox" id="rr-rr-all" onchange="_rrRereadCount()" style="width:auto"> Include invoices that already have a period</label></div>'+
+      '<div class="fgr"><label>At most this many per vendor</label><input id="rr-rr-per" type="number" min="0" value="5" oninput="_rrRereadCount()"><div style="font-size:11px;color:#888;margin-top:3px">Start with a few per vendor to check the results; 0 = no limit.</div></div>'+
+      '<div class="fgr"><label>Invoices to read</label><div id="rr-rr-count" style="font-size:18px;font-weight:600;padding-top:4px"></div></div>'+
+    '</div>'+
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="_rrRereadStart()">Start</button></div>');
+  _rrRereadCount();
+}
+function _rrRereadOpts(){
+  var a = g('rr-rr-all'), p = g('rr-rr-per');
+  return { all: !!(a && a.checked), per: p ? Math.max(0, parseInt(p.value,10)||0) : 5 };
+}
+function _rrRereadCount(){
+  var o = _rrRereadOpts(), n = _rrRereadCandidates(o.all, o.per).length, el = g('rr-rr-count');
+  if(el) el.textContent = n + ' (about ' + Math.max(1, Math.round(n*20/60)) + ' min)';
+}
+async function _rrRereadStart(){
+  var o = _rrRereadOpts(), ids = _rrRereadCandidates(o.all, o.per);
+  closeModal();
+  if(!ids.length){ _rrBanner('info','Nothing to re-read in the current view.'); return; }
+  _rrBusy = true;
+  var tally = { ok:0, review:0, skipped:0, failed:0 }, failures = [];
+  try{
+    for(var k=0; k<ids.length; k+=5){
+      _rrBanner('info','Re-reading '+Math.min(k+5, ids.length)+' of '+ids.length+'\u2026 keep this page open.');
+      var batch = ids.slice(k, k+5), res;
+      try{ res = await _rrRereadCall(batch); }
+      catch(e){ res = batch.map(function(id){ return { id:id, status:'error', detail:(e && e.message) ? e.message : String(e) }; }); }
+      res.forEach(function(x){
+        if(x.status==='updated'){ if(x.check==='ok') tally.ok++; else tally.review++; }
+        else if(x.status==='skipped_ap_entered') tally.skipped++;
+        else { tally.failed++; failures.push(x.id+': '+x.status+(x.detail?(' \u2014 '+x.detail):'')); }
+      });
+    }
+  } finally { _rrBusy = false; }
+  await renderRentalReview();
+  _rrBanner(tally.failed ? 'error' : 'success',
+    'Re-read finished: '+tally.ok+' read'+(tally.review?(', '+tally.review+' need review'):'')+(tally.skipped?(', '+tally.skipped+' skipped (entered by AP)'):'')+
+    (tally.failed?(', '+tally.failed+' failed<div style="font-size:11px;margin-top:4px">'+failures.slice(0,8).map(_rrEsc).join('<br>')+'</div>'):'')+'.');
+}
+
+// ── Excel export (same layout as the Rental Review spreadsheet) ─────────
+function _rrExport(){
+  if(typeof XLSX==='undefined'){ alert('The Excel library did not load. Refresh and try again.'); return; }
+  if(!_rrRows.length){ alert('Nothing to export yet.'); return; }
+  var today = _rrTodayIso(), money = '$#,##0.00;($#,##0.00);"-"', dfmt = 'm/d/yyyy';
+  var wk = _rrFmtDate(_rrRows[0].payroll_week_start)+' \u2013 '+_rrFmtDate(_rrRows[0].payroll_week_end);
+  var src = 'Source: KMI.Build AP module (rental classes 5/60/9/7, invoices dated last 60 days, not voided) + Foundation payroll sync. Prev payroll week = '+wk+'.';
+  var notesByJob = {}; _rrJobNotes.forEach(function(n){ notesByJob[n.rental_key.slice(4)] = n.notes||''; });
+  function sheet(title, head, body, foot, widths, moneyCols, dateCols){
+    var aoa = [[title], ['Report date:', _rrDateObj(today)], [src], head].concat(body);
+    if(foot) aoa.push(foot);
+    var ws = XLSX.utils.aoa_to_sheet(aoa, { cellDates:true });
+    ws['!cols'] = widths.map(function(w){ return { wch:w }; });
+    ws['B2'] && (ws['B2'].z = dfmt);
+    for(var rI=4; rI<aoa.length; rI++){
+      moneyCols.forEach(function(c){ var a = XLSX.utils.encode_cell({ r:rI, c:c }); if(ws[a] && typeof ws[a].v==='number') ws[a].z = money; });
+      dateCols.forEach(function(c){ var a = XLSX.utils.encode_cell({ r:rI, c:c }); if(ws[a] && ws[a].t==='d') ws[a].z = dfmt; });
+    }
+    ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s:{ r:3, c:0 }, e:{ r:3+body.length, c:head.length-1 } }) };
+    return ws;
+  }
+  var yn = function(b){ return b ? 'Y' : 'N'; };
+  var jobs = _rrJobs(_rrRows);
+  var pBody = jobs.map(function(j){
+    var flag = (!j.pw && !j.cm) ? 'No payroll \u2014 review' : (!j.pw ? 'No payroll last week' : '');
+    return [Number(j.job_no)||j.job_no, j.project, j.n, j.eq, j.sc, j.eq+j.sc, yn(j.pw), yn(j.cm), j.last ? _rrDateObj(j.last) : 'None (120 days)', flag, j.status||'', notesByJob[j.job_no]||''];
+  });
+  var pT = jobs.reduce(function(a,j){ a[0]+=j.n; a[1]+=j.eq; a[2]+=j.sc; return a; }, [0,0,0]);
+  var wsP = sheet('Rental Review \u2014 Equipment & Scaffold on Rent by Project',
+    ['Job #','Project','Invoices','Equipment $','Scaffold $','Total $','Payroll Prev Week','Payroll Current Month','Last Payroll Date','Review Flag','Project Status','Notes / Next Step'],
+    pBody, ['TOTAL','',pT[0],pT[1],pT[2],pT[1]+pT[2]], [8,38,9,13,13,13,10,10,13,22,20,38], [3,4,5], [8]);
+
+  var dRows = _rrRows.slice().sort(function(a,b){ return (Number(a.job_no)||0)-(Number(b.job_no)||0) || String(a.rental_type).localeCompare(String(b.rental_type)) || String(a.vendor).localeCompare(String(b.vendor)) || String(a.invoice_date).localeCompare(String(b.invoice_date)); });
+  var dSum = 0;
+  var dBody = dRows.map(function(r){
+    dSum += Number(r.amount)||0;
+    return [r.vendor, Number(r.job_no)||r.job_no, r.project, r.rental_type, r.cost_class, r.eq_no||'', r.eq_desc||'', r.invoice_no,
+      _rrDateObj(r.invoice_date), _rrDateObj(r.rental_start)||'', _rrDateObj(r.rental_end)||'', r.days_on_rent!=null ? r.days_on_rent : '',
+      r.new_this_week ? 'Y' : '', Number(r.amount)||0, r.ap_status||'', yn(!!r.payroll_prev_week), yn(!!r.payroll_current_month),
+      r.project_status||'', r.action||'', _rrFlags(r).join('; '), r.notes||''];
+  });
+  var wsD = sheet('Rental Review \u2014 Invoice Detail',
+    ['Vendor','Job #','Project','Type','Cost Class','Eq #','Eq Description','Invoice #','Invoice Date','Rental Start','Rental End','Days on Rent','New This Week','Amount','AP Status','Payroll Prev Week','Payroll Current Month','Project Status','Action','Flags','Notes'],
+    dBody, ['TOTAL','','','','','','',dRows.length+' rows','','','','','',dSum], [30,8,34,11,18,10,14,16,11,11,11,9,8,13,10,10,10,18,15,36,30], [13], [8,9,10]);
+
+  var vs = _rrVendors(_rrRows);
+  var vT = vs.reduce(function(a,v){ a[0]+=v.n; a[1]+=v.total; a[2]+=v.nopay; return a; }, [0,0,0]);
+  var wsV = sheet('Rental Dollars by Vendor (All Projects)', ['Vendor','Type','Invoices','# of Jobs','Total $','Amount on No-Payroll Jobs'],
+    vs.map(function(v){ return [v.vendor, v.type, v.n, v.nj, v.total, v.nopay]; }), ['TOTAL','',vT[0],'',vT[1],vT[2]], [36,12,10,10,14,18], [4,5], []);
+
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsP, 'Summary');
+  XLSX.utils.book_append_sheet(wb, wsD, 'Detail');
+  XLSX.utils.book_append_sheet(wb, wsV, 'Vendor Totals');
+  XLSX.writeFile(wb, 'KMI_Rental_Review_'+today+'.xlsx');
 }
 
 async function renderApChecks(){
@@ -56262,7 +56940,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-09-PJC1';
+var KMI_BUILD = '2026-10-10-2026-10-10-RR1';
 
 var _kmiSessionId = (function(){
   try {
@@ -56415,7 +57093,8 @@ function fromSBVendor(r) {
     website:r.website||'', notes:r.notes||'',
     foundationVendorNo:r.foundation_vendor_no||'',
     foundationVendorName:r.foundation_vendor_name||'',
-    reconcileStatus:r.reconcile_status||null
+    reconcileStatus:r.reconcile_status||null,
+    rentalPeriodHint:r.rental_period_hint||'', rentalUnitHint:r.rental_unit_hint||''
   };
 }
 
@@ -58046,6 +58725,8 @@ function fromSBApInvoice(r) {
     importConfirmedAt:r.import_confirmed_at||'', importConfirmedBy:r.import_confirmed_by||'',
     decisionNote:r.decision_note||'', queuedAt:r.queued_at||'', lastReminderAt:r.last_reminder_at||'',
     eqBoardHandled:!!r.eq_board_handled,
+    rentalPeriodStart:r.rental_period_start||'', rentalPeriodEnd:r.rental_period_end||'',
+    rentalUnitNo:r.rental_unit_no||'', rentalPeriodSource:r.rental_period_source||'', rentalPeriodNote:r.rental_period_note||'',
     voidedAt:r.voided_at||'', voidedBy:r.voided_by||'', voidReason:r.void_reason||'',
     isCredit:(r.is_credit==null ? null : !!r.is_credit),
     createdBy:r.created_by||'', createdAt:r.created_at||'',
