@@ -46335,9 +46335,10 @@ function _apRentalBlock(i, d){
       '<div style="margin-bottom:10px"><label for="apc-runit" style="'+lab+'">Eq / Unit #</label><input id="apc-runit" value="'+apEsc(r.unit)+'" style="'+inp+'"></div>'+
     '</div>'+
     '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:11.5px">'+
+      (hasFull('ap-invoices') ? '<button type="button" class="btn btn-p" onclick="_apRpSaveNow(\'apc\')" style="font-size:12px;padding:5px 12px">Save period</button>' : '')+
       (canReread ? '<button type="button" class="btn" onclick="_apRpReread()" style="font-size:12px;padding:5px 12px">Re-read from invoice</button>' : '')+
       (v ? '<a href="#" onclick="event.preventDefault();showEditVendor('+JSON.stringify(v.id)+')" style="color:var(--kmi)">'+apEsc(v.name)+' layout note</a>' : '')+
-      '<span style="color:#999">Changes save with Save / Submit and are marked \u201centered by AP.\u201d</span>'+
+      '<span style="color:#999">Saves right away and doesn\u2019t change the coding or approval.</span>'+
     '</div>'+
   '</div>';
 }
@@ -46353,11 +46354,53 @@ function _apRpReviewHtml(i, lines){
       '<div style="font-size:10px;text-transform:uppercase;color:#9aa0b4;letter-spacing:.4px;font-weight:600">Rental period</div>'+
       '<div style="font-size:11px">'+_apRpSourceHtml(i.rentalPeriodSource, i.rentalPeriodNote)+'</div>'+
     '</div>'+
-    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 14px;font-size:12.5px">'+
-      kv('Start',_rrFmtDate(i.rentalPeriodStart))+kv('End',_rrFmtDate(i.rentalPeriodEnd))+kv('Eq / Unit #',i.rentalUnitNo)+
-    '</div>'+
-    (_apIsAcct() ? '<div style="font-size:11px;color:#999;margin-top:6px">To correct it, open the invoice in AP Invoices.</div>' : '')+
+    (hasFull('ap-invoices') ? _apRpEditGrid(i, 'apr') :
+      ('<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 14px;font-size:12.5px">'+
+        kv('Start',_rrFmtDate(i.rentalPeriodStart))+kv('End',_rrFmtDate(i.rentalPeriodEnd))+kv('Eq / Unit #',i.rentalUnitNo)+
+      '</div>'))+
   '</div>';
+}
+// Editable period fields (Approvals screen, Admin/Accounting).
+function _apRpEditGrid(i, p){
+  var inp = 'width:100%;padding:6px 8px;border:1px solid #d8dce6;border-radius:6px;font-size:12.5px;font-family:inherit;box-sizing:border-box';
+  var lab = 'display:block;font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9aa0b4;margin-bottom:3px';
+  return '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 14px">'+
+    '<div><label for="'+p+'-rstart" style="'+lab+'">Start</label><input id="'+p+'-rstart" type="date" value="'+apEsc(i.rentalPeriodStart||'')+'" style="'+inp+'"></div>'+
+    '<div><label for="'+p+'-rend" style="'+lab+'">End</label><input id="'+p+'-rend" type="date" value="'+apEsc(i.rentalPeriodEnd||'')+'" style="'+inp+'"></div>'+
+    '<div><label for="'+p+'-runit" style="'+lab+'">Eq / Unit #</label><input id="'+p+'-runit" value="'+apEsc(i.rentalUnitNo||'')+'" style="'+inp+'"></div>'+
+  '</div>'+
+  '<div style="display:flex;gap:10px;align-items:center;margin-top:8px;font-size:11.5px;flex-wrap:wrap">'+
+    '<button type="button" class="btn btn-p" onclick="_apRpSaveNow(\''+p+'\')" style="font-size:12px;padding:5px 12px">Save period</button>'+
+    '<span id="'+p+'-rmsg" style="color:#999">Doesn\u2019t change the coding or approval.</span>'+
+  '</div>';
+}
+// Saves ONLY the rental columns, at any invoice status (approved and
+// exported included). Coding, status and approval stamps are untouched.
+async function _apRpSaveNow(p){
+  if(!requireFull('ap-invoices','edit rental periods')) return;
+  if(!supabaseClient){ alert('Not connected.'); return; }
+  var id = p==='apc' ? _apCodeId : _apReviewId;
+  var i = (db.apInvoices||[]).find(function(x){ return String(x.id)===String(id); });
+  if(!i) return;
+  var s = g(p+'-rstart'), e = g(p+'-rend'), u = g(p+'-runit');
+  var v = { start: s ? (s.value||'') : '', end: e ? (e.value||'') : '', unit: u ? (u.value||'').trim() : '' };
+  if(v.start && v.end && v.start > v.end){ alert('The rental period start is after the end.'); return; }
+  var any = !!(v.start || v.end || v.unit);
+  var who = _currentUser ? (_currentUser.email || '') : '';
+  var patch = { rental_period_start: v.start || null, rental_period_end: v.end || null, rental_unit_no: v.unit || null,
+    rental_period_source: any ? 'ap_entered' : null, rental_period_note: any ? ('by '+who) : null };
+  var r = await supabaseClient.from('kmi_ap_invoices').update(patch).eq('id', String(i.id));
+  if(r && r.error){ alert('Could not save the rental period: '+r.error.message); return; }
+  i.rentalPeriodStart = v.start; i.rentalPeriodEnd = v.end; i.rentalUnitNo = v.unit;
+  i.rentalPeriodSource = patch.rental_period_source || ''; i.rentalPeriodNote = patch.rental_period_note || '';
+  if(p==='apc'){
+    if(_apCodeDraft){ _apCodeSync(); _apCodeDraft.rental = _apRpDraft(i); }
+    apRenderCode();
+    apSetBanner('success','Rental period saved.');
+  } else {
+    apRenderReview();
+    var m = g('apr-rmsg'); if(m){ m.textContent = 'Saved.'; m.style.color = '#3B6D11'; }
+  }
 }
 function _apRpSync(d){
   if(!d || !d.rental) return;
@@ -57010,7 +57053,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-10-RR1c';
+var KMI_BUILD = '2026-10-10-RR1d';
 
 var _kmiSessionId = (function(){
   try {
