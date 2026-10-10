@@ -46293,6 +46293,8 @@ function _apRpDraft(i){
 }
 function _apRpShow(i, d){
   if(i.rentalPeriodStart || i.rentalPeriodEnd || i.rentalUnitNo || i.rentalPeriodSource) return true;
+  var ex = i.extractedJson || {};
+  if(ex.rental_period_start || ex.rental_period_end || ex.rental_unit_no) return true;
   if(!d) return false;
   if(RR_RENTAL_CLASSES[String(d.costClass||'')]) return true;
   return (d.lines||[]).some(function(l){ return RR_RENTAL_CLASSES[String(l.costClass||'')]; });
@@ -46326,6 +46328,24 @@ function _apRentalBlock(i, d){
       (v ? '<a href="#" onclick="event.preventDefault();showEditVendor('+JSON.stringify(v.id)+')" style="color:var(--kmi)">'+apEsc(v.name)+' layout note</a>' : '')+
       '<span style="color:#999">Changes save with Save / Submit and are marked \u201centered by AP.\u201d</span>'+
     '</div>'+
+  '</div>';
+}
+// Read-only rental period on the AP Approvals review screen. Shown when the
+// invoice has a period or any coded line is a rental class (5/60/9/7).
+function _apRpReviewHtml(i, lines){
+  var rental = !!(i.rentalPeriodStart || i.rentalPeriodEnd || i.rentalUnitNo || i.rentalPeriodSource) ||
+    (lines||[]).some(function(l){ return RR_RENTAL_CLASSES[String(l.costClass||'')]; });
+  if(!rental) return '';
+  function kv(l,v){ return '<div><div style="font-size:10px;text-transform:uppercase;color:#9aa0b4;letter-spacing:.4px">'+l+'</div>'+(v?apEsc(v):'\u2014')+'</div>'; }
+  return '<div style="border-top:1px solid #eef0f4;margin-top:10px;padding-top:10px">'+
+    '<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px">'+
+      '<div style="font-size:10px;text-transform:uppercase;color:#9aa0b4;letter-spacing:.4px;font-weight:600">Rental period</div>'+
+      '<div style="font-size:11px">'+_apRpSourceHtml(i.rentalPeriodSource, i.rentalPeriodNote)+'</div>'+
+    '</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 14px;font-size:12.5px">'+
+      kv('Start',_rrFmtDate(i.rentalPeriodStart))+kv('End',_rrFmtDate(i.rentalPeriodEnd))+kv('Eq / Unit #',i.rentalUnitNo)+
+    '</div>'+
+    (_apIsAcct() ? '<div style="font-size:11px;color:#999;margin-top:6px">To correct it, open the invoice in AP Invoices.</div>' : '')+
   '</div>';
 }
 function _apRpSync(d){
@@ -47036,7 +47056,7 @@ function apRenderReview(){
     '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 14px;font-size:12.5px">'+
       kv('Invoice #',i.invoiceNo)+kv('Invoice date',i.invoiceDate)+kv('Terms',i.terms)+
       kv('PO #',i.poNo)+kv('Subtotal',apMoney(i.subtotal))+kv('Tax',apMoney(i.salesTax))+
-    '</div></div>';
+    '</div>'+_apRpReviewHtml(i, lines)+'</div>';
 
   // coding distribution
   var distHeads = isJob ? ['Description','Job','Cost code','Class','Amount'] : ['Description','GL account','Amount'];
@@ -56940,7 +56960,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-10-2026-10-10-RR1';
+var KMI_BUILD = '2026-10-10-RR1b';
 
 var _kmiSessionId = (function(){
   try {
