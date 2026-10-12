@@ -46845,6 +46845,7 @@ async function renderRentalReview(){
   if(bx){
     bx.innerHTML =
       (hasFull('ap-invoices') ? '<button class="btn" onclick="_rrRereadOpen()">Re-read rental periods</button>' : '')+
+      '<button class="btn" onclick="_rrSendPreview()">Send preview to me</button>'+
       '<button class="btn btn-p" onclick="_rrExport()">Export to Excel</button>';
   }
   if(!supabaseClient){ el.innerHTML = '<div class="card"><div style="color:#888;font-size:12px">Not connected.</div></div>'; return; }
@@ -46860,6 +46861,7 @@ async function renderRentalReview(){
     }
     _rrRows = all;
     await _rrLoadJobNotes();
+    await _rrLoadLastSend();
     _rrLoaded = true;
     _rrRender();
   }catch(e){
@@ -46948,7 +46950,7 @@ function _rrRender(){
     if(_rrIsReview(r)) review++;
   });
   var wk = rows.length ? (_rrFmtDate(rows[0].payroll_week_start)+' \u2013 '+_rrFmtDate(rows[0].payroll_week_end)) : '';
-  var sub = g('rr-sub'); if(sub) sub.textContent = 'Equipment & scaffold on rent \u00b7 as of '+_rrFmtDate(today)+(wk?(' \u00b7 payroll week '+wk):'');
+  var sub = g('rr-sub'); if(sub) sub.textContent = 'Equipment & scaffold on rent \u00b7 as of '+_rrFmtDate(today)+(wk?(' \u00b7 payroll week '+wk):'')+_rrLastSendText();
 
   function card(label, val, note, color){
     return '<div class="card" style="margin:0;border-top:3px solid '+color+'"><div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">'+label+'</div>'+
@@ -47177,6 +47179,38 @@ async function _rrSaveNote(id){
   _rrBanner('success','Layout note saved. The next read or re-read from this vendor will use it.');
 }
 
+// ── Weekly email (RR2): last send + preview ─────────────────────────────
+var _rrLastSend = null;
+async function _rrLoadLastSend(){
+  try{
+    var r = await supabaseClient.from('kmi_rental_report_sends').select('send_date,status,recipients,error')
+      .in('status',['sent','partial','failed']).order('created_at',{ ascending:false }).limit(1);
+    _rrLastSend = (r && !r.error && r.data && r.data[0]) ? r.data[0] : null;
+  }catch(e){ _rrLastSend = null; }
+}
+function _rrLastSendText(){
+  if(!_rrLastSend) return ' \u00b7 weekly email: not sent yet (Wednesdays at noon)';
+  var s = _rrLastSend;
+  return ' \u00b7 last weekly email '+_rrFmtDate(s.send_date)+(s.status==='sent' ? (' to '+(s.recipients||0)+' people') : (' \u2014 '+s.status));
+}
+async function _rrSendPreview(){
+  if(!hasRead('rental-review')) return;
+  var me = _currentUser ? (_currentUser.email||'') : '';
+  if(!confirm('Email yourself this week\u2019s Rental Review'+(me?(' at '+me):'')+', exactly as you would receive it on Wednesday (with the Excel attachment)?')) return;
+  var creds = getSBCreds();
+  if((!creds||!creds.url||!creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) creds = { url:DEFAULT_SB_URL, key:DEFAULT_SB_KEY };
+  if(!creds||!creds.url||!creds.key){ _rrBanner('error','Supabase is not configured.'); return; }
+  _rrBanner('info','Building and sending your preview\u2026');
+  try{
+    var resp = await fetch(normalizeSBUrl(creds.url) + '/functions/v1/rental-weekly-report', { method:'POST',
+      headers:{ 'Content-Type':'application/json', 'apikey':creds.key, 'Authorization':'Bearer '+kmiAuthToken(creds.key) },
+      body: JSON.stringify({ mode:'preview' }) });
+    var data = await resp.json().catch(function(){ return null; });
+    if(!resp.ok || !data || !data.ok) throw new Error((data && (data.error || (data.failed||[]).join('; '))) || ('status '+resp.status));
+    var d = (data.detail||[])[0] || {};
+    _rrBanner('success','Preview sent'+(me?(' to '+_rrEsc(me)):'')+' \u2014 '+(d.scope||'')+', '+(d.rows||0)+' rows. If email test mode is on, it went to the test address instead.');
+  }catch(e){ _rrBanner('error','Preview failed: '+_rrEsc(e && e.message ? e.message : String(e))); }
+}
 var _rrJobNotes = [];
 async function _rrLoadJobNotes(){
   if(!supabaseClient) return;
@@ -57394,7 +57428,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-10-VD1';
+var KMI_BUILD = '2026-10-12-RR2';
 
 var _kmiSessionId = (function(){
   try {
