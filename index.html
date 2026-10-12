@@ -46862,6 +46862,7 @@ async function renderRentalReview(){
     _rrRows = all;
     await _rrLoadJobNotes();
     await _rrLoadLastSend();
+    await _rrLoadPayroll();
     _rrLoaded = true;
     _rrRender();
   }catch(e){
@@ -46956,7 +46957,7 @@ function _rrRender(){
     return '<div class="card" style="margin:0;border-top:3px solid '+color+'"><div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">'+label+'</div>'+
       '<div style="font-size:22px;font-weight:600;color:'+(color==='#1E2448'?'inherit':color)+'">'+val+'</div><div style="font-size:11px;color:#666;margin-top:2px">'+note+'</div></div>';
   }
-  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px">'+
+  var h = _rrPayrollBanner() + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px">'+
     card('On rent', _rrMoney(tot), Object.keys(invs).length+' invoices \u00b7 '+Object.keys(jobs).length+' jobs', '#1E2448')+
     card('No payroll last week', _rrMoney(npAmt), Object.keys(npJobs).length+' jobs', '#A32D2D')+
     card('Period ends in 7 days', String(ending), 'call off or renew', '#7a5f1f')+
@@ -47180,6 +47181,21 @@ async function _rrSaveNote(id){
 }
 
 // ── Weekly email (RR2): last send + preview ─────────────────────────────
+// Has last week's payroll landed in Foundation? (MR2b kmi_rental_payroll_status)
+var _rrPayroll = null;
+async function _rrLoadPayroll(){
+  try{
+    var r = await supabaseClient.rpc('kmi_rental_payroll_status');
+    _rrPayroll = (r && !r.error && r.data && r.data[0]) ? r.data[0] : null;
+  }catch(e){ _rrPayroll = null; }
+}
+function _rrPayrollBanner(){
+  var p = _rrPayroll;
+  if(!p || p.posted !== false) return '';
+  return '<div style="background:#FFF3D6;border:1px solid #E8C66A;color:#6b4e00;border-radius:6px;padding:9px 12px;margin-bottom:12px;font-size:12.5px">'+
+    '<b>Payroll for '+_rrFmtDate(p.week_start)+' \u2013 '+_rrFmtDate(p.week_end)+' hasn\u2019t posted in Foundation yet</b> ('+(p.rows_week||0)+' of about '+(p.typical_rows||0)+' payroll lines). '+
+    'Until it does, most jobs will show N for payroll last week. Payroll usually posts Tuesday or Wednesday; the weekly email waits for it.</div>';
+}
 var _rrLastSend = null;
 async function _rrLoadLastSend(){
   try{
@@ -47189,7 +47205,7 @@ async function _rrLoadLastSend(){
   }catch(e){ _rrLastSend = null; }
 }
 function _rrLastSendText(){
-  if(!_rrLastSend) return ' \u00b7 weekly email: not sent yet (Wednesdays at noon)';
+  if(!_rrLastSend) return ' \u00b7 weekly email: not sent yet (Wednesday afternoon once payroll posts, Thursday 9 AM at the latest)';
   var s = _rrLastSend;
   return ' \u00b7 last weekly email '+_rrFmtDate(s.send_date)+(s.status==='sent' ? (' to '+(s.recipients||0)+' people') : (' \u2014 '+s.status));
 }
@@ -57450,7 +57466,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-12-RR3';
+var KMI_BUILD = '2026-10-12-RR4';
 
 var _kmiSessionId = (function(){
   try {
