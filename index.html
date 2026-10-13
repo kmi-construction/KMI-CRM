@@ -4703,6 +4703,33 @@ function kmiAuthToken(fallbackKey) {
   } catch(e) { return fallbackKey; }
 }
 
+// AIPROXY1: every Anthropic call goes through the ai-proxy Edge Function.
+// The API key lives only in the Supabase secret; the browser sends the user's session token.
+async function kmiAIFetch(purpose, opts) {
+  var creds = getSBCreds();
+  if ((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) creds = { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY };
+  if (!creds || !creds.url || !creds.key) throw new Error('Supabase is not configured \u2014 AI features need the cloud connection.');
+  var token = null;
+  try {
+    if (supabaseClient) {
+      var s = await supabaseClient.auth.getSession();
+      token = (s && s.data && s.data.session) ? s.data.session.access_token : null;
+    }
+  } catch(e) {}
+  if (!token && _kmiAuthSession && _kmiAuthSession.access_token) token = _kmiAuthSession.access_token;
+  if (!token) throw new Error('Sign in required for AI features. Sign out and back in, then try again.');
+  return fetch(normalizeSBUrl(creds.url) + '/functions/v1/ai-proxy', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': creds.key,
+      'Authorization': 'Bearer ' + token,
+      'x-kmi-purpose': purpose || 'unknown'
+    },
+    body: opts && opts.body
+  });
+}
+
 // Creates the client early — before the session gate in boot() — so the auth
 // session is known before we decide whether to trust a local session marker.
 async function kmiAuthBootstrap() {
@@ -18581,10 +18608,6 @@ function showSmartUploadModal(prefillProjectId) {
     alert('Smart Upload requires the app to be served from a web URL (e.g. GitHub Pages).\nWhen opened directly from a file, browser security rules block API calls.');
     return;
   }
-  if (!db.anthropic_api_key) {
-    alert('No Anthropic API key is configured.\nAsk your admin to add one to the kmi_settings table in Supabase.');
-    return;
-  }
   if (!supabaseClient) {
     alert('Not connected to Supabase. Smart Upload needs cloud storage to save the file.');
     return;
@@ -18739,14 +18762,7 @@ async function smartUploadExtract() {
       '- Return arrays even if empty — never omit a key.\n' +
       '- If a field is genuinely unreadable, return null (or 0 for hour fields).';
 
-    var resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': db.anthropic_api_key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
+    var resp = await kmiAIFetch('tm-smart-upload', {
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
         max_tokens: 4000,
@@ -21251,10 +21267,6 @@ function showSmartUploadCorModal(preselectProjectId) {
     alert('COR Smart Upload requires the app to be served from a web URL.\nWhen opened directly from a file, browser security rules block API calls.');
     return;
   }
-  if (!db.anthropic_api_key) {
-    alert('No Anthropic API key is configured.\nAsk your admin to add one to the kmi_settings table in Supabase.');
-    return;
-  }
   if (!supabaseClient) {
     alert('Not connected to Supabase. Smart Upload needs cloud storage to save the file.');
     return;
@@ -21446,14 +21458,7 @@ async function smartUploadCorExtract() {
       '- If markup percentages aren\'t printed but you can infer them (e.g. mat-OHP / matSubtotal), set them; otherwise null and the form will use project defaults.\n' +
       '- Preserve the original COR number text as-is (don\'t reformat).';
 
-    var resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': db.anthropic_api_key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
+    var resp = await kmiAIFetch('cor-smart-upload', {
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
         max_tokens: 8000,  // larger ceiling — CORs can have many line items
@@ -33218,10 +33223,6 @@ function poExtractFromQuote() {
     alert('AI extraction requires the app to be served from a web URL (e.g. GitHub Pages).\nWhen opened directly from a file, browser security rules block API calls.');
     return;
   }
-  if (!db.anthropic_api_key) {
-    alert('No Anthropic API key is configured.\nAsk your admin to add one to the kmi_settings table in Supabase.');
-    return;
-  }
   if (!window.pdfjsLib) {
     alert('PDF reader library failed to load. Check your internet connection and refresh.');
     return;
@@ -33296,14 +33297,7 @@ async function poRunExtract(attId) {
       '{"lines":[{"qty":<number>,"unit":"<string>","description":"<string>","unitPrice":<number>}]}\n\n' +
       'DOCUMENT TEXT:\n' + sendText;
 
-    var apiResp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': db.anthropic_api_key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
+    var apiResp = await kmiAIFetch('po-quote-extract', {
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
         max_tokens: 4000,
@@ -50176,9 +50170,6 @@ async function prodWkSave() {
 // ── Smart upload (Phase 1b) — photo/PDF of a field sheet -> fill the week ──
 function prodWkOpenUpload() {
   var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
-  if (!db.anthropic_api_key) {
-    alert('Smart upload needs the Anthropic API key. Add it in Settings first.'); return;
-  }
   if (location.protocol === 'file:') {
     alert('Smart upload needs the app served from a web URL (e.g. kmi.build). Opening the file directly blocks the API call.'); return;
   }
@@ -50236,14 +50227,7 @@ async function prodWkRunUpload() {
       'Match every row on the sheet to one of these estimate items, using these EXACT names. Items marked "units + hours" track an installed-unit count; "hours only" items do not:\n  [' + itemList + ']\n\n' +
       'Schema:\n{\n  "items": [\n    {"name": "<exact item name from the list>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>}\n  ]\n}\n\n' +
       'Rules:\n- Match each sheet row to one listed item name EXACTLY. If a row matches no listed item, omit it.\n- Hours are numbers (use 0 for blank, never null).\n- Include "units" only for "units + hours" items; use null otherwise.\n- Return the items array even if empty; never invent values.';
-    var resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': db.anthropic_api_key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
+    var resp = await kmiAIFetch('prod-week-upload', {
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
         max_tokens: 4000,
@@ -52300,7 +52284,6 @@ async function _mobWkNotifyPM(project, items, weekEnding) {
 }
 function mobWkOpenUpload() {
   var p = getProj(_mobileSelectedProjectId); if (!p || !_mobWeekModel) return;
-  if (!db.anthropic_api_key) { alert('Smart upload needs the Anthropic API key (set it in Settings).'); return; }
   showModal('<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt">Snap the field sheet</div>' +
     '<div class="msb">Take or upload a photo (or PDF) of the daily production sheet. The AI fills this day for your review. Nothing saves until you tap Save day.</div>' +
@@ -52332,9 +52315,7 @@ async function mobWkRunUpload() {
       'Match every row to one of these estimate items using these EXACT names ("units + hours" items track units; "hours only" do not):\n  [' + itemList + ']\n\n' +
       'Schema:\n{ "items": [ {"name":"<exact item name>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>} ] }\n\n' +
       'Rules:\n- Match each row to one listed item EXACTLY; omit rows that match nothing.\n- Hours are numbers (0 for blank).\n- Include units only for "units + hours" items; null otherwise.\n- Return items even if empty; never invent values.';
-    var resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json','x-api-key':db.anthropic_api_key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true' },
+    var resp = await kmiAIFetch('prod-week-upload-mobile', {
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{ role:'user', content:[
         isPdf ? { type:'document', source:{ type:'base64', media_type:apiMedia, data:b64 } } : { type:'image', source:{ type:'base64', media_type:apiMedia, data:b64 } },
         { type:'text', text:prompt }
@@ -53410,12 +53391,6 @@ function scopeSmartExtract() {
     return;
   }
 
-  var apiKey = db.anthropic_api_key;
-  if (!apiKey) {
-    alert('No Anthropic API key is configured.\nAsk your admin to add one to the kmi_settings table in Supabase.');
-    return;
-  }
-
   var input = g('od-scope-file');
   input.value = '';
   input.onchange = function(e){
@@ -53426,8 +53401,6 @@ function scopeSmartExtract() {
 }
 
 async function scopeExtractWithAI(text) {
-  var apiKey = db.anthropic_api_key;
-  if (!apiKey) { alert('Missing API key.'); return; }
 
   var MAX_CHARS = 60000;
   var truncated = text.length > MAX_CHARS;
@@ -53444,14 +53417,7 @@ async function scopeExtractWithAI(text) {
     'DOCUMENT TEXT:\n' + sendText;
 
   try {
-    var resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
+    var resp = await kmiAIFetch('scope-extract', {
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
         max_tokens: 4000,
@@ -55703,14 +55669,12 @@ async function rlaRunExtract(attId) {
       var parsed = _rlaParseExcel(buffer);
       if (parsed.acts.length) { acts = parsed.acts; method = 'excel'; }
       else {
-        if (!db.anthropic_api_key) throw new Error('Could not detect columns and no Anthropic API key is configured for fallback.');
         _rlaProgress('Layout unclear \u2014 using AI on the sheet\u2026');
         acts = await _gcCallAI([{ type: 'text',
           text: _gcSchemaPrompt(_gcContext()) + '\n\nSCHEDULE ROWS (CSV):\n' + parsed.csv.slice(0, GC_MAX_CHARS_PER_CALL) }]);
         method = 'ai';
       }
     } else {
-      if (!db.anthropic_api_key) throw new Error('No Anthropic API key is configured in kmi_settings.');
       if (!window.pdfjsLib) throw new Error('PDF reader library failed to load.');
       _rlaProgress('Reading the PDF text layer\u2026');
       var res = await _gcPageTexts(buffer);
@@ -56832,7 +56796,6 @@ function gcStartImport() {
   if (location.protocol === 'file:') {
     alert('AI extraction requires the app to be served from a web URL.'); return;
   }
-  if (!db.anthropic_api_key) { alert('No Anthropic API key is configured in kmi_settings.'); return; }
   if (!window.pdfjsLib) { alert('PDF reader library failed to load. Refresh and try again.'); return; }
   var p = _schCurrentProject(); if (!p) { alert('No project loaded.'); return; }
   var atts = (p.attachments || []).filter(function(a){
@@ -56940,14 +56903,7 @@ function _gcContext() {
   return ctx;
 }
 async function _gcCallAI(contentBlocks) {
-  var resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': db.anthropic_api_key,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    },
+  var resp = await kmiAIFetch('gc-schedule-import', {
     body: JSON.stringify({
       model: 'claude-sonnet-4-5',
       max_tokens: 8000,
@@ -57466,7 +57422,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-12-RR4';
+var KMI_BUILD = '2026-10-13-AIPROXY1';
 
 var _kmiSessionId = (function(){
   try {
@@ -60183,14 +60139,14 @@ async function pullFromSupabase() {
     enforceSeedRoles();  // re-assert Fred/Mike=Admin, Mark=PM after cloud pull
 
     // Settings — copy known setting rows into db. Includes runtime-config
-    // keys like anthropic_api_key that aren't part of the default db shape.
+    // keys that aren't part of the default db shape.
     var ALLOWED_SETTING_KEYS = ['stdClar','projClar','exclusions','costTmpls',
                                 'laborRates','laborRateSets','materialTemplates','crewTemplates',
                                 'companyTypes','projectTypes','projectRoles','vendorTypes','clarGroups',
                                 'budgetEquipmentSplit','budgetQtyConversions','budgetAutoRoutes',
                                 'bprCostCodeMap',
                                 'bprProdItemMap',
-                                'anthropic_api_key','truckingPin'];
+                                'truckingPin'];
     (settings.data || []).forEach(function(row) {
       if (ALLOWED_SETTING_KEYS.indexOf(row.key) !== -1) db[row.key] = row.value;
     });
@@ -60199,6 +60155,7 @@ async function pullFromSupabase() {
       db.laborRateSets = [{id:'lrs1', label:'Current Rates', rates:db.laborRates}];
     }
     delete db.laborRates;
+    delete db.anthropic_api_key;  // AIPROXY1: key is server-side only; purge any cached copy
 
     // Correct any stale grout/mortar bag capacities (old defaults 28/22 →
     // 27/23) loaded from the cloud, and re-persist so the saved setting and
