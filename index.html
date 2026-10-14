@@ -43533,7 +43533,7 @@ function importFoundationVendors(rows) {
           if (ins && ins.error) { console.warn('foundation_vendors insert error:', ins.error.message); break; }
         }
         if (touched.length || removed) {
-          var up = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
+          var up = await kmiPushTableRows('vendors');   // RD1
           if (up && up.error) console.warn('vendors upsert error:', up.error.message);
         }
       } catch (e) { console.warn('foundation_vendors sync exception:', e); }
@@ -43694,7 +43694,7 @@ function _vendorReconcilePersist() {
   if (supabaseClient) {
     (async function(){
       try {
-        var up = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
+        var up = await kmiPushTableRows('vendors');   // RD1
         if (up && up.error) console.warn('vendors upsert error:', up.error.message);
       } catch (e) { console.warn('vendors sync exception:', e); }
     })();
@@ -57422,7 +57422,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-13-AIPROXY1';
+var KMI_BUILD = '2026-10-13-rd1';
 
 var _kmiSessionId = (function(){
   try {
@@ -58145,7 +58145,7 @@ function fromSBProdItem(r) {
 function _syncProdCategoriesToCloud() {
   if (typeof supabaseClient === 'undefined' || !supabaseClient) return;
   if (!Array.isArray(db.prodCategories) || !db.prodCategories.length) return;
-  supabaseClient.from('kmi_prod_categories').upsert(db.prodCategories.map(toSBProdCategory))
+  kmiPushTableRows('prodCategories')   // RD1
     .then(function(r){ if (r && r.error) console.warn('prod_categories sync error:', r.error.message); });
 }
 function _syncProdItemToCloud(item) {
@@ -59354,236 +59354,272 @@ function _tblBaselineAll() {
   } catch (e) { /* non-fatal — worst case everything reads dirty */ }
 }
 
+// ── RD1: Row-level diff sync ─────────────────────────────────────────
+// _tblDirty() above is TABLE granularity: change one row in a 500-row table
+// and all 500 push, including the 499 this tab read hours ago. That is the
+// clobber mechanism behind the AP (23 -> 88 -> 567 rows) and COR ticket-lock
+// incidents: not the row you edited, but the ones you didn't.
+//
+// Every id-keyed table now pushes through one registry loop. Each mapped row
+// (the toSB* output, i.e. exactly what goes on the wire) is hashed after
+// every pull and every successful table push. On the next push only rows
+// whose mapped output differs from that baseline are "changed".
+//
+// KMI_ROWDIFF_MODE:
+//   'shadow' - compute and LOG the diff, but still send the full table.
+//              Same rows on the wire as the old 41 hand-written blocks.
+//   'live'   - send only new/changed rows.
+// Per-tab override for canary testing (no deploy needed):
+//   kmiRowDiffMode('live')  /  kmiRowDiffMode('shadow')  /  kmiRowDiffMode(null)
+//
+// Safety direction is always "push": a row with no id, no baseline (new, or
+// no pull yet this session) or an unhashable payload counts as changed.
+// Baselines are captured BEFORE the request is sent and applied only when
+// that table's upsert succeeds, so an edit made while a push is in flight
+// stays dirty, and a failed table retries on the next save.
+var KMI_ROWDIFF_MODE = 'shadow';
+
+var _rowHash = {};       // key -> { id: hash } baseline of mapped rows
+var _rdLast  = null;     // last push run, for kmiRowDiffReport()
+var _RD_STATS_KEY = 'kmi_rowdiff_stats';
+
+function _rowDiffMode() {
+  try {
+    var o = localStorage.getItem('kmi_rowdiff_mode');
+    if (o === 'live' || o === 'shadow') return o;
+  } catch (e) {}
+  return KMI_ROWDIFF_MODE === 'live' ? 'live' : 'shadow';
+}
+
+// Every id-keyed table in the push, IN PUSH ORDER. Order is load-bearing:
+// drawing areas -> sets -> sheets -> revisions, so a partial failure never
+// leaves a revision pointing at a sheet that hasn't landed. kmi_foundation_
+// vendors is intentionally absent (VD1: fnd_vendors is sync-owned). Built on
+// first use so a mapper defined in a later script block still resolves.
+var _SYNC_TABLES = null;
+function SYNC_TABLES() {
+  if (_SYNC_TABLES) return _SYNC_TABLES;
+  _SYNC_TABLES = [
+    {k:'customers',           t:'kmi_customers',               m:toSBCustomer,         lbl:'customers'},
+    {k:'pms',                 t:'kmi_project_managers',        m:toSBPM,               lbl:'pms'},
+    {k:'vendors',             t:'kmi_vendors',                 m:toSBVendor,           lbl:'vendors'},
+    {k:'vendorContacts',      t:'kmi_vendor_contacts',         m:toSBVendorContact,    lbl:'vendor_contacts'},
+    {k:'manufacturers',       t:'kmi_manufacturers',           m:toSBManufacturer,     lbl:'manufacturers'},
+    {k:'products',            t:'kmi_products',                m:toSBProduct,          lbl:'products'},
+    {k:'productDocuments',    t:'kmi_product_documents',       m:toSBProductDocument,  lbl:'product_documents'},
+    {k:'submittals',          t:'kmi_submittals',              m:toSBSubmittal,        lbl:'submittals'},
+    {k:'meetings',            t:'kmi_meetings',                m:toSBMeeting,          lbl:'meetings'},
+    {k:'meetingActionItems',  t:'kmi_meeting_action_items',    m:toSBMeetingItem,      lbl:'meeting_action_items'},
+    {k:'drawingAreas',        t:'kmi_drawing_areas',           m:toSBDrawingArea,      lbl:'drawing_areas'},
+    {k:'drawingSets',         t:'kmi_drawing_sets',            m:toSBDrawingSet,       lbl:'drawing_sets'},
+    {k:'drawings',            t:'kmi_drawings',                m:toSBDrawing,          lbl:'drawings'},
+    {k:'drawingRevisions',    t:'kmi_drawing_revisions',       m:toSBDrawingRevision,  lbl:'drawing_revisions'},
+    {k:'drawingMarkups',      t:'kmi_drawing_markups',         m:toSBDrawingMarkup,    lbl:'drawing_markups'},
+    {k:'transmittals',        t:'kmi_transmittals',            m:toSBTransmittal,      lbl:'transmittals'},
+    {k:'specSections',        t:'kmi_spec_sections',           m:toSBSpecSection,      lbl:'spec_sections'},
+    {k:'productDocTypes',     t:'kmi_product_doc_types',       m:toSBProductDocType,   lbl:'product_doc_types'},
+    {k:'productCategories',   t:'kmi_product_categories',      m:toSBProductCategory,  lbl:'product_categories'},
+    {k:'projectParameters',   t:'kmi_project_parameters',      m:toSBProjectParameter, lbl:'project_parameters'},
+    {k:'users',               t:'kmi_users',                   m:toSBUser,             lbl:'users'},
+    {k:'opportunities',       t:'kmi_opportunities',           m:toSBOpp,              lbl:'opportunities'},
+    {k:'proposals',           t:'kmi_proposals',               m:toSBProposal,         lbl:'proposals'},
+    {k:'projects',            t:'kmi_projects',                m:toSBProject,          lbl:'projects'},
+    {k:'tmTickets',           t:'kmi_tm_tickets',              m:toSBTmTicket,         lbl:'tm_tickets'},
+    {k:'prodWeekly',          t:'kmi_prod_weekly',             m:toSBProdWeekly,       lbl:'prod_weekly'},
+    {k:'prodCategories',      t:'kmi_prod_categories',         m:toSBProdCategory,     lbl:'prod_categories'},
+    {k:'prodItems',           t:'kmi_prod_items',              m:toSBProdItem,         lbl:'prod_items'},
+    {k:'cors',                t:'kmi_cors',                    m:toSBCor,              lbl:'cors'},
+    {k:'purchaseOrders',      t:'kmi_purchase_orders',         m:toSBPurchaseOrder,    lbl:'purchase_orders'},
+    {k:'rfqs',                t:'kmi_rfqs',                    m:toSBRfq,              lbl:'rfqs'},
+    {k:'rfqResponses',        t:'kmi_rfq_responses',           m:toSBRfqResponse,      lbl:'rfq_responses'},
+    {k:'apInvoices',          t:'kmi_ap_invoices',             m:toSBApInvoice,        lbl:'ap_invoices'},
+    {k:'apInvoiceLines',      t:'kmi_ap_invoice_lines',        m:toSBApLine,           lbl:'ap_invoice_lines'},
+    {k:'apInvoiceLog',        t:'kmi_ap_invoice_log',          m:toSBApLog,            lbl:'ap_invoice_log'},
+    {k:'apVendorAliases',     t:'kmi_ap_vendor_aliases',       m:toSBApAlias,          lbl:'ap_vendor_aliases'},
+    {k:'costCodes',           t:'kmi_cost_codes',              m:toSBCostCode,         lbl:'cost_codes'},
+    {k:'costClasses',         t:'kmi_cost_classes',            m:toSBCostClass,        lbl:'cost_classes'},
+    {k:'customersFoundation', t:'kmi_customers_foundation',    m:toSBCustFnd,          lbl:'customers_foundation'},
+    {k:'budgetTemplate',      t:'kmi_budget_template_lines',   m:toSBBudgetTmpl,       lbl:'budget_template'},
+    {k:'projectBudgets',      t:'kmi_project_budgets',         m:toSBProjBudget,       lbl:'project_budgets'}
+  ];
+  return _SYNC_TABLES;
+}
+
+// 64-bit row fingerprint (FNV-1a 32 + djb2 32 + length). A collision here
+// would hide a real edit in live mode, so this is deliberately stronger than
+// the table-level _cheapHash.
+function _rowHash64(s) {
+  var h1 = 0x811c9dc5, h2 = 5381, i, c;
+  for (i = 0; i < s.length; i++) {
+    c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+    h2 = (Math.imul(h2, 33) ^ c) >>> 0;
+  }
+  return h1.toString(36) + '.' + h2.toString(36) + ':' + s.length;
+}
+
+// Maps the whole table once. Returns the full payload (shadow), the changed
+// subset (live) and the new baseline. A throwing mapper propagates to the
+// caller, which fails that one table instead of the whole push.
+function _rowDiff(e) {
+  var list = db[e.k] || [], base = _rowHash[e.k] || null;
+  var out = { full: [], send: [], hashes: {}, total: list.length,
+              changed: 0, unhashable: 0, nobase: !base };
+  for (var i = 0; i < list.length; i++) {
+    var row = e.m(list[i]);
+    out.full.push(row);
+    var id = (row && row.id != null && row.id !== '') ? String(row.id) : null;
+    var h = null;
+    if (id !== null) { try { h = _rowHash64(JSON.stringify(row)); } catch (x) { h = null; } }
+    if (id === null || h === null) { out.unhashable++; out.changed++; out.send.push(row); continue; }
+    out.hashes[id] = h;
+    if (!base || base[id] !== h) { out.changed++; out.send.push(row); }
+  }
+  return out;
+}
+
+// Called at the end of a pull: local now matches cloud, so every registry
+// table's current mapped rows become the baseline.
+function _rowBaselineAll() {
+  var tabs = SYNC_TABLES();
+  for (var i = 0; i < tabs.length; i++) {
+    try { _rowHash[tabs[i].k] = _rowDiff({ k: tabs[i].k, m: tabs[i].m }).hashes; }
+    catch (e) { delete _rowHash[tabs[i].k]; }   // unknown baseline reads dirty
+  }
+}
+
+// Pushes deferred because a sync was in flight. Before RD1 these were simply
+// dropped, and the post-push re-baseline then marked the edit as clean.
+function _kmiRequeuePush() {
+  if (!saveDB._requeue || !supabaseClient) return;
+  saveDB._requeue = false;
+  clearTimeout(saveDB._timer);
+  saveDB._timer = setTimeout(function() {
+    setSyncStatus('syncing', 'Syncing\u2026');
+    pushToSupabase();
+  }, 1500);
+}
+
+// Out-of-band pushes (vendor reconcile/import, catalog edits) go through the
+// same diff, so no code path upserts a whole table any more. Resolves to the
+// supabase result ({error:null} when nothing changed); never rejects.
+async function kmiPushTableRows(key) {
+  try {
+    var e = SYNC_TABLES().filter(function(x){ return x.k === key; })[0];
+    if (!e || !supabaseClient) return null;
+    var dup = _findDupIds(db[e.k] || []);
+    if (dup.length) return { error: { message: 'duplicate ID(s) ' + dup.join(', ') } };
+    var d = _rowDiff(e), payload = (_rowDiffMode() === 'live') ? d.send : d.full;
+    if (!payload.length) return { error: null, data: null };
+    var r = await supabaseClient.from(e.t).upsert(payload);
+    if (r && !r.error) _rowHash[e.k] = d.hashes;
+    return r;
+  } catch (x) { return { error: { message: (x && x.message) || String(x) } }; }
+}
+
+function _rdRecord(run) {
+  _rdLast = run;
+  var dirty = run.tables.filter(function(t){ return t.total > 0; });
+  if (!dirty.length) return;
+  var tot = 0, chg = 0, sent = 0;
+  dirty.forEach(function(t){ tot += t.total; chg += t.changed; sent += t.sent; });
+  var pct = tot ? Math.round(100 * (1 - chg / tot)) : 0;
+  console.info('[rowdiff:' + run.mode + '] ' + chg + ' of ' + tot + ' rows across ' +
+    dirty.length + ' dirty table(s) changed (' + pct + '% reduction' +
+    (run.mode === 'live' ? ', ' + sent + ' sent' : ' available') + ')');
+  try {
+    var s = JSON.parse(localStorage.getItem(_RD_STATS_KEY) || 'null') ||
+            { since: run.at, pushes: 0, tables: {} };
+    s.pushes++; s.last = run.at;
+    dirty.forEach(function(t) {
+      var x = s.tables[t.k] || (s.tables[t.k] = { pushes:0, rows:0, changed:0, sent:0, allChanged:0, nobase:0, errors:0, unhashable:0 });
+      x.pushes++; x.rows += t.total; x.changed += t.changed; x.sent += t.sent;
+      x.unhashable += t.unhashable;
+      if (t.nobase) x.nobase++;
+      else if (t.total > 1 && t.changed === t.total) x.allChanged++;
+      if (!t.ok) x.errors++;
+    });
+    localStorage.setItem(_RD_STATS_KEY, JSON.stringify(s));
+  } catch (e) { /* stats are diagnostic only */ }
+}
+
+// Console: kmiRowDiffReport()          -> cumulative stats for this browser
+//          kmiRowDiffReport('last')    -> the last push, table by table
+//          kmiRowDiffReport('reset')   -> clear cumulative stats
+// Red flag before going live: a table whose allChanged count tracks its
+// pushes (with nobase excluded) has a mapper the diff can't see through.
+function kmiRowDiffReport(arg) {
+  if (arg === 'reset') { try { localStorage.removeItem(_RD_STATS_KEY); } catch (e) {} console.info('[rowdiff] stats cleared'); return; }
+  console.info('[rowdiff] mode: ' + _rowDiffMode() + ' (build default ' + KMI_ROWDIFF_MODE + ')');
+  if (arg === 'last') {
+    if (!_rdLast) { console.info('[rowdiff] no push yet this session'); return null; }
+    console.table(_rdLast.tables);
+    return _rdLast;
+  }
+  var s = null;
+  try { s = JSON.parse(localStorage.getItem(_RD_STATS_KEY) || 'null'); } catch (e) {}
+  if (!s) { console.info('[rowdiff] no stats yet \u2014 use the app, then re-run'); return null; }
+  var rows = Object.keys(s.tables).sort().map(function(k) {
+    var x = s.tables[k], based = x.pushes - x.nobase;
+    return { table: k, pushes: x.pushes, avgRows: Math.round(x.rows / x.pushes),
+             avgChanged: +(x.changed / x.pushes).toFixed(1), reductionPct: x.rows ? Math.round(100 * (1 - x.changed / x.rows)) : 0,
+             allChanged: x.allChanged + '/' + based, nobase: x.nobase, unhashable: x.unhashable, errors: x.errors,
+             FLAG: (based >= 3 && x.allChanged === based) ? 'CHECK MAPPER' : '' };
+  });
+  console.info('[rowdiff] ' + s.pushes + ' push(es) since ' + s.since);
+  console.table(rows);
+  return s;
+}
+
+function kmiRowDiffMode(m) {
+  try {
+    if (m === 'live' || m === 'shadow') localStorage.setItem('kmi_rowdiff_mode', m);
+    else if (m === null) localStorage.removeItem('kmi_rowdiff_mode');
+  } catch (e) {}
+  var cur = _rowDiffMode();
+  console.info('[rowdiff] this tab: ' + cur + (cur !== KMI_ROWDIFF_MODE ? ' (override; build default ' + KMI_ROWDIFF_MODE + ')' : ''));
+  return cur;
+}
+
 // ── Push all data to Supabase ────────────────────────────────────
 async function pushToSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
+  if (_syncing) { saveDB._requeue = true; return; }   // RD1: never overlap a pull/push
   _syncing = true;
   setSyncStatus('syncing', 'Syncing\u2026');
   try {
     var errs = [];
 
-    // Customers
-    if (db.customers.length && _tblDirty('customers')) {
-      var r = await supabaseClient.from('kmi_customers').upsert(db.customers.map(toSBCustomer));
-      if (r.error) errs.push('customers: ' + r.error.message);
-    }
-    // PMs
-    if (db.pms.length && _tblDirty('pms')) {
-      var r = await supabaseClient.from('kmi_project_managers').upsert(db.pms.map(toSBPM));
-      if (r.error) errs.push('pms: ' + r.error.message);
-    }
-    // Vendors
-    if ((db.vendors || []).length && _tblDirty('vendors')) {
-      var r = await supabaseClient.from('kmi_vendors').upsert(db.vendors.map(toSBVendor));
-      if (r.error) errs.push('vendors: ' + r.error.message);
-    }
-    // Vendor contacts
-    if ((db.vendorContacts || []).length && _tblDirty('vendorContacts')) {
-      var r = await supabaseClient.from('kmi_vendor_contacts').upsert(db.vendorContacts.map(toSBVendorContact));
-      if (r.error) errs.push('vendor_contacts: ' + r.error.message);
-    }
-    // Product Library (Round 1) — non-fatal if tables missing on older
-    // Supabase projects (they get created via the round1 migration).
-    if ((db.manufacturers || []).length && _tblDirty('manufacturers')) {
-      var r = await supabaseClient.from('kmi_manufacturers').upsert(db.manufacturers.map(toSBManufacturer));
-      if (r && r.error) errs.push('manufacturers: ' + r.error.message);
-    }
-    if ((db.products || []).length && _tblDirty('products')) {
-      var r = await supabaseClient.from('kmi_products').upsert(db.products.map(toSBProduct));
-      if (r && r.error) errs.push('products: ' + r.error.message);
-    }
-    if ((db.productDocuments || []).length && _tblDirty('productDocuments')) {
-      var r = await supabaseClient.from('kmi_product_documents').upsert(db.productDocuments.map(toSBProductDocument));
-      if (r && r.error) errs.push('product_documents: ' + r.error.message);
-    }
-    // Submittals (Round 2A) — non-fatal if table missing
-    if ((db.submittals || []).length && _tblDirty('submittals')) {
-      var r = await supabaseClient.from('kmi_submittals').upsert(db.submittals.map(toSBSubmittal));
-      if (r && r.error) errs.push('submittals: ' + r.error.message);
-    }
-    // Meeting Minutes (Round 1) — non-fatal if tables missing
-    if ((db.meetings || []).length && _tblDirty('meetings')) {
-      var r = await supabaseClient.from('kmi_meetings').upsert(db.meetings.map(toSBMeeting));
-      if (r && r.error) errs.push('meetings: ' + r.error.message);
-    }
-    if ((db.meetingActionItems || []).length && _tblDirty('meetingActionItems')) {
-      var r = await supabaseClient.from('kmi_meeting_action_items').upsert(db.meetingActionItems.map(toSBMeetingItem));
-      if (r && r.error) errs.push('meeting_action_items: ' + r.error.message);
-    }
-    // Drawings (Session 1) — non-fatal if tables missing. Order matters on a
-    // fresh push: areas before sets before sheets before revisions, so a
-    // partial failure never leaves a revision pointing at a sheet that
-    // hasn't landed.
-    if ((db.drawingAreas || []).length && _tblDirty('drawingAreas')) {
-      var r = await supabaseClient.from('kmi_drawing_areas').upsert(db.drawingAreas.map(toSBDrawingArea));
-      if (r && r.error) errs.push('drawing_areas: ' + r.error.message);
-    }
-    if ((db.drawingSets || []).length && _tblDirty('drawingSets')) {
-      var r = await supabaseClient.from('kmi_drawing_sets').upsert(db.drawingSets.map(toSBDrawingSet));
-      if (r && r.error) errs.push('drawing_sets: ' + r.error.message);
-    }
-    if ((db.drawings || []).length && _tblDirty('drawings')) {
-      var r = await supabaseClient.from('kmi_drawings').upsert(db.drawings.map(toSBDrawing));
-      if (r && r.error) errs.push('drawings: ' + r.error.message);
-    }
-    if ((db.drawingRevisions || []).length && _tblDirty('drawingRevisions')) {
-      var r = await supabaseClient.from('kmi_drawing_revisions').upsert(db.drawingRevisions.map(toSBDrawingRevision));
-      if (r && r.error) errs.push('drawing_revisions: ' + r.error.message);
-    }
-    if ((db.drawingMarkups || []).length && _tblDirty('drawingMarkups')) {
-      var r = await supabaseClient.from('kmi_drawing_markups').upsert(db.drawingMarkups.map(toSBDrawingMarkup));
-      if (r && r.error) errs.push('drawing_markups: ' + r.error.message);
-    }
-    // Transmittals (autonumber history) — non-fatal if table missing
-    if ((db.transmittals || []).length && _tblDirty('transmittals')) {
-      var r = await supabaseClient.from('kmi_transmittals').upsert(db.transmittals.map(toSBTransmittal));
-      if (r && r.error) errs.push('transmittals: ' + r.error.message);
-    }
-    // Spec sections (Round 5) — non-fatal if table missing
-    if ((db.specSections || []).length && _tblDirty('specSections')) {
-      var r = await supabaseClient.from('kmi_spec_sections').upsert(db.specSections.map(toSBSpecSection));
-      if (r && r.error) errs.push('spec_sections: ' + r.error.message);
-    }
-    // Product Library lists (Product Lists Round 1) — non-fatal if tables missing
-    if ((db.productDocTypes || []).length && _tblDirty('productDocTypes')) {
-      var r = await supabaseClient.from('kmi_product_doc_types').upsert(db.productDocTypes.map(toSBProductDocType));
-      if (r && r.error) errs.push('product_doc_types: ' + r.error.message);
-    }
-    if ((db.productCategories || []).length && _tblDirty('productCategories')) {
-      var r = await supabaseClient.from('kmi_product_categories').upsert(db.productCategories.map(toSBProductCategory));
-      if (r && r.error) errs.push('product_categories: ' + r.error.message);
-    }
-    // Project parameters (Form-fill Round 1) — non-fatal if table missing
-    if ((db.projectParameters || []).length && _tblDirty('projectParameters')) {
-      var r = await supabaseClient.from('kmi_project_parameters').upsert(db.projectParameters.map(toSBProjectParameter));
-      if (r && r.error) errs.push('project_parameters: ' + r.error.message);
-    }
-    // Users
-    if (db.users.length && _tblDirty('users')) {
-      var r = await supabaseClient.from('kmi_users').upsert(db.users.map(toSBUser));
-      if (r.error) errs.push('users: ' + r.error.message);
-    }
-    // Opportunities
-    // A duplicate ID inside a single upsert batch makes Postgres abort the whole
-    // statement ("ON CONFLICT DO UPDATE command cannot affect row a second
-    // time"), so every record in the table silently stops syncing. Detect it here
-    // and surface a message that names the offending ID instead.
-    if (db.opportunities.length && _tblDirty('opportunities')) {
-      var dupOpp = _findDupIds(db.opportunities);
-      if (dupOpp.length) {
-        errs.push('opportunities: duplicate ID(s) ' + dupOpp.join(', ') + ' \u2014 upsert skipped until resolved');
-        console.error('[sync] duplicate opportunity IDs block the upsert:', dupOpp);
-      } else {
-        var r = await supabaseClient.from('kmi_opportunities').upsert(db.opportunities.map(toSBOpp));
-        if (r.error) errs.push('opportunities: ' + r.error.message);
+    // RD1 — one registry loop replaces the 41 hand-written blocks. Duplicate-
+    // ID detection now covers every table (was opportunities/proposals only):
+    // a duplicate makes Postgres abort the whole statement, so name it here.
+    var _rdMode = _rowDiffMode();
+    var _rdRun = { mode: _rdMode, at: new Date().toISOString(), tables: [] };
+    var _rdTabs = SYNC_TABLES();
+    for (var _ti = 0; _ti < _rdTabs.length; _ti++) {
+      var _e = _rdTabs[_ti];
+      if (!(db[_e.k] || []).length || !_tblDirty(_e.k)) continue;
+      var _dup = _findDupIds(db[_e.k]);
+      if (_dup.length) {
+        errs.push(_e.lbl + ': duplicate ID(s) ' + _dup.join(', ') + ' \u2014 upsert skipped until resolved');
+        console.error('[sync] duplicate ' + _e.k + ' IDs block the upsert:', _dup);
+        continue;
       }
-    }
-    // Proposals
-    if (db.proposals.length && _tblDirty('proposals')) {
-      var dupProp = _findDupIds(db.proposals);
-      if (dupProp.length) {
-        errs.push('proposals: duplicate ID(s) ' + dupProp.join(', ') + ' \u2014 upsert skipped until resolved');
-        console.error('[sync] duplicate proposal IDs block the upsert:', dupProp);
-      } else {
-        var r = await supabaseClient.from('kmi_proposals').upsert(db.proposals.map(toSBProposal));
-        if (r.error) errs.push('proposals: ' + r.error.message);
+      var _tSnap = _tblSnapshot(_e.k), _d;
+      try { _d = _rowDiff(_e); }
+      catch (mx) { errs.push(_e.lbl + ': ' + ((mx && mx.message) || mx)); continue; }
+      var _payload = (_rdMode === 'live') ? _d.send : _d.full;
+      var _st = { k: _e.k, total: _d.total, changed: _d.changed, sent: _payload.length,
+                  unhashable: _d.unhashable, nobase: _d.nobase, ok: true };
+      if (_payload.length) {
+        var r = await supabaseClient.from(_e.t).upsert(_payload);
+        if (r && r.error) { errs.push(_e.lbl + ': ' + r.error.message); _st.ok = false; }
       }
-    }
-    // Projects
-    if (db.projects.length && _tblDirty('projects')) {
-      var r = await supabaseClient.from('kmi_projects').upsert(db.projects.map(toSBProject));
-      if (r.error) errs.push('projects: ' + r.error.message);
-    }
-    // T&M Tickets (Round 1) — non-fatal if table missing on older Supabase projects
-    if ((db.tmTickets || []).length && _tblDirty('tmTickets')) {
-      var r = await supabaseClient.from('kmi_tm_tickets').upsert(db.tmTickets.map(toSBTmTicket));
-      if (r && r.error) errs.push('tm_tickets: ' + r.error.message);
-    }
-    // Production weekly data (Phase 1) — non-fatal if table missing
-    if ((db.prodWeekly || []).length && _tblDirty('prodWeekly')) {
-      var r = await supabaseClient.from('kmi_prod_weekly').upsert(db.prodWeekly.map(toSBProdWeekly));
-      if (r && r.error) errs.push('prod_weekly: ' + r.error.message);
-    }
-    // Production catalog (Prod Catalog Round 1) — dedicated tables. Non-fatal
-    // if the tables are missing on an older Supabase project (created by the
-    // prod_catalog_round1 migration). These are now the sole source of truth
-    // for categories/items; they are no longer written to kmi_settings.
-    if ((db.prodCategories || []).length && _tblDirty('prodCategories')) {
-      var r = await supabaseClient.from('kmi_prod_categories').upsert(db.prodCategories.map(toSBProdCategory));
-      if (r && r.error) errs.push('prod_categories: ' + r.error.message);
-    }
-    if ((db.prodItems || []).length && _tblDirty('prodItems')) {
-      var r = await supabaseClient.from('kmi_prod_items').upsert(db.prodItems.map(toSBProdItem));
-      if (r && r.error) errs.push('prod_items: ' + r.error.message);
-    }
-    // CORs (Round 4.1) — non-fatal if table missing on older Supabase projects
-    if ((db.cors || []).length && _tblDirty('cors')) {
-      var r = await supabaseClient.from('kmi_cors').upsert(db.cors.map(toSBCor));
-      if (r && r.error) errs.push('cors: ' + r.error.message);
-    }
-    // Purchase Orders (PO Module v1) — non-fatal if table missing on older
-    // Supabase projects; the kmi_purchase_orders table is created by the
-    // po_round1 migration. Without the table, POs only persist in
-    // localStorage on this device.
-    if ((db.purchaseOrders || []).length && _tblDirty('purchaseOrders')) {
-      var r = await supabaseClient.from('kmi_purchase_orders').upsert(db.purchaseOrders.map(toSBPurchaseOrder));
-      if (r && r.error) errs.push('purchase_orders: ' + r.error.message);
-    }
-    // RFQ / Vendor Pricing — non-fatal if tables missing on older Supabase
-    // projects (created by the rfq_round1 migration). Without the tables,
-    // RFQs only persist in localStorage on this device.
-    if ((db.rfqs || []).length && _tblDirty('rfqs')) {
-      var r = await supabaseClient.from('kmi_rfqs').upsert(db.rfqs.map(toSBRfq));
-      if (r && r.error) errs.push('rfqs: ' + r.error.message);
-    }
-    if ((db.rfqResponses || []).length && _tblDirty('rfqResponses')) {
-      var r = await supabaseClient.from('kmi_rfq_responses').upsert(db.rfqResponses.map(toSBRfqResponse));
-      if (r && r.error) errs.push('rfq_responses: ' + r.error.message);
-    }
-    // AP invoices (Session 2) — non-fatal if tables missing (ap_s2 migration).
-    if (false && (db.foundationVendors || []).length && _tblDirty('foundationVendors')) {  // VD1: fnd_vendors is sync-owned
-      var r = await supabaseClient.from('kmi_foundation_vendors').upsert(db.foundationVendors.map(toSBFoundationVendor));
-      if (r && r.error) errs.push('foundation_vendors: ' + r.error.message);
-    }
-    if ((db.apInvoices || []).length && _tblDirty('apInvoices')) {
-      var r = await supabaseClient.from('kmi_ap_invoices').upsert(db.apInvoices.map(toSBApInvoice));
-      if (r && r.error) errs.push('ap_invoices: ' + r.error.message);
-    }
-    if ((db.apInvoiceLines || []).length && _tblDirty('apInvoiceLines')) {
-      var r = await supabaseClient.from('kmi_ap_invoice_lines').upsert(db.apInvoiceLines.map(toSBApLine));
-      if (r && r.error) errs.push('ap_invoice_lines: ' + r.error.message);
-    }
-    if ((db.apInvoiceLog || []).length && _tblDirty('apInvoiceLog')) {
-      var r = await supabaseClient.from('kmi_ap_invoice_log').upsert(db.apInvoiceLog.map(toSBApLog));
-      if (r && r.error) errs.push('ap_invoice_log: ' + r.error.message);
-    }
-    if ((db.apVendorAliases || []).length && _tblDirty('apVendorAliases')) {
-      var r = await supabaseClient.from('kmi_ap_vendor_aliases').upsert(db.apVendorAliases.map(toSBApAlias));
-      if (r && r.error) errs.push('ap_vendor_aliases: ' + r.error.message);
-    }
-    // Foundation master data — cost codes / classes / customers (Chunk 1).
-    // These are populated by CSV import on the Templates page; if local is
-    // empty we don't push (avoids wiping a populated cloud copy on a fresh
-    // device that hasn't pulled yet).
-    if ((db.costCodes || []).length && _tblDirty('costCodes')) {
-      var r = await supabaseClient.from('kmi_cost_codes').upsert(db.costCodes.map(toSBCostCode));
-      if (r && r.error) errs.push('cost_codes: ' + r.error.message);
-    }
-    if ((db.costClasses || []).length && _tblDirty('costClasses')) {
-      var r = await supabaseClient.from('kmi_cost_classes').upsert(db.costClasses.map(toSBCostClass));
-      if (r && r.error) errs.push('cost_classes: ' + r.error.message);
-    }
-    if ((db.customersFoundation || []).length && _tblDirty('customersFoundation')) {
-      var r = await supabaseClient.from('kmi_customers_foundation').upsert(db.customersFoundation.map(toSBCustFnd));
-      if (r && r.error) errs.push('customers_foundation: ' + r.error.message);
-    }
-    if ((db.budgetTemplate || []).length && _tblDirty('budgetTemplate')) {
-      var r = await supabaseClient.from('kmi_budget_template_lines').upsert(db.budgetTemplate.map(toSBBudgetTmpl));
-      if (r && r.error) errs.push('budget_template: ' + r.error.message);
-    }
-    if ((db.projectBudgets || []).length && _tblDirty('projectBudgets')) {
-      var r = await supabaseClient.from('kmi_project_budgets').upsert(db.projectBudgets.map(toSBProjBudget));
-      if (r && r.error) errs.push('project_budgets: ' + r.error.message);
+      if (_st.ok) {
+        _rowHash[_e.k] = _d.hashes;                 // pre-send hashes, by design
+        if (_tSnap !== null) _tblHash[_e.k] = _tSnap;
+      }
+      _rdRun.tables.push(_st);
     }
     // Activity
     //
@@ -59599,6 +59635,7 @@ async function pushToSupabase() {
     // trim by explicit id list rather than by an unbounded predicate. If the
     // read fails we insert without trimming — growing the log is recoverable,
     // emptying it is not.
+    var _actSnap = _tblSnapshot('activity'), _actErrs = errs.length;   // RD1
     if (db.activity.length && _tblDirty('activity')) {
       var actRows = db.activity.slice(0, 50).map(function(a) {
         return { text:a.text||'', type:a.type||'', time:a.time||'' };
@@ -59629,6 +59666,7 @@ async function pushToSupabase() {
         }
       }
     }
+    if (errs.length === _actErrs && _actSnap !== null) _tblHash.activity = _actSnap;   // RD1
     // Settings
     var settingsRows = [
       {key:'stdClar',      value:db.stdClar},
@@ -59651,15 +59689,16 @@ async function pushToSupabase() {
     ];
     var r = await supabaseClient.from('kmi_settings').upsert(settingsRows);
     if (r.error) errs.push('settings: ' + r.error.message);
+    _rdRecord(_rdRun);   // RD1
 
     if (errs.length) {
       setSyncStatus('error', 'Sync error');
       showSBResult('Sync errors: ' + errs.join('; '), false);
     } else {
-      // Clean push — cloud now matches local, so re-baseline. On an errored
-      // push we deliberately leave the old baseline in place so the affected
-      // tables still read dirty and retry on the next save.
-      _tblBaselineAll();
+      // RD1: baselines are set per table as each upsert succeeds, from
+      // hashes captured BEFORE the request. Re-hashing everything here (the
+      // old _tblBaselineAll call) marked edits made mid-push as already
+      // synced, so they never went up.
       setSyncStatus('connected', 'Connected \u2022 Synced');
       kmiStartHeartbeat();   // an idle tab that never saves must still report in
       showSBResult('\u2714 All data synced to Supabase', true);
@@ -59671,6 +59710,7 @@ async function pushToSupabase() {
     showSBResult('Error: ' + e.message, false);
   }
   _syncing = false;
+  _kmiRequeuePush();   // RD1
 }
 
 // ── Pull all data from Supabase ──────────────────────────────────
@@ -60221,6 +60261,7 @@ async function pullFromSupabase() {
     // Local state now matches cloud — baseline every table so the next
     // auto-push only carries what this session actually changes from here.
     _tblBaselineAll();
+    _rowBaselineAll();   // RD1
 
     // Re-render current page
     var activePg = document.querySelector('.pg.active');
@@ -60234,6 +60275,7 @@ async function pullFromSupabase() {
     showSBResult('Error: ' + e.message, false);
   } finally {
     _syncing = false;
+    _kmiRequeuePush();   // RD1
   }
 }
 
@@ -60357,6 +60399,8 @@ saveDB = function() {
       setSyncStatus('syncing', 'Syncing\u2026');
       pushToSupabase();
     }, 1500);
+  } else if (supabaseClient) {
+    saveDB._requeue = true;   // RD1: sync in flight — push again when it ends
   }
   if (supabaseClient) kmiStartHeartbeat();
 };
