@@ -20850,6 +20850,7 @@ async function saveCor() {
     return {
       description: r.description || '',
       quantity:    Number(r.quantity)  || 0,
+      unit:        corMatUnitNorm(r.unit),  // MATUNIT1
       unitPrice:   Number(r.unitPrice) || 0,
       sourceTickets: r.sourceTickets || []
     };
@@ -20858,6 +20859,7 @@ async function saveCor() {
     return {
       description: r.description || '',
       quantity:    Number(r.quantity)  || 0,
+      unit:        corMatUnitNorm(r.unit),  // MATUNIT1
       unitPrice:   Number(r.unitPrice) || 0
     };
   });
@@ -21435,7 +21437,7 @@ async function smartUploadCorExtract() {
       '  "customerCoDate":    "YYYY-MM-DD or null — date the customer issued their formal CO, if shown",\n' +
       '  "decisionDate":      "YYYY-MM-DD or null — date the customer accepted/rejected, if shown",\n' +
       '  "manualLaborRows":   [{"classification": "...", "hours": 0, "rate": 0}],\n' +
-      '  "manualMaterialRows":[{"description": "...", "quantity": 0, "unitPrice": 0}],\n' +
+      '  "manualMaterialRows":[{"description": "...", "quantity": 0, "unit": "EA, SF, LF, CY, BAG, LS, etc. or empty", "unitPrice": 0}],\n' +
       '  "equipmentRows":     [{"description": "...", "quantity": 0, "unit": "DAY", "unitPrice": 0}],\n' +
       '  "unitPriceRows":     [{"description": "...", "quantity": 0, "unit": "...", "unitPrice": 0}],\n' +
       '  "subRows":           [{"name": "...", "total": 0}],\n' +
@@ -21645,6 +21647,7 @@ function _smartUpCorApplyPrefill(project, parsed) {
       return {
         description: String((r && r.description) || '').trim(),
         quantity:    Number(r && r.quantity)  || 0,
+        unit:        corMatUnitNorm(r && r.unit),  // MATUNIT1
         unitPrice:   Number(r && r.unitPrice) || 0
       };
     });
@@ -21796,7 +21799,7 @@ async function confirmSmartUploadCor() {
     return { classification: r.classification || '', hourType: corHourTypeOf(r), hours: Number(r.hours) || 0, rate: Number(r.rate) || 0 };
   });
   var newManualMat = (w.manualMaterialRows || []).map(function(r){
-    return { description: r.description || '', quantity: Number(r.quantity) || 0, unitPrice: Number(r.unitPrice) || 0 };
+    return { description: r.description || '', quantity: Number(r.quantity) || 0, unit: corMatUnitNorm(r.unit), unitPrice: Number(r.unitPrice) || 0 };  // MATUNIT1
   });
   var newSubs = (w.subRows || []).map(function(r){
     return { name: r.name || '', total: Number(r.total) || 0 };
@@ -22129,6 +22132,7 @@ function _corPdfMaterialRows(c) {
     return {
       description: r.description || '',
       quantity: qty,
+      unit: corMatUnitNorm(r.unit),  // MATUNIT1
       unitPrice: unitPrice,
       cost: qty * unitPrice
     };
@@ -22364,15 +22368,18 @@ function buildStandardCorPDF(c, p) {
   y += 14;
 
   var matRows = _corPdfMaterialRows(c);
+  // MATUNIT1: Unit column added; same column grid as Equipment Breakdown.
   var mc = {
     desc: LM,
-    qty:  LM + 280,
-    unit: LM + 360,
+    qty:  LM + 220,
+    um:   LM + 290,
+    unit: LM + 380,
     cost: RM
   };
   sf('bold', 9, [80, 80, 80]);
   doc.text('Description', mc.desc, y);
   doc.text('Quantity', mc.qty + 60, y, {align:'right'});
+  doc.text('Unit', mc.um + 30, y, {align:'center'});
   doc.text('Unit Price', mc.unit + 60, y, {align:'right'});
   doc.text('Cost', mc.cost - 6, y, {align:'right'});
   y += 4;
@@ -22388,9 +22395,10 @@ function buildStandardCorPDF(c, p) {
   } else {
     matRows.forEach(function(r){
       y = ensureRoom(16, y);
-      var dLines = wrap(r.description || '', 270);
+      var dLines = wrap(r.description || '', 210);
       doc.text(dLines, mc.desc, y);
       doc.text(_corPdfNum(r.quantity), mc.qty + 60, y, {align:'right'});
+      doc.text(String(r.unit || ''), mc.um + 30, y, {align:'center'});
       doc.text('$ ' + _corPdfMoney(r.unitPrice), mc.unit + 60, y, {align:'right'});
       doc.text('$ ' + _corPdfMoney(r.cost), mc.cost - 6, y, {align:'right'});
       y += dLines.length * 12 + 2;
@@ -22406,8 +22414,8 @@ function buildStandardCorPDF(c, p) {
   y += 28;
 
   // ── EQUIPMENT BREAKDOWN ───────────────────────────────────────────
-  // Equipment table has a dedicated Unit column (DAY/HR) that the
-  // Material table lacks — tighter description column to make room.
+  // Equipment table has a dedicated Unit column (DAY/HR); the Material
+  // table uses the same column grid (MATUNIT1).
   y = ensureRoom(80, y);
   sf('bold', 10);
   doc.text('Equipment Breakdown:', LM, y);
@@ -22952,7 +22960,7 @@ function buildHunzingerCorPDF(c, p) {
       doc.text(dShort[0] || '', LM + 18, y);
       doc.text(_corPdfNum(mr.quantity), Fx, y, {align: 'right'});
       doc.text('@', Gc, y, {align: 'center'});
-      doc.text(String(mr.unit || 'LS'), Hx, y, {align: 'right'});
+      doc.text(String(mr.unit || ''), Hx, y, {align: 'right'});  // MATUNIT1: blank, not LS
       doc.text('$' + _corPdfMoney(mr.unitPrice), Ix, y, {align: 'right'});
       doc.text('$' + _corPdfMoney(mr.cost), Mx, y, {align: 'right'});
     } else {
@@ -24583,8 +24591,9 @@ function ncorRebuildAutoMaterialRows() {
       if (!desc) return;
       var qty = Number(r.quantity) || 0;
       if (qty <= 0) return;
-      if (!byDesc[desc]) byDesc[desc] = { quantity: 0, sourceTickets: [] };
+      if (!byDesc[desc]) byDesc[desc] = { quantity: 0, sourceTickets: [], unit: '' };
       byDesc[desc].quantity += qty;
+      if (!byDesc[desc].unit && r.unit) byDesc[desc].unit = corMatUnitNorm(r.unit);  // MATUNIT1
       if (byDesc[desc].sourceTickets.indexOf(t.ticketNumber) === -1) {
         byDesc[desc].sourceTickets.push(t.ticketNumber);
       }
@@ -24595,7 +24604,7 @@ function ncorRebuildAutoMaterialRows() {
       var hrs = Number(r.hours) || 0;
       if (hrs <= 0) return;
       var label = desc + ' (equipment hrs)';
-      if (!byDesc[label]) byDesc[label] = { quantity: 0, sourceTickets: [] };
+      if (!byDesc[label]) byDesc[label] = { quantity: 0, sourceTickets: [], unit: 'HR' };  // MATUNIT1
       byDesc[label].quantity += hrs;
       if (byDesc[label].sourceTickets.indexOf(t.ticketNumber) === -1) {
         byDesc[label].sourceTickets.push(t.ticketNumber);
@@ -24609,16 +24618,20 @@ function ncorRebuildAutoMaterialRows() {
     var agg = byDesc[desc];
     // Look up unit price: existing override > project material list match > 0
     var prior = oldAuto.find(function(r){ return r.description === desc; });
+    var matched = matList.find(function(m){ return (m.description || '').trim().toLowerCase() === desc.toLowerCase(); });
     var unitPrice = 0;
     if (prior && Number(prior.unitPrice) > 0) {
       unitPrice = Number(prior.unitPrice);
     } else {
-      var matched = matList.find(function(m){ return (m.description || '').trim().toLowerCase() === desc.toLowerCase(); });
       if (matched && Number(matched.unitCost) > 0) unitPrice = Number(matched.unitCost);
     }
+    // MATUNIT1: unit = user override > ticket row > project material list > blank
+    var unit = (prior && prior.unit) ? corMatUnitNorm(prior.unit)
+             : (agg.unit || (matched ? corMatUnitNorm(matched.unit) : ''));
     return {
       description: desc,
       quantity: agg.quantity,
+      unit: unit,
       unitPrice: unitPrice,
       cost: agg.quantity * unitPrice,
       sourceTickets: agg.sourceTickets,
@@ -24626,6 +24639,23 @@ function ncorRebuildAutoMaterialRows() {
     };
   });
   w.autoMaterialRows = newAuto;
+}
+
+// MATUNIT1: COR material units. Same vocabulary as the project material
+// list (MATERIAL_UNITS); stored upper-case, blank = no unit.
+function corMatUnitNorm(u) {
+  return String(u == null ? '' : u).trim().toUpperCase();
+}
+function corMatUnitSelectHtml(cur, onchangeJs) {
+  var v = corMatUnitNorm(cur);
+  var units = (typeof MATERIAL_UNITS !== 'undefined' && Array.isArray(MATERIAL_UNITS)) ? MATERIAL_UNITS.slice() : ['EA','LS'];
+  if (v && units.indexOf(v) === -1) units.unshift(v);  // keep an off-list unit (e.g. Smart Upload) visible
+  return '<select onchange="' + onchangeJs + '" style="width:72px;font-size:12px;padding:3px 4px">' +
+    '<option value=""' + (v ? '' : ' selected') + '>—</option>' +
+    units.map(function(u){
+      return '<option value="' + corEsc(u) + '"' + (u === v ? ' selected' : '') + '>' + corEsc(u) + '</option>';
+    }).join('') +
+  '</select>';
 }
 
 function ncorRenderMaterialsSection() {
@@ -24670,6 +24700,12 @@ function ncorRenderMaterialsSection() {
       : (isAuto
           ? '<input type="number" step="0.01" min="0" value="' + (Number(r.unitPrice) || 0) + '" onchange="ncorUpdateAutoMat(' + autoIdx + ',\'unitPrice\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
           : '<input type="number" step="0.01" min="0" value="' + (Number(r.unitPrice) || 0) + '" onchange="ncorUpdateManualMat(' + manualIdx + ',\'unitPrice\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">');
+    // MATUNIT1: unit dropdown (auto + manual rows)
+    var unitCell = !canEdit
+      ? corEsc(corMatUnitNorm(r.unit))
+      : (isAuto
+          ? corMatUnitSelectHtml(r.unit, 'ncorUpdateAutoMat(' + autoIdx + ',\'unit\',this.value)')
+          : corMatUnitSelectHtml(r.unit, 'ncorUpdateManualMat(' + manualIdx + ',\'unit\',this.value)'));
     var cost = (Number(r.quantity) || 0) * (Number(r.unitPrice) || 0);
     var removeCell = (!isAuto && canEdit)
       ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="ncorRemoveManualMat(' + manualIdx + ')">×</button>'
@@ -24678,6 +24714,7 @@ function ncorRenderMaterialsSection() {
       '<td style="padding:5px 8px;width:50px">' + srcBadge + '</td>' +
       '<td style="padding:5px 8px">' + descCell + '</td>' +
       '<td style="padding:5px 8px;text-align:right">' + qtyCell + '</td>' +
+      '<td style="padding:5px 8px;text-align:center">' + unitCell + '</td>' +
       '<td style="padding:5px 8px;text-align:right">' + priceCell + '</td>' +
       '<td style="padding:5px 8px;text-align:right;font-family:monospace;font-weight:600">' + corFmtMoney(cost) + '</td>' +
       '<td style="padding:5px 8px;text-align:right;width:40px">' + removeCell + '</td>' +
@@ -24695,17 +24732,18 @@ function ncorRenderMaterialsSection() {
       '<th style="text-align:left;padding:6px 8px">Source</th>' +
       '<th style="text-align:left;padding:6px 8px">Description</th>' +
       '<th style="text-align:right;padding:6px 8px">Quantity</th>' +
+      '<th style="text-align:center;padding:6px 8px">Unit</th>' +
       '<th style="text-align:right;padding:6px 8px">Unit price</th>' +
       '<th style="text-align:right;padding:6px 8px">Cost</th>' +
       '<th style="padding:6px 8px"></th>' +
     '</tr></thead><tbody>' + rowsHtml +
     '<tr style="border-top:1px solid #ccc;background:#FAF8F0">' +
-      '<td colspan="4" style="padding:6px 8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Total material cost</td>' +
+      '<td colspan="5" style="padding:6px 8px;text-align:right;text-transform:uppercase;font-size:11px;letter-spacing:.5px;color:#666;font-weight:700">Total material cost</td>' +
       '<td style="padding:6px 8px;text-align:right;font-family:monospace;font-weight:700">' + corFmtMoney(subtotal) + '</td>' +
       '<td></td>' +
     '</tr>' +
     '<tr style="background:#FAF8F0">' +
-      '<td colspan="4" style="padding:6px 8px;text-align:right;color:#666;font-size:11px">Overhead &amp; Profit (' + markupPct + '%)</td>' +
+      '<td colspan="5" style="padding:6px 8px;text-align:right;color:#666;font-size:11px">Overhead &amp; Profit (' + markupPct + '%)</td>' +
       '<td style="padding:6px 8px;text-align:right;font-family:monospace">' + corFmtMoney(markup) + '</td>' +
       '<td></td>' +
     '</tr></tbody></table>';
@@ -24713,13 +24751,14 @@ function ncorRenderMaterialsSection() {
 
 function ncorAddMaterialRow() {
   _ncorWorking.manualMaterialRows = _ncorWorking.manualMaterialRows || [];
-  _ncorWorking.manualMaterialRows.push({ description: '', quantity: 1, unitPrice: 0 });
+  _ncorWorking.manualMaterialRows.push({ description: '', quantity: 1, unit: '', unitPrice: 0 });
   ncorRenderSections();
 }
 
 function ncorUpdateManualMat(idx, field, value) {
   var r = (_ncorWorking.manualMaterialRows || [])[idx]; if (!r) return;
   if (field === 'description') r.description = value;
+  else if (field === 'unit') r.unit = corMatUnitNorm(value);  // MATUNIT1
   else if (field === 'quantity' || field === 'unitPrice') r[field] = Number(value) || 0;
   ncorRenderSections();
 }
@@ -24727,6 +24766,7 @@ function ncorUpdateManualMat(idx, field, value) {
 function ncorUpdateAutoMat(idx, field, value) {
   var r = (_ncorWorking.autoMaterialRows || [])[idx]; if (!r) return;
   if (field === 'quantity' || field === 'unitPrice') r[field] = Number(value) || 0;
+  else if (field === 'unit') r.unit = corMatUnitNorm(value);  // MATUNIT1 (survives re-rollup)
   ncorRenderSections();
 }
 
@@ -24789,6 +24829,7 @@ function ncorAddSelectedMatList() {
     _ncorWorking.manualMaterialRows.push({
       description: m.description || '',
       quantity: 1,
+      unit: corMatUnitNorm(m.unit),  // MATUNIT1
       unitPrice: Number(m.unitCost) || 0
     });
   });
@@ -57426,7 +57467,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-14-MIX2';
+var KMI_BUILD = '2026-10-14-MATUNIT1';
 
 var _kmiSessionId = (function(){
   try {
