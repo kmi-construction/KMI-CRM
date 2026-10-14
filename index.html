@@ -1717,7 +1717,7 @@ tr.gc-line:hover td{background:#fafafa}
       <span id="sb-dot" style="width:7px;height:7px;border-radius:50%;background:#888;display:inline-block;flex-shrink:0"></span>
       <span id="sb-status-text">Not connected</span>
     </div>
-    <button onclick="nav('supabase-setup')" style="width:100%;background:rgba(200,168,75,.12);border:0.5px solid rgba(200,168,75,.3);color:var(--acl);border-radius:6px;padding:6px 10px;font-size:11px;cursor:pointer;font-family:inherit;text-align:left">&#9881; Supabase connection</button>
+    <button id="sb-setup-btn" onclick="nav('supabase-setup')" style="width:100%;background:rgba(200,168,75,.12);border:0.5px solid rgba(200,168,75,.3);color:var(--acl);border-radius:6px;padding:6px 10px;font-size:11px;cursor:pointer;font-family:inherit;text-align:left">&#9881; Supabase connection</button>
   </div>
   <div class="sb-user" id="sb-user" style="display:none">
     <div class="sb-user-avatar" id="sb-user-avatar">??</div>
@@ -4108,6 +4108,15 @@ var DB_DEFAULTS = {
   clarGroups: ['brick veneer','stone veneer','precast','CMU','demolition','patching','granite','cladding support','terracotta']
 };
 
+// PFC1: legacy password hashes never live in the browser cache. Older builds
+// pulled every user's hash into db.users and saved it to localStorage on every
+// device, field phones included. This strips them on load; the next saveDB()
+// rewrites the cache without them.
+function _kmiScrubUserHashes(list) {
+  if (!Array.isArray(list)) return [];
+  list.forEach(function(u){ if (u) { delete u.passwordHash; delete u.passwordSalt; } });
+  return list;
+}
 function loadDB() {
   try {
     var s = localStorage.getItem(DB_KEY);
@@ -4121,7 +4130,7 @@ function loadDB() {
       return {
         customers:    p.customers    || [],
         pms:          p.pms          || [],
-        users:        p.users        || [],
+        users:        _kmiScrubUserHashes(p.users || []),   // PFC1
         opportunities:p.opportunities|| [],
         proposals:    p.proposals    || [],
         projects:     p.projects     || [],
@@ -4435,6 +4444,14 @@ var PERMISSIONS = {
   // trust boundary today, split out so edit can be tightened later.
   'view-meetings': ['full','full','full','none','none','none','none'],
   'edit-meetings': ['full','full','full','none','none','none','none'],
+  // PFC1: pages that had no row and were therefore open to every role.
+  // Manpower board: office + Superintendent; Accounting reads. The page does
+  // not distinguish read from full yet, so 'read' only controls visibility.
+  // admin-sync: the Supabase connection page (credentials, push/pull) and the
+  // CSV Import page. Admin only.
+  //                 Admin  PM     PC     Acct   Super  Foreman Shop
+  'view-manpower': ['full','full','full','read','full','none','none'],
+  'admin-sync':    ['full','none','none','none','none','none','none'],
   //                 Admin  PM     PC     Acct   Super  Foreman Shop
   'view-tasks':     ['full','full','full','full','full','full','full'],
   'edit-tasks':     ['full','full','full','full','full','full','full'],
@@ -4531,7 +4548,24 @@ var PAGE_ACTION_MAP = {
   'cost-jobs':       'manage-cost-jobs',
   'meetings':        'view-meetings',
   'tasks':           'view-tasks',
-  'drawings':        'view-drawings'
+  'drawings':        'view-drawings',
+  // PFC1: every router page is now mapped here or listed in PAGE_OPEN below.
+  'manpower':        'view-manpower',
+  'supabase-setup':  'admin-sync',
+  'import':          'admin-sync',
+  'new-opportunity': 'create-opportunity',
+  'cors':            'view-cors',
+  'new-cor':         'create-cor',
+  'configure-form':  'edit-product-library'
+};
+// PFC1: pages deliberately reachable without a permission row. Mobile shells
+// enforce their own scoping (_canAccessProject, field-role data). Any page
+// that is neither here nor in PAGE_ACTION_MAP is denied by nav() and hidden
+// from the sidebar, so a new page cannot ship open by accident.
+var PAGE_OPEN = {
+  'm-projects': 1, 'm-project-detail': 1, 'm-submittals': 1,
+  'm-submittal-detail': 1, 'm-procurement': 1, 'm-weekly': 1,
+  'm-desktop-only': 1
 };
 function canAccess(action) {
   if (!_currentUser) return 'none';
@@ -4539,8 +4573,23 @@ function canAccess(action) {
   var idx = PERM_ROLES.indexOf(role);
   if (idx < 0) return 'none';
   var row = PERMISSIONS[action];
-  if (!row) return 'full';
-  return row[idx];
+  // PFC1: fail closed. A key missing from the matrix used to return 'full'
+  // for every role, so a feature that shipped without a row was open to all.
+  // A short row (a role with no value) or a typo'd value is denied the same
+  // way. Each distinct miss logs once to the console so it gets noticed.
+  if (!row) { _permWarn('missing key: ' + action); return 'none'; }
+  var v = row[idx];
+  if (v !== 'full' && v !== 'read' && v !== 'none') {
+    _permWarn('bad value for ' + action + ' / ' + role + ': ' + v);
+    return 'none';
+  }
+  return v;
+}
+var _permWarned = {};
+function _permWarn(msg) {
+  if (_permWarned[msg]) return;
+  _permWarned[msg] = 1;
+  console.error('[perm] ' + msg + ' \u2014 denied (PFC1 fail-closed)');
 }
 function hasFull(action) { return canAccess(action) === 'full'; }
 function hasRead(action) { var a = canAccess(action); return a === 'full' || a === 'read'; }
@@ -4806,6 +4855,25 @@ async function kmiAuthSignIn(email, pw, legacyOk) {
   return { ok:true, migrated:true };
 }
 
+// PFC1: the only way a legacy hash is written. Sync no longer carries the
+// hash columns (authenticated cannot read them, which makes any upsert that
+// includes them fail). kmi_set_legacy_password() lets an Admin set or clear
+// anyone's hash and lets a user clear their own. pw === null clears.
+// Never throws; resolves to { ok, reason }.
+async function kmiSetLegacyPassword(userId, pw, mustReset) {
+  if (!supabaseClient || !_kmiAuthSession) return { ok:false, reason:'not signed in to the server' };
+  var hash = null, salt = null;
+  if (pw != null) { salt = generateSalt(); hash = await hashPassword(pw, salt); }
+  try {
+    var r = await supabaseClient.rpc('kmi_set_legacy_password', {
+      p_user_id: String(userId), p_hash: hash, p_salt: salt,
+      p_must_reset: (mustReset == null ? null : !!mustReset)
+    });
+    if (r.error) return { ok:false, reason: r.error.message || 'server error' };
+    return (r.data && typeof r.data === 'object') ? r.data : { ok:false, reason:'no response' };
+  } catch(e) { return { ok:false, reason:'could not reach the server' }; }
+}
+
 async function kmiAuthSignOut() {
   try { if (supabaseClient) await supabaseClient.auth.signOut(); } catch(e) {}
   _kmiAuthSession  = null;
@@ -4829,10 +4897,15 @@ function kmiPullTimeoutMs() { return _kmiAuthPersist() ? 25000 : 15000; }
 // about a week, so a foreman who uses the app weekly can easily return to an
 // empty cache. On desktop the cache usually survives, so the failure would
 // have looked like "broken only on phones".
+// PFC1: every read of kmi_users names its columns. password_hash and
+// password_salt are not readable by authenticated after PFC1b, and select('*')
+// would then fail outright ("permission denied").
+var KMI_USER_COLS = 'id,first_name,last_name,email,phone,role,must_reset_password,' +
+                    'status,updated_at,signature_image,foundation_pm_code,title,auth_user_id';
 async function kmiAuthFetchUser(userId, email) {
   if (!supabaseClient) return null;
   try {
-    var q = supabaseClient.from('kmi_users').select('*');
+    var q = supabaseClient.from('kmi_users').select(KMI_USER_COLS);
     q = userId ? q.eq('id', userId) : q.ilike('email', String(email || ''));
     var r = await q.limit(1);
     if (r.error || !r.data || !r.data[0]) return null;
@@ -4930,13 +5003,12 @@ async function loginAttempt() {
   if (!email || !pw) { err.textContent = 'Please enter your email and password.'; return; }
   var u = db.users.find(function(x){ return (x.email || '').toLowerCase() === email; });
 
-  // Legacy check first. This does not sign anyone in — it establishes that the
+  // Legacy check. This does not sign anyone in — it establishes that the
   // password is genuinely theirs, which is what entitles us to create a
-  // Supabase Auth account with it further down. The probe salt keeps the
-  // timing similar for unknown emails.
-  var probeSalt = (u && u.passwordSalt) || 'probe';
-  var hash      = await hashPassword(pw, probeSalt);
-  var legacyOk  = !!(u && u.passwordHash && hash === u.passwordHash);
+  // Supabase Auth account with it further down.
+  // PFC1: hashes are no longer in the browser, so the check is always the
+  // server-side kmi_legacy_verify() below.
+  var legacyOk   = false;
   var legacyInfo = null;
 
   // B3: fall back to server-side verification when the local check could not
@@ -5091,10 +5163,14 @@ async function forgotPassword() {
   var email = prompt('Enter the email on your account. A reset link will be sent.');
   if (!email) return;
   email = email.trim().toLowerCase();
-  var u = db.users.find(function(x){ return (x.email || '').toLowerCase() === email; });
-  // Same reply either way — never confirm whether an address is on file.
-  var generic = 'If that email is on file, reset instructions have been sent.';
-  if (!u) { alert(generic); return; }
+  // Same reply on every path — never confirm whether an address is on file.
+  // PFC1: the second sentence covers the unmigrated case below, which no
+  // longer sends anything, without revealing which case applied.
+  var generic = 'If that email is on file, reset instructions have been sent.\n\n' +
+                'If nothing arrives within a few minutes, contact an administrator.';
+  // PFC1: no local db.users lookup. After M2 the pre-login cache is empty on a
+  // fresh device, so the old `if (!u)` exit silently did nothing there. The
+  // server decides the route below.
 
   // B1c: ASK THE SERVER which path applies. This used to branch on the local
   // u.authUserId, which is null exactly when someone is stuck — the link is
@@ -5124,16 +5200,11 @@ async function forgotPassword() {
     return;
   }
 
-  // Not yet migrated: no auth account exists to recover. Issue a legacy temp
-  // password — shadow migration converts them on their next sign-in.
-  var tempPw = generateTempPassword();
-  var salt   = generateSalt();
-  u.passwordHash = await hashPassword(tempPw, salt);
-  u.passwordSalt = salt;
-  u.mustResetPassword = true;
-  u.status = u.status || 'active';
-  saveDB();
-  await sendTempPasswordEmail(u, tempPw, 'Password reset');
+  // PFC1: not yet migrated — no auth account exists to recover. This used to
+  // write a legacy temp password from the login screen, where nobody is signed
+  // in; after M2 anon has no write grants, so the email carried a password that
+  // never reached the database. An Admin issues one instead (Users → Reset pw).
+  alert(generic);
 }
 
 // ── Send temporary-password email (real send via Edge Function) ─
@@ -5402,11 +5473,10 @@ async function submitRecoveryReset() {
   await kmiAuthPostLoginSync();
   if (!_currentUser) _currentUser = u;
 
-  // Legacy hash kept in step deliberately — still the first-login path for
-  // admin-created users, and it keeps a rollback survivable. Goes away in M2.
-  var salt = generateSalt();
-  _currentUser.passwordHash = await hashPassword(a, salt);
-  _currentUser.passwordSalt = salt;
+  // PFC1: the legacy hash is no longer kept in step. This user now has a
+  // Supabase Auth password, so their old hash is dead weight — clear it
+  // server-side (non-fatal if it fails).
+  await kmiSetLegacyPassword(_currentUser.id, null, false);
   _currentUser.mustResetPassword = false;
   saveDB();
   saveSession(_currentUser);
@@ -5442,14 +5512,15 @@ async function submitPasswordReset() {
       var up = await supabaseClient.auth.updateUser({ password: a });
       if (up && up.error) { err.textContent = up.error.message || 'Could not update password.'; return; }
     } catch(e) { err.textContent = 'Could not reach the server. Please try again.'; return; }
+  } else {
+    // PFC1: without a server session there is nowhere to store the new
+    // password — the legacy-hash fallback that used to catch this is gone.
+    err.textContent = 'Not connected to the server. Sign out, sign back in, and try again.';
+    return;
   }
 
-  // Legacy hash kept in step deliberately. It is still what admin-created users
-  // sign in with the first time, and it keeps a rollback to the previous build
-  // survivable. Both go away in M2.
-  var salt = generateSalt();
-  _currentUser.passwordHash = await hashPassword(a, salt);
-  _currentUser.passwordSalt = salt;
+  // PFC1: the legacy hash is no longer kept in step; clear it (non-fatal).
+  await kmiSetLegacyPassword(_currentUser.id, null, false);
   _currentUser.mustResetPassword = false;
   saveDB();
   closeModal();
@@ -5463,11 +5534,14 @@ async function submitPasswordReset() {
 
 function applyUserPermissions() {
   if (!_currentUser) return;
+  // PFC1: the Supabase connection button sits outside .sb .ni, so gate it here.
+  var _sbBtn = g('sb-setup-btn');
+  if (_sbBtn) _sbBtn.style.display = (canAccess('admin-sync') === 'none') ? 'none' : '';
   document.querySelectorAll('.sb .ni').forEach(function(el){
     var m = (el.getAttribute('onclick') || '').match(/nav\(\'([^\']+)\'\)/);
     if (!m) return;
     var action = PAGE_ACTION_MAP[m[1]];
-    if (!action) return;
+    if (!action) { el.style.display = PAGE_OPEN[m[1]] ? '' : 'none'; return; }   // PFC1
     el.style.display = (canAccess(action) === 'none') ? 'none' : '';
   });
   document.querySelectorAll('.sb .ngl').forEach(function(lbl){
@@ -6408,7 +6482,7 @@ function firstAccessiblePage() {
                'product-library','vendors','customers','budget','analytics'];
   for (var i = 0; i < order.length; i++) {
     var a = PAGE_ACTION_MAP[order[i]];
-    if (!a || canAccess(a) !== 'none') return order[i];
+    if (a ? canAccess(a) !== 'none' : PAGE_OPEN[order[i]]) return order[i];   // PFC1
   }
   return 'dashboard';
 }
@@ -6419,7 +6493,10 @@ function nav(page) {
   // accessible page instead. Pages with no mapped action (mobile shells,
   // new-* sub-pages) pass through unchanged.
   var _gate = PAGE_ACTION_MAP[page];
-  if (_gate && _currentUser && canAccess(_gate) === 'none') {
+  // PFC1: a page with no mapped action is denied unless it is on PAGE_OPEN.
+  var _denied = !!_currentUser && (_gate ? canAccess(_gate) === 'none' : !PAGE_OPEN[page]);
+  if (_denied && !_gate) _permWarn('unmapped page: ' + page);
+  if (_denied) {
     var _dest = firstAccessiblePage();
     if (_dest && _dest !== page) { nav(_dest); return; }
   }
@@ -31593,10 +31670,7 @@ async function saveUser() {
   } else {
     // NEW USER — generate a temp password and seed auth fields BEFORE pushing,
     // so the welcome email can deliver something the user can sign in with.
-    var tempPw = generateTempPassword();
-    var salt   = generateSalt();
-    data.passwordHash       = await hashPassword(tempPw, salt);
-    data.passwordSalt       = salt;
+    var tempPw = generateTempPassword();   // PFC1: hash set server-side below
     data.mustResetPassword  = true;
     data.status             = 'active';
     data.id                 = Date.now();
@@ -31621,6 +31695,17 @@ async function saveUser() {
   // user is visible in the list while the email is in flight. sendWelcomeEmail
   // shows its own modal (success toast or fallback with the temp password).
   if (welcomeContext) {
+    // PFC1: the hash can only be set once the row exists, so push users now
+    // instead of waiting for the debounced sync, then set it server-side.
+    var _pr = await kmiPushTableRows('users');
+    var _sp = (_pr && !_pr.error)
+      ? await kmiSetLegacyPassword(welcomeContext.user.id, welcomeContext.tempPw, true)
+      : { ok:false, reason: (_pr && _pr.error && _pr.error.message) || 'could not save the user to the server' };
+    if (!_sp.ok) {
+      alert('The user was saved, but their temporary password could not be set (' + _sp.reason + ').\n\n' +
+            'No welcome email was sent. Use "Reset pw" on the Users page once you are back online.');
+      return;
+    }
     await sendWelcomeEmail(welcomeContext.user, welcomeContext.tempPw);
   }
 }
@@ -31697,10 +31782,16 @@ async function adminSendTempPassword(id) {
   if (!requireFull('users', 'reset passwords')) return;
   var u = db.users.find(function(x){ return x.id === id; }); if (!u) return;
   if (!confirm('Generate a new temporary password for ' + u.firstName + ' ' + u.lastName + '?\n\nTheir existing password will stop working immediately.')) return;
+  // PFC1: a legacy temp password cannot sign in a user who already has a
+  // Supabase Auth account — the login dead-ends on "needs a password reset".
+  if (u.authUserId) {
+    alert(u.firstName + ' already signs in with the new system, so a temporary password will not work for them.\n\n' +
+          'Ask them to use "Forgot password?" on the sign-in screen.');
+    return;
+  }
   var pw = generateTempPassword();
-  var salt = generateSalt();
-  u.passwordHash = await hashPassword(pw, salt);
-  u.passwordSalt = salt;
+  var sp = await kmiSetLegacyPassword(u.id, pw, true);
+  if (!sp.ok) { alert('Could not set a temporary password (' + sp.reason + '). Nothing was emailed.'); return; }
   u.mustResetPassword = true;
   u.status = u.status || 'active';
   saveDB();
@@ -31921,7 +32012,8 @@ var NPRJ_TAB_PERMS = {
 };
 function npTabAllowed(tab) {
   var a = NPRJ_TAB_PERMS[tab];
-  return !a || canAccess(a) !== 'none';
+  if (!a) { _permWarn('unmapped project tab: ' + tab); return false; }   // PFC1
+  return canAccess(a) !== 'none';
 }
 function applyProjectTabPermissions() {
   Object.keys(NPRJ_TAB_PERMS).forEach(function(tab) {
@@ -57467,7 +57559,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-14-MATUNIT1';
+var KMI_BUILD = '2026-10-14-PFC1';
 
 var _kmiSessionId = (function(){
   try {
@@ -58245,8 +58337,8 @@ function toSBUser(r)    {
     id:r.id, first_name:r.firstName||'', last_name:r.lastName||'',
     email:r.email||'', phone:r.phone||'', role:r.role||'',
     title:                r.title || '',
-    password_hash:       r.passwordHash || null,
-    password_salt:       r.passwordSalt || null,
+    // PFC1: password_hash / password_salt are never synced. Writes go
+    // through kmi_set_legacy_password(); authenticated cannot read them.
     must_reset_password: !!r.mustResetPassword,
     status:              r.status || 'active',
     // JSONB column. Stores either { data: '<dataURL>', w: <px>, h: <px> } or null.
@@ -58274,9 +58366,7 @@ function fromSBUser(r)  {
     id:r.id, firstName:r.first_name||'', lastName:r.last_name||'',
     email:r.email||'', phone:r.phone||'', role:r.role||'',
     title:              r.title || '',
-    passwordHash:       r.password_hash || '',
-    passwordSalt:       r.password_salt || '',
-    mustResetPassword:  !!r.must_reset_password,
+    mustResetPassword:  !!r.must_reset_password,   // PFC1: no hash fields
     status:             r.status || 'active',
     signatureImage:     r.signature_image || null,
     foundationPmCode:   r.foundation_pm_code || ''
@@ -59778,7 +59868,7 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
       supabaseClient.from('kmi_vendor_contacts').select('*'),
-      supabaseClient.from('kmi_users').select('*'),
+      supabaseClient.from('kmi_users').select(KMI_USER_COLS),   // PFC1
       supabaseClient.from('kmi_opportunities').select('*'),
       supabaseClient.from('kmi_proposals').select('*'),
       supabaseClient.from('kmi_projects').select('*'),
@@ -59902,18 +59992,15 @@ async function pullFromSupabase() {
     catch (e) { console.warn('kmi_drawing_revisions load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingRevisions)) db.drawingRevisions = []; }
     try { db.drawingMarkups = await _selAll('kmi_drawing_markups', fromSBDrawingMarkup); }
     catch (e) { console.warn('kmi_drawing_markups load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingMarkups)) db.drawingMarkups = []; }
-    // Merge pulled users with local auth state. After the password-sync migration,
-    // the cloud is the source of truth for passwordHash/Salt/status/mustReset, but
-    // we still fall back to local values for any row whose cloud columns are blank
-    // (e.g. an old user record that was last pushed before the migration).
+    // Merge pulled users with local state. The cloud is the source of truth
+    // for status/mustReset; local values fill only blank cloud columns.
+    // PFC1: password hashes are no longer pulled or preserved from the cache.
     var _prevUsersByEmail = {};
     db.users.forEach(function(u){ _prevUsersByEmail[(u.email || '').toLowerCase()] = u; });
     db.users = (users.data || []).map(function(row) {
       var r = fromSBUser(row);
       var local = _prevUsersByEmail[(r.email || '').toLowerCase()];
       if (local) {
-        if (!r.passwordHash && local.passwordHash) r.passwordHash = local.passwordHash;
-        if (!r.passwordSalt && local.passwordSalt) r.passwordSalt = local.passwordSalt;
         if (!r.status        && local.status)       r.status       = local.status;
         // Same pattern for signatureImage: if cloud row lacks the column (older rows
         // before the migration) but we've got it locally, keep the local value.
