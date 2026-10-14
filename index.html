@@ -20843,7 +20843,8 @@ async function saveCor() {
   var w = _ncorWorking || {};
   var newRolledIds   = (w.rolledUpTicketIds   || []).map(Number);
   var newManualLabor = (w.manualLaborRows     || []).map(function(r){
-    return { classification: r.classification || '', hours: Number(r.hours) || 0, rate: Number(r.rate) || 0 };
+    // MIX2: keep the ST/OT/DT the user picked on the manual row.
+    return { classification: r.classification || '', hourType: corHourTypeOf(r), hours: Number(r.hours) || 0, rate: Number(r.rate) || 0 };
   });
   var newAutoMat = (w.autoMaterialRows || []).map(function(r){
     return {
@@ -20867,8 +20868,10 @@ async function saveCor() {
   // Persist the auto-snapshot of computed labor rows (for Round 4.3 PDF
   // and historical accuracy — if a ticket changes after the COR is sent,
   // we still want to know what was on the COR at the time).
+  // MIX2: keep hourType on the snapshot. Without it every saved row reads
+  // as legacy, so PDFs and the Foundation cost export lose ST/OT/DT.
   var snapshotAutoLabor = ncorComputeAutoLaborRows().map(function(r){
-    return { classification: r.classification, hours: r.hours, rate: r.rate, source: 'auto' };
+    return { classification: r.classification, hourType: corHourTypeOf(r), hours: r.hours, rate: r.rate, source: 'auto' };
   });
 
   // Read Hunzinger fields back into working state before snapshotting
@@ -21789,7 +21792,8 @@ async function confirmSmartUploadCor() {
   // Snapshot row state from the working copy
   var w = _ncorWorking || {};
   var newManualLabor = (w.manualLaborRows || []).map(function(r){
-    return { classification: r.classification || '', hours: Number(r.hours) || 0, rate: Number(r.rate) || 0 };
+    // MIX2: keep hourType when the row has one (null = legacy behavior).
+    return { classification: r.classification || '', hourType: corHourTypeOf(r), hours: Number(r.hours) || 0, rate: Number(r.rate) || 0 };
   });
   var newManualMat = (w.manualMaterialRows || []).map(function(r){
     return { description: r.description || '', quantity: Number(r.quantity) || 0, unitPrice: Number(r.unitPrice) || 0 };
@@ -57422,7 +57426,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-13-rd2';
+var KMI_BUILD = '2026-10-14-MIX2';
 
 var _kmiSessionId = (function(){
   try {
