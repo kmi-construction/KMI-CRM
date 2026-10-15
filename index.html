@@ -57559,7 +57559,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-14-PFC1';
+var KMI_BUILD = '2026-10-14-DP1';
 
 var _kmiSessionId = (function(){
   try {
@@ -57619,11 +57619,11 @@ async function kmiHeartbeat(){
 function kmiStartHeartbeat(){
   if(_kmiHbTimer) return;
   kmiHeartbeat();
-  _kmiHbTimer = setInterval(kmiHeartbeat, 60000);
+  _kmiHbTimer = setInterval(function(){ kmiHeartbeat(); kmiDeltaPull('timer'); }, 60000);   // DP1
   // Refresh immediately when a backgrounded tab comes forward \u2014 that is the
   // dangerous case: a tab reopened after hours still holding old state.
   document.addEventListener('visibilitychange', function(){
-    if(document.visibilityState==='visible') kmiHeartbeat();
+    if(document.visibilityState==='visible'){ kmiHeartbeat(); kmiDeltaPull('focus'); }   // DP1
   });
   window.addEventListener('beforeunload', function(){
     try{ if(supabaseClient) supabaseClient.from('kmi_sessions').delete().eq('id',_kmiSessionId); }catch(e){}
@@ -59716,6 +59716,174 @@ function kmiRowDiffMode(m) {
   return cur;
 }
 
+// ── DP1: Delta pull (T&M tickets + CORs) ─────────────────────────────
+// TMCORLINK1 made the ticket->COR link server-owned and stamps every write
+// with server_updated_at. This keeps open tabs current without a reload: on
+// the 60s heartbeat, when a tab comes forward, and right after a push that
+// sent tickets or CORs, fetch only rows whose server_updated_at moved since
+// the last look and merge them into db.
+//
+// The cursor is server time, so client clock skew can't hide a row. Each
+// query re-reads a 2-minute overlap behind the cursor because now() is the
+// transaction START time: a slow commit can land a row stamped earlier than
+// rows already seen. Re-reading is harmless - identical rows skip by hash.
+//
+// Merge rules, per incoming row:
+//   identical to local                 -> skip
+//   local row clean (matches baseline) -> take server version IN PLACE (same
+//                                         object, so open references hold)
+//                                         and re-baseline it, so the next
+//                                         push does not send it back
+//   local row has an unsaved edit      -> keep local; the pending push
+//                                         carries it
+//   not present locally                -> add it
+// Deletes are not detected (tickets/CORs are voided, not deleted); the next
+// full load drops them.
+//
+// Holds _syncing for fetch + merge so it never interleaves with a push or
+// pull; a save in that window is requeued exactly as RD1 does. A 15s
+// timeout releases the lock if the network hangs.
+// Console: kmiDeltaReport()  |  kmiDeltaPull('push') forces a run now.
+var KMI_DP_OVERLAP_MS  = 120000;
+var KMI_DP_THROTTLE_MS = 15000;
+var KMI_DP_TIMEOUT_MS  = 15000;
+var _dpCursor  = {};      // k -> ms of newest server_updated_at seen; absent = disabled
+var _dpBusy    = false;
+var _dpLastRun = 0;
+var _dpLast    = null;
+
+var _DP_TABLES = null;
+function DP_TABLES() {
+  if (_DP_TABLES) return _DP_TABLES;
+  _DP_TABLES = [
+    { k:'tmTickets', t:'kmi_tm_tickets', from:fromSBTmTicket, page:'tm-tickets', refresh:function(){ filterTmTickets(); } },
+    { k:'cors',      t:'kmi_cors',       from:fromSBCor,      page:'cors',       refresh:function(){ filterCors(); } }
+  ];
+  return _DP_TABLES;
+}
+
+// Postgres can return 6 fractional digits and a bare '+00' offset; not
+// every browser's Date.parse accepts those.
+function _dpParse(v) {
+  if (v == null || v === '') return NaN;
+  var s = String(v).replace(' ', 'T').replace(/(\.\d{3})\d+/, '$1');
+  if (/[+-]\d{2}$/.test(s)) s += ':00';
+  return Date.parse(s);
+}
+
+function _dpMaxStamp(rows) {
+  var mx = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var t = _dpParse(rows[i] && rows[i].server_updated_at);
+    if (t > mx) mx = t;
+  }
+  return mx;
+}
+
+// Called from the full pull with the RAW rows (before fromSB mapping drops
+// server_updated_at). No column on the table = delta pull stays off for it.
+function _dpNoteMax(k, rows) {
+  rows = rows || [];
+  if (rows.length && !Object.prototype.hasOwnProperty.call(rows[0], 'server_updated_at')) {
+    delete _dpCursor[k];
+    return;
+  }
+  _dpCursor[k] = _dpMaxStamp(rows);
+}
+
+function _dpMerge(e, rows) {
+  var st = { merged: 0, added: 0, kept: 0, skipped: 0 };
+  var sync = SYNC_TABLES().filter(function(x){ return x.k === e.k; })[0];
+  var base = _rowHash[e.k];
+  if (!sync || !base) { st.skipped = rows.length; return st; }   // no baseline: can't tell clean from dirty
+  var list = db[e.k] || (db[e.k] = []);
+  var wasClean = !_tblDirty(e.k);
+  var byId = {};
+  for (var i = 0; i < list.length; i++) byId[String(list[i].id)] = list[i];
+  rows.forEach(function(raw) {
+    var inc, h;
+    try { inc = e.from(raw); h = _rowHash64(JSON.stringify(sync.m(inc))); }
+    catch (x) { st.skipped++; return; }
+    var id = String(inc.id), cur = byId[id];
+    if (!cur) { list.push(inc); byId[id] = inc; base[id] = h; st.added++; return; }
+    var curH = null;
+    try { curH = _rowHash64(JSON.stringify(sync.m(cur))); } catch (x) {}
+    if (curH === h) { base[id] = h; st.skipped++; return; }
+    if (curH === null || base[id] !== curH) { st.kept++; return; }
+    Object.keys(cur).forEach(function(key){ if (!(key in inc)) delete cur[key]; });
+    Object.assign(cur, inc);
+    base[id] = h;
+    st.merged++;
+  });
+  if (wasClean) { var snap = _tblSnapshot(e.k); if (snap !== null) _tblHash[e.k] = snap; }
+  return st;
+}
+
+async function kmiDeltaPull(reason) {
+  if (!supabaseClient || _syncing || _dpBusy) return;
+  if (reason !== 'push') {
+    if (document.visibilityState === 'hidden') return;          // focus event catches up
+    if (Date.now() - _dpLastRun < KMI_DP_THROTTLE_MS) return;
+  }
+  var tabs = DP_TABLES().filter(function(e){ return typeof _dpCursor[e.k] === 'number'; });
+  if (!tabs.length) return;
+  _dpBusy = true; _syncing = true; _dpLastRun = Date.now();
+  var run = { at: new Date().toISOString(), reason: reason || '', tables: [] }, touched = [];
+  try {
+    var reqs = Promise.all(tabs.map(function(e){
+      var since = new Date(Math.max(0, _dpCursor[e.k] - KMI_DP_OVERLAP_MS)).toISOString();
+      return supabaseClient.from(e.t).select('*').gt('server_updated_at', since)
+        .order('server_updated_at', { ascending: true }).limit(1000);
+    }));
+    var timer = null;
+    var res = await Promise.race([reqs, new Promise(function(r){ timer = setTimeout(function(){ r(null); }, KMI_DP_TIMEOUT_MS); })]);
+    clearTimeout(timer);
+    if (!res) { run.error = 'timeout'; return; }
+    for (var i = 0; i < tabs.length; i++) {
+      var e = tabs[i], r = res[i];
+      if (!r || r.error) { run.tables.push({ k: e.k, error: (r && r.error) ? r.error.message : 'no result' }); continue; }
+      var rows = r.data || [];
+      var st = rows.length ? _dpMerge(e, rows) : { merged: 0, added: 0, kept: 0, skipped: 0 };
+      st.k = e.k; st.fetched = rows.length;
+      run.tables.push(st);
+      var mx = _dpMaxStamp(rows);
+      if (mx > _dpCursor[e.k]) _dpCursor[e.k] = mx;
+      if (st.merged || st.added) touched.push(e);
+    }
+  } catch (x) {
+    run.error = (x && x.message) || String(x);
+  } finally {
+    _dpLast = run;
+    _syncing = false;
+    _dpBusy = false;
+    _kmiRequeuePush();
+  }
+  if (run.error) console.warn('[delta] ' + run.reason + ': ' + run.error);
+  run.tables.forEach(function(t){
+    if (t.error) console.warn('[delta] ' + t.k + ': ' + t.error);
+    else if (t.merged || t.added || t.kept)
+      console.info('[delta] ' + t.k + ': ' + t.merged + ' updated, ' + t.added + ' added, ' + t.kept + ' kept (unsaved local edit)');
+  });
+  if (touched.length) {
+    var pg = document.querySelector('.pg.active');
+    var pid = pg ? pg.id.replace('pg-', '') : '';
+    touched.forEach(function(e){
+      if (e.page !== pid) return;
+      try { e.refresh(); } catch (x) { console.warn('[delta] refresh ' + e.k + ':', x); }
+    });
+  }
+}
+
+function kmiDeltaReport() {
+  var c = Object.keys(_dpCursor).map(function(k){
+    return k + ' @ ' + (_dpCursor[k] ? new Date(_dpCursor[k]).toISOString() : 'start');
+  });
+  console.info('[delta] cursors: ' + (c.length ? c.join(', ') : 'none (no full pull yet, or server_updated_at missing)'));
+  if (_dpLast) { console.info('[delta] last run ' + _dpLast.at + ' (' + _dpLast.reason + ')' + (_dpLast.error ? ' ERROR ' + _dpLast.error : '')); console.table(_dpLast.tables); }
+  else console.info('[delta] no run yet this session');
+  return _dpLast;
+}
+
 // ── Push all data to Supabase ────────────────────────────────────
 async function pushToSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
@@ -59824,6 +59992,7 @@ async function pushToSupabase() {
     ];
     var r = await supabaseClient.from('kmi_settings').upsert(settingsRows);
     if (r.error) errs.push('settings: ' + r.error.message);
+    var _dpAfterPush = _rdRun.tables.some(function(t){ return (t.k === 'tmTickets' || t.k === 'cors') && t.ok && t.sent > 0; });   // DP1
     _rdRecord(_rdRun);   // RD1
 
     if (errs.length) {
@@ -59846,6 +60015,7 @@ async function pushToSupabase() {
   }
   _syncing = false;
   _kmiRequeuePush();   // RD1
+  if (_dpAfterPush) setTimeout(function(){ kmiDeltaPull('push'); }, 2000);   // DP1: pick up server-derived COR links
 }
 
 // ── Pull all data from Supabase ──────────────────────────────────
@@ -60076,6 +60246,7 @@ async function pullFromSupabase() {
     // the migration yet doesn't get its locally-created tickets wiped.
     if (tmTix && !tmTix.error) {
       db.tmTickets = (tmTix.data || []).map(fromSBTmTicket);
+      _dpNoteMax('tmTickets', tmTix.data);   // DP1
     } else if (tmTix && tmTix.error) {
       console.warn('kmi_tm_tickets load error (table missing?):', tmTix.error.message);
       if (!Array.isArray(db.tmTickets)) db.tmTickets = [];
@@ -60169,6 +60340,7 @@ async function pullFromSupabase() {
     // CORs (Round 4.1) — same preserve-on-missing pattern
     if (corsRes && !corsRes.error) {
       db.cors = (corsRes.data || []).map(fromSBCor);
+      _dpNoteMax('cors', corsRes.data);   // DP1
     } else if (corsRes && corsRes.error) {
       console.warn('kmi_cors load error (table missing?):', corsRes.error.message);
       if (!Array.isArray(db.cors)) db.cors = [];
