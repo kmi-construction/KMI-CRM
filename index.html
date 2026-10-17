@@ -332,6 +332,21 @@ input.carried:focus{background:#fff;border-color:var(--kmi)}
 .toast.info .toast-icon{background:#F0F0F0;color:#666}
 .toast-msg{flex:1;line-height:1.4;color:#333}
 .toast.dismissing{animation:toast-out .2s ease-in forwards}
+.toast.vg{border-left-color:#BA7517;align-items:flex-start;cursor:default;max-width:400px}
+.toast.vg .toast-icon{background:#FAEEDA;color:#854F0B}
+.vg-title{font-weight:600;color:#222}
+.vg-sub{color:#555;margin-top:3px;line-height:1.45}
+.vg-box{margin-top:8px;padding:7px 9px;background:#f6f6f4;border-radius:6px;color:#555;line-height:1.55}
+.vg-box-h{font-size:11.5px;color:#888}
+.vg-line b{font-weight:500;color:#222}
+.vg-acts{display:flex;gap:6px;margin-top:10px}
+.vg-btn{font:inherit;font-size:12.5px;padding:5px 10px;border:1px solid #ccc;background:#fff;color:#222;border-radius:6px;cursor:pointer}
+.vg-btn:hover{background:#f4f4f4}
+.vg-btn.ghost{border-color:transparent;background:transparent;color:#555}
+.vg-list{margin-top:8px}
+.vg-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-top:1px solid #eee}
+.vg-row-name{color:#222}
+.vg-row-meta{font-size:11.5px;color:#888;line-height:1.4}
 @keyframes toast-in{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
 @keyframes toast-out{to{transform:translateX(20px);opacity:0}}
 
@@ -8124,7 +8139,7 @@ async function _sopSave() {
 
   try {
     if (supabaseClient) {
-      var r = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(t));
+      var r = await kmiVgUpsert('tmTickets', toSBTmTicket(t));
       if (r && r.error) throw new Error(r.error.message);
     }
   } catch (e) {
@@ -16711,7 +16726,7 @@ async function saveTmTicket() {
     while (!syncOk && attempt < 5) {
       attempt++;
       try {
-        var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(ticket));
+        var tixRes = await kmiVgUpsert('tmTickets', toSBTmTicket(ticket));
         if (tixRes && tixRes.error) {
           lastErr = tixRes.error;
           var msg = tixRes.error.message || '';
@@ -18289,12 +18304,13 @@ async function sendForSignature() {
   // local state out of sync.
   try {
     if (supabaseClient) {
-      var up = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(t));
+      var up = await kmiVgUpsert('tmTickets', toSBTmTicket(t));
       if (up && up.error) throw new Error(up.error.message);
       // TMATT1: targeted column write - signature_cc is deliberately NOT in
       // toSBTmTicket so a stale wholesale push can never overwrite it.
       if (ccList.length) {
-        var ccUp = await supabaseClient.from('kmi_tm_tickets').update({ signature_cc: ccList }).eq('id', t.id);
+        var ccUp = await supabaseClient.from('kmi_tm_tickets').update({ signature_cc: ccList }).eq('id', t.id).select('id,version_at');   // VG1
+        _vgStamp('tmTickets', ccUp);   // VG1: keep this tab's version current
         if (ccUp && ccUp.error) throw new Error(ccUp.error.message);
       }
     }
@@ -18508,7 +18524,7 @@ async function doSendReminder() {
     t.lastReminderSentAt = new Date().toISOString();
     t.reminderCount = (t.reminderCount || 0) + 1;
     saveDB();
-    try { if (supabaseClient) await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(t)); } catch(e){}
+    try { if (supabaseClient) await kmiVgUpsert('tmTickets', toSBTmTicket(t)); } catch(e){}
     closeModal();
     viewTmTicket(t.id);
   } else {
@@ -18601,7 +18617,7 @@ async function uploadSignedPdf() {
     t.updatedByUserId = _currentUser ? _currentUser.id : null;
 
     saveDB();
-    var upRes = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(t));
+    var upRes = await kmiVgUpsert('tmTickets', toSBTmTicket(t));
     if (upRes && upRes.error) throw new Error('Sync error: ' + upRes.error.message);
 
     closeModal();
@@ -19153,7 +19169,7 @@ async function confirmSmartUploadTicket() {
   while (!syncOk && attempt < 5) {
     attempt++;
     try {
-      var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(ticket));
+      var tixRes = await kmiVgUpsert('tmTickets', toSBTmTicket(ticket));
       if (tixRes && tixRes.error) {
         lastErr = tixRes.error;
         var msg = tixRes.error.message || '';
@@ -19324,7 +19340,7 @@ async function approveTmTicket() {
   saveDB();
   try {
     if (supabaseClient) {
-      var r = await supabaseClient.from('kmi_tm_tickets').upsert(toSBTmTicket(t));
+      var r = await kmiVgUpsert('tmTickets', toSBTmTicket(t));
       if (r && r.error) throw new Error(r.error.message);
     }
   } catch (e) {
@@ -21039,7 +21055,7 @@ async function saveCor() {
           .map(function(tid){ return (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); }); })
           .filter(Boolean);
         if (tixToSync.length) {
-          var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(tixToSync.map(toSBTmTicket));
+          var tixRes = await kmiVgUpsert('tmTickets', tixToSync.map(toSBTmTicket));
           if (tixRes && tixRes.error) {
             console.warn('Ticket lock sync error:', tixRes.error.message);
             alert('WARNING \u2014 ticket lock changes did not reach the cloud:\n\n' +
@@ -21048,7 +21064,7 @@ async function saveCor() {
                   'Run Sync \u2192 Push, then re-open this COR to confirm the ticket list.');
           }
         }
-        var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(existingCor));
+        var upRes = await kmiVgUpsert('cors', toSBCor(existingCor));
         // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
         // the report falls back to class-only mapping if this fails.
         try { await corSyncDistribution(existingCor, getProj(existingCor.projectId)); }
@@ -21151,7 +21167,7 @@ async function saveCor() {
           .map(function(tid){ return (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); }); })
           .filter(Boolean);
         if (tixToSync.length) {
-          var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(tixToSync.map(toSBTmTicket));
+          var tixRes = await kmiVgUpsert('tmTickets', tixToSync.map(toSBTmTicket));
           if (tixRes && tixRes.error) {
             console.warn('Ticket lock sync error:', tixRes.error.message);
             alert('WARNING \u2014 ticket locks did not reach the cloud:\n\n' +
@@ -21161,7 +21177,7 @@ async function saveCor() {
           }
         }
       }
-      var upRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(newCor));
+      var upRes = await kmiVgUpsert('cors', toSBCor(newCor));
       // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
       // the report falls back to class-only mapping if this fails.
       try { await corSyncDistribution(newCor, getProj(newCor.projectId)); }
@@ -22013,7 +22029,7 @@ async function confirmSmartUploadCor() {
   // Phase 3 — push to Supabase
   try {
     if (supabaseClient) {
-      var corRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(newCor));
+      var corRes = await kmiVgUpsert('cors', toSBCor(newCor));
       // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
       // the report falls back to class-only mapping if this fails.
       try { await corSyncDistribution(newCor, getProj(newCor.projectId)); }
@@ -23404,14 +23420,14 @@ async function _corPersistTransition(c, opts) {
   saveDB();
   try {
     if (supabaseClient) {
-      var corRes = await supabaseClient.from('kmi_cors').upsert(toSBCor(c));
+      var corRes = await kmiVgUpsert('cors', toSBCor(c));
       // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
       // the report falls back to class-only mapping if this fails.
       try { await corSyncDistribution(c, getProj(c.projectId)); }
       catch (e) { console.warn('distribution sync', e); }
       if (corRes && corRes.error) console.warn('COR transition sync error:', corRes.error.message);
       if (opts && opts.tickets && opts.tickets.length) {
-        var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(opts.tickets.map(toSBTmTicket));
+        var tixRes = await kmiVgUpsert('tmTickets', opts.tickets.map(toSBTmTicket));
         if (tixRes && tixRes.error) console.warn('Ticket sync error:', tixRes.error.message);
       }
     }
@@ -24070,7 +24086,7 @@ async function deleteCor(id) {
       var delRes = await supabaseClient.from('kmi_cors').delete().eq('id', c.id);
       if (delRes && delRes.error) console.warn('COR delete sync error:', delRes.error.message);
       if (unlockedTickets.length) {
-        var tixRes = await supabaseClient.from('kmi_tm_tickets').upsert(unlockedTickets.map(toSBTmTicket));
+        var tixRes = await kmiVgUpsert('tmTickets', unlockedTickets.map(toSBTmTicket));
         if (tixRes && tixRes.error) console.warn('Ticket unlock sync error:', tixRes.error.message);
       }
     }
@@ -57559,7 +57575,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-14-DP1';
+var KMI_BUILD = '2026-10-17-VG1';
 
 var _kmiSessionId = (function(){
   try {
@@ -57619,7 +57635,7 @@ async function kmiHeartbeat(){
 function kmiStartHeartbeat(){
   if(_kmiHbTimer) return;
   kmiHeartbeat();
-  _kmiHbTimer = setInterval(function(){ kmiHeartbeat(); kmiDeltaPull('timer'); }, 60000);   // DP1
+  _kmiHbTimer = setInterval(kmiHeartbeat, 60000);   // DP1.1: delta pull has its own timer
   // Refresh immediately when a backgrounded tab comes forward \u2014 that is the
   // dangerous case: a tab reopened after hours still holding old state.
   document.addEventListener('visibilitychange', function(){
@@ -58830,6 +58846,7 @@ function fromSBTmTicket(r) {
     sentForSignatureAt:      r.sent_for_signature_at     || null,
     corId: r.cor_id || null,
     corNumber: r.cor_number || null,
+    versionAt: r.version_at || null,   // VG1
     // TMATT1: read-only here. Written by targeted update in sendForSignature;
     // intentionally absent from toSBTmTicket.
     signatureCc: Array.isArray(r.signature_cc) ? r.signature_cc : []
@@ -58943,6 +58960,7 @@ function fromSBCor(r) {
     description:  r.description   || '',
     status:       r.status        || 'Draft',
     rolledUpTicketIds: Array.isArray(r.rolled_up_ticket_ids) ? r.rolled_up_ticket_ids : [],
+    versionAt: r.version_at || null,   // VG1
     laborRows:         laborAuto,
     manualLaborRows:   laborManual,
     autoMaterialRows:  matAuto,
@@ -59789,6 +59807,7 @@ function _dpNoteMax(k, rows) {
     return;
   }
   _dpCursor[k] = _dpMaxStamp(rows);
+  _dpStartTimer();   // DP1.1
 }
 
 function _dpMerge(e, rows) {
@@ -59800,19 +59819,31 @@ function _dpMerge(e, rows) {
   var wasClean = !_tblDirty(e.k);
   var byId = {};
   for (var i = 0; i < list.length; i++) byId[String(list[i].id)] = list[i];
-  rows.forEach(function(raw) {
-    var inc, h;
-    try { inc = e.from(raw); h = _rowHash64(JSON.stringify(sync.m(inc))); }
+  var def = _dpDeferred[e.k] || (_dpDeferred[e.k] = {}), all = {};
+  Object.keys(def).forEach(function(id){ all[id] = def[id]; });          // parked earlier (DP1.1)
+  rows.forEach(function(raw){ all[String(raw.id)] = raw; });            // newer copy wins
+  Object.keys(all).forEach(function(key0) {
+    var raw = all[key0], inc, mapped, h;
+    try { inc = e.from(raw); mapped = sync.m(inc); h = _rowHash64(JSON.stringify(mapped)); }
     catch (x) { st.skipped++; return; }
     var id = String(inc.id), cur = byId[id];
-    if (!cur) { list.push(inc); byId[id] = inc; base[id] = h; st.added++; return; }
+    if (cur && _vgEditing(e.k, id)) { def[id] = raw; st.deferred = (st.deferred || 0) + 1; return; }   // DP1.1: open in an edit form - merge after it closes
+    delete def[id];
+    if (!cur) { list.push(inc); byId[id] = inc; base[id] = h; _vgSetBase(e.k, id, mapped); st.added++; return; }   // VG1
     var curH = null;
     try { curH = _rowHash64(JSON.stringify(sync.m(cur))); } catch (x) {}
-    if (curH === h) { base[id] = h; st.skipped++; return; }
-    if (curH === null || base[id] !== curH) { st.kept++; return; }
+    if (curH === h) {   // same content: still take the newer version stamp (VG1)
+      base[id] = h;
+      if (inc.versionAt) cur.versionAt = inc.versionAt;
+      _vgSetBase(e.k, id, mapped);
+      st.skipped++;
+      return;
+    }
+    if (curH === null || base[id] !== curH) { st.kept++; return; }   // unsaved local edit keeps its OLD version stamp
     Object.keys(cur).forEach(function(key){ if (!(key in inc)) delete cur[key]; });
     Object.assign(cur, inc);
     base[id] = h;
+    _vgSetBase(e.k, id, mapped);   // VG1
     st.merged++;
   });
   if (wasClean) { var snap = _tblSnapshot(e.k); if (snap !== null) _tblHash[e.k] = snap; }
@@ -59823,7 +59854,7 @@ async function kmiDeltaPull(reason) {
   if (!supabaseClient || _syncing || _dpBusy) return;
   if (reason !== 'push') {
     if (document.visibilityState === 'hidden') return;          // focus event catches up
-    if (Date.now() - _dpLastRun < KMI_DP_THROTTLE_MS) return;
+    if (reason !== 'wake' && reason !== 'online' && Date.now() - _dpLastRun < KMI_DP_THROTTLE_MS) return;   // DP1.1
   }
   var tabs = DP_TABLES().filter(function(e){ return typeof _dpCursor[e.k] === 'number'; });
   if (!tabs.length) return;
@@ -59843,7 +59874,7 @@ async function kmiDeltaPull(reason) {
       var e = tabs[i], r = res[i];
       if (!r || r.error) { run.tables.push({ k: e.k, error: (r && r.error) ? r.error.message : 'no result' }); continue; }
       var rows = r.data || [];
-      var st = rows.length ? _dpMerge(e, rows) : { merged: 0, added: 0, kept: 0, skipped: 0 };
+      var st = (rows.length || _dpHasDeferred(e.k)) ? _dpMerge(e, rows) : { merged: 0, added: 0, kept: 0, skipped: 0 };   // DP1.1
       st.k = e.k; st.fetched = rows.length;
       run.tables.push(st);
       var mx = _dpMaxStamp(rows);
@@ -59884,6 +59915,400 @@ function kmiDeltaReport() {
   return _dpLast;
 }
 
+// ── DP1.1: delta pull timing ─────────────────────────────────────────
+// DP1 piggybacked on the heartbeat timer, which only starts after a tab's
+// first save - a view-only tab never refreshed. The delta pull now owns its
+// timer (started when the first full load sets a cursor), refreshes on
+// plain window focus (side-by-side windows never fire visibilitychange),
+// and catches up immediately after a laptop wakes (timer gap) or the
+// network comes back. A record open in its edit form is parked, not
+// merged, until the form closes (see _vgEditing).
+var _dpTimer = null, _dpTick = 0;
+var _dpDeferred = {};   // k -> id -> raw row parked while that record is open in an edit form
+function _dpHasDeferred(k) { return !!(_dpDeferred[k] && Object.keys(_dpDeferred[k]).length); }
+function _dpStartTimer() {
+  if (_dpTimer) return;
+  _dpTick = Date.now();
+  _dpTimer = setInterval(function(){
+    var now = Date.now(), gap = now - _dpTick;
+    _dpTick = now;
+    kmiDeltaPull(gap > 180000 ? 'wake' : 'timer');
+  }, 60000);
+  window.addEventListener('focus',  function(){ kmiDeltaPull('focus'); });
+  window.addEventListener('online', function(){ kmiDeltaPull('online'); });
+}
+
+// ── VG1: Version guard (T&M tickets + CORs) ─────────────────────────
+// The database (VG1 migration) skips a ticket/COR write whose
+// base_version_at is older than the row's version_at: someone else saved
+// it after this tab last saw it. This side:
+//   - sends base_version_at = the row's versionAt on every write - the
+//     push loop via _vgUpsert, direct saves via kmiVgUpsert
+//   - reads version_at back from each write so the next save is current,
+//     and serializes writes per table so a tab never conflicts with itself
+//   - on a rejection, loads the current row and works out which of this
+//     user's edits were lost: changed from the version they started from
+//     AND different from what is saved now. It takes the server version
+//     and shows the sticky notice. A rejection that lost nothing (an echo
+//     push, or the same value someone else already saved) settles quietly.
+// Direct saves return an error on a real conflict so the caller's own
+// failure path runs ("Sync failed ... try again"). The server copy replaces
+// the local row right after the caller's rollback, so nothing stale pushes.
+// Console: kmiVgReport()
+var _VG_SKIP = ['id', 'created_at', 'created_by_user_id', 'created_by_name', 'updated_at',
+                'updated_by_user_id', 'base_version_at', 'version_at', 'server_updated_at'];
+var _VG = {
+  tmTickets: {
+    t: 'kmi_tm_tickets', noun: 'ticket',
+    name: function(r){ return 'T&M ' + ((r && (r.ticketNumber || r.id)) || ''); },
+    open: function(id){ viewTmTicket(id); },
+    from: function(x){ return fromSBTmTicket(x); },
+    skip: ['cor_id', 'cor_number', 'sign_token', 'sign_token_expires', 'signed_ip',
+           'last_reminder_sent_at', 'reminder_count'],
+    labels: {
+      project_id: 'Project', ticket_number: 'Ticket #', ticket_date: 'Date',
+      work_description: 'Work description', cm_comments: 'CM comments',
+      super_comments: 'Super comments', labor_rows: 'Labor', equipment_rows: 'Equipment',
+      material_rows: 'Materials', status: 'Status', rejected_reason: 'Rejection reason',
+      signature_recipient_email: 'Signer email', signature_recipient_name: 'Signer name',
+      signature_recipient_title: 'Signer title', signed_by_name: 'Signed by',
+      signed_by_title: 'Signed by title', signed_at: 'Signed', signature_image: 'Signature',
+      uploaded_signed_file: 'Signed file', approved_at: 'Approved',
+      approved_by_user_id: 'Approved by', sent_for_signature_at: 'Sent for signature'
+    }
+  },
+  cors: {
+    t: 'kmi_cors', noun: 'COR',
+    name: function(r){ return 'COR ' + ((r && (r.corNumber || r.id)) || ''); },
+    open: function(id){ viewCor(id); },
+    from: function(x){ return fromSBCor(x); },
+    skip: ['total_labor', 'total_material', 'total_sub', 'total_equipment', 'total_unit_price',
+           'mateq_ohp', 'sub_ohp', 'equipment_ohp', 'unit_price_ohp', 'bond_cost'],
+    labels: {
+      cor_number: 'COR #', cor_date: 'Date', cor_type: 'Type', project_id: 'Project',
+      attention_contact_id: 'Attention', description: 'Description', status: 'Status',
+      rolled_up_ticket_ids: 'T&M tickets', labor_rows: 'Labor', material_rows: 'Materials',
+      sub_rows: 'Subcontractors', equipment_rows: 'Equipment', unit_price_rows: 'Unit pricing',
+      mat_eq_markup_pct: 'Mat/Eq markup %', sub_markup_pct: 'Sub markup %',
+      equipment_markup_pct: 'Equipment markup %', unit_price_markup_pct: 'Unit price markup %',
+      bond_rate_pct: 'Bond rate %', time_extension_days: 'Time extension (days)',
+      added_scope: 'Added scope', omitted_scope: 'Omitted scope', total_amount: 'Total',
+      customer_co_number: 'Customer CO #', customer_co_date: 'Customer CO date',
+      void_reason: 'Void reason', rejected_reason: 'Rejection reason'
+    }
+  }
+};
+var _vgBase  = { tmTickets: {}, cors: {} };   // k -> id -> JSON of the last synced mapped row
+var _vgChain = {};
+var _vgLast  = [];
+
+function _vgOn(k) { return Object.prototype.hasOwnProperty.call(_VG, k); }
+
+// A record open in its edit form keeps the version it was opened at: the
+// form writes its fields over the record on Save, so refreshing the record
+// underneath it would make a stale save look current.
+function _vgEditing(k, id) {
+  var pg = document.querySelector('.pg.active'), pid = pg ? pg.id : '';
+  if (k === 'tmTickets') return pid === 'pg-new-tm-ticket' && typeof _editTmTicketId !== 'undefined' && _editTmTicketId != null && String(_editTmTicketId) === String(id);
+  if (k === 'cors')      return pid === 'pg-new-cor' && typeof _editCorId !== 'undefined' && _editCorId != null && String(_editCorId) === String(id);
+  return false;
+}
+
+function _vgMap(k, obj) {
+  var e = SYNC_TABLES().filter(function(x){ return x.k === k; })[0];
+  return e ? e.m(obj) : null;
+}
+
+function _vgLocked(k, fn) {
+  var p = (_vgChain[k] || Promise.resolve()).then(fn, fn);
+  _vgChain[k] = p.then(function(){}, function(){});
+  return p;
+}
+
+function _vgIndex(k) {
+  var m = {}, list = db[k] || [];
+  for (var i = 0; i < list.length; i++) m[String(list[i].id)] = list[i];
+  return m;
+}
+
+function _vgSetBase(k, id, mapped) {
+  if (!_vgBase[k] || !mapped) return;
+  try { _vgBase[k][String(id)] = JSON.stringify(mapped); } catch (x) {}
+}
+
+function _vgSnapAll(k) {
+  if (!_vgOn(k)) return;
+  var b = {}, list = db[k] || [];
+  for (var i = 0; i < list.length; i++) {
+    try { b[String(list[i].id)] = JSON.stringify(_vgMap(k, list[i])); } catch (x) {}
+  }
+  _vgBase[k] = b;
+}
+
+// For targeted writes that don't go through kmiVgUpsert (.update().select).
+function _vgStamp(k, res) {
+  if (!res || res.error || !Array.isArray(res.data)) return;
+  var by = _vgIndex(k);
+  res.data.forEach(function(x){
+    var loc = by[String(x.id)];
+    if (loc && x.version_at) loc.versionAt = x.version_at;
+  });
+}
+
+function _vgUpsert(k, payload) {
+  return _vgLocked(k, async function() {
+    var e = _VG[k];
+    var arr = Array.isArray(payload) ? payload : [payload];
+    var by = _vgIndex(k);
+    var rows = arr.map(function(p){
+      var o = Object.assign({}, p), loc = by[String(p.id)];
+      o.base_version_at = (loc && loc.versionAt) || null;   // read at send time, inside the lock
+      return o;
+    });
+    var r;
+    try { r = await supabaseClient.from(e.t).upsert(rows).select('id,version_at'); }
+    catch (x) { return { error: { message: (x && x.message) || String(x) } }; }
+    if (!r || r.error) return r;
+    var got = {};
+    (r.data || []).forEach(function(x){ got[String(x.id)] = x.version_at || null; });
+    var rej = [];
+    rows.forEach(function(o, i){
+      var id = String(o.id), loc = by[id];
+      if (Object.prototype.hasOwnProperty.call(got, id)) {
+        if (loc && got[id]) loc.versionAt = got[id];
+        _vgSetBase(k, id, arr[i]);
+      } else {
+        rej.push({ id: id, sent: arr[i] });
+      }
+    });
+    r.vgRejected = rej;
+    return r;
+  });
+}
+
+function _vgDiffKeys(k, a, b) {
+  var skip = _VG_SKIP.concat(_VG[k].skip || []), out = [];
+  var keys = Object.keys(Object.assign({}, a || {}, b || {}));
+  for (var i = 0; i < keys.length; i++) {
+    var f = keys[i];
+    if (skip.indexOf(f) >= 0) continue;
+    if (JSON.stringify(a ? a[f] : null) !== JSON.stringify(b ? b[f] : null)) out.push(f);
+  }
+  return out;
+}
+
+async function _vgClassify(k, rej) {
+  var e = _VG[k], ids = rej.map(function(x){ return x.id; }), res;
+  try { res = await supabaseClient.from(e.t).select('*').in('id', ids); }
+  catch (x) { res = { error: { message: (x && x.message) || String(x) } }; }
+  if (!res || res.error) return { error: (res && res.error && res.error.message) || 'fetch failed', items: [] };
+  var srv = {};
+  (res.data || []).forEach(function(raw){ srv[String(raw.id)] = raw; });
+  var items = [];
+  rej.forEach(function(x){
+    var raw = srv[x.id];
+    if (!raw) return;
+    var inc = e.from(raw), theirs = _vgMap(k, inc), mine = x.sent, base = null;
+    var bj = _vgBase[k] && _vgBase[k][x.id];
+    if (bj) { try { base = JSON.parse(bj); } catch (y) {} }
+    var vsServer = _vgDiffKeys(k, mine, theirs);
+    var lost = base
+      ? _vgDiffKeys(k, base, mine).filter(function(f){ return vsServer.indexOf(f) >= 0; })
+      : vsServer;
+    items.push({ k: k, id: x.id, raw: raw, inc: inc, mapped: theirs, mine: mine, lost: lost, hadBase: !!base });
+  });
+  return { error: null, items: items };
+}
+
+function _vgRefreshView(k) {
+  var pg = document.querySelector('.pg.active'), pid = pg ? pg.id.replace('pg-', '') : '';
+  DP_TABLES().forEach(function(e){
+    if (e.k !== k || e.page !== pid) return;
+    try { e.refresh(); } catch (x) { console.warn('[vg] refresh ' + k + ':', x); }
+  });
+}
+
+function _vgApply(k, items) {
+  if (!items || !items.length) return;
+  var list = db[k] || (db[k] = []), by = _vgIndex(k), base = _rowHash[k];
+  items.forEach(function(it){
+    var cur = by[it.id], inc = it.inc;
+    if (cur) {
+      Object.keys(cur).forEach(function(key){ if (!(key in inc)) delete cur[key]; });
+      Object.assign(cur, inc);
+    } else {
+      list.push(inc);
+    }
+    if (base) { try { base[it.id] = _rowHash64(JSON.stringify(it.mapped)); } catch (x) {} }
+    _vgSetBase(k, it.id, it.mapped);
+  });
+  try {
+    var e = SYNC_TABLES().filter(function(x){ return x.k === k; })[0];
+    if (e && _rowDiff(e).changed === 0) { var s = _tblSnapshot(k); if (s !== null) _tblHash[k] = s; }
+  } catch (x) {}
+  _vgRefreshView(k);
+}
+
+// Push-loop path: runs after the loop baselined the table, still under _syncing.
+async function _vgSettle(k, rej) {
+  var c = await _vgClassify(k, rej);
+  if (c.error) {
+    // Couldn't load the current version: leave the edits dirty so the next
+    // push retries (and settles) instead of marking them synced.
+    rej.forEach(function(x){ if (_rowHash[k]) delete _rowHash[k][x.id]; });
+    delete _tblHash[k];
+    console.warn('[vg] ' + k + ': ' + rej.length + ' rejected; could not load the current version (' + c.error + '). Will retry on the next save.');
+    return;
+  }
+  _vgApply(k, c.items);
+  _vgNotify(c.items.filter(function(it){ return it.lost.length; }));
+}
+
+// Direct-save path: drop-in for supabaseClient.from(<table>).upsert(x).
+async function kmiVgUpsert(k, payload) {
+  var r = await _vgUpsert(k, payload);
+  if (!r || r.error || !r.vgRejected || !r.vgRejected.length) return r;
+  var c = await _vgClassify(k, r.vgRejected);
+  if (c.error) {
+    return { data: r.data, error: { message: 'Could not confirm the save - please try again (' + c.error + ')' } };
+  }
+  var real  = c.items.filter(function(it){ return it.lost.length; });
+  var quiet = c.items.filter(function(it){ return !it.lost.length; });
+  _vgApply(k, quiet);
+  if (!real.length) return r;
+  setTimeout(function(){ _vgApply(k, real); _vgNotify(real); }, 0);   // after the caller's rollback
+  return { data: r.data, error: { code: 'VG_CONFLICT',
+    message: 'Someone else saved this ' + _VG[k].noun + ' first, so your change was not saved. The latest version is loaded.' } };
+}
+
+function _vgWho(raw) {
+  var uid = raw && raw.updated_by_user_id;
+  if (uid != null && _currentUser && String(uid) === String(_currentUser.id)) return { self: true, name: 'You' };
+  var u = (uid != null) ? (db.users || []).find(function(x){ return String(x.id) === String(uid); }) : null;
+  var nm = u ? ((((u.firstName || '') + ' ' + (u.lastName || '')).trim()) || u.email || '') : '';
+  return { self: false, name: nm || 'Someone' };
+}
+
+function _vgWhen(v) {
+  var t = _dpParse(v);
+  if (!(t > 0)) return '';
+  var d = new Date(t), now = new Date();
+  var tm = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return (d.toDateString() === now.toDateString()) ? tm : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + tm;
+}
+
+function _vgLabel(k, f) {
+  var L = _VG[k].labels || {};
+  if (L[f]) return L[f];
+  var s = String(f).replace(/_/g, ' ');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function _vgFmt(k, f, v) {
+  if (v === null || v === undefined || v === '') return '(blank)';
+  if (f === 'signature_image') return '(signature changed)';
+  if (f === 'rolled_up_ticket_ids' && Array.isArray(v)) return v.length + (v.length === 1 ? ' ticket' : ' tickets');
+  if (Array.isArray(v)) return v.length + (v.length === 1 ? ' row' : ' rows');
+  if (typeof v === 'object') {
+    if (Array.isArray(v.auto) || Array.isArray(v.manual)) {
+      var n = (v.auto || []).length + (v.manual || []).length;
+      return n + (n === 1 ? ' row' : ' rows');
+    }
+    return v.name ? String(v.name) : '(changed)';
+  }
+  var s = String(v);
+  return s.length > 60 ? s.slice(0, 57) + '\u2026' : s;
+}
+
+function _vgEl(tag, cls, text) {
+  var el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+function _vgNotify(items) {
+  if (!items || !items.length) return;
+  var at = new Date().toISOString();
+  items.forEach(function(it){
+    _vgLast.unshift({ at: at, table: it.k, id: it.id, row: _VG[it.k].name(it.inc),
+                      by: _vgWho(it.raw).name, version: it.raw.version_at, lost: it.lost.join(', ') });
+  });
+  _vgLast = _vgLast.slice(0, 25);
+  console.warn('[vg] ' + items.length + ' change(s) not saved - someone saved first. kmiVgReport() for detail.');
+
+  var c = document.getElementById('toast-container');
+  if (!c) {
+    c = _vgEl('div', 'toast-container');
+    c.id = 'toast-container';
+    document.body.appendChild(c);
+  }
+  var el = _vgEl('div', 'toast vg'), body = _vgEl('div', 'toast-msg');
+  el.appendChild(_vgEl('div', 'toast-icon', '!'));
+  el.appendChild(body);
+  var close = function() {
+    if (el._dismissed) return;
+    el._dismissed = true;
+    el.classList.add('dismissing');
+    setTimeout(function(){ if (el.parentNode) el.parentNode.removeChild(el); }, 220);
+  };
+  var openBtn = function(it, label, closeIt) {
+    var b = _vgEl('button', 'vg-btn', label);
+    b.type = 'button';
+    b.onclick = function(){ if (closeIt) close(); try { _VG[it.k].open(it.inc.id); } catch (x) { console.warn('[vg] open:', x); } };
+    return b;
+  };
+  var acts = _vgEl('div', 'vg-acts');
+
+  if (items.length === 1) {
+    var it = items[0], e = _VG[it.k], who = _vgWho(it.raw), when = _vgWhen(it.raw.version_at);
+    body.appendChild(_vgEl('div', 'vg-title', 'Your change to ' + e.name(it.inc) + ' wasn\u2019t saved'));
+    body.appendChild(_vgEl('div', 'vg-sub', who.self
+      ? 'You saved this ' + e.noun + ' from another window or device' + (when ? ' at ' + when : '') + '. That version is loaded now.'
+      : who.name + ' changed this ' + e.noun + (when ? ' at ' + when : '') + '. ' +
+        (who.name === 'Someone' ? 'The latest' : 'Their') + ' version is loaded now.'));
+    var box = _vgEl('div', 'vg-box');
+    box.appendChild(_vgEl('div', 'vg-box-h', it.hadBase ? 'What you changed' : 'Your values that weren\u2019t saved'));
+    it.lost.slice(0, 6).forEach(function(f){
+      var line = _vgEl('div', 'vg-line');
+      line.appendChild(document.createTextNode(_vgLabel(it.k, f) + ' \u2192 '));
+      line.appendChild(_vgEl('b', null, _vgFmt(it.k, f, it.mine[f])));
+      box.appendChild(line);
+    });
+    if (it.lost.length > 6) box.appendChild(_vgEl('div', 'vg-line', '+' + (it.lost.length - 6) + ' more'));
+    body.appendChild(box);
+    acts.appendChild(openBtn(it, 'Open ' + e.noun, true));
+  } else {
+    body.appendChild(_vgEl('div', 'vg-title', items.length + ' of your changes weren\u2019t saved'));
+    body.appendChild(_vgEl('div', 'vg-sub', 'Someone else saved these first. The latest versions are loaded now.'));
+    var listEl = _vgEl('div', 'vg-list');
+    items.forEach(function(it){
+      var row = _vgEl('div', 'vg-row'), txt = _vgEl('div');
+      var who = _vgWho(it.raw), when = _vgWhen(it.raw.version_at);
+      txt.appendChild(_vgEl('div', 'vg-row-name', _VG[it.k].name(it.inc)));
+      txt.appendChild(_vgEl('div', 'vg-row-meta', [who.self ? 'You (other window)' : who.name, when,
+        'you changed ' + it.lost.slice(0, 3).map(function(f){ return _vgLabel(it.k, f); }).join(', ') +
+        (it.lost.length > 3 ? ' +' + (it.lost.length - 3) : '')].filter(Boolean).join(' \u00b7 ')));
+      row.appendChild(txt);
+      row.appendChild(openBtn(it, 'Open', false));
+      listEl.appendChild(row);
+    });
+    body.appendChild(listEl);
+  }
+  var dis = _vgEl('button', 'vg-btn ghost', 'Dismiss');
+  dis.type = 'button';
+  dis.onclick = close;
+  acts.appendChild(dis);
+  body.appendChild(acts);
+  c.appendChild(el);
+}
+
+function kmiVgReport() {
+  if (!_vgLast.length) { console.info('[vg] no rejected saves this session'); return []; }
+  console.table(_vgLast);
+  return _vgLast;
+}
+
 // ── Push all data to Supabase ────────────────────────────────────
 async function pushToSupabase() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
@@ -59914,13 +60339,16 @@ async function pushToSupabase() {
       var _payload = (_rdMode === 'live') ? _d.send : _d.full;
       var _st = { k: _e.k, total: _d.total, changed: _d.changed, sent: _payload.length,
                   unhashable: _d.unhashable, nobase: _d.nobase, ok: true };
+      var _vgRej = null;   // VG1
       if (_payload.length) {
-        var r = await supabaseClient.from(_e.t).upsert(_payload);
+        var r = _vgOn(_e.k) ? await _vgUpsert(_e.k, _payload) : await supabaseClient.from(_e.t).upsert(_payload);   // VG1
         if (r && r.error) { errs.push(_e.lbl + ': ' + r.error.message); _st.ok = false; }
+        else if (r && r.vgRejected && r.vgRejected.length) { _vgRej = r.vgRejected; _st.rejected = _vgRej.length; }   // VG1
       }
       if (_st.ok) {
         _rowHash[_e.k] = _d.hashes;                 // pre-send hashes, by design
         if (_tSnap !== null) _tblHash[_e.k] = _tSnap;
+        if (_vgRej) await _vgSettle(_e.k, _vgRej);   // VG1: take server copies, re-baseline, notice
       }
       _rdRun.tables.push(_st);
     }
@@ -60566,6 +60994,7 @@ async function pullFromSupabase() {
     // auto-push only carries what this session actually changes from here.
     _tblBaselineAll();
     _rowBaselineAll();   // RD1
+    _vgSnapAll('tmTickets'); _vgSnapAll('cors');   // VG1
 
     // Re-render current page
     var activePg = document.querySelector('.pg.active');
