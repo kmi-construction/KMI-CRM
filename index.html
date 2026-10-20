@@ -19391,7 +19391,22 @@ function corFmtMoney(n) {
 }
 
 var COR_STATUSES = ['Draft','Pending','Approved','Rejected','Voided'];
-var COR_TYPES    = ['T&M','Overtime','Double Time','Premium Time OT','Premium Time DT','Fixed Fee'];
+var COR_TYPES    = ['T&M','Overtime','Double Time','Premium Time OT','Premium Time DT','Fixed Fee','Back Charge'];
+
+// BACKCHG1: Back Charge — a customer/GC charge against KMI that comes out of
+// OH&P only. No tickets, labor, materials, equipment, subs, unit pricing,
+// markups or bond: one amount, entered positive, stored as a NEGATIVE
+// totalAmount so contract rollups show it as a deduction. Record-only (no
+// PDF / send). Foundation gets a header row only: negative income, $0 cost.
+function corIsBackCharge(t) { return t === 'Back Charge'; }
+// Types that never roll up T&M tickets or auto-pivot labor/material rows.
+function corIsNoRollupType(t) { return t === 'Fixed Fee' || t === 'Back Charge'; }
+// SMARTEXACT1: round to cents, half away from zero, without float noise.
+function corRound2(x) {
+  var v = Number(x) || 0;
+  var r = Math.round((Math.abs(v) + Number.EPSILON) * 100) / 100;
+  return v < 0 ? -r : r;
+}
 
 // Rate-resolution matrix: given a labor rate snapshot row and a COR type,
 // returns the customer-billing rate to use for the auto-pivot (and as
@@ -19624,6 +19639,7 @@ function corResolveHourBuckets(laborRow, corType) {
     case 'Premium Time OT':  return [{ hourType: 'ot', hours: ot }];
     case 'Premium Time DT':  return [{ hourType: 'dt', hours: dt }];
     case 'Fixed Fee':        return [];  // never rolls up
+    case 'Back Charge':      return [];  // BACKCHG1 — never rolls up
     default:
       return [{ hourType: 'st', hours: st },
               { hourType: 'ot', hours: ot },
@@ -19688,8 +19704,8 @@ function corTicketEligible(ticket, corType) {
     }, 0);
     if (hours <= 0) return false;
   }
-  // Fixed Fee never rolls up tickets
-  if (corType === 'Fixed Fee') return false;
+  // Fixed Fee / Back Charge never roll up tickets (BACKCHG1)
+  if (corIsNoRollupType(corType)) return false;
   return true;
 }
 
@@ -19715,7 +19731,8 @@ function corTypeBadge(c) {
     'Double Time':      'DT',
     'Premium Time OT':  'Prem. (OT)',
     'Premium Time DT':  'Prem. (DT)',
-    'Fixed Fee':        'Fixed Fee'
+    'Fixed Fee':        'Fixed Fee',
+    'Back Charge':      'Back Charge'  // BACKCHG1
   };
   return '<span class="bdg bd-pending" title="' + corEsc(t) + '">' + corEsc(compact[t] || t) + '</span>';
 }
@@ -20655,7 +20672,8 @@ function showNewCorModal(preselectProjectId) {
       '<label style="display:grid;grid-template-columns:1fr 24px;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:9px 6px;font-size:13px;border-bottom:.5px solid #f0f0f0;cursor:pointer"><span><strong>Double Time</strong> — rolls up approved tickets, billed at full DT rate</span><input type="radio" name="ncm-type" value="Double Time" style="justify-self:end;width:auto;margin:0;accent-color:var(--kmi)"></label>' +
       '<label style="display:grid;grid-template-columns:1fr 24px;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:9px 6px;font-size:13px;border-bottom:.5px solid #f0f0f0;cursor:pointer"><span><strong>Premium Time — OT</strong> — captures only the OT premium (delta over ST rate) on OT hours</span><input type="radio" name="ncm-type" value="Premium Time OT" style="justify-self:end;width:auto;margin:0;accent-color:var(--kmi)"></label>' +
       '<label style="display:grid;grid-template-columns:1fr 24px;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:9px 6px;font-size:13px;border-bottom:.5px solid #f0f0f0;cursor:pointer"><span><strong>Premium Time — DT</strong> — captures only the DT premium (delta over ST rate) on DT hours</span><input type="radio" name="ncm-type" value="Premium Time DT" style="justify-self:end;width:auto;margin:0;accent-color:var(--kmi)"></label>' +
-      '<label style="display:grid;grid-template-columns:1fr 24px;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:9px 6px;font-size:13px;cursor:pointer"><span><strong>Fixed Fee</strong> — purely manual entry, no ticket rollup</span><input type="radio" name="ncm-type" value="Fixed Fee" style="justify-self:end;width:auto;margin:0;accent-color:var(--kmi)"></label>' +
+      '<label style="display:grid;grid-template-columns:1fr 24px;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:9px 6px;font-size:13px;border-bottom:.5px solid #f0f0f0;cursor:pointer"><span><strong>Fixed Fee</strong> — purely manual entry, no ticket rollup</span><input type="radio" name="ncm-type" value="Fixed Fee" style="justify-self:end;width:auto;margin:0;accent-color:var(--kmi)"></label>' +
+      '<label style="display:grid;grid-template-columns:1fr 24px;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:9px 6px;font-size:13px;cursor:pointer"><span><strong>Back Charge</strong> — a charge against KMI, out of OH&amp;P only; one amount, recorded as a deduction (no PDF / send)</span><input type="radio" name="ncm-type" value="Back Charge" style="justify-self:end;width:auto;margin:0;accent-color:var(--kmi)"></label>' +
     '</div>' +
     '<div id="ncm-err" style="color:#A32D2D;font-size:12px;min-height:14px"></div>' +
     '<div class="mf">' +
@@ -20926,9 +20944,14 @@ async function saveCor() {
   var p = db.projects.find(function(x){ return String(x.id) === String(projectId); });
   if (!p) { alert('Project not found.'); return; }
 
+  // BACKCHG1: a back charge needs an amount.
+  if (corIsBackCharge(corType) && !((Number(_ncorWorking && _ncorWorking.backChargeAmount) || 0) > 0)) {
+    alert('Please enter the back charge amount.'); return;
+  }
+
   // Soft-fail warning per Q10: if the project has no labor rate snapshot
-  // and this COR type requires rates (anything except Fixed Fee), warn.
-  if (corType !== 'Fixed Fee' && !corGetProjectLaborRates(p).length) {
+  // and this COR type requires rates (not Fixed Fee / Back Charge), warn.
+  if (!corIsNoRollupType(corType) && !corGetProjectLaborRates(p).length) {
     if (!confirm('This project has no labor rate snapshot. Auto-pivoted labor rows will use $0 rates until you set up rates on the project edit page. Save anyway?')) return;
   }
 
@@ -21292,6 +21315,18 @@ function _refreshCorActionButtons(c) {
   } else if (s === 'Approved' || s === 'Voided') {
     if (g('ncor-pdf-btn'))  g('ncor-pdf-btn').style.display  = '';
   }
+  // BACKCHG1: back charges are record-only — no PDF, no send, no cost
+  // distribution, no Detail CSV (header-only export). From Draft they go
+  // straight to Approved (accepted) or Rejected (disputed).
+  if (corIsBackCharge(c.corType)) {
+    ['ncor-pdf-btn','ncor-send-btn','ncor-dist-btn','ncor-fnd-detail-btn'].forEach(function(idStr){
+      var el = g(idStr); if (el) el.style.display = 'none';
+    });
+    if (s === 'Draft') {
+      if (g('ncor-approve-btn')) g('ncor-approve-btn').style.display = hasFull('transition-cor') ? '' : 'none';
+      if (g('ncor-reject-btn'))  g('ncor-reject-btn').style.display  = hasFull('transition-cor') ? '' : 'none';
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -21511,11 +21546,12 @@ async function smartUploadCorExtract() {
       '  Project number: ' + (p.number || '') + '\n' +
       '  Project name:   ' + (p.name || '') + '\n\n' +
       'Allowed COR types (pick the one that best matches; the document may use varied terminology):\n' +
-      '  ["T&M", "Overtime", "Double Time", "Premium Time OT", "Premium Time DT", "Fixed Fee"]\n' +
+      '  ["T&M", "Overtime", "Double Time", "Premium Time OT", "Premium Time DT", "Fixed Fee", "Back Charge"]\n' +
       '  - "T&M" — full Time & Material billing of all hours\n' +
       '  - "Overtime" / "Double Time" — billing OT/DT hours at premium rates\n' +
       '  - "Premium Time OT" / "Premium Time DT" — billing only the premium delta over straight-time on those hours\n' +
-      '  - "Fixed Fee" — lump-sum amount with no hourly breakdown\n\n' +
+      '  - "Fixed Fee" — lump-sum amount with no hourly breakdown\n' +
+      '  - "Back Charge" — the customer/GC charging KMI (clean-up, damage, delays, etc.); comes out of OH&P only, usually no labor/material breakdown. Put the charged amount in totalAmount as a POSITIVE number and return empty row arrays.\n\n' +
       'Allowed labor classifications (match each labor row EXACTLY to one of these; if none fit, return the value as written):\n  [' + classListStr + ']\n\n' +
       'Project material list (try to match each material EXACTLY to one of these descriptions; if none fit, return the description as written):\n  [' + matListStr + ']\n\n' +
       'Customer-side contacts on this project (match the "attention" / addressee to one of these names if possible; otherwise return the name as written):\n  [' + contactListStr + ']\n\n' +
@@ -21595,7 +21631,8 @@ async function smartUploadCorExtract() {
     if (COR_TYPES.indexOf(cType) === -1) {
       // Loose match — try to pick the closest type
       var lc = cType.toLowerCase();
-      if (/fixed|lump/.test(lc)) cType = 'Fixed Fee';
+      if (/back.?charge/.test(lc)) cType = 'Back Charge';  // BACKCHG1 — before the others
+      else if (/fixed|lump/.test(lc)) cType = 'Fixed Fee';
       else if (/premium.*ot|prem.*ot/.test(lc)) cType = 'Premium Time OT';
       else if (/premium.*dt|prem.*dt/.test(lc)) cType = 'Premium Time DT';
       else if (/double.*time|dt/.test(lc)) cType = 'Double Time';
@@ -21802,6 +21839,18 @@ function _smartUpCorApplyPrefill(project, parsed) {
     _ncorWorking.omittedScope = parsed.omittedScope.trim();
   }
 
+  // BACKCHG1: a back charge carries only an amount — drop any rows the AI
+  // returned and take the document total as a positive number.
+  if (corIsBackCharge(_ncorWorking.corType)) {
+    _ncorWorking.manualLaborRows = [];
+    _ncorWorking.manualMaterialRows = [];
+    _ncorWorking.subRows = [];
+    _ncorWorking.equipmentRows = [];
+    _ncorWorking.unitPriceRows = [];
+    var _bcDoc = Number(parsed.totalAmount);
+    _ncorWorking.backChargeAmount = isNaN(_bcDoc) ? 0 : Math.abs(_bcDoc);
+  }
+
   // Re-render all sections to show the populated rows
   ncorRenderSections();
 
@@ -21851,6 +21900,10 @@ async function confirmSmartUploadCor() {
   if (COR_TYPES.indexOf(corType) === -1) { alert('Invalid COR type. Edit the type before saving.'); return; }
   if (!attnId)    { alert('Please pick an Attention contact. If none are listed, assign customer contacts on the Project edit page first, then re-open this Smart Upload review.'); return; }
   if (!description) { alert('Please enter a description.'); return; }
+  // BACKCHG1
+  if (corIsBackCharge(corType) && !((Number(_ncorWorking && _ncorWorking.backChargeAmount) || 0) > 0)) {
+    alert('Please enter the back charge amount.'); return;
+  }
 
   var p = db.projects.find(function(x){ return String(x.id) === String(pid); });
   if (!p) { alert('Project not found.'); return; }
@@ -22119,6 +22172,7 @@ async function downloadCorPDF() {
   if (!_editCorId) { alert('Save the COR first, then generate the PDF.'); return; }
   var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
   if (!c) { alert('COR not found.'); return; }
+  if (corIsBackCharge(c.corType)) { alert('Back charges are record-only \u2014 there is no COR PDF.'); return; }  // BACKCHG1
   var p = getProj(c.projectId) || {};
 
   // Best-effort grab of the trigger button so we can show a brief loading
@@ -23583,6 +23637,7 @@ function _corResolveProjectContacts(p) {
 function showSendCorToCustomerMenu() {
   var c = _corCurrent();
   if (!c) { alert('Save the COR before sending.'); return; }
+  if (corIsBackCharge(c.corType)) { alert('Back charges are record-only and are not sent to the customer.'); return; }  // BACKCHG1
   if ((c.status || 'Draft') !== 'Draft') {
     alert('Only Draft CORs can be sent to a customer. Current status: ' + (c.status || 'Draft'));
     return;
@@ -23816,7 +23871,7 @@ async function confirmMarkCorAsSent() {
 function markCorApproved() {
   var c = _corCurrent();
   if (!c) return;
-  if ((c.status || '') !== 'Pending') {
+  if ((c.status || '') !== 'Pending' && !(corIsBackCharge(c.corType) && (c.status || 'Draft') === 'Draft')) {  // BACKCHG1
     alert('Only Pending CORs can be approved. Current status: ' + (c.status || 'Draft'));
     return;
   }
@@ -23870,7 +23925,7 @@ async function confirmCorApproved() {
 function markCorRejected() {
   var c = _corCurrent();
   if (!c) return;
-  if ((c.status || '') !== 'Pending') {
+  if ((c.status || '') !== 'Pending' && !(corIsBackCharge(c.corType) && (c.status || 'Draft') === 'Draft')) {  // BACKCHG1
     alert('Only Pending CORs can be rejected. Current status: ' + (c.status || 'Draft'));
     return;
   }
@@ -24149,6 +24204,10 @@ function ncorInitWorking(c) {
     timeExtensionDays: (c.timeExtensionDays !== null && c.timeExtensionDays !== undefined && c.timeExtensionDays !== '') ? c.timeExtensionDays : '',
     addedScope:        c.addedScope   || '',
     omittedScope:      c.omittedScope || '',
+    // BACKCHG1: back charge amount (stored on the COR as -totalAmount).
+    backChargeAmount: (c.corType === 'Back Charge') ? Math.abs(Number(c.totalAmount) || 0) : 0,
+    // SMARTEXACT1: smart-uploaded CORs keep exact cents through later edits.
+    smartUploaded: !!c.smartUploaded,
     corType:    c.corType || 'T&M',
     projectId:  c.projectId
   };
@@ -24158,6 +24217,18 @@ function ncorInitWorking(c) {
 function ncorRenderSections() {
   if (!_ncorWorking) return;
   ncorRenderHunzingerSection();
+  // BACKCHG1: Back Charge shows only the header card + Grand total card.
+  // (Hunzinger render still runs first so its hidden fields hold this COR's
+  // values, not a previous COR's, when ncorReadHunzingerFields runs on save.)
+  var _bcOnly = corIsBackCharge(_ncorWorking.corType);
+  ['ncor-section-hunzinger','ncor-section-tickets','ncor-section-labor','ncor-section-materials',
+   'ncor-section-equipment','ncor-section-subs','ncor-section-unit-pricing'].forEach(function(idStr){
+    var el = g(idStr);
+    if (!el) return;
+    if (_bcOnly) el.style.display = 'none';
+    else if (idStr !== 'ncor-section-hunzinger' && idStr !== 'ncor-section-tickets') el.style.display = '';
+  });
+  if (_bcOnly) { ncorRenderTotalsSection(); return; }
   ncorRenderTicketsSection();
   ncorRenderLaborSection();
   ncorRenderMaterialsSection();
@@ -24457,7 +24528,7 @@ function ncorComputeAutoLaborRows() {
   var w = _ncorWorking;
   if (!w) return [];
   var corType = w.corType;
-  if (corType === 'Fixed Fee') return [];
+  if (corIsNoRollupType(corType)) return [];  // BACKCHG1
 
   // Get the project's labor rate snapshot (handles both modern and
   // legacy shapes via corGetProjectLaborRates).
@@ -24668,7 +24739,7 @@ function ncorRemoveManualLabor(idx) {
 function ncorRebuildAutoMaterialRows() {
   var w = _ncorWorking;
   if (!w) return;
-  if (w.corType === 'Fixed Fee') { w.autoMaterialRows = []; return; }
+  if (corIsNoRollupType(w.corType)) { w.autoMaterialRows = []; return; }  // BACKCHG1
 
   // Project material list for description-based price match
   var p = db.projects.find(function(x){ return String(x.id) === String(w.projectId); });
@@ -25309,18 +25380,34 @@ function ncorComputeTotals() {
                + mateqOhp + equipmentOhp + unitPriceOhp + subOhp;
   var bondCost = subtotal * (bondPct / 100);
 
-  // Round every category up to the next whole dollar so customer-facing
-  // CORs (form, PDF, Foundation CSV) always show clean dollar amounts.
-  var rTotalLabor     = Math.ceil(totalLabor);
-  var rTotalMaterial  = Math.ceil(totalMaterial);
-  var rTotalEquipment = Math.ceil(totalEquipment);
-  var rTotalUnitPrice = Math.ceil(totalUnitPrice);
-  var rTotalSub       = Math.ceil(totalSub);
-  var rMateqOhp       = Math.ceil(mateqOhp);
-  var rEquipmentOhp   = Math.ceil(equipmentOhp);
-  var rUnitPriceOhp   = Math.ceil(unitPriceOhp);
-  var rSubOhp         = Math.ceil(subOhp);
-  var rBondCost       = Math.ceil(bondCost);
+  // BACKCHG1: Back Charge — every category is zero; the total is the
+  // entered amount as a deduction, exact to the cent (Math.ceil on a
+  // negative would round toward zero and understate the charge).
+  if (corIsBackCharge(w.corType)) {
+    var _bcAmt = corRound2(Math.abs(Number(w.backChargeAmount) || 0));
+    return {
+      totalLabor:0, totalMaterial:0, totalSub:0, totalEquipment:0, totalUnitPrice:0,
+      mateqOhp:0, subOhp:0, equipmentOhp:0, unitPriceOhp:0, bondCost:0,
+      totalAmount: _bcAmt ? -_bcAmt : 0
+    };
+  }
+
+  // Native CORs round every category UP to the next whole dollar so
+  // customer-facing CORs (form, PDF, Foundation CSV) show clean amounts.
+  // SMARTEXACT1: smart-uploaded CORs are the actuals already submitted, so
+  // they keep exact cents (during review and on any later edit).
+  var _exact = !!(w.smartUploaded || _smartUpCorMode);
+  var rnd = _exact ? corRound2 : Math.ceil;
+  var rTotalLabor     = rnd(totalLabor);
+  var rTotalMaterial  = rnd(totalMaterial);
+  var rTotalEquipment = rnd(totalEquipment);
+  var rTotalUnitPrice = rnd(totalUnitPrice);
+  var rTotalSub       = rnd(totalSub);
+  var rMateqOhp       = rnd(mateqOhp);
+  var rEquipmentOhp   = rnd(equipmentOhp);
+  var rUnitPriceOhp   = rnd(unitPriceOhp);
+  var rSubOhp         = rnd(subOhp);
+  var rBondCost       = rnd(bondCost);
 
   return {
     totalLabor:     rTotalLabor,
@@ -25333,8 +25420,8 @@ function ncorComputeTotals() {
     unitPriceOhp:   rUnitPriceOhp,
     subOhp:         rSubOhp,
     bondCost:       rBondCost,
-    totalAmount:    rTotalLabor + rTotalMaterial + rTotalEquipment + rTotalUnitPrice + rTotalSub +
-                    rMateqOhp + rEquipmentOhp + rUnitPriceOhp + rSubOhp + rBondCost
+    totalAmount:    corRound2(rTotalLabor + rTotalMaterial + rTotalEquipment + rTotalUnitPrice + rTotalSub +
+                    rMateqOhp + rEquipmentOhp + rUnitPriceOhp + rSubOhp + rBondCost)  // SMARTEXACT1: strip float noise
   };
 }
 
@@ -25343,6 +25430,7 @@ function ncorRenderTotalsSection() {
   if (!bodyEl) return;
   var t = ncorComputeTotals();
   var w = _ncorWorking;
+  if (w && corIsBackCharge(w.corType)) { ncorRenderBackChargeTotals(bodyEl, t); return; }  // BACKCHG1
   bodyEl.innerHTML =
     '<div style="display:flex;flex-direction:column;gap:6px;font-size:13px">' +
       '<div style="display:flex;justify-content:space-between;padding:4px 8px"><span>Total labor cost</span><span style="font-family:monospace">' + corFmtMoney(t.totalLabor) + '</span></div>' +
@@ -25359,7 +25447,59 @@ function ncorRenderTotalsSection() {
         '<strong style="font-size:14px;text-transform:uppercase;letter-spacing:.5px">Total Change Order Request</strong>' +
         '<strong style="font-family:monospace;font-size:18px;color:var(--kmi)">' + corFmtMoney(t.totalAmount) + '</strong>' +
       '</div>' +
+      ncorSmartUpVarianceHtml(t) +
     '</div>';
+}
+
+// BACKCHG1: Back Charge total card — one amount field, shown as a deduction.
+function ncorRenderBackChargeTotals(bodyEl, t) {
+  var w = _ncorWorking;
+  var canEdit = ncorIsEditable();
+  var amt = Number(w && w.backChargeAmount) || 0;
+  bodyEl.innerHTML =
+    '<div style="display:flex;flex-direction:column;gap:8px;font-size:13px">' +
+      '<div style="font-size:12px;color:#666;padding:0 8px">Back charges come out of OH&amp;P only &mdash; no labor, materials, equipment or subs. Enter the amount as a positive number; it is recorded as a deduction.</div>' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:4px 8px">' +
+        '<label for="ncor-bc-amount" style="font-weight:600">Back charge amount *</label>' +
+        '<input type="number" id="ncor-bc-amount" min="0" step="0.01" placeholder="0.00" value="' + (amt ? corEsc(String(amt)) : '') + '" oninput="ncorUpdateBackChargeAmount(this.value)"' + (canEdit ? '' : ' disabled') + ' style="max-width:180px;text-align:right;font-family:monospace">' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;padding:10px 8px;border-top:2px solid #ccc;background:#FAF8F0;border-radius:6px;margin-top:4px">' +
+        '<strong style="font-size:14px;text-transform:uppercase;letter-spacing:.5px">Total Back Charge</strong>' +
+        '<strong id="ncor-bc-total" style="font-family:monospace;font-size:18px;color:#7A2E2E">' + corFmtMoney(t.totalAmount) + '</strong>' +
+      '</div>' +
+      '<div id="ncor-bc-variance">' + ncorSmartUpVarianceHtml(t) + '</div>' +
+    '</div>';
+}
+
+// Updates in place — a full re-render would pull focus out of the input.
+function ncorUpdateBackChargeAmount(v) {
+  if (!_ncorWorking) return;
+  _ncorWorking.backChargeAmount = Math.abs(parseFloat(v) || 0);
+  var t = ncorComputeTotals();
+  var tot = g('ncor-bc-total'); if (tot) tot.textContent = corFmtMoney(t.totalAmount);
+  var vr  = g('ncor-bc-variance'); if (vr) vr.innerHTML = ncorSmartUpVarianceHtml(t);
+}
+
+// SMARTEXACT1: during Smart Upload review, compare the computed total with
+// the total printed on the uploaded document so a mismatch is caught here,
+// not in Foundation.
+function ncorSmartUpVarianceHtml(t) {
+  if (!_smartUpCorMode || !_smartUpCorExtracted) return '';
+  var raw = _smartUpCorExtracted.totalAmount;
+  if (raw === null || raw === undefined || raw === '') return '';
+  var docTotal = Number(raw);
+  if (isNaN(docTotal)) return '';
+  var isBc = !!(_ncorWorking && corIsBackCharge(_ncorWorking.corType));
+  var calc = Number(t && t.totalAmount) || 0;
+  var a = isBc ? Math.abs(calc) : calc;
+  var b = isBc ? Math.abs(docTotal) : docTotal;
+  var diff = Math.abs(a - b);
+  if (diff <= 0.01) {
+    return '<div style="font-size:12px;color:#3B6D11;padding:4px 8px">&#10003; Matches the total on the uploaded document.</div>';
+  }
+  return '<div style="font-size:12px;color:#7A2E2E;background:#FBE9E9;border:0.5px solid #E8B8B8;border-radius:6px;padding:6px 10px;margin-top:4px">' +
+    '&#9888; Computed total ' + corFmtMoney(calc) + ' differs from the document total ' +
+    corFmtMoney(isBc ? -Math.abs(docTotal) : docTotal) + ' by ' + corFmtMoney(diff) + '. Check the rows before saving.</div>';
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -27237,6 +27377,15 @@ function corBuildFoundationDetailRows(cor, project) {
 function corValidateForFoundationExport(cor, project) {
   var errors = [];
   var warnings = [];
+  // BACKCHG1: back charges export a header row only (negative income, $0
+  // cost, no detail rows), so the cost-code checks don't apply.
+  if (cor && corIsBackCharge(cor.corType)) {
+    if (!project) errors.push('Project not loaded.');
+    else if (!project.number) errors.push('Project has no project number.');
+    if (!cor.id) errors.push('Save the COR before exporting to Foundation.');
+    if (!((Number(cor.totalAmount) || 0) < 0)) errors.push('Back charge has no amount.');
+    return { ok: errors.length === 0, errors: errors, warnings: warnings };
+  }
   if (!cor) errors.push('COR not loaded.');
   if (!project) errors.push('Project not loaded.');
   if (cor && !cor.id) errors.push('Save the COR before exporting to Foundation.');
@@ -27319,7 +27468,7 @@ function corBuildFoundationHeaderRow(cor, project) {
   // Income column stays as the customer total (with OH&P) since that's what
   // KMI bills.
   var built  = corBuildFoundationDetailRows(cor, project);
-  var rawCost = built.rows.reduce(function(s, r){
+  var rawCost = corIsBackCharge(cor.corType) ? 0 : built.rows.reduce(function(s, r){  // BACKCHG1: $0 cost
     return s + parseFloat(Number(r[2]).toFixed(2));
   }, 0);
   var income  = Number(cor.totalAmount) || 0;
@@ -27730,6 +27879,7 @@ function corExportFoundationDetailCsv() {
   var c = (db.cors || []).find(function(x){ return String(x.id) === String(_editCorId); });
   if (!c) { alert('COR not found.'); return; }
   var p = getProj(c.projectId);
+  if (corIsBackCharge(c.corType)) { alert('Back charges export a Header CSV only \u2014 there are no detail rows.'); return; }  // BACKCHG1
   var v = corValidateForFoundationExport(c, p);
   window._corExportTargetId = c.id;
   corShowFoundationValidationAndRun('Export CO Detail CSV', v, corRunFoundationDetailExport);
@@ -57575,7 +57725,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-17-VG1';
+var KMI_BUILD = '2026-10-20-BACKCHG1';
 
 var _kmiSessionId = (function(){
   try {
