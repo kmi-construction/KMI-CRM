@@ -2412,7 +2412,8 @@ tr.gc-line:hover td{background:#fafafa}
        columns. Renders lazily via renderProjectCorList() when the tab opens.
        "+ New COR" launches the standard type-picker with this project locked. -->
   <div id="nprj-tab-cors" style="display:none">
-    <div class="card">
+    <div id="nprj-cor-subtabs"></div>
+    <div class="card" id="nprj-cor-card">
       <div class="ch">
         <span class="ct">Change Orders</span>
         <div style="display:flex;align-items:center;gap:8px">
@@ -2432,6 +2433,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div style="font-size:12px;color:#888;margin-bottom:10px">Change Order Requests on this project. Click any column header to sort; use the dropdown to filter by status.</div>
       <div id="nprj-cor-list-section"></div>
     </div>
+    <div id="nprj-oco-section" style="display:none"></div>
   </div>
 
   <!-- ─── TAB 6: PROCUREMENT ─────────────────────────────────────── -->
@@ -3318,8 +3320,9 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="fgr"><label>Type</label><input id="ncor-type-display" disabled style="background:#f5f5f5;color:#666;font-weight:600"></div>
       <div class="fgr"><label>Customer</label><input id="ncor-customer-display" disabled style="background:#f5f5f5;color:#666"></div>
       <div class="fgr"><label>Attention *</label><select id="ncor-attention"><option value="">Select contact...</option></select></div>
-      <div class="fgr"><label>Customer CO #</label><input id="ncor-customer-co-num" placeholder="Customer's CO reference number (optional)"><div style="font-size:11px;color:#888;margin-top:4px">Set this when the customer issues their own CO number against this COR.</div></div>
-      <div class="fgr"><label>Customer CO Date</label><input type="date" id="ncor-customer-co-date"><div style="font-size:11px;color:#888;margin-top:4px">Date the customer issued their formal CO. Fill in when you receive the actual CO from the customer.</div></div>
+      <div class="fgr"><label>GC ref #</label><input id="ncor-gc-ref" placeholder="GC's PCO / CE / PCI number (optional)"><div style="font-size:11px;color:#888;margin-top:4px">Used to match this COR when the owner&rsquo;s CO comes in.</div></div>
+      <div class="fgr"><label>Owner CO #</label><input id="ncor-customer-co-num" list="ncor-oco-dl" autocomplete="off" placeholder="Pick or type the owner's CO number" onfocus="ocoFillDatalist(ocoFormPid(),'ncor-oco-dl')" oninput="ocoCoNumInput(this,'ncor-customer-co-date',ocoFormPid())"><datalist id="ncor-oco-dl"></datalist><div style="font-size:11px;color:#888;margin-top:4px">Pick an owner CO already on this project or type a new number &mdash; the COR is linked to it when you save.</div><div id="ncor-oco-info" style="font-size:12px;margin-top:4px"></div></div>
+      <div class="fgr"><label>Owner CO date</label><input type="date" id="ncor-customer-co-date"><div style="font-size:11px;color:#888;margin-top:4px">The owner CO&rsquo;s date. It applies to every COR on that CO.</div></div>
       <div class="fgr full"><label id="ncor-desc-label">Description *</label><textarea id="ncor-desc" rows="3" placeholder="Describe the change being requested..."></textarea></div>
     </div>
   </div>
@@ -19806,6 +19809,8 @@ var COR_COLS = [
   { key: 'creator', label: 'Created by' }
 ];
 var PRJ_COR_COLS = COR_COLS.filter(function(c){ return c.key !== 'project'; });
+// OCO2: the project tab shows each COR's owner CO after Status.
+PRJ_COR_COLS.splice(PRJ_COR_COLS.map(function(c){ return c.key; }).indexOf('status') + 1, 0, { key: 'ownerco', label: 'Owner CO' });
 
 // Sort state. Default is newest-first by date (matches the prior hardcoded
 // behaviour). _corSort drives the main list; _prjCorSort the project tab.
@@ -19843,6 +19848,7 @@ function _corSortValue(c, key) {
     case 'total':   return { t: 'n', v: Number(c.totalAmount) || 0 };
     case 'status':  return { t: 's', v: String(c.status || 'Draft').toLowerCase() };
     case 'creator': return { t: 's', v: _corCreatorName(c).toLowerCase() };
+    case 'ownerco': return { t: 's', v: String(c.customerCoNumber || '').toLowerCase() };   // OCO2
     default:        return { t: 's', v: '' };
   }
 }
@@ -19896,6 +19902,8 @@ function prjCorSetSort(key) {
 // sort columns. Mirrors renderProjectPoList's lazy-render pattern.
 function renderProjectCorList() {
   var el = g('nprj-cor-list-section'); if (!el) return;
+  ocoRenderSubTabs();                                          // OCO2
+  if (_ocoSubTab === 'cos') { ocoRenderCoView(); return; }    // OCO2
   var newBtn = g('nprj-cor-new-btn');
   var logBtn = g('nprj-cor-log-btn');
   var pid = _editProjectId;
@@ -19931,7 +19939,7 @@ function renderProjectCorList() {
 
   if (!rows.length) {
     el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
-      '</tr></thead><tbody><tr><td colspan="8" style="text-align:center;color:#aaa;padding:24px;font-size:13px">' +
+      '</tr></thead><tbody><tr><td colspan="9" style="text-align:center;color:#aaa;padding:24px;font-size:13px">' +
       (statusFilter ? ('No ' + corEsc(statusFilter) + ' change orders on this project.') : 'No change orders on this project yet.') +
       '</td></tr></tbody></table>';
     return;
@@ -19954,6 +19962,7 @@ function renderProjectCorList() {
       '<td style="padding:8px 10px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + corEsc(c.description || '') + '">' + corEsc(c.description || '') + '</td>' +
       '<td style="padding:8px 10px">' + corFmtMoney(c.totalAmount || 0) + '</td>' +
       '<td style="padding:8px 10px">' + corStatusBadge(c) + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap">' + ocoChipHtml(c) + '</td>' +   // OCO2
       '<td style="padding:8px 10px">' + corEsc(creatorName) + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap">' + actions + '</td>' +
       '</tr>';
@@ -19961,6 +19970,1148 @@ function renderProjectCorList() {
 
   el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
     '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OCO2: Owner change orders.
+// The project Change Orders tab splits into COR's / CO's sub-tabs (same
+// pattern as Production). Owner COs live in kmi_owner_cos (header),
+// kmi_owner_co_lines (lines as printed by the GC), kmi_owner_co_cors (which
+// CORs are on which CO; one CO per COR) and kmi_owner_co_allocs (each line's
+// dollars split across its CORs). All writes go through the OCO1 RPCs; the
+// COR's customer CO # / date / approved amount are derived server-side, so
+// after any RPC the affected CORs are re-read with ocoRefreshCors().
+// ═══════════════════════════════════════════════════════════════════════
+var _ocoSubTab   = 'cors';
+var _ocoCache    = {};   // pid -> { data:{cos,lines,links,allocs}, promise }
+var _ocoExpanded = {};   // owner CO id -> true
+var _ocoImp      = null; // import wizard state (one at a time)
+
+function ocoCanEdit() { return hasFull('transition-cor'); }
+function ocoN(x) { var v = Number(x); return isNaN(v) ? 0 : v; }
+function ocoUid() { return _currentUser ? _currentUser.id : null; }
+function ocoFmtDate(d) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || ''));
+  return m ? (m[2] + '/' + m[3] + '/' + m[1]) : String(d || '');
+}
+function ocoVarHtml(v) {
+  v = corRound2(v);
+  if (Math.abs(v) < 0.01) return '<span style="color:#aaa">\u2014</span>';
+  return '<strong style="color:#8A5A00">' + (v > 0 ? '+' : '') + corFmtMoney(v) + '</strong>';
+}
+function ocoCorLabel(c) {
+  return 'COR ' + (corExtractKmiSeq(c.corNumber) || c.corNumber || c.id);
+}
+
+// ── Data ──────────────────────────────────────────────────────────────
+async function ocoLoad(pid, force) {
+  var k = String(pid), ent = _ocoCache[k] || (_ocoCache[k] = {});
+  if (ent.data && !force) return ent.data;
+  if (ent.promise && !force) return ent.promise;
+  ent.promise = (async function(){
+    if (!supabaseClient) throw new Error('Owner change orders need the cloud connection.');
+    var cos = await supabaseClient.from('kmi_owner_cos').select('*').eq('project_id', pid);
+    if (cos.error) throw new Error(cos.error.message);
+    var ids = (cos.data || []).map(function(r){ return r.id; });
+    var lines = [], links = [], allocs = [];
+    if (ids.length) {
+      var lr = await supabaseClient.from('kmi_owner_co_lines').select('*').in('owner_co_id', ids);
+      if (lr.error) throw new Error(lr.error.message);
+      var kr = await supabaseClient.from('kmi_owner_co_cors').select('*').in('owner_co_id', ids);
+      if (kr.error) throw new Error(kr.error.message);
+      lines = lr.data || []; links = kr.data || [];
+      var lids = lines.map(function(r){ return r.id; });
+      if (lids.length) {
+        var ar = await supabaseClient.from('kmi_owner_co_allocs').select('*').in('line_id', lids);
+        if (ar.error) throw new Error(ar.error.message);
+        allocs = ar.data || [];
+      }
+    }
+    ent.data = { cos: cos.data || [], lines: lines, links: links, allocs: allocs };
+    return ent.data;
+  })();
+  try { var d = await ent.promise; ent.promise = null; return d; }
+  catch (e) { ent.promise = null; throw e; }
+}
+
+function ocoInvalidate(pid) { delete _ocoCache[String(pid)]; }
+
+// Re-read CORs the server changed (derived CO fields, approval) so the local
+// copy carries the new version and is not seen as a dirty edit.
+async function ocoRefreshCors(ids) {
+  ids = (ids || []).filter(function(x){ return x !== null && x !== undefined && x !== ''; })
+                   .map(function(x){ return String(x); });
+  ids = ids.filter(function(x, i){ return ids.indexOf(x) === i; });
+  if (!ids.length || !supabaseClient) return;
+  var res;
+  try { res = await supabaseClient.from('kmi_cors').select('*').in('id', ids); }
+  catch (e) { console.warn('[oco] refresh', e); return; }
+  if (!res || res.error) { console.warn('[oco] refresh', res && res.error); return; }
+  var items = (res.data || []).map(function(raw){
+    var inc = fromSBCor(raw);
+    return { k: 'cors', id: String(raw.id), raw: raw, inc: inc, mapped: _vgMap('cors', inc), lost: [] };
+  });
+  _vgApply('cors', items);
+  saveDB();
+}
+
+// Build a display model for one owner CO.
+function ocoCoModel(data, co) {
+  var corById = {};
+  (db.cors || []).forEach(function(c){ corById[String(c.id)] = c; });
+  var lines = data.lines.filter(function(l){ return String(l.owner_co_id) === String(co.id); })
+                        .sort(function(a, b){ return (a.line_no - b.line_no) || (a.id - b.id); });
+  var links = data.links.filter(function(k){ return String(k.owner_co_id) === String(co.id); });
+  var linkById = {};
+  links.forEach(function(k){ linkById[String(k.id)] = k; });
+  var allocs = data.allocs.filter(function(a){ return !!linkById[String(a.link_id)]; });
+  var corRows = links.map(function(k){
+    var c = corById[String(k.cor_id)] || null;
+    var appr = allocs.filter(function(a){ return String(a.link_id) === String(k.id); })
+                     .reduce(function(s, a){ return s + ocoN(a.amount); }, 0);
+    var req = c ? ocoN(c.totalAmount) : 0;
+    return { link: k, cor: c, appr: corRound2(appr), req: req, v: corRound2(appr - req) };
+  }).sort(function(a, b){
+    return String(a.cor ? a.cor.corNumber : '').localeCompare(String(b.cor ? b.cor.corNumber : ''), undefined, { numeric: true });
+  });
+  var lineRows = lines.map(function(l){
+    var la = allocs.filter(function(a){ return String(a.line_id) === String(l.id); });
+    var allocated = la.reduce(function(s, a){ return s + ocoN(a.amount); }, 0);
+    var cors = la.map(function(a){
+      var k = linkById[String(a.link_id)], c = k ? corById[String(k.cor_id)] : null;
+      return { corId: k ? k.cor_id : null, cor: c, amount: ocoN(a.amount) };
+    });
+    return { line: l, amount: ocoN(l.amount), allocated: corRound2(allocated), cors: cors };
+  });
+  var linesTotal = lineRows.reduce(function(s, r){ return s + r.amount; }, 0);
+  var req = corRows.reduce(function(s, r){ return s + r.req; }, 0);
+  var appr = corRows.reduce(function(s, r){ return s + r.appr; }, 0);
+  var unallocated = corRound2(lineRows.reduce(function(s, r){ return s + (r.amount - r.allocated); }, 0));
+  return {
+    co: co, lines: lineRows, cors: corRows,
+    total: (co.total_amount !== null && co.total_amount !== undefined) ? ocoN(co.total_amount) : linesTotal,
+    linesTotal: corRound2(linesTotal), req: corRound2(req), appr: corRound2(appr),
+    v: corRound2(appr - req), unallocated: unallocated
+  };
+}
+
+// ── Sub-tabs ──────────────────────────────────────────────────────────
+function ocoRenderSubTabs() {
+  var bar = g('nprj-cor-subtabs'); if (!bar) return;
+  function t(key, label) {
+    var on = (_ocoSubTab === key);
+    return '<div onclick="ocoSwSub(\'' + key + '\')" style="padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;border-bottom:2px solid ' +
+      (on ? 'var(--ac)' : 'transparent') + ';color:' + (on ? 'var(--kmi)' : '#888') + ';margin-bottom:-1px">' + label + '</div>';
+  }
+  bar.innerHTML = '<div style="display:flex;gap:4px;border-bottom:1px solid #e5e5e5;margin-bottom:18px">' +
+    t('cors', 'COR\u2019s') + t('cos', 'CO\u2019s') + '</div>';
+  var card = g('nprj-cor-card'), sec = g('nprj-oco-section');
+  if (card) card.style.display = (_ocoSubTab === 'cors') ? '' : 'none';
+  if (sec)  sec.style.display  = (_ocoSubTab === 'cos')  ? '' : 'none';
+}
+
+function ocoSwSub(sub) {
+  sub = (sub === 'cos') ? 'cos' : 'cors';
+  if (sub === _ocoSubTab) return;
+  if (_ocoImp && _ocoImp.step !== 'upload' && sub === 'cors' &&
+      !confirm('Leave the owner CO import? What you have entered so far is kept until you cancel it.')) return;
+  _ocoSubTab = sub;
+  renderProjectCorList();
+}
+
+// Jump from a COR's Owner CO chip to that CO, expanded.
+function ocoGoCo(coId) {
+  _ocoSubTab = 'cos';
+  _ocoExpanded[String(coId)] = true;
+  if (_ocoImp) _ocoImp = null;
+  renderProjectCorList();
+}
+
+function ocoChipHtml(c) {
+  if (!c.customerCoNumber) return '<span style="color:#bbb">\u2014</span>';
+  var lbl = 'CO ' + c.customerCoNumber + (c.customerCoDate ? ' \u00B7 ' + ocoFmtDate(c.customerCoDate) : '');
+  var html = c.ownerCoId
+    ? '<button class="btn btn-sm" style="border-radius:12px;padding:2px 10px;font-size:11px" onclick="event.stopPropagation();ocoGoCo(' + Number(c.ownerCoId) + ')" title="Open this owner CO">\uD83D\uDD17 ' + corEsc(lbl) + '</button>'
+    : '<span style="font-size:11px;color:#888" title="This CO # is not linked to an owner CO record yet">' + corEsc(lbl) + '</span>';
+  if (c.ownerCoId && c.approvedAmount !== null && c.approvedAmount !== undefined &&
+      Math.abs(corRound2(c.approvedAmount - ocoN(c.totalAmount))) >= 0.01) {
+    html += '<div style="font-size:11px;color:#8A5A00;margin-top:2px">Approved ' + corFmtMoney(c.approvedAmount) + '</div>';
+  }
+  return html;
+}
+
+// ── CO's sub-tab: list ────────────────────────────────────────────────
+async function ocoRenderCoView() {
+  var host = g('nprj-oco-section'); if (!host) return;
+  var pid = _editProjectId;
+  if (!pid) {
+    host.innerHTML = '<div class="card"><div style="text-align:center;color:#888;padding:20px;font-size:13px">Save the project first to track owner change orders.</div></div>';
+    return;
+  }
+  if (_ocoImp && String(_ocoImp.pid) !== String(pid)) _ocoImp = null;
+  if (_ocoImp) { ocoRenderImport(); return; }
+  var ent = _ocoCache[String(pid)];
+  if (!ent || !ent.data) {
+    host.innerHTML = '<div class="card"><div style="padding:16px;color:#888;font-size:13px">Loading owner change orders\u2026</div></div>';
+    try { await ocoLoad(pid); }
+    catch (e) {
+      host.innerHTML = '<div class="card"><div style="padding:16px;color:#A32D2D;font-size:13px">Could not load owner change orders: ' + corEsc(e.message || e) +
+        ' <button class="btn btn-sm" onclick="ocoReload()">Retry</button></div></div>';
+      return;
+    }
+    if (_ocoSubTab !== 'cos' || String(_editProjectId) !== String(pid) || _ocoImp) return;
+  }
+  host.innerHTML = ocoListHtml(pid, _ocoCache[String(pid)].data);
+}
+
+async function ocoReload() {
+  var pid = _editProjectId; if (!pid) return;
+  ocoInvalidate(pid);
+  renderProjectCorList();
+}
+
+function ocoListHtml(pid, data) {
+  var models = data.cos.map(function(co){ return ocoCoModel(data, co); });
+  models.sort(function(a, b){
+    return String(b.co.co_date || '').localeCompare(String(a.co.co_date || '')) ||
+           String(b.co.co_number || '').localeCompare(String(a.co.co_number || ''), undefined, { numeric: true });
+  });
+  var tot = models.reduce(function(s, m){ return s + m.total; }, 0);
+  var nVar = models.filter(function(m){ return Math.abs(m.v) >= 0.01; }).length;
+  var nUn  = models.filter(function(m){ return Math.abs(m.unallocated) >= 0.01; }).length;
+  var chip = 'display:inline-block;border-radius:14px;padding:4px 12px;font-size:12px;';
+  var chips =
+    '<span style="' + chip + 'background:#f4f5f8;border:1px solid #e3e5ec">' + models.length + ' owner CO\u2019s</span> ' +
+    '<span style="' + chip + 'background:#f4f5f8;border:1px solid #e3e5ec">' + corFmtMoney(tot) + ' approved by owner</span> ' +
+    (nVar ? '<span style="' + chip + 'background:#FFF4D6;border:1px solid #F1DFA6;color:#7A4F00">' + nVar + ' with amount variance</span> ' : '') +
+    (nUn ? '<span style="' + chip + 'background:#FDF1F1;border:1px solid #F0D2D2;color:#8E2424">' + nUn + ' with unlinked dollars</span>' : '');
+
+  var th = 'padding:8px 10px;text-align:left;white-space:nowrap';
+  var head = '<tr style="background:#f5f5f5"><th style="width:34px"></th><th style="' + th + '">CO #</th><th style="' + th + '">CO date</th>' +
+    '<th style="' + th + '">Description</th><th style="' + th + '">CORs</th><th style="' + th + ';text-align:right">KMI requested</th>' +
+    '<th style="' + th + ';text-align:right">Owner approved</th><th style="' + th + ';text-align:right">Variance</th><th style="' + th + '">Document</th>' +
+    '<th style="' + th + '">Actions</th></tr>';
+
+  var body = models.map(function(m){
+    var co = m.co, open = !!_ocoExpanded[String(co.id)];
+    var doc = co.file_path
+      ? '<button class="btn btn-sm" onclick="ocoOpenDoc(' + co.id + ')" title="' + corEsc(co.file_name || 'CO document') + '">\uD83D\uDCC4 ' + corEsc((co.file_name || 'PDF').slice(0, 28)) + '</button>'
+      : '<span style="color:#bbb;font-size:12px">' + (co.source === 'backfill' ? 'backfilled' : 'none') + '</span>';
+    var acts = ocoCanEdit()
+      ? '<button class="btn btn-sm" onclick="ocoEditHeader(' + co.id + ')">Edit</button>&nbsp;<button class="btn btn-sm" style="color:#A32D2D" onclick="ocoDeleteCo(' + co.id + ')">Delete</button>'
+      : '';
+    var row = '<tr style="border-top:1px solid #eee;cursor:pointer" onclick="ocoToggle(' + co.id + ')">' +
+      '<td style="padding:8px 6px;text-align:center"><span style="display:inline-block;transition:transform .15s;transform:rotate(' + (open ? 90 : 0) + 'deg);color:var(--kmi)">\u25B6</span></td>' +
+      '<td style="padding:8px 10px"><strong style="color:var(--kmi)">' + corEsc(co.co_number) + '</strong></td>' +
+      '<td style="padding:8px 10px">' + corEsc(ocoFmtDate(co.co_date) || '\u2014') + '</td>' +
+      '<td style="padding:8px 10px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + corEsc(co.description || '') + '">' + corEsc(co.description || '') +
+        (co.issued_by ? '<div style="font-size:11px;color:#888">' + corEsc(co.issued_by) + '</div>' : '') + '</td>' +
+      '<td style="padding:8px 10px">' + m.cors.length + '</td>' +
+      '<td style="padding:8px 10px;text-align:right">' + corFmtMoney(m.req) + '</td>' +
+      '<td style="padding:8px 10px;text-align:right"><strong>' + corFmtMoney(m.total) + '</strong></td>' +
+      '<td style="padding:8px 10px;text-align:right">' + ocoVarHtml(m.v) + '</td>' +
+      '<td style="padding:6px 10px" onclick="event.stopPropagation()">' + doc + '</td>' +
+      '<td style="padding:6px 10px;white-space:nowrap" onclick="event.stopPropagation()">' + acts + '</td>' +
+      '</tr>';
+    if (open) row += '<tr><td colspan="10" style="padding:0;background:#fafafc;border-top:1px dashed #e0e2ea">' + ocoDetailHtml(m) + '</td></tr>';
+    return row;
+  }).join('');
+  if (!models.length) {
+    body = '<tr><td colspan="10" style="text-align:center;color:#aaa;padding:24px;font-size:13px">No owner change orders on this project yet.</td></tr>';
+  }
+
+  return '<div class="card">' +
+    '<div class="ch"><span class="ct">Owner Change Orders</span><div style="display:flex;align-items:center;gap:8px">' +
+      '<button class="btn btn-sm" onclick="ocoReload()" title="Re-read owner COs from the cloud">\u21BB Refresh</button>' +
+      (ocoCanEdit() ? '<button class="btn btn-sm btn-p" onclick="ocoImpStart()">\u2B06 Import owner CO</button>' : '') +
+    '</div></div>' +
+    '<div style="margin-bottom:12px">' + chips + '</div>' +
+    '<div style="overflow-x:auto"><table style="width:100%;font-size:13px;min-width:980px"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
+  '</div>';
+}
+
+function ocoDetailHtml(m) {
+  var co = m.co, canEd = ocoCanEdit();
+  var th = 'padding:6px 8px;text-align:left;font-size:11px;color:#5f6368;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap';
+  var cors = m.cors.map(function(r){
+    var c = r.cor;
+    return '<tr style="border-top:1px solid #eee;background:#fff">' +
+      '<td style="padding:7px 8px"><strong style="color:var(--kmi)">' + (c ? corEsc(corExtractKmiSeq(c.corNumber) || c.corNumber) : '?') + '</strong></td>' +
+      '<td style="padding:7px 8px">' + corEsc(c && c.gcRef ? c.gcRef : '') + '</td>' +
+      '<td style="padding:7px 8px;max-width:300px">' + corEsc(c ? c.description : '(COR not loaded)') + '</td>' +
+      '<td style="padding:7px 8px;text-align:right">' + corFmtMoney(r.req) + '</td>' +
+      '<td style="padding:7px 8px;text-align:right"><strong>' + corFmtMoney(r.appr) + '</strong></td>' +
+      '<td style="padding:7px 8px;text-align:right">' + ocoVarHtml(r.v) + '</td>' +
+      '<td style="padding:7px 8px">' + (c ? corStatusBadge(c) : '') + '</td>' +
+      '<td style="padding:5px 8px;white-space:nowrap">' +
+        (c && hasRead('view-cors') ? '<button class="btn btn-sm" onclick="corViewForProject(' + c.id + ')">Open</button>' : '') +
+        (c && canEd ? '&nbsp;<button class="btn btn-sm" style="color:#A32D2D" onclick="ocoUnlinkCor(' + c.id + ')">Unlink</button>' : '') +
+      '</td></tr>';
+  }).join('') || '<tr><td colspan="8" style="padding:10px;color:#aaa;background:#fff">No CORs linked to this CO.</td></tr>';
+
+  var lines = m.lines.map(function(r){
+    var l = r.line, gap = corRound2(r.amount - r.allocated);
+    var corsTxt = r.cors.length
+      ? r.cors.map(function(x){ return (x.cor ? corEsc(ocoCorLabel(x.cor)) : '?') + ' ' + corFmtMoney(x.amount); }).join('<br>')
+      : '<span style="color:#8E2424">Unmatched</span>';
+    return '<tr style="border-top:1px solid #eee;background:#fff">' +
+      '<td style="padding:7px 8px">' + l.line_no + '</td>' +
+      '<td style="padding:7px 8px">' + corEsc(l.gc_ref || '') + '</td>' +
+      '<td style="padding:7px 8px;max-width:300px">' + corEsc(l.description || '') + (l.cost_code ? '<div style="font-size:11px;color:#888">' + corEsc(l.cost_code) + '</div>' : '') + '</td>' +
+      '<td style="padding:7px 8px;text-align:right">' + corFmtMoney(r.amount) + '</td>' +
+      '<td style="padding:7px 8px;font-size:12px">' + corsTxt +
+        (Math.abs(gap) >= 0.01 && r.cors.length ? '<div style="color:#8E2424;font-size:11px">' + corFmtMoney(gap) + ' not assigned</div>' : '') + '</td>' +
+      '<td style="padding:5px 8px">' + (canEd ? '<button class="btn btn-sm" onclick="ocoEditLine(' + l.id + ')">Link CORs\u2026</button>' : '') + '</td>' +
+      '</tr>';
+  }).join('') || '<tr><td colspan="6" style="padding:10px;color:#aaa;background:#fff">No lines recorded.</td></tr>';
+
+  var notes = [];
+  if (co.notes) notes.push(corEsc(co.notes));
+  if (Math.abs(m.total - m.linesTotal) >= 0.01) notes.push('<span style="color:#8E2424">Lines total ' + corFmtMoney(m.linesTotal) + ' does not tie to the CO total ' + corFmtMoney(m.total) + '.</span>');
+  if (Math.abs(m.unallocated) >= 0.01) notes.push('<span style="color:#8E2424">' + corFmtMoney(m.unallocated) + ' of this CO is not assigned to any COR.</span>');
+
+  return '<div style="padding:12px 14px 16px 44px">' +
+    '<div style="font-size:12px;font-weight:700;color:var(--kmi);margin-bottom:6px">CORs on this CO</div>' +
+    '<table style="width:100%;font-size:12px;border:1px solid #eceef3"><thead><tr>' +
+      '<th style="' + th + '">COR #</th><th style="' + th + '">GC ref</th><th style="' + th + '">Description</th><th style="' + th + ';text-align:right">Requested</th>' +
+      '<th style="' + th + ';text-align:right">Approved</th><th style="' + th + ';text-align:right">Variance</th><th style="' + th + '">Status</th><th style="' + th + '"></th>' +
+    '</tr></thead><tbody>' + cors + '</tbody></table>' +
+    '<div style="font-size:12px;font-weight:700;color:var(--kmi);margin:14px 0 6px">Lines on the owner\u2019s CO</div>' +
+    '<table style="width:100%;font-size:12px;border:1px solid #eceef3"><thead><tr>' +
+      '<th style="' + th + '">#</th><th style="' + th + '">GC ref</th><th style="' + th + '">Description</th><th style="' + th + ';text-align:right">Amount</th>' +
+      '<th style="' + th + '">Assigned to</th><th style="' + th + '"></th>' +
+    '</tr></thead><tbody>' + lines + '</tbody></table>' +
+    (notes.length ? '<div style="margin-top:8px;font-size:12px;color:#4a4f5c">' + notes.join('<br>') + '</div>' : '') +
+  '</div>';
+}
+
+function ocoToggle(coId) {
+  var k = String(coId);
+  if (_ocoExpanded[k]) delete _ocoExpanded[k]; else _ocoExpanded[k] = true;
+  ocoRenderCoView();
+}
+
+async function ocoOpenDoc(coId) {
+  var d = _ocoCache[String(_editProjectId)], co = d && d.data ? d.data.cos.find(function(x){ return String(x.id) === String(coId); }) : null;
+  if (!co || !co.file_path) return;
+  var w = window.open('', '_blank');
+  try {
+    var r = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).createSignedUrl(co.file_path, 300);
+    if (r.error) throw new Error(r.error.message);
+    if (w) w.location = r.data.signedUrl; else window.location.href = r.data.signedUrl;
+  } catch (e) {
+    if (w) w.close();
+    alert('Could not open the CO document: ' + (e.message || e));
+  }
+}
+
+// ── CO maintenance (header edit, delete, unlink, line links) ───────────
+function _ocoFindCo(coId) {
+  var d = _ocoCache[String(_editProjectId)];
+  return d && d.data ? d.data.cos.find(function(x){ return String(x.id) === String(coId); }) : null;
+}
+function _ocoCorIdsOnCo(coId) {
+  var d = _ocoCache[String(_editProjectId)];
+  if (!d || !d.data) return [];
+  return d.data.links.filter(function(k){ return String(k.owner_co_id) === String(coId); }).map(function(k){ return k.cor_id; });
+}
+
+function ocoEditHeader(coId) {
+  if (!ocoCanEdit()) return;
+  var co = _ocoFindCo(coId); if (!co) return;
+  var fld = function(id, label, val, type) {
+    return '<div class="fgr"><label>' + label + '</label><input id="' + id + '" type="' + (type || 'text') + '" value="' + corEsc(val == null ? '' : val) + '"></div>';
+  };
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Edit owner CO ' + corEsc(co.co_number) + '</div>' +
+    '<div class="msb">The CO # and date are copied onto every COR on this CO.</div>' +
+    '<div class="fg">' +
+      fld('oco-h-no', 'CO #', co.co_number) + fld('oco-h-date', 'CO date', co.co_date || '', 'date') +
+      fld('oco-h-by', 'Issued by', co.issued_by || '') + fld('oco-h-total', 'CO total', co.total_amount == null ? '' : ocoN(co.total_amount), 'number') +
+      '<div class="fgr full"><label>Description</label><input id="oco-h-desc" value="' + corEsc(co.description || '') + '"></div>' +
+      '<div class="fgr full"><label>Notes</label><textarea id="oco-h-notes" rows="2">' + corEsc(co.notes || '') + '</textarea></div>' +
+    '</div>' +
+    '<div id="oco-h-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
+    '<div class="mbtns"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" id="oco-h-save" onclick="ocoSaveHeader(' + co.id + ')">Save</button></div>'
+  );
+}
+
+async function ocoSaveHeader(coId) {
+  var no = (g('oco-h-no').value || '').trim();
+  if (!no) { g('oco-h-err').textContent = 'CO # is required.'; return; }
+  var tot = (g('oco-h-total').value || '').trim();
+  var upd = {
+    co_number: no,
+    co_date: g('oco-h-date').value || null,
+    issued_by: (g('oco-h-by').value || '').trim() || null,
+    total_amount: tot === '' ? null : Number(tot),
+    description: (g('oco-h-desc').value || '').trim(),
+    notes: (g('oco-h-notes').value || '').trim() || null,
+    updated_at: new Date().toISOString(),
+    updated_by_user_id: ocoUid()
+  };
+  var btn = g('oco-h-save'); if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
+  var r = await supabaseClient.from('kmi_owner_cos').update(upd).eq('id', coId);
+  if (r.error) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    g('oco-h-err').textContent = /duplicate|unique/i.test(r.error.message) ? ('CO ' + no + ' already exists on this project.') : r.error.message;
+    return;
+  }
+  var ids = _ocoCorIdsOnCo(coId);
+  closeModal();
+  await ocoRefreshCors(ids);
+  ocoInvalidate(_editProjectId);
+  showToast('Owner CO ' + no + ' saved.', 'success');
+  renderProjectCorList();
+}
+
+async function ocoDeleteCo(coId) {
+  if (!ocoCanEdit()) return;
+  var co = _ocoFindCo(coId); if (!co) return;
+  var ids = _ocoCorIdsOnCo(coId);
+  if (!confirm('Delete owner CO ' + co.co_number + '?\n\n' + ids.length + ' COR(s) will be unlinked from it and lose its CO # and date. ' +
+               'Their status stays as it is (approved CORs stay Approved).')) return;
+  var r = await supabaseClient.from('kmi_owner_cos').delete().eq('id', coId);
+  if (r.error) { alert('Could not delete the CO: ' + r.error.message); return; }
+  if (co.file_path) {
+    try { await supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([co.file_path]); } catch (e) { console.warn('[oco] file remove', e); }
+  }
+  delete _ocoExpanded[String(coId)];
+  await ocoRefreshCors(ids);
+  ocoInvalidate(_editProjectId);
+  showToast('Owner CO ' + co.co_number + ' deleted.', 'success');
+  renderProjectCorList();
+}
+
+async function ocoUnlinkCor(corId) {
+  if (!ocoCanEdit()) return;
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(corId); });
+  if (!confirm('Unlink ' + (c ? ocoCorLabel(c) : 'this COR') + ' from its owner CO?\n\nThe CO keeps its lines (they show as unmatched). The COR keeps its status.')) return;
+  var r = await supabaseClient.rpc('kmi_owner_co_unlink_cor', { p_cor_id: Number(corId) });
+  if (r.error) { alert('Could not unlink: ' + r.error.message); return; }
+  await ocoRefreshCors([corId]);
+  ocoInvalidate(_editProjectId);
+  renderProjectCorList();
+}
+
+// CORs that can take owner CO dollars: on this project, not voided/rejected,
+// and either unlinked or already on `coId`.
+function ocoCandidateCors(pid, coId) {
+  return (db.cors || []).filter(function(c){
+    if (String(c.projectId) !== String(pid)) return false;
+    var s = c.status || 'Draft';
+    if (s === 'Voided' || s === 'Rejected') return false;
+    return !c.ownerCoId || (coId != null && String(c.ownerCoId) === String(coId));
+  }).sort(function(a, b){
+    return String(a.corNumber).localeCompare(String(b.corNumber), undefined, { numeric: true });
+  });
+}
+
+function ocoCorOptions(cands, selId) {
+  return '<option value="">\u2014 Pick a COR \u2014</option>' + cands.map(function(c){
+    return '<option value="' + c.id + '"' + (String(c.id) === String(selId) ? ' selected' : '') + '>' +
+      corEsc(ocoCorLabel(c) + ' \u2014 ' + String(c.description || '').slice(0, 60) + ' (' + corFmtMoney(c.totalAmount) + ', ' + (c.status || 'Draft') + ')') + '</option>';
+  }).join('');
+}
+
+var _ocoLineEdit = null;
+function ocoEditLine(lineId) {
+  if (!ocoCanEdit()) return;
+  var d = _ocoCache[String(_editProjectId)]; if (!d || !d.data) return;
+  var line = d.data.lines.find(function(l){ return String(l.id) === String(lineId); }); if (!line) return;
+  var co = _ocoFindCo(line.owner_co_id);
+  var m = ocoCoModel(d.data, co);
+  var lr = m.lines.find(function(r){ return String(r.line.id) === String(lineId); });
+  _ocoLineEdit = {
+    lineId: line.id, coId: co.id, amount: ocoN(line.amount),
+    rows: lr.cors.map(function(x){ return { corId: x.corId, amount: x.amount }; })
+  };
+  if (!_ocoLineEdit.rows.length) _ocoLineEdit.rows.push({ corId: '', amount: _ocoLineEdit.amount });
+  ocoRenderLineEdit();
+}
+
+function ocoRenderLineEdit() {
+  var st = _ocoLineEdit; if (!st) return;
+  var d = _ocoCache[String(_editProjectId)];
+  var line = d.data.lines.find(function(l){ return String(l.id) === String(st.lineId); });
+  var co = _ocoFindCo(st.coId);
+  var cands = ocoCandidateCors(_editProjectId, st.coId);
+  var assigned = st.rows.reduce(function(s, r){ return s + ocoN(r.amount); }, 0);
+  var gap = corRound2(st.amount - assigned);
+  var rows = st.rows.map(function(r, i){
+    return '<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">' +
+      '<select style="flex:1;min-width:0" onchange="_ocoLineEdit.rows[' + i + '].corId=this.value">' + ocoCorOptions(cands, r.corId) + '</select>' +
+      '<input type="number" step="0.01" style="width:130px" value="' + ocoN(r.amount) + '" oninput="_ocoLineEdit.rows[' + i + '].amount=this.value" onchange="ocoRenderLineEdit()">' +
+      '<button class="btn btn-sm" onclick="_ocoLineEdit.rows.splice(' + i + ',1);ocoRenderLineEdit()" title="Remove">&#215;</button></div>';
+  }).join('');
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt">Link CORs to CO ' + corEsc(co.co_number) + ' line ' + line.line_no + '</div>' +
+    '<div class="msb">' + corEsc((line.gc_ref ? line.gc_ref + ' \u2014 ' : '') + (line.description || '')) + ' \u00B7 <strong>' + corFmtMoney(st.amount) + '</strong><br>' +
+      'Split this line\u2019s dollars across one or more CORs. Pending CORs linked here move to Approved.</div>' +
+    rows +
+    '<div style="display:flex;gap:8px;margin:6px 0 4px">' +
+      '<button class="btn btn-sm" onclick="_ocoLineEdit.rows.push({corId:\'\',amount:0});ocoRenderLineEdit()">+ Add a COR</button>' +
+      '<button class="btn btn-sm" onclick="ocoLineEditSplit()">Split by requested amount</button>' +
+    '</div>' +
+    '<div style="font-size:12px;margin-top:6px;color:' + (Math.abs(gap) >= 0.01 ? '#8E2424' : '#2F5A0C') + '">Assigned ' + corFmtMoney(assigned) + ' of ' + corFmtMoney(st.amount) +
+      (Math.abs(gap) >= 0.01 ? ' \u2014 ' + corFmtMoney(gap) + ' left unassigned' : '') + '</div>' +
+    '<div id="oco-le-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
+    '<div class="mbtns"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-p" id="oco-le-save" onclick="ocoSaveLineEdit()">Save links</button></div>'
+  );
+}
+
+function ocoSplitByRequested(amount, corIds) {
+  var cors = corIds.map(function(id){ return (db.cors || []).find(function(c){ return String(c.id) === String(id); }); });
+  var reqs = cors.map(function(c){ return c ? Math.abs(ocoN(c.totalAmount)) : 0; });
+  var sum = reqs.reduce(function(s, x){ return s + x; }, 0);
+  var out = [], used = 0;
+  corIds.forEach(function(id, i){
+    var share = (i === corIds.length - 1) ? corRound2(amount - used)
+      : corRound2(sum > 0 ? amount * reqs[i] / sum : amount / corIds.length);
+    used = corRound2(used + share);
+    out.push(share);
+  });
+  return out;
+}
+
+function ocoLineEditSplit() {
+  var st = _ocoLineEdit; if (!st) return;
+  var ids = st.rows.map(function(r){ return r.corId; }).filter(Boolean);
+  if (!ids.length) return;
+  var shares = ocoSplitByRequested(st.amount, ids), j = 0;
+  st.rows = st.rows.filter(function(r){ return r.corId; });
+  st.rows.forEach(function(r){ r.amount = shares[j++]; });
+  ocoRenderLineEdit();
+}
+
+async function ocoSaveLineEdit() {
+  var st = _ocoLineEdit; if (!st) return;
+  var rows = st.rows.filter(function(r){ return r.corId; });
+  var seen = {};
+  for (var i = 0; i < rows.length; i++) {
+    if (seen[rows[i].corId]) { g('oco-le-err').textContent = 'Each COR can only appear once on a line.'; return; }
+    seen[rows[i].corId] = true;
+  }
+  var before = _ocoCorIdsOnCo(st.coId);
+  var btn = g('oco-le-save'); if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
+  var r = await supabaseClient.rpc('kmi_owner_co_set_line_allocs', {
+    p_line_id: Number(st.lineId),
+    p_allocs: rows.map(function(x){ return { cor_id: Number(x.corId), amount: corRound2(ocoN(x.amount)), match_method: 'manual' }; }),
+    p_user_id: ocoUid()
+  });
+  if (r.error) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save links'; }
+    g('oco-le-err').textContent = r.error.message;
+    return;
+  }
+  closeModal();
+  _ocoLineEdit = null;
+  await ocoRefreshCors(before.concat(rows.map(function(x){ return x.corId; })));
+  ocoInvalidate(_editProjectId);
+  renderProjectCorList();
+}
+
+// ── COR form / Mark Approved: link a COR to an owner CO by number ──────
+// Called after the COR row is saved. Compares the typed number/date with the
+// COR's current (server-derived) values and calls the matching RPC.
+async function ocoApplyCorCo(c, num, date) {
+  if (!c || !supabaseClient) return;
+  num = String(num || '').trim(); date = String(date || '').trim();
+  var curNum = String(c.customerCoNumber || '').trim(), curDate = String(c.customerCoDate || '').trim();
+  var r = null, what = '';
+  if (!num) {
+    if (!c.ownerCoId) return;
+    what = 'unlink it from its owner CO';
+    r = await supabaseClient.rpc('kmi_owner_co_unlink_cor', { p_cor_id: Number(c.id) });
+  } else if (num.toLowerCase() !== curNum.toLowerCase()) {
+    what = 'link it to owner CO ' + num;
+    r = await supabaseClient.rpc('kmi_owner_co_link_cor', {
+      p_cor_id: Number(c.id), p_co_number: num, p_co_date: date || null, p_amount: null, p_user_id: ocoUid()
+    });
+  } else if (date && date !== curDate && c.ownerCoId) {
+    var nOn = 0;
+    var d = _ocoCache[String(c.projectId)];
+    if (d && d.data) nOn = d.data.links.filter(function(k){ return String(k.owner_co_id) === String(c.ownerCoId); }).length;
+    if (!confirm('Change the date of owner CO ' + num + ' to ' + ocoFmtDate(date) + '?\n\nThe date is copied onto every COR on that CO' + (nOn > 1 ? ' (' + nOn + ' CORs).' : '.'))) return;
+    what = 'change the date of owner CO ' + num;
+    r = await supabaseClient.from('kmi_owner_cos').update({ co_date: date, updated_at: new Date().toISOString(), updated_by_user_id: ocoUid() }).eq('id', c.ownerCoId);
+  } else {
+    return;
+  }
+  if (r && r.error) alert('The COR saved, but the app could not ' + what + ':\n\n' + r.error.message);
+  var ids = [c.id];
+  if (c.ownerCoId) ids = ids.concat(_ocoCorIdsOnCoAny(c.projectId, c.ownerCoId));
+  await ocoRefreshCors(ids);
+  ocoInvalidate(c.projectId);
+}
+
+function _ocoCorIdsOnCoAny(pid, coId) {
+  var d = _ocoCache[String(pid)];
+  if (!d || !d.data) return [];
+  return d.data.links.filter(function(k){ return String(k.owner_co_id) === String(coId); }).map(function(k){ return k.cor_id; });
+}
+
+// Fill a <datalist> with the project's owner COs ("pick or create").
+async function ocoFillDatalist(pid, dlId) {
+  if (!pid) return;
+  var d;
+  try { d = await ocoLoad(pid); } catch (e) { return; }
+  var dl = g(dlId); if (!dl) return;
+  dl.innerHTML = d.cos.slice().sort(function(a, b){ return String(b.co_date || '').localeCompare(String(a.co_date || '')); })
+    .map(function(co){
+      return '<option value="' + corEsc(co.co_number) + '">' + corEsc((co.co_date ? ocoFmtDate(co.co_date) : 'no date') + (co.description ? ' \u00B7 ' + co.description : '')) + '</option>';
+    }).join('');
+}
+
+// When the typed number matches an existing owner CO, show its date.
+function ocoCoNumInput(inp, dateId, pid) {
+  var d = _ocoCache[String(pid)]; if (!d || !d.data || !inp) return;
+  var v = String(inp.value || '').trim().toLowerCase();
+  var co = d.data.cos.find(function(x){ return String(x.co_number || '').trim().toLowerCase() === v; });
+  var di = g(dateId);
+  if (co && co.co_date && di) di.value = co.co_date;
+}
+
+function ocoFormPid() {
+  var c = (typeof _corCurrent === 'function') ? _corCurrent() : null;
+  if (c) return c.projectId;
+  return g('ncor-project') ? g('ncor-project').value : null;
+}
+
+// Linked-CO line under the Owner CO # field on the COR form.
+function ocoFormInfo(c) {
+  var el = g('ncor-oco-info'); if (!el) return;
+  if (!c || !c.ownerCoId) {
+    el.innerHTML = (c && c.customerCoNumber) ? '<span style="color:#8A5A00">CO # not linked to an owner CO record yet. Re-type it (or pick from the list) and save to link it.</span>' : '';
+    return;
+  }
+  var appr = (c.approvedAmount !== null && c.approvedAmount !== undefined) ? Number(c.approvedAmount) : null;
+  var v = appr === null ? 0 : corRound2(appr - ocoN(c.totalAmount));
+  el.innerHTML = '\uD83D\uDD17 Linked to owner CO <strong>' + corEsc(c.customerCoNumber || '') + '</strong>' +
+    (appr !== null ? ' \u00B7 owner approved <strong>' + corFmtMoney(appr) + '</strong>' : '') +
+    (Math.abs(v) >= 0.01 ? ' <span style="color:#8A5A00">(' + (v > 0 ? '+' : '') + corFmtMoney(v) + ' vs requested)</span>' : '');
+}
+
+// ── Import wizard ─────────────────────────────────────────────────────
+function ocoImpStart() {
+  if (!ocoCanEdit()) { alert('You do not have permission to import owner change orders.'); return; }
+  _ocoImp = { pid: _editProjectId, step: 'upload', busy: false, err: '', file: null,
+              hdr: { no: '', date: '', issuedBy: '', total: '', desc: '', gcProject: '' }, lines: [], idx: 0 };
+  ocoRenderImport();
+}
+
+function ocoImpCancel() {
+  if (_ocoImp && _ocoImp.step !== 'upload' && !confirm('Cancel this import? Nothing has been saved.')) return;
+  _ocoImp = null;
+  ocoRenderCoView();
+}
+
+function ocoImpStepsHtml() {
+  var keys = ['upload', 'header', 'lines', 'review'], labels = ['Upload CO PDF', 'CO header', 'Confirm each roll-up', 'Review & save'];
+  var cur = keys.indexOf(_ocoImp.step);
+  return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">' + keys.map(function(k, i){
+    var on = i === cur, past = i < cur;
+    return '<div style="display:flex;align-items:center;gap:8px;padding:5px 12px 5px 5px;border-radius:16px;font-size:12px;font-weight:600;' +
+      (on ? 'background:var(--kmi);color:#fff' : past ? 'background:#E3F1D7;color:#2F5A0C' : 'background:#f0f1f5;color:#5f6368') + '">' +
+      '<span style="display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;border-radius:10px;font-size:11px;' +
+      (on ? 'background:var(--ac);color:var(--kmi)' : 'background:#fff') + '">' + (past ? '\u2713' : (i + 1)) + '</span>' + labels[i] + '</div>';
+  }).join('') + '</div>';
+}
+
+function ocoRenderImport() {
+  var host = g('nprj-oco-section'); if (!host || !_ocoImp) return;
+  var st = _ocoImp, body = '';
+  if (st.step === 'upload') body = ocoImpUploadHtml();
+  else if (st.step === 'header') body = ocoImpHeaderHtml();
+  else if (st.step === 'lines') body = ocoImpLinesHtml();
+  else body = ocoImpReviewHtml();
+  host.innerHTML = '<div class="card">' +
+    '<div class="ch"><span class="ct">Import owner CO</span><div><button class="btn btn-sm" onclick="ocoImpCancel()"' + (st.busy ? ' disabled' : '') + '>Cancel</button></div></div>' +
+    ocoImpStepsHtml() + body +
+    (st.err ? '<div style="color:#A32D2D;font-size:13px;margin-top:10px">' + corEsc(st.err) + '</div>' : '') +
+  '</div>';
+}
+
+function ocoImpUploadHtml() {
+  var st = _ocoImp;
+  return '<div style="border:2px dashed #cfd2db;border-radius:10px;padding:32px 20px;text-align:center;background:#fafafc">' +
+    '<div style="font-size:15px;font-weight:600;color:var(--kmi)">Choose the owner\u2019s CO PDF</div>' +
+    '<div style="color:#5f6368;margin:6px 0 14px;font-size:13px">The app reads the CO #, date, total and each line, then proposes CORs for every line. Nothing is saved until you confirm.</div>' +
+    '<input type="file" id="oco-imp-file" accept="application/pdf,.pdf"' + (st.busy ? ' disabled' : '') + '> ' +
+    '<button class="btn btn-p" onclick="ocoImpExtract()"' + (st.busy ? ' disabled' : '') + '>' + (st.busy ? 'Reading the CO\u2026' : '\u2728 Read CO') + '</button>' +
+    (st.busy ? '<div style="font-size:12px;color:#888;margin-top:10px">This usually takes 10\u201330 seconds.</div>' : '') +
+  '</div>';
+}
+
+async function ocoImpExtract() {
+  var st = _ocoImp; if (!st || st.busy) return;
+  var fileEl = g('oco-imp-file'), file = fileEl && fileEl.files && fileEl.files[0];
+  st.err = '';
+  if (!file) { st.err = 'Choose a PDF first.'; ocoRenderImport(); return; }
+  var isPdf = (file.type || '').toLowerCase() === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  if (!isPdf) { st.err = 'Only PDF files are supported.'; ocoRenderImport(); return; }
+  if (file.size > 25 * 1024 * 1024) { st.err = 'File is larger than 25 MB.'; ocoRenderImport(); return; }
+  var p = getProj(st.pid);
+  st.busy = true; st.file = file; ocoRenderImport();
+  try {
+    var b64 = await _smartUpCorFileToBase64(file);
+    var prompt =
+      'You are reading a change order issued by a general contractor (GC) to KMI Construction, a masonry subcontractor. ' +
+      'It may be titled Subcontract Change Order, Change Order, CCO, SCO or similar. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
+      'Our project for this CO: ' + ((p && p.number) || '') + ' ' + ((p && p.name) || '') + '\n\n' +
+      'Schema (null for unknown values; never invent):\n' +
+      '{\n' +
+      '  "coNumber":   "the CO number exactly as printed, e.g. \\"CCO #001\\", \\"1\\", \\"J10150.000-0076-001\\"",\n' +
+      '  "coDate":     "YYYY-MM-DD \u2014 the date the GC issued/created the CO (Order Date, Date Created, Change Order Date). NOT a signature, review or print date.",\n' +
+      '  "issuedBy":   "the GC company name",\n' +
+      '  "gcProject":  "the GC project number and name as printed",\n' +
+      '  "title":      "the CO title or description line",\n' +
+      '  "totalAmount": number \u2014 this CO\'s change to KMI\'s subcontract (NOT the original or new contract sum),\n' +
+      '  "lines": [ { "gcRef": "the GC reference for the line (PCO #, CE #, PCI No., change event) or null", "costCode": "cost code / phase or null", "description": "line description including any sub-description", "amount": number } ]\n' +
+      '}\n\n' +
+      'Rules:\n' +
+      '- Only line items that change KMI\'s subcontract. Ignore contract-sum summaries, signature blocks, terms, and attached logs (drawing revision logs, RFI logs).\n' +
+      '- If the CO carries a header-level reference (e.g. "CE #069 - Construction Bulletin 3") and its lines have none, put that reference in gcRef on each line and the header text in the description.\n' +
+      '- Numbers are numbers: no $ signs, no commas; deducts are negative.\n' +
+      '- Zero-dollar lines are valid \u2014 include them.\n' +
+      '- If there is no line table, return one line with the title and totalAmount.\n' +
+      '- Keep any "KMI COR" or "COR" numbers verbatim inside the description.';
+    var resp = await kmiAIFetch('cor-smart-upload', {
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 4000,
+        messages: [{ role: 'user', content: [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+          { type: 'text', text: prompt }
+        ] }]
+      })
+    });
+    if (!resp.ok) { var et = await resp.text(); throw new Error('API ' + resp.status + ': ' + et.substring(0, 300)); }
+    var data = await resp.json(), reply = '';
+    (data && data.content || []).some(function(b){ if (b.type === 'text' && b.text) { reply = b.text; return true; } return false; });
+    reply = String(reply || '').replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+    var parsed;
+    try { parsed = JSON.parse(reply); } catch (e) { throw new Error('Could not read the AI response. First 200 chars: ' + reply.substring(0, 200)); }
+    var dt = String(parsed.coDate || '').trim();
+    st.hdr = {
+      no: String(parsed.coNumber || '').trim(),
+      date: /^\d{4}-\d{2}-\d{2}$/.test(dt) ? dt : '',
+      issuedBy: String(parsed.issuedBy || '').trim(),
+      gcProject: String(parsed.gcProject || '').trim(),
+      desc: String(parsed.title || '').trim(),
+      total: (parsed.totalAmount === null || parsed.totalAmount === undefined || isNaN(Number(parsed.totalAmount))) ? '' : String(corRound2(parsed.totalAmount))
+    };
+    st.lines = (Array.isArray(parsed.lines) ? parsed.lines : []).map(function(l){
+      return { gcRef: String(l.gcRef || '').trim(), costCode: String(l.costCode || '').trim(),
+               description: String(l.description || '').trim(), amount: corRound2(ocoN(l.amount)),
+               allocs: [], action: null, conf: 'None', reason: '' };
+    });
+    if (!st.lines.length) st.lines.push({ gcRef: '', costCode: '', description: st.hdr.desc, amount: corRound2(ocoN(st.hdr.total)), allocs: [], action: null, conf: 'None', reason: '' });
+    try { await ocoLoad(st.pid); } catch (e) { console.warn('[oco] load', e); }
+    ocoImpPropose();
+    st.step = 'header';
+  } catch (e) {
+    console.error('[oco] extract', e);
+    st.err = 'Could not read the CO: ' + (e.message || e);
+  }
+  st.busy = false;
+  ocoRenderImport();
+}
+
+// ── Matching ──────────────────────────────────────────────────────────
+var OCO_REF_RE = /\b(PCO|PCI|CE|CB|RFI|BT|IS|ASI|CCD|PR|FA|CR)\s*(?:NO\.?|#|:|-)?\s*#?\s*0*(\d+)/g;
+function ocoRefTokens(s) {
+  var out = [], m; s = String(s || '').toUpperCase();
+  OCO_REF_RE.lastIndex = 0;
+  while ((m = OCO_REF_RE.exec(s)) !== null) {
+    var t = m[1] + '-' + String(Number(m[2]));
+    if (out.indexOf(t) === -1) out.push(t);
+  }
+  return out;
+}
+function ocoCorNumsIn(s) {
+  var out = [], m, re = /\bCOR\s*[-#:]?\s*(?:\d+\s*-\s*COR\s*-\s*)?0*(\d{1,6})\b|-COR-0*(\d{1,6})\b/gi;
+  s = String(s || '');
+  while ((m = re.exec(s)) !== null) {
+    var n = Number(m[1] || m[2]);
+    if (!isNaN(n) && out.indexOf(n) === -1) out.push(n);
+  }
+  return out;
+}
+var OCO_STOP = ['the','and','for','with','per','from','this','that','scope','kmi','masonry','add','added','plus','fee','change','order','line','item','work'];
+function ocoWords(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter(function(w){
+    return w.length >= 3 && OCO_STOP.indexOf(w) === -1 && !/^\d+$/.test(w);
+  });
+}
+function ocoSim(a, b) {
+  var A = ocoWords(a), B = ocoWords(b);
+  if (!A.length || !B.length) return 0;
+  var hit = 0;
+  A.forEach(function(w){ if (B.indexOf(w) !== -1) hit++; });
+  return hit / Math.min(A.length, B.length);
+}
+
+function ocoScore(line, c) {
+  var text = (line.gcRef || '') + ' ' + (line.description || '');
+  var s = 0, why = [];
+  var seq = Number(corExtractKmiSeq(c.corNumber));
+  if (!isNaN(seq) && ocoCorNumsIn(text).indexOf(seq) !== -1) { s += 100; why.push('KMI COR # appears on the CO line'); }
+  var lt = ocoRefTokens(text), ct = ocoRefTokens(c.gcRef), dt = ocoRefTokens(c.description);
+  var refHit = lt.filter(function(t){ return ct.indexOf(t) !== -1; });
+  var descHit = lt.filter(function(t){ return dt.indexOf(t) !== -1; });
+  if (refHit.length) { s += 90; why.push('GC ref ' + refHit.join(', ') + ' matches the COR\u2019s GC ref'); }
+  else if (descHit.length) { s += 70; why.push(descHit.join(', ') + ' appears in the COR description'); }
+  var amt = ocoN(line.amount), req = ocoN(c.totalAmount);
+  if (amt !== 0 && Math.abs(amt - req) < 0.01) { s += 40; why.push('amount matches exactly'); }
+  else if (amt !== 0 && req !== 0 && Math.abs(amt - req) / Math.abs(req) <= 0.05) { s += 15; why.push('amount within 5%'); }
+  var sim = ocoSim(line.description, c.description);
+  if (sim >= 0.25) { s += Math.round(sim * 40); why.push('descriptions are similar'); }
+  return { score: s, why: why };
+}
+
+function ocoImpPropose() {
+  var st = _ocoImp; if (!st) return;
+  var cands = ocoCandidateCors(st.pid, null);
+  var claimed = {};
+  st.lines.forEach(function(line){
+    var best = null;
+    cands.forEach(function(c){
+      var r = ocoScore(line, c);
+      if (claimed[String(c.id)]) r.score -= 10;
+      if (!best || r.score > best.score) best = { c: c, score: r.score, why: r.why };
+    });
+    if (best && best.score >= 50) {
+      line.allocs = [{ corId: String(best.c.id), amount: line.amount }];
+      line.conf = best.score >= 90 ? 'High' : 'Medium';
+      line.reason = best.why.join('; ');
+      claimed[String(best.c.id)] = true;
+    } else {
+      line.allocs = [];
+      line.conf = 'None';
+      line.reason = best && best.score >= 30 ? ('Closest: ' + ocoCorLabel(best.c) + ' (' + best.why.join('; ') + ') \u2014 not confident enough to pre-select') : '';
+    }
+    line.proposedIds = line.allocs.map(function(a){ return a.corId; }).join(',');
+  });
+}
+
+// ── Header step ───────────────────────────────────────────────────────
+function ocoImpDup() {
+  var st = _ocoImp, d = _ocoCache[String(st.pid)];
+  var v = String(st.hdr.no || '').trim().toLowerCase();
+  if (!v || !d || !d.data) return null;
+  return d.data.cos.find(function(co){ return String(co.co_number || '').trim().toLowerCase() === v; }) || null;
+}
+
+function ocoImpHeaderHtml() {
+  var st = _ocoImp, h = st.hdr, p = getProj(st.pid) || {};
+  var linesTot = corRound2(st.lines.reduce(function(s, l){ return s + ocoN(l.amount); }, 0));
+  var ties = h.total === '' || Math.abs(linesTot - ocoN(h.total)) < 0.01;
+  var dup = ocoImpDup();
+  var inp = function(key, label, type) {
+    return '<div class="fgr"><label>' + label + '</label><input type="' + (type || 'text') + '" value="' + corEsc(h[key]) + '" oninput="_ocoImp.hdr.' + key + '=this.value" onchange="ocoRenderImport()"></div>';
+  };
+  return '<div style="font-size:12px;color:#5f6368;margin-bottom:10px">Read from <strong>' + corEsc(st.file ? st.file.name : '') + '</strong>. Correct anything that\u2019s off.' +
+      (h.gcProject ? ' The CO says project <strong>' + corEsc(h.gcProject) + '</strong>; you are importing into <strong>' + corEsc((p.number || '') + ' ' + (p.name || '')) + '</strong>.' : '') + '</div>' +
+    '<div class="fg">' + inp('no', 'Owner CO #') + inp('date', 'CO date', 'date') + inp('issuedBy', 'Issued by') + inp('total', 'CO total', 'number') +
+      '<div class="fgr full"><label>Description</label><input value="' + corEsc(h.desc) + '" oninput="_ocoImp.hdr.desc=this.value"></div></div>' +
+    '<div style="margin-top:10px;padding:10px 12px;border-radius:6px;font-size:13px;' + (ties ? 'background:#E3F1D7;color:#2F5A0C' : 'background:#FFF4D6;color:#7A4F00') + '">' +
+      st.lines.length + ' line' + (st.lines.length === 1 ? '' : 's') + ' found \u00B7 lines total ' + corFmtMoney(linesTot) + (ties ? ' \u2014 ties to the CO total.' : ' \u2014 does not tie to the CO total of ' + corFmtMoney(ocoN(h.total)) + '.') + '</div>' +
+    (dup ? '<div style="margin-top:8px;padding:10px 12px;border-radius:6px;background:#F7E1E1;color:#8E2424;font-weight:600;font-size:13px">CO ' + corEsc(dup.co_number) + ' already exists on this project. Change the number or open the existing CO instead.</div>' : '') +
+    '<div style="display:flex;gap:10px;margin-top:14px">' +
+      '<button class="btn" onclick="_ocoImp.step=\'upload\';_ocoImp.err=\'\';ocoRenderImport()">Back</button>' +
+      '<button class="btn btn-p" onclick="ocoImpToLines()"' + (dup || !String(h.no).trim() ? ' disabled' : '') + '>Continue to roll-ups</button>' +
+    '</div>';
+}
+
+function ocoImpToLines() {
+  var st = _ocoImp;
+  if (!String(st.hdr.no).trim()) { st.err = 'Owner CO # is required.'; ocoRenderImport(); return; }
+  if (ocoImpDup()) { st.err = 'That CO # already exists on this project.'; ocoRenderImport(); return; }
+  st.err = ''; st.step = 'lines'; st.idx = 0;
+  ocoRenderImport();
+}
+
+// ── Lines step ────────────────────────────────────────────────────────
+function ocoImpLineTag(l) {
+  if (l.action === 'match') return l.allocs.map(function(a){ var c = ocoImpCor(a.corId); return c ? ocoCorLabel(c) : '?'; }).join(', ');
+  if (l.action === 'create') return 'Create a new COR';
+  if (l.action === 'unmatched') return 'Leave unmatched';
+  return null;
+}
+function ocoImpCor(id) { return (db.cors || []).find(function(c){ return String(c.id) === String(id); }) || null; }
+
+// Approved total per COR across every line of this import.
+function ocoImpApprovedByCor() {
+  var out = {};
+  _ocoImp.lines.forEach(function(l){
+    if (l.action === 'unmatched' || l.action === 'create') return;
+    l.allocs.forEach(function(a){ if (a.corId) out[a.corId] = corRound2((out[a.corId] || 0) + ocoN(a.amount)); });
+  });
+  return out;
+}
+
+function ocoImpLinesHtml() {
+  var st = _ocoImp, l = st.lines[st.idx], n = st.lines.length;
+  var list = st.lines.map(function(x, i){
+    var tag = ocoImpLineTag(x), cur = i === st.idx;
+    return '<div onclick="_ocoImp.idx=' + i + ';ocoRenderImport()" style="cursor:pointer;padding:9px 11px;border-radius:8px;margin-bottom:6px;font-size:12px;' +
+      (cur ? 'border:2px solid var(--kmi);background:#eef0f7' : 'border:1px solid #e3e5ec;background:#fff') + '">' +
+      '<div style="display:flex;justify-content:space-between;gap:8px;font-weight:700;color:var(--kmi)"><span>' + corEsc(x.gcRef || ('Line ' + (i + 1))) + '</span><span>' + corFmtMoney(x.amount) + '</span></div>' +
+      '<div style="color:#4a4f5c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + corEsc(x.description) + '</div>' +
+      '<div style="margin-top:4px;font-weight:600;color:' + (cur ? 'var(--kmi)' : tag ? '#2F5A0C' : '#888') + '">' + corEsc(cur ? 'Reviewing' : (tag || 'Not reviewed')) + '</div></div>';
+  }).join('');
+
+  var cands = ocoCandidateCors(st.pid, null);
+  var appr = ocoImpApprovedByCor();
+  var assigned = l.allocs.reduce(function(s, a){ return s + ocoN(a.amount); }, 0);
+  var gap = corRound2(l.amount - assigned);
+  var confStyle = { High: 'background:#E3F1D7;color:#2F5A0C', Medium: 'background:#FFF4D6;color:#7A4F00', None: 'background:#F7E1E1;color:#8E2424', Manual: 'background:#E4E8F5;color:var(--kmi)' };
+  var picked = l.allocs.map(function(a){ return a.corId; }).filter(Boolean).join(',');
+  var conf = !picked ? 'None' : (picked === l.proposedIds ? l.conf : 'Manual');
+  var confLbl = conf === 'None' ? 'No match' : conf === 'Manual' ? 'Picked by you' : conf + ' confidence';
+
+  var allocRows = l.allocs.map(function(a, i){
+    var c = ocoImpCor(a.corId), info = '';
+    if (c) {
+      var ap = (l.action === 'create' || l.action === 'unmatched') ? ocoN(a.amount) : (appr[a.corId] || ocoN(a.amount));
+      var v = corRound2(ap - ocoN(c.totalAmount));
+      info = '<div style="font-size:11px;color:#5f6368;margin:2px 0 0 2px">' + corStatusBadge(c) + ' requested ' + corFmtMoney(c.totalAmount) +
+        ' \u00B7 approved on this CO ' + corFmtMoney(ap) + (Math.abs(v) >= 0.01 ? ' <span style="color:#8A5A00;font-weight:700">(' + (v > 0 ? '+' : '') + corFmtMoney(v) + ' variance \u2014 approved amount is stored, requested stays on record)</span>' : '') + '</div>';
+    }
+    return '<div style="margin-bottom:8px"><div style="display:flex;gap:8px;align-items:center">' +
+      '<select style="flex:1;min-width:0" onchange="ocoImpSetAlloc(' + i + ',\'corId\',this.value)">' + ocoCorOptions(cands, a.corId) + '</select>' +
+      '<input type="number" step="0.01" style="width:130px" value="' + ocoN(a.amount) + '" onchange="ocoImpSetAlloc(' + i + ',\'amount\',this.value)">' +
+      '<button class="btn btn-sm" onclick="ocoImpRemoveAlloc(' + i + ')" title="Remove">&#215;</button></div>' + info + '</div>';
+  }).join('');
+
+  return '<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">' +
+    '<div style="flex:1 1 240px;max-width:300px;min-width:0">' + list + '</div>' +
+    '<div style="flex:999 1 480px;min-width:0;border:1px solid #e3e5ec;border-radius:10px;padding:16px">' +
+      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="font-size:12px;color:#5f6368">CO line ' + (st.idx + 1) + ' of ' + n + '</span>' +
+        (l.gcRef ? '<span style="background:#eef0f7;color:var(--kmi);font-weight:700;font-size:12px;border-radius:10px;padding:2px 9px">' + corEsc(l.gcRef) + '</span>' : '') +
+        (l.costCode ? '<span style="font-size:11px;color:#888">' + corEsc(l.costCode) + '</span>' : '') +
+        '<span style="flex:1"></span><span style="font-size:18px;font-weight:700;color:var(--kmi)">' + corFmtMoney(l.amount) + '</span></div>' +
+      '<div style="font-size:14px;margin:8px 0 12px">' + corEsc(l.description) + '</div>' +
+      '<div style="display:flex;align-items:center;gap:10px;border-top:1px solid #eceef3;padding-top:12px;margin-bottom:8px">' +
+        '<span style="font-size:11px;font-weight:600;color:#4a4f5c;text-transform:uppercase;letter-spacing:.4px">CORs for this line</span>' +
+        '<span style="display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:600;' + confStyle[conf] + '">' + confLbl + '</span></div>' +
+      (conf !== 'Manual' && l.reason ? '<div style="font-size:12px;color:#4a4f5c;margin-bottom:8px">Why: ' + corEsc(l.reason) + '</div>' : '') +
+      (allocRows || '<div style="font-size:13px;color:#6E1C1C;background:#FDF1F1;border:1px solid #F0D2D2;border-radius:8px;padding:10px;margin-bottom:8px">No COR on this job matches this line by COR #, GC reference, or amount and description. Pick one, create a COR from the line, or leave it unmatched.</div>') +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">' +
+        '<button class="btn btn-sm" onclick="ocoImpAddAlloc()">+ Add a COR</button>' +
+        (l.allocs.length > 1 ? '<button class="btn btn-sm" onclick="ocoImpSplit()">Split by requested amount</button>' : '') + '</div>' +
+      (l.allocs.length ? '<div style="font-size:12px;color:' + (Math.abs(gap) >= 0.01 ? '#8E2424' : '#2F5A0C') + '">Assigned ' + corFmtMoney(assigned) + ' of ' + corFmtMoney(l.amount) + (Math.abs(gap) >= 0.01 ? ' \u2014 ' + corFmtMoney(gap) + ' left unassigned' : '') + '</div>' : '') +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid #eceef3;padding-top:12px;margin-top:12px">' +
+        '<button class="btn" onclick="ocoImpBack()">Back</button><span style="flex:1"></span>' +
+        '<button class="btn" onclick="ocoImpDecide(\'unmatched\')">Leave unmatched</button>' +
+        '<button class="btn" onclick="ocoImpDecide(\'create\')">Create COR from this line</button>' +
+        '<button class="btn btn-p" style="background:#3B6D11;border-color:#3B6D11" onclick="ocoImpDecide(\'match\')"' + (picked ? '' : ' disabled') + '>Confirm roll-up</button>' +
+      '</div>' +
+    '</div></div>';
+}
+
+function ocoImpSetAlloc(i, key, v) {
+  var l = _ocoImp.lines[_ocoImp.idx]; if (!l.allocs[i]) return;
+  l.allocs[i][key] = (key === 'amount') ? corRound2(ocoN(v)) : v;
+  if (key === 'corId' && l.allocs.length === 1) l.allocs[0].amount = l.amount;
+  if (l.action === 'create' || l.action === 'unmatched') l.action = null;
+  ocoRenderImport();
+}
+function ocoImpAddAlloc() {
+  var l = _ocoImp.lines[_ocoImp.idx];
+  var assigned = l.allocs.reduce(function(s, a){ return s + ocoN(a.amount); }, 0);
+  l.allocs.push({ corId: '', amount: corRound2(l.amount - assigned) });
+  ocoRenderImport();
+}
+function ocoImpRemoveAlloc(i) {
+  var l = _ocoImp.lines[_ocoImp.idx];
+  l.allocs.splice(i, 1);
+  if (l.allocs.length === 1) l.allocs[0].amount = l.amount;
+  ocoRenderImport();
+}
+function ocoImpSplit() {
+  var l = _ocoImp.lines[_ocoImp.idx];
+  l.allocs = l.allocs.filter(function(a){ return a.corId; });
+  var shares = ocoSplitByRequested(l.amount, l.allocs.map(function(a){ return a.corId; }));
+  l.allocs.forEach(function(a, i){ a.amount = shares[i]; });
+  ocoRenderImport();
+}
+function ocoImpBack() {
+  var st = _ocoImp;
+  if (st.idx > 0) st.idx--; else st.step = 'header';
+  st.err = ''; ocoRenderImport();
+}
+function ocoImpDecide(action) {
+  var st = _ocoImp, l = st.lines[st.idx];
+  st.err = '';
+  if (action === 'match') {
+    var rows = l.allocs.filter(function(a){ return a.corId; });
+    var seen = {};
+    for (var i = 0; i < rows.length; i++) {
+      if (seen[rows[i].corId]) { st.err = 'Each COR can only appear once on a line.'; ocoRenderImport(); return; }
+      seen[rows[i].corId] = true;
+    }
+    if (!rows.length) { st.err = 'Pick at least one COR, or choose another option.'; ocoRenderImport(); return; }
+    var gap = corRound2(l.amount - rows.reduce(function(s, a){ return s + ocoN(a.amount); }, 0));
+    if (Math.abs(gap) >= 0.01 && !confirm(corFmtMoney(gap) + ' of this line is not assigned to a COR. Continue anyway?')) return;
+    l.allocs = rows;
+  } else {
+    l.allocs = [];
+  }
+  l.action = action;
+  if (st.idx < st.lines.length - 1) st.idx++; else st.step = 'review';
+  ocoRenderImport();
+}
+
+// ── Review step ───────────────────────────────────────────────────────
+function ocoImpReviewHtml() {
+  var st = _ocoImp, appr = ocoImpApprovedByCor();
+  var undecided = st.lines.filter(function(l){ return !l.action; }).length;
+  var rows = st.lines.map(function(l, i){
+    var out = !l.action ? '<span style="color:#888">Not reviewed</span>'
+      : l.action === 'match' ? l.allocs.map(function(a){ var c = ocoImpCor(a.corId); return corEsc(c ? ocoCorLabel(c) : '?') + ' ' + corFmtMoney(a.amount); }).join('<br>')
+      : l.action === 'create' ? 'New Fixed Fee COR (Pending \u2192 Approved)' : '<span style="color:#8E2424">Unmatched line</span>';
+    return '<tr style="border-top:1px solid #eee"><td style="padding:7px 8px;font-weight:700;color:var(--kmi)">' + corEsc(l.gcRef || ('Line ' + (i + 1))) + '</td>' +
+      '<td style="padding:7px 8px">' + corEsc(l.description) + '</td><td style="padding:7px 8px;text-align:right">' + corFmtMoney(l.amount) + '</td>' +
+      '<td style="padding:7px 8px;font-size:12px">' + out + '</td>' +
+      '<td style="padding:5px 8px"><button class="btn btn-sm" onclick="_ocoImp.step=\'lines\';_ocoImp.idx=' + i + ';ocoRenderImport()">Edit</button></td></tr>';
+  }).join('');
+  var corIds = Object.keys(appr);
+  var corRows = corIds.map(function(id){
+    var c = ocoImpCor(id); if (!c) return '';
+    var v = corRound2(appr[id] - ocoN(c.totalAmount)), s = c.status || 'Draft';
+    return '<tr style="border-top:1px solid #eee"><td style="padding:7px 8px;font-weight:700;color:var(--kmi)">' + corEsc(ocoCorLabel(c)) + '</td>' +
+      '<td style="padding:7px 8px">' + corEsc(c.description) + '</td><td style="padding:7px 8px;text-align:right">' + corFmtMoney(c.totalAmount) + '</td>' +
+      '<td style="padding:7px 8px;text-align:right"><strong>' + corFmtMoney(appr[id]) + '</strong></td><td style="padding:7px 8px;text-align:right">' + ocoVarHtml(v) + '</td>' +
+      '<td style="padding:7px 8px;font-size:12px">' + ((s === 'Draft' || s === 'Pending') ? s + ' \u2192 <strong style="color:#2F5A0C">Approved</strong>' : s) + '</td></tr>';
+  }).join('');
+  var nCreate = st.lines.filter(function(l){ return l.action === 'create'; }).length;
+  var th = 'padding:7px 8px;text-align:left;font-size:12px;background:#f5f5f5';
+  return '<div style="font-size:13px;color:#4a4f5c;margin-bottom:10px">Owner CO <strong>' + corEsc(st.hdr.no) + '</strong> \u00B7 ' + corEsc(ocoFmtDate(st.hdr.date) || 'no date') +
+      ' \u00B7 total ' + corFmtMoney(ocoN(st.hdr.total)) + '</div>' +
+    '<table style="width:100%;font-size:13px;border:1px solid #eceef3"><thead><tr><th style="' + th + '">GC ref</th><th style="' + th + '">CO line</th><th style="' + th + ';text-align:right">Amount</th><th style="' + th + '">Outcome</th><th style="' + th + '"></th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    (corRows ? '<div style="font-size:12px;font-weight:700;color:var(--kmi);margin:14px 0 6px">CORs rolling up</div>' +
+      '<table style="width:100%;font-size:13px;border:1px solid #eceef3"><thead><tr><th style="' + th + '">COR</th><th style="' + th + '">Description</th><th style="' + th + ';text-align:right">Requested</th><th style="' + th + ';text-align:right">Approved</th><th style="' + th + ';text-align:right">Variance</th><th style="' + th + '">Status</th></tr></thead><tbody>' + corRows + '</tbody></table>' : '') +
+    '<div style="margin-top:12px;font-size:12px;color:#4a4f5c">Saving creates owner CO ' + corEsc(st.hdr.no) + ' with the PDF attached' +
+      (nCreate ? ', creates ' + nCreate + ' new COR' + (nCreate === 1 ? '' : 's') : '') +
+      ', writes the CO # and date onto each linked COR, and moves Draft/Pending CORs to Approved. The Foundation CO export picks up the CO # automatically.</div>' +
+    (undecided ? '<div style="margin-top:8px;color:#8E2424;font-size:13px">' + undecided + ' line' + (undecided === 1 ? ' has' : 's have') + ' not been reviewed yet.</div>' : '') +
+    '<div style="display:flex;gap:10px;margin-top:14px"><button class="btn" onclick="_ocoImp.step=\'lines\';_ocoImp.idx=_ocoImp.lines.length-1;ocoRenderImport()"' + (st.busy ? ' disabled' : '') + '>Back</button><span style="flex:1"></span>' +
+      '<button class="btn btn-p" style="background:#3B6D11;border-color:#3B6D11" onclick="ocoImpSave()"' + (st.busy || undecided ? ' disabled' : '') + '>' +
+      (st.busy ? 'Saving\u2026' : 'Save CO ' + corEsc(st.hdr.no) + ' & roll up') + '</button></div>';
+}
+
+// A minimal Fixed Fee COR for a CO line with no COR (decision 5-A).
+function ocoMakeCor(p, line, hdr, idOffset) {
+  var nowIso = new Date().toISOString(), amt = corRound2(line.amount);
+  var who = _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '';
+  var desc = line.description || ('Owner CO ' + hdr.no + ' line');
+  return {
+    id: Date.now() + idOffset,
+    corNumber: String(corBumpProjectSeq(p)),
+    corDate: hdr.date || nowIso.slice(0, 10),
+    corType: 'Fixed Fee',
+    projectId: Number(p.id),
+    attentionContactId: null,
+    description: desc,
+    status: 'Pending',
+    rolledUpTicketIds: [], laborRows: [], manualLaborRows: [], autoMaterialRows: [], manualMaterialRows: [], subRows: [],
+    equipmentRows: [],
+    unitPriceRows: [{ description: desc, quantity: 1, unit: 'LS', unitPrice: amt }],
+    matEqMarkupPct: 0, subMarkupPct: 0, equipmentMarkupPct: 0, unitPriceMarkupPct: 0, bondRatePct: 0,
+    timeExtensionDays: '', addedScope: '', omittedScope: '',
+    totalLabor: 0, totalMaterial: 0, totalSub: 0, totalEquipment: 0, totalUnitPrice: amt,
+    mateqOhp: 0, subOhp: 0, equipmentOhp: 0, unitPriceOhp: 0, bondCost: 0, totalAmount: amt,
+    createdAt: nowIso, createdByUserId: ocoUid(), createdByName: who,
+    updatedAt: nowIso, updatedByUserId: ocoUid(),
+    sentAt: nowIso, sentByUserId: ocoUid(),
+    decisionAt: null, decisionByUserId: null, voidedAt: null, voidedByUserId: null, voidReason: null,
+    customerCoNumber: null, customerCoDate: null, gcRef: line.gcRef || null,
+    smartUploaded: false
+  };
+}
+
+async function ocoImpSave() {
+  var st = _ocoImp; if (!st || st.busy) return;
+  if (!supabaseClient) { st.err = 'Saving an owner CO needs the cloud connection.'; ocoRenderImport(); return; }
+  var p = getProj(st.pid); if (!p) { st.err = 'Project not found.'; ocoRenderImport(); return; }
+  st.busy = true; st.err = ''; ocoRenderImport();
+  var created = [], path = null;
+  try {
+    // 1. New CORs for lines with no COR
+    var toCreate = st.lines.filter(function(l){ return l.action === 'create' && !l.createdCorId; });
+    for (var i = 0; i < toCreate.length; i++) {
+      var l = toCreate[i], nc = ocoMakeCor(p, l, st.hdr, i);
+      db.cors = db.cors || [];
+      db.cors.unshift(nc);
+      saveDB();
+      var cr = await kmiVgUpsert('cors', toSBCor(nc));
+      if (cr && cr.error) throw new Error('Could not create a COR for line "' + l.description + '": ' + cr.error.message);
+      try { await corSyncDistribution(nc, p); } catch (e) { console.warn('distribution sync', e); }
+      l.createdCorId = String(nc.id);
+      created.push(ocoCorLabel(nc));
+    }
+    if (toCreate.length) {
+      var pr = await supabaseClient.from('kmi_projects').upsert(toSBProject(p));
+      if (pr && pr.error) console.warn('[oco] project seq sync', pr.error.message);
+    }
+    // 2. The PDF
+    if (st.file) {
+      var safe = String(st.file.name || 'owner-co.pdf').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+      if (!/\.pdf$/i.test(safe)) safe += '.pdf';
+      path = 'owner-cos/' + st.pid + '/' + Date.now() + '_' + safe;
+      var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).upload(path, st.file, { contentType: 'application/pdf', upsert: false });
+      if (up && up.error) throw new Error('PDF upload failed: ' + up.error.message);
+    }
+    // 3. One transaction on the server
+    var lines = [], allocs = [], corIds = [];
+    st.lines.forEach(function(l, idx){
+      lines.push({ gc_ref: l.gcRef || null, cost_code: l.costCode || null, description: l.description || '', amount: corRound2(l.amount) });
+      if (l.action === 'create' && l.createdCorId) {
+        allocs.push({ line: idx, cor_id: Number(l.createdCorId), amount: corRound2(l.amount), match_method: 'created' });
+        corIds.push(l.createdCorId);
+      } else if (l.action === 'match') {
+        var picked = l.allocs.map(function(a){ return a.corId; }).join(',');
+        var method = picked === l.proposedIds ? ('auto-' + String(l.conf).toLowerCase()) : 'manual';
+        l.allocs.forEach(function(a){
+          allocs.push({ line: idx, cor_id: Number(a.corId), amount: corRound2(ocoN(a.amount)), match_method: method });
+          corIds.push(a.corId);
+        });
+      }
+    });
+    var payload = {
+      project_id: Number(st.pid), co_number: String(st.hdr.no).trim(), co_date: st.hdr.date || null,
+      issued_by: st.hdr.issuedBy || null, description: st.hdr.desc || null,
+      total_amount: st.hdr.total === '' ? null : corRound2(ocoN(st.hdr.total)),
+      file_path: path, file_name: st.file ? st.file.name : null, user_id: ocoUid(),
+      lines: lines, allocs: allocs
+    };
+    var r = await supabaseClient.rpc('kmi_owner_co_import', { p: payload });
+    if (r.error) throw new Error(r.error.message);
+    // 4. Pull the CORs the server just changed
+    await ocoRefreshCors(corIds);
+    var coNo = payload.co_number, newId = r.data;
+    _ocoImp = null;
+    if (newId) _ocoExpanded[String(newId)] = true;
+    ocoInvalidate(st.pid);
+    db.activity = db.activity || [];
+    db.activity.unshift({ text: 'Owner CO ' + coNo + ' imported (' + corIds.length + ' COR roll-up' + (corIds.length === 1 ? '' : 's') + ')', type: 'won', time: 'Just now' });
+    saveDB();
+    showToast('Owner CO ' + coNo + ' saved' + (corIds.length ? ' \u2014 ' + corIds.length + ' COR roll-up' + (corIds.length === 1 ? '' : 's') : '') + '.', 'success');
+    renderProjectCorList();
+  } catch (e) {
+    console.error('[oco] save', e);
+    if (path) { try { await supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([path]); } catch (x) {} }
+    st.busy = false;
+    st.err = 'Not saved: ' + (e.message || e) +
+      (created.length ? ' \u2014 note: ' + created.join(', ') + ' were already created as Pending; they will be reused if you save again.' : '');
+    ocoRenderImport();
+  }
 }
 
 // Launch the New COR type-picker with this project pre-selected and locked.
@@ -20712,7 +21863,7 @@ function initNewCor() {
   // which won't open when clicked. Re-enable everything before populating.
   // (ncor-num stays disabled in this flow — it's auto-generated on save.
   // The smart upload flow re-enables it explicitly when needed.)
-  ['ncor-date','ncor-desc','ncor-attention','ncor-customer-co-num'].forEach(function(idStr){
+  ['ncor-date','ncor-desc','ncor-attention','ncor-customer-co-num','ncor-customer-co-date','ncor-gc-ref'].forEach(function(idStr){
     var el = g(idStr); if (el) el.disabled = false;
   });
 
@@ -20753,6 +21904,8 @@ function initNewCor() {
   if (g('ncor-customer-co-num')) g('ncor-customer-co-num').value = '';
   // Customer CO Date — empty on new
   if (g('ncor-customer-co-date')) g('ncor-customer-co-date').value = '';
+  if (g('ncor-gc-ref')) g('ncor-gc-ref').value = '';   // OCO2
+  ocoFormInfo(null);                                    // OCO2
 
   // Trigger project-changed handler to populate customer + attention
   ncorProjectChanged();
@@ -20837,6 +21990,9 @@ function viewCor(id) {
     g('ncor-customer-co-date').value = c.customerCoDate || '';
     g('ncor-customer-co-date').disabled = !canEdit;
   }
+  // OCO2: GC ref + linked owner CO line
+  if (g('ncor-gc-ref')) { g('ncor-gc-ref').value = c.gcRef || ''; g('ncor-gc-ref').disabled = !canEdit; }
+  ocoFormInfo(c);
 
   // Disable inputs if read-only
   ['ncor-date','ncor-desc'].forEach(function(idStr){
@@ -20933,6 +22089,7 @@ async function saveCor() {
   var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
   // Customer CO Date — optional; captured when KMI receives the formal CO from the customer
   var customerCoDate = g('ncor-customer-co-date') ? (g('ncor-customer-co-date').value || '').trim() : '';
+  var gcRef = g('ncor-gc-ref') ? (g('ncor-gc-ref').value || '').trim() : '';   // OCO2
 
   if (!projectId) { alert('Please select a project.'); return; }
   if (!corDate)   { alert('Please pick a date.'); return; }
@@ -21032,10 +22189,9 @@ async function saveCor() {
     existingCor.corDate     = corDate;
     existingCor.attentionContactId = attnId;
     existingCor.description = description;
-    // Customer CO# — empty string normalized to null
-    existingCor.customerCoNumber = customerCoNumber || null;
-    // Customer CO Date — empty string normalized to null
-    existingCor.customerCoDate = customerCoDate || null;
+    // OCO2: the owner CO # / date are linked through ocoApplyCorCo() after
+    // the upsert below; the server derives them onto the COR.
+    existingCor.gcRef = gcRef || null;
     existingCor.rolledUpTicketIds = newRolledIds;
     existingCor.laborRows         = snapshotAutoLabor;       // auto-pivot snapshot
     existingCor.manualLaborRows   = newManualLabor;
@@ -21088,6 +22244,7 @@ async function saveCor() {
           }
         }
         var upRes = await kmiVgUpsert('cors', toSBCor(existingCor));
+        if (!(upRes && upRes.error)) { try { await ocoApplyCorCo(existingCor, customerCoNumber, customerCoDate); } catch (e) { console.warn('[oco] link', e); } }   // OCO2
         // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
         // the report falls back to class-only mapping if this fails.
         try { await corSyncDistribution(existingCor, getProj(existingCor.projectId)); }
@@ -21162,8 +22319,9 @@ async function saveCor() {
     decisionAt: null, decisionByUserId: null,
     voidedAt: null, voidedByUserId: null,
     voidReason: null,
-    customerCoNumber: customerCoNumber || null,
-    customerCoDate: customerCoDate || null
+    customerCoNumber: null,   // OCO2: linked after the upsert
+    customerCoDate: null,
+    gcRef: gcRef || null
   };
 
   // Lock all rolled-up tickets onto the new COR
@@ -21201,6 +22359,7 @@ async function saveCor() {
         }
       }
       var upRes = await kmiVgUpsert('cors', toSBCor(newCor));
+      if (!(upRes && upRes.error)) { try { await ocoApplyCorCo(newCor, customerCoNumber, customerCoDate); } catch (e) { console.warn('[oco] link', e); } }   // OCO2
       // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
       // the report falls back to class-only mapping if this fails.
       try { await corSyncDistribution(newCor, getProj(newCor.projectId)); }
@@ -21893,6 +23052,7 @@ async function confirmSmartUploadCor() {
   var description = (g('ncor-desc').value || '').trim();
   var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
   var customerCoDate = g('ncor-customer-co-date') ? (g('ncor-customer-co-date').value || '').trim() : '';
+  var gcRef = g('ncor-gc-ref') ? (g('ncor-gc-ref').value || '').trim() : '';   // OCO2
   var corNumber = g('ncor-num') ? (g('ncor-num').value || '').trim() : '';
 
   if (!corNumber) { alert('Please enter or confirm the COR # from the original document.'); return; }
@@ -22026,8 +23186,9 @@ async function confirmSmartUploadCor() {
     decisionAt: decisionAt, decisionByUserId: null,
     voidedAt: null, voidedByUserId: null,
     voidReason: null,
-    customerCoNumber: customerCoNumber || null,
-    customerCoDate: customerCoDate || null,
+    customerCoNumber: null,   // OCO2: linked after the upsert
+    customerCoDate: null,
+    gcRef: gcRef || null,
     // Smart Upload provenance — synced if the SQL migration ran, local-only otherwise
     smartUploaded: true,
     smartUploadedAt: nowIso,
@@ -22083,6 +23244,7 @@ async function confirmSmartUploadCor() {
   try {
     if (supabaseClient) {
       var corRes = await kmiVgUpsert('cors', toSBCor(newCor));
+      if (!(corRes && corRes.error)) { try { await ocoApplyCorCo(newCor, customerCoNumber, customerCoDate); } catch (e) { console.warn('[oco] link', e); } }   // OCO2
       // B2: keep kmi_cor_distribution in step with the COR. Non-fatal --
       // the report falls back to class-only mapping if this fails.
       try { await corSyncDistribution(newCor, getProj(newCor.projectId)); }
@@ -23880,12 +25042,12 @@ function markCorApproved() {
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
     '<div class="mt" style="color:#3B6D11">Mark COR as Approved</div>' +
-    '<div class="msb">The customer has approved this Change Order Request. Capture their formal CO number and CO date now if you have them (you can also fill them in later by editing the COR).</div>' +
+    '<div class="msb">The customer has approved this Change Order Request. Pick the owner CO it is on (or type a new CO number) and its date, if you have them. You can also link it later by importing the owner&rsquo;s CO on the CO&rsquo;s tab.</div>' +
     '<div class="fg">' +
-      '<div class="fgr"><label>Customer CO # <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
-        '<input type="text" id="cor-app-cno" value="' + corEsc(c.customerCoNumber || '') + '" placeholder="e.g. CO-2026-047">' +
+      '<div class="fgr"><label>Owner CO # <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
+        '<input type="text" id="cor-app-cno" list="cor-app-dl" autocomplete="off" value="' + corEsc(c.customerCoNumber || '') + '" placeholder="Pick or type the owner CO #" oninput="ocoCoNumInput(this,\'cor-app-cdate\',' + Number(c.projectId) + ')"><datalist id="cor-app-dl"></datalist>' +
       '</div>' +
-      '<div class="fgr"><label>Customer CO Date <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
+      '<div class="fgr"><label>Owner CO date <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(optional)</span></label>' +
         '<input type="date" id="cor-app-cdate" value="' + corEsc(c.customerCoDate || '') + '">' +
       '</div>' +
     '</div>' +
@@ -23894,6 +25056,7 @@ function markCorApproved() {
       '<button class="btn btn-p" onclick="confirmCorApproved()" style="background:#3B6D11;border-color:#3B6D11">&#10003; Mark Approved</button>' +
     '</div>'
   );
+  ocoFillDatalist(c.projectId, 'cor-app-dl');   // OCO2
 }
 
 async function confirmCorApproved() {
@@ -23905,11 +25068,10 @@ async function confirmCorApproved() {
   c.status = 'Approved';
   c.decisionAt = nowIso;
   c.decisionByUserId = _currentUser ? _currentUser.id : null;
-  if (customerCo) c.customerCoNumber = customerCo;
-  if (customerCoDt) c.customerCoDate = customerCoDt;
   c.updatedAt = nowIso;
   c.updatedByUserId = _currentUser ? _currentUser.id : null;
   await _corPersistTransition(c);
+  if (customerCo) { try { await ocoApplyCorCo(c, customerCo, customerCoDt); } catch (e) { console.warn('[oco] link', e); } }   // OCO2
 
   var seqOnly = corExtractKmiSeq(c.corNumber) || c.corNumber || c.id;
   db.activity = db.activity || [];
@@ -57725,7 +58887,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-20-BACKCHG1';
+var KMI_BUILD = '2026-10-21-OCO2';
 
 var _kmiSessionId = (function(){
   try {
@@ -59067,8 +60229,9 @@ function toSBCor(r) {
     voided_by_user_id: r.voidedByUserId   || null,
     void_reason:       r.voidReason       || null,
     rejected_reason:   r.rejectedReason   || null,
-    customer_co_number: r.customerCoNumber || null,
-    customer_co_date:   r.customerCoDate   || null,
+    // OCO2: customer_co_number / customer_co_date are server-owned (derived
+    // from the linked owner CO by trigger) and are no longer written here.
+    gc_ref: r.gcRef || null,
     // Smart Upload provenance — added with COR Smart Upload feature.
     // Requires a SQL migration to add these four columns. Until the
     // migration is run these fields will fail-silent on upsert; the
@@ -59160,6 +60323,9 @@ function fromSBCor(r) {
     rejectedReason:   r.rejected_reason   || null,
     customerCoNumber: r.customer_co_number || null,
     customerCoDate:   r.customer_co_date   || null,
+    ownerCoId:        r.owner_co_id || null,                                                    // OCO2
+    approvedAmount:   (r.approved_amount !== null && r.approved_amount !== undefined) ? Number(r.approved_amount) : null,
+    gcRef:            r.gc_ref || '',
     // Smart Upload provenance (only present after the SQL migration runs)
     smartUploaded:         !!r.smart_uploaded,
     smartUploadedFile:     r.smart_uploaded_file        || null,
