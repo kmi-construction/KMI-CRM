@@ -20456,8 +20456,7 @@ function ocoRenderLineEdit() {
       '<button class="btn btn-sm" onclick="_ocoLineEdit.rows.push({corId:\'\',amount:0});ocoRenderLineEdit()">+ Add a COR</button>' +
       '<button class="btn btn-sm" onclick="ocoLineEditSplit()">Split by requested amount</button>' +
     '</div>' +
-    '<div style="font-size:12px;margin-top:6px;color:' + (Math.abs(gap) >= 0.01 ? '#8E2424' : '#2F5A0C') + '">Assigned ' + corFmtMoney(assigned) + ' of ' + corFmtMoney(st.amount) +
-      (Math.abs(gap) >= 0.01 ? ' \u2014 ' + corFmtMoney(gap) + ' left unassigned' : '') + '</div>' +
+    '<div style="font-size:12px;margin-top:6px">' + ocoGapText(st.amount, assigned) + '</div>' +   // OCO2b
     '<div id="oco-le-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
     '<div class="mbtns"><button class="btn" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-p" id="oco-le-save" onclick="ocoSaveLineEdit()">Save links</button></div>'
@@ -20495,6 +20494,10 @@ async function ocoSaveLineEdit() {
   for (var i = 0; i < rows.length; i++) {
     if (seen[rows[i].corId]) { g('oco-le-err').textContent = 'Each COR can only appear once on a line.'; return; }
     seen[rows[i].corId] = true;
+  }
+  if (ocoOver(st.amount, rows.reduce(function(s, x){ return s + ocoN(x.amount); }, 0))) {   // OCO2b
+    g('oco-le-err').textContent = 'More than the line amount is assigned. Reduce an amount first.';
+    return;
   }
   var before = _ocoCorIdsOnCo(st.coId);
   var btn = g('oco-le-save'); if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
@@ -20726,6 +20729,8 @@ async function ocoImpExtract() {
 var OCO_REF_RE = /\b(PCO|PCI|CE|CB|RFI|BT|IS|ASI|CCD|PR|FA|CR)\s*(?:NO\.?|#|:|-)?\s*#?\s*0*(\d+)/g;
 function ocoRefTokens(s) {
   var out = [], m; s = String(s || '').toUpperCase();
+  s = s.replace(/\bCONSTRUCTION\s+BULLETIN\b/g, 'CB').replace(/\bBULLETIN\b/g, 'CB')            // OCO2b
+       .replace(/\bCHANGE\s+EVENT\b/g, 'CE').replace(/\bPOTENTIAL\s+CHANGE\s+ORDER\b/g, 'PCO');
   OCO_REF_RE.lastIndex = 0;
   while ((m = OCO_REF_RE.exec(s)) !== null) {
     var t = m[1] + '-' + String(Number(m[2]));
@@ -20771,7 +20776,7 @@ function ocoScore(line, c) {
   else if (amt !== 0 && req !== 0 && Math.abs(amt - req) / Math.abs(req) <= 0.05) { s += 15; why.push('amount within 5%'); }
   var sim = ocoSim(line.description, c.description);
   if (sim >= 0.25) { s += Math.round(sim * 40); why.push('descriptions are similar'); }
-  return { score: s, why: why };
+  return { score: s, why: why, exact: amt !== 0 && Math.abs(amt - req) < 0.01 };   // OCO2b
 }
 
 function ocoImpPropose() {
@@ -20779,12 +20784,16 @@ function ocoImpPropose() {
   var cands = ocoCandidateCors(st.pid, null);
   var claimed = {};
   st.lines.forEach(function(line){
+    var amt = ocoN(line.amount);
+    var nExact = amt !== 0 ? cands.filter(function(c){ return Math.abs(ocoN(c.totalAmount) - amt) < 0.01; }).length : 0;
     var best = null;
     cands.forEach(function(c){
       var r = ocoScore(line, c);
+      if (r.exact && nExact === 1) { r.score += 15; r.why.push('the only open COR at this amount'); }   // OCO2b
       if (claimed[String(c.id)]) r.score -= 10;
       if (!best || r.score > best.score) best = { c: c, score: r.score, why: r.why };
     });
+    line.autoZero = false;
     if (best && best.score >= 50) {
       line.allocs = [{ corId: String(best.c.id), amount: line.amount }];
       line.conf = best.score >= 90 ? 'High' : 'Medium';
@@ -20794,6 +20803,7 @@ function ocoImpPropose() {
       line.allocs = [];
       line.conf = 'None';
       line.reason = best && best.score >= 30 ? ('Closest: ' + ocoCorLabel(best.c) + ' (' + best.why.join('; ') + ') \u2014 not confident enough to pre-select') : '';
+      if (amt === 0) { line.action = 'unmatched'; line.autoZero = true; }   // OCO2b: $0 lines need no review
     }
     line.proposedIds = line.allocs.map(function(a){ return a.corId; }).join(',');
   });
@@ -20832,7 +20842,9 @@ function ocoImpToLines() {
   var st = _ocoImp;
   if (!String(st.hdr.no).trim()) { st.err = 'Owner CO # is required.'; ocoRenderImport(); return; }
   if (ocoImpDup()) { st.err = 'That CO # already exists on this project.'; ocoRenderImport(); return; }
-  st.err = ''; st.step = 'lines'; st.idx = 0;
+  st.err = ''; st.step = 'lines';
+  st.idx = ocoImpNextIdx(-1);                       // OCO2b
+  if (st.idx < 0) { st.idx = 0; st.step = 'review'; }
   ocoRenderImport();
 }
 
@@ -20840,10 +20852,34 @@ function ocoImpToLines() {
 function ocoImpLineTag(l) {
   if (l.action === 'match') return l.allocs.map(function(a){ var c = ocoImpCor(a.corId); return c ? ocoCorLabel(c) : '?'; }).join(', ');
   if (l.action === 'create') return 'Create a new COR';
-  if (l.action === 'unmatched') return 'Leave unmatched';
+  if (l.action === 'unmatched') return l.autoZero ? '$0 \u2014 left unmatched' : 'Leave unmatched';   // OCO2b
   return null;
 }
 function ocoImpCor(id) { return (db.cors || []).find(function(c){ return String(c.id) === String(id); }) || null; }
+
+// OCO2b: assignment checks and review navigation.
+function ocoOver(amount, assigned) {
+  amount = corRound2(ocoN(amount)); assigned = corRound2(ocoN(assigned));
+  return amount >= 0 ? (assigned - amount >= 0.01) : (amount - assigned >= 0.01);
+}
+function ocoGapText(amount, assigned) {
+  var gap = corRound2(ocoN(amount) - ocoN(assigned));
+  if (ocoOver(amount, assigned)) {
+    return '<span style="color:#8E2424;font-weight:600">Assigned ' + corFmtMoney(assigned) + ' of ' + corFmtMoney(amount) +
+      ' \u2014 ' + corFmtMoney(Math.abs(gap)) + ' over-assigned. Reduce an amount before saving.</span>';
+  }
+  if (Math.abs(gap) >= 0.01) {
+    return '<span style="color:#8E2424">Assigned ' + corFmtMoney(assigned) + ' of ' + corFmtMoney(amount) + ' \u2014 ' + corFmtMoney(Math.abs(gap)) + ' left unassigned</span>';
+  }
+  return '<span style="color:#2F5A0C">Assigned ' + corFmtMoney(assigned) + ' of ' + corFmtMoney(amount) + '</span>';
+}
+// First line after `from` that has not been decided, wrapping to the top.
+function ocoImpNextIdx(from) {
+  var L = _ocoImp.lines, i;
+  for (i = from + 1; i < L.length; i++) if (!L[i].action) return i;
+  for (i = 0; i <= from && i < L.length; i++) if (!L[i].action) return i;
+  return -1;
+}
 
 // Approved total per COR across every line of this import.
 function ocoImpApprovedByCor() {
@@ -20860,7 +20896,7 @@ function ocoImpLinesHtml() {
   var list = st.lines.map(function(x, i){
     var tag = ocoImpLineTag(x), cur = i === st.idx;
     return '<div onclick="_ocoImp.idx=' + i + ';ocoRenderImport()" style="cursor:pointer;padding:9px 11px;border-radius:8px;margin-bottom:6px;font-size:12px;' +
-      (cur ? 'border:2px solid var(--kmi);background:#eef0f7' : 'border:1px solid #e3e5ec;background:#fff') + '">' +
+      (cur ? 'border:2px solid var(--kmi);background:#eef0f7' : 'border:1px solid #e3e5ec;background:#fff') + (x.autoZero && !cur ? ';opacity:.55' : '') + '">' +
       '<div style="display:flex;justify-content:space-between;gap:8px;font-weight:700;color:var(--kmi)"><span>' + corEsc(x.gcRef || ('Line ' + (i + 1))) + '</span><span>' + corFmtMoney(x.amount) + '</span></div>' +
       '<div style="color:#4a4f5c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + corEsc(x.description) + '</div>' +
       '<div style="margin-top:4px;font-weight:600;color:' + (cur ? 'var(--kmi)' : tag ? '#2F5A0C' : '#888') + '">' + corEsc(cur ? 'Reviewing' : (tag || 'Not reviewed')) + '</div></div>';
@@ -20889,7 +20925,11 @@ function ocoImpLinesHtml() {
       '<button class="btn btn-sm" onclick="ocoImpRemoveAlloc(' + i + ')" title="Remove">&#215;</button></div>' + info + '</div>';
   }).join('');
 
-  return '<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">' +
+  var nTodo = st.lines.filter(function(x){ return !x.action; }).length;                    // OCO2b
+  var nZero = st.lines.filter(function(x){ return x.autoZero; }).length;
+  return '<div style="font-size:12px;color:#4a4f5c;margin-bottom:10px">' + nTodo + ' line' + (nTodo === 1 ? '' : 's') + ' still to review' +
+      (nZero ? ' \u00B7 ' + nZero + ' $0 line' + (nZero === 1 ? '' : 's') + ' left unmatched automatically (open one to link it)' : '') + '</div>' +
+    '<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">' +
     '<div style="flex:1 1 240px;max-width:300px;min-width:0">' + list + '</div>' +
     '<div style="flex:999 1 480px;min-width:0;border:1px solid #e3e5ec;border-radius:10px;padding:16px">' +
       '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="font-size:12px;color:#5f6368">CO line ' + (st.idx + 1) + ' of ' + n + '</span>' +
@@ -20905,7 +20945,7 @@ function ocoImpLinesHtml() {
       '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">' +
         '<button class="btn btn-sm" onclick="ocoImpAddAlloc()">+ Add a COR</button>' +
         (l.allocs.length > 1 ? '<button class="btn btn-sm" onclick="ocoImpSplit()">Split by requested amount</button>' : '') + '</div>' +
-      (l.allocs.length ? '<div style="font-size:12px;color:' + (Math.abs(gap) >= 0.01 ? '#8E2424' : '#2F5A0C') + '">Assigned ' + corFmtMoney(assigned) + ' of ' + corFmtMoney(l.amount) + (Math.abs(gap) >= 0.01 ? ' \u2014 ' + corFmtMoney(gap) + ' left unassigned' : '') + '</div>' : '') +
+      (l.allocs.length ? '<div style="font-size:12px">' + ocoGapText(l.amount, assigned) + '</div>' : '') +   // OCO2b
       '<div style="display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid #eceef3;padding-top:12px;margin-top:12px">' +
         '<button class="btn" onclick="ocoImpBack()">Back</button><span style="flex:1"></span>' +
         '<button class="btn" onclick="ocoImpDecide(\'unmatched\')">Leave unmatched</button>' +
@@ -20958,13 +20998,16 @@ function ocoImpDecide(action) {
     }
     if (!rows.length) { st.err = 'Pick at least one COR, or choose another option.'; ocoRenderImport(); return; }
     var gap = corRound2(l.amount - rows.reduce(function(s, a){ return s + ocoN(a.amount); }, 0));
-    if (Math.abs(gap) >= 0.01 && !confirm(corFmtMoney(gap) + ' of this line is not assigned to a COR. Continue anyway?')) return;
+    if (ocoOver(l.amount, l.amount - gap)) { st.err = 'More than the line amount is assigned. Reduce an amount (or remove a COR) first.'; ocoRenderImport(); return; }   // OCO2b
+    if (Math.abs(gap) >= 0.01 && !confirm(corFmtMoney(Math.abs(gap)) + ' of this line is not assigned to a COR. Continue anyway?')) return;
     l.allocs = rows;
   } else {
     l.allocs = [];
   }
   l.action = action;
-  if (st.idx < st.lines.length - 1) st.idx++; else st.step = 'review';
+  l.autoZero = false;                                // OCO2b
+  var nx = ocoImpNextIdx(st.idx);
+  if (nx >= 0) st.idx = nx; else st.step = 'review';
   ocoRenderImport();
 }
 
@@ -58887,7 +58930,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-21-OCO2';
+var KMI_BUILD = '2026-10-21-OCO2b';
 
 var _kmiSessionId = (function(){
   try {
