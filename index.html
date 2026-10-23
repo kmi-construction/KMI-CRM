@@ -20828,7 +20828,7 @@ function ocoImpHeaderHtml() {
   var ties = h.total === '' || Math.abs(linesTot - ocoN(h.total)) < 0.01;
   var dup = ocoImpDup();
   var inp = function(key, label, type) {
-    return '<div class="fgr"><label>' + label + '</label><input type="' + (type || 'text') + '" value="' + corEsc(h[key]) + '" oninput="_ocoImp.hdr.' + key + '=this.value" onchange="ocoRenderImport()"></div>';
+    return '<div class="fgr"><label>' + label + '</label><input type="' + (type || 'text') + '" value="' + corEsc(h[key]) + '" oninput="_ocoImp.hdr.' + key + '=this.value" onblur="ocoRenderImport()"></div>';   // OCO3b: blur, not change
   };
   return '<div style="font-size:12px;color:#5f6368;margin-bottom:10px">Read from <strong>' + corEsc(st.file ? st.file.name : '') + '</strong>. Correct anything that\u2019s off.' +
       (h.gcProject ? ' The CO says project <strong>' + corEsc(h.gcProject) + '</strong>; you are importing into <strong>' + corEsc((p.number || '') + ' ' + (p.name || '')) + '</strong>.' : '') + '</div>' +
@@ -20846,6 +20846,8 @@ function ocoImpHeaderHtml() {
 function ocoImpToLines() {
   var st = _ocoImp;
   if (!String(st.hdr.no).trim()) { st.err = 'Owner CO # is required.'; ocoRenderImport(); return; }
+  var hy = Number(String(st.hdr.date || '').slice(0, 4));                                                   // OCO3b
+  if (st.hdr.date && (hy < 2000 || hy > 2100)) { st.err = 'The CO date\u2019s year looks wrong (' + hy + '). Fix the date first.'; ocoRenderImport(); return; }
   if (ocoImpDup()) { st.err = 'That CO # already exists on this project.'; ocoRenderImport(); return; }
   st.err = ''; st.step = 'lines';
   st.idx = ocoImpNextIdx(-1);                       // OCO2b
@@ -21398,7 +21400,7 @@ function xcReviewHtml(st, p) {
       : (r.flags.length ? '<span style="color:#8E2424">' + r.flags.map(corEsc).join('<br>') + '</span>' : '<span style="color:#2F5A0C">Ready</span>');
     var hrs = r.labor.reduce(function(s, x){ return s + x.hours; }, 0);
     var dateCell = r.existing ? corEsc(r.corDate || r.rawDate)
-      : '<input type="date" value="' + corEsc(r.corDate) + '" style="font-size:12px;padding:3px 4px" onchange="xcSetDate(' + i + ',this.value)">';
+      : '<input type="date" value="' + corEsc(r.corDate) + '" style="font-size:12px;padding:3px 4px" onblur="xcSetDate(' + i + ',this.value)">';
     return '<tr style="border-top:1px solid #eee;' + (r.existing ? 'opacity:.6' : '') + '">' +
       '<td style="padding:6px 8px"><input type="checkbox"' + (r.include ? ' checked' : '') + (r.existing || !r.corDate ? ' disabled' : '') + ' onchange="xcToggle(' + i + ',this.checked)"></td>' +
       '<td style="padding:6px 8px;font-weight:700;color:var(--kmi)">' + corEsc(r.corNumber) + '</td>' +
@@ -21430,7 +21432,8 @@ function xcToggle(i, on) { var r = _xcImp.rows[i]; if (r && !r.existing && r.cor
 function xcToggleAll(on) { _xcImp.rows.forEach(function(r){ if (!r.existing && r.corDate) r.include = !!on; }); xcRender(); }
 function xcSetDate(i, v) {
   var r = _xcImp.rows[i]; if (!r) return;
-  r.corDate = /^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : '';
+  // OCO3b: only a full date with a plausible year counts as entered.
+  r.corDate = (/^\d{4}-\d{2}-\d{2}$/.test(v || '') && Number(v.slice(0, 4)) >= 2000 && Number(v.slice(0, 4)) <= 2100) ? v : '';
   r.flags = r.flags.filter(function(f){ return !/^Date /.test(f); });
   if (!r.corDate) { r.flags.push('Date "' + r.rawDate + '" is not a valid date \u2014 enter it below'); r.include = false; }
   else if (!r.existing) r.include = true;
@@ -59310,7 +59313,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-23-OCO3';
+var KMI_BUILD = '2026-10-23-OCO3b';
 
 var _kmiSessionId = (function(){
   try {
