@@ -2427,6 +2427,7 @@ tr.gc-line:hover td{background:#fafafa}
           </select>
           <button class="btn btn-sm" onclick="showCorLogModal()" id="nprj-cor-log-btn" title="Download a Change Order Log PDF with a contract summary">&#8595; Download log</button>
           <button class="btn btn-sm" onclick="corSmartUploadForProject()" id="nprj-cor-smart-up-btn" title="Upload a historical COR PDF (e.g. exported from Excel) &#8212; AI fills in the form, COR goes straight to Pending for PM disposition">&#10024; Smart upload</button>
+          <button class="btn btn-sm" onclick="xcStart()" id="nprj-cor-xl-btn" title="Create CORs from KMI&#8217;s old Excel COR workbook (one sheet per COR)">&#8679; Import Excel</button>
           <button class="btn btn-sm btn-p" onclick="corNewForProject()" id="nprj-cor-new-btn">+ New COR</button>
         </div>
       </div>
@@ -19915,6 +19916,8 @@ function renderProjectCorList() {
   // Smart upload needs both create-cor and smart-upload-cor.
   var suBtn = g('nprj-cor-smart-up-btn');
   if (suBtn) suBtn.style.display = (hasFull('create-cor') && hasFull('smart-upload-cor')) ? '' : 'none';
+  var xlBtn = g('nprj-cor-xl-btn');                                                                    // OCO3
+  if (xlBtn) { xlBtn.style.display = (hasFull('create-cor') && hasFull('smart-upload-cor')) ? '' : 'none'; xlBtn.disabled = !pid; }
 
   if (!pid) {
     el.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px">Save the project first to start adding change orders.</div>';
@@ -19927,6 +19930,8 @@ function renderProjectCorList() {
   if (logBtn) logBtn.disabled = false;
   if (suBtn) suBtn.disabled = false;
 
+  if (_xcImp && String(_xcImp.pid) !== String(pid)) _xcImp = null;   // OCO3
+  if (_xcImp) { xcRender(); return; }
   var statusFilter = (g('nprj-cor-status-filter') && g('nprj-cor-status-filter').value) || '';
   var rows = (db.cors || []).filter(function(c){
     if (String(c.projectId) !== String(pid)) return false;
@@ -21155,6 +21160,381 @@ async function ocoImpSave() {
       (created.length ? ' \u2014 note: ' + created.join(', ') + ' were already created as Pending; they will be reused if you save again.' : '');
     ocoRenderImport();
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OCO3: Create CORs from KMI's old Excel COR workbook (one sheet per COR,
+// "CHANGE ORDER REQUEST" template). Reads the customer-facing side only
+// (A–E): labor hours by class at that sheet's own rates, material /
+// equipment lines, subs, OH&P. Totals reproduce the workbook's
+// "Total Change Order Request" exactly (no bond added); the workbook rounds
+// its total up to the whole dollar, so that difference is carried as a
+// "Rounding to whole dollar (as billed)" material line. CORs whose number
+// already exists on the project are skipped. New CORs come in as Pending.
+// ═══════════════════════════════════════════════════════════════════════
+var _xcImp = null;   // { pid, step:'pick'|'review'|'saving'|'done', file, rows:[], skipped:[], busy, err, done:{} }
+
+function xcStart() {
+  if (!hasFull('create-cor') || !hasFull('smart-upload-cor')) { alert('You do not have permission to import CORs.'); return; }
+  if (!_editProjectId) { alert('Save the project first before importing change orders.'); return; }
+  _ocoSubTab = 'cors';
+  _xcImp = { pid: _editProjectId, step: 'pick', file: null, rows: [], skipped: [], busy: false, err: '', done: null };
+  renderProjectCorList();
+}
+
+function xcCancel() {
+  if (_xcImp && _xcImp.busy) return;
+  if (_xcImp && _xcImp.step === 'review' && !confirm('Cancel the Excel import? Nothing has been saved.')) return;
+  _xcImp = null;
+  renderProjectCorList();
+}
+
+// ── Cell helpers ──────────────────────────────────────────────────────
+function xcCell(ws, a) { var c = ws[a]; return c ? c.v : null; }
+function xcNum(ws, a) { var v = Number(xcCell(ws, a)); return isNaN(v) ? 0 : v; }
+function xcStr(ws, a) { var v = xcCell(ws, a); return (v === null || v === undefined) ? '' : String(v).trim(); }
+function xcIso(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+// Returns YYYY-MM-DD, or '' when the cell can't be read as a real date.
+function xcDate(ws, a) {
+  var c = ws[a]; if (!c) return '';
+  if (c.v instanceof Date && !isNaN(c.v)) return xcIso(c.v);
+  if (typeof c.v === 'number' && c.v > 20000 && c.v < 80000) {
+    var d = new Date(Math.round((c.v - 25569) * 86400000));
+    return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+  }
+  var m = /^\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/.exec(String(c.v || ''));
+  if (m) {
+    var mo = Number(m[1]), dy = Number(m[2]), yr = Number(m[3]);
+    var dt = new Date(yr, mo - 1, dy);
+    if (dt.getMonth() === mo - 1 && dt.getDate() === dy) return xcIso(dt);
+  }
+  return '';
+}
+function xcUnitOf(label) {
+  var m = /\(([^)]+)\)\s*$/.exec(label || '');
+  var u = m ? m[1].trim().toUpperCase() : '';
+  if (u === 'DAY' || u === 'DAYS') return 'DAY';
+  if (u === 'MONTH' || u === 'MONTHS' || u === 'MO') return 'MO';
+  return u || 'LS';
+}
+function xcBaseLabel(label) { return String(label || '').replace(/\s*\([^)]*\)\s*$/, '').trim() || String(label || '').trim(); }
+
+// Match a workbook labor type to the project's classification spelling.
+function xcClassFor(p, name) {
+  var list = (corGetProjectLaborRates(p) || []).map(function(r){ return (r.classification || '').trim(); }).filter(Boolean);
+  var k = String(name || '').trim().toLowerCase();
+  var hit = list.find(function(c){ return c.toLowerCase() === k; });
+  return hit || String(name || '').trim();
+}
+
+// Same arithmetic as ncorComputeTotals() for an exact-cents (smart-uploaded) COR.
+function xcTotals(r) {
+  var L = r.labor.reduce(function(s, x){ return s + x.hours * x.rate; }, 0);
+  var M = r.mat.reduce(function(s, x){ return s + x.quantity * x.unitPrice; }, 0);
+  var Q = r.equip.reduce(function(s, x){ return s + x.quantity * x.unitPrice; }, 0);
+  var S = r.subs.reduce(function(s, x){ return s + x.total; }, 0);
+  var t = {
+    totalLabor: corRound2(L), totalMaterial: corRound2(M), totalEquipment: corRound2(Q), totalUnitPrice: 0, totalSub: corRound2(S),
+    mateqOhp: corRound2(M * r.pct / 100), equipmentOhp: corRound2(Q * r.pct / 100), unitPriceOhp: 0,
+    subOhp: corRound2(S * r.subPct / 100), bondCost: 0
+  };
+  t.totalAmount = corRound2(t.totalLabor + t.totalMaterial + t.totalEquipment + t.totalSub + t.mateqOhp + t.equipmentOhp + t.subOhp);
+  return t;
+}
+
+// Parse one template sheet. Returns null when the sheet isn't a COR.
+function xcParseSheet(p, name, ws) {
+  if (!/CHANGE ORDER REQUEST/i.test(xcStr(ws, 'A1'))) return null;
+  var corNo = xcStr(ws, 'E8').replace(/\.0+$/, '');
+  if (!corNo) return null;
+  var r = { sheet: name, corNumber: corNo, corDate: xcDate(ws, 'E7'), rawDate: xcStr(ws, 'E7'),
+            description: xcStr(ws, 'A16').replace(/\s+/g, ' '), attention: xcStr(ws, 'B11'), wbProject: xcStr(ws, 'B13'),
+            labor: [], mat: [], equip: [], subs: [], pct: 0, subPct: 0, flags: [] };
+  var maxRate = 0;
+  ['B', 'C', 'D', 'E'].forEach(function(col){
+    var nm = xcStr(ws, col + '25'), h = xcNum(ws, col + '26'), rt = xcNum(ws, col + '27');
+    if (nm && h > 0) { r.labor.push({ name: nm, hours: h, rate: rt }); if (rt > maxRate) maxRate = rt; }
+  });
+  // Premium-only rates (roughly a third of straight time) mark premium-time CORs.
+  var ht = (maxRate === 0 || maxRate >= 90) ? 'st' : (maxRate <= 45 ? 'ot' : 'dt');
+  r.corType = ht === 'ot' ? 'Premium Time OT' : ht === 'dt' ? 'Premium Time DT' : 'T&M';
+  r.labor = r.labor.map(function(x){ return { classification: xcClassFor(p, x.name), hourType: ht, hours: x.hours, rate: x.rate }; });
+  for (var row = 35; row <= 42; row++) {
+    var lab = xcStr(ws, 'A' + row);
+    if (!lab || /^TOTAL/i.test(lab)) continue;
+    var q = xcNum(ws, 'C' + row), up = xcNum(ws, 'D' + row), cost = xcNum(ws, 'E' + row);
+    if (!cost && !(q * up)) continue;
+    if (Math.abs(q * up - cost) > 0.01) { q = 1; up = cost; }
+    var line = { description: xcBaseLabel(lab), quantity: q, unit: xcUnitOf(lab), unitPrice: up };
+    if (/^equipment/i.test(lab)) r.equip.push(line); else r.mat.push(line);
+  }
+  for (var sr = 48; sr <= 51; sr++) {
+    var sn = xcStr(ws, 'A' + sr), st = xcNum(ws, 'E' + sr);
+    if (sn && st && !/^TOTAL/i.test(sn)) r.subs.push({ name: sn, total: st });
+  }
+  var e43 = xcNum(ws, 'E43'), e52 = xcNum(ws, 'E52');
+  r.pct = e43 ? corRound2(xcNum(ws, 'E54') / e43 * 100) : 0;
+  r.subPct = e52 ? corRound2(xcNum(ws, 'E55') / e52 * 100) : 0;
+  r.wbTotal = corRound2(xcNum(ws, 'E58'));
+
+  // Reproduce the workbook total: carry its round-up as a material line,
+  // sized so the line plus its OH&P lands exactly on the workbook total.
+  var t = xcTotals(r), d = corRound2(r.wbTotal - t.totalAmount);
+  if (Math.abs(d) >= 0.005) {
+    // OH&P rounding can make some cent values unreachable from one line, so
+    // a second cent-level line on equipment is allowed when needed.
+    var x0 = corRound2(d / (1 + r.pct / 100)), best = null;
+    var ys = [0, 0.01, -0.01, 0.02, -0.02];
+    for (var yi = 0; yi < ys.length && !(best && best.off < 0.005); yi++) {
+      for (var k = -6; k <= 6; k++) {
+        var x = corRound2(x0 + k * 0.01), y = ys[yi];
+        var trial = { labor: r.labor, mat: r.mat.concat([{ quantity: 1, unitPrice: x }]),
+                      equip: y ? r.equip.concat([{ quantity: 1, unitPrice: y }]) : r.equip, subs: r.subs, pct: r.pct, subPct: r.subPct };
+        var off = Math.abs(xcTotals(trial).totalAmount - r.wbTotal);
+        if (!best || off < best.off - 0.0001) best = { x: x, y: y, off: off };
+        if (off < 0.005) break;
+      }
+    }
+    r.mat.push({ description: 'Rounding to whole dollar (as billed)', quantity: 1, unit: 'LS', unitPrice: best.x });
+    if (best.y) r.equip.push({ description: 'Rounding to whole dollar (as billed)', quantity: 1, unit: 'LS', unitPrice: best.y });
+    t = xcTotals(r);
+  }
+  r.totals = t;
+  if (Math.abs(t.totalAmount - r.wbTotal) >= 0.01) r.flags.push('Total ' + corFmtMoney(t.totalAmount) + ' does not match the workbook ' + corFmtMoney(r.wbTotal));
+  if (!r.corDate) r.flags.push('Date "' + r.rawDate + '" is not a valid date \u2014 enter it below');
+  if (!r.description) r.flags.push('No description on the sheet');
+
+  // Attention: match the sheet's name to a contact assigned to the project.
+  r.attentionId = null;
+  var an = r.attention.toLowerCase();
+  (Array.isArray(p.contactAssignments) ? p.contactAssignments : []).forEach(function(ca){
+    var pm = (db.pms || []).find(function(x){ return String(x.id) === String(ca.pmId); });
+    if (pm && an && ((pm.firstName || '') + ' ' + (pm.lastName || '')).trim().toLowerCase() === an) r.attentionId = pm.id;
+  });
+
+  // Already in the app? (decision 18-A: skip, and show amount differences)
+  var ex = (db.cors || []).find(function(c){
+    return String(c.projectId) === String(p.id) && String(corExtractKmiSeq(c.corNumber)) === String(Number(corNo) || corNo);
+  });
+  r.existing = ex || null;
+  r.include = !ex && !!r.corDate;
+  return r;
+}
+
+async function xcRead() {
+  var st = _xcImp; if (!st || st.busy) return;
+  var fileEl = g('xc-file'), file = fileEl && fileEl.files && fileEl.files[0];
+  st.err = '';
+  if (!file) { st.err = 'Choose the Excel workbook first.'; xcRender(); return; }
+  if (!/\.(xlsx|xlsm|xls)$/i.test(file.name || '')) { st.err = 'Choose an Excel file (.xlsx, .xlsm or .xls).'; xcRender(); return; }
+  if (typeof XLSX === 'undefined') { st.err = 'The Excel reader did not load. Reload the app and try again.'; xcRender(); return; }
+  var p = getProj(st.pid); if (!p) { st.err = 'Project not found.'; xcRender(); return; }
+  st.busy = true; xcRender();
+  try {
+    var buf = await file.arrayBuffer();
+    var wb = XLSX.read(new Uint8Array(buf), { type: 'array', cellDates: true });
+    var rows = [], skipped = [];
+    wb.SheetNames.forEach(function(nm){
+      var r = null;
+      try { r = xcParseSheet(p, nm, wb.Sheets[nm]); } catch (e) { console.warn('[xc] sheet ' + nm, e); }
+      if (r) rows.push(r); else skipped.push(nm);
+    });
+    var seen = {};
+    rows.forEach(function(r){
+      if (seen[r.corNumber]) { r.flags.push('COR ' + r.corNumber + ' appears on more than one sheet'); r.include = false; }
+      seen[r.corNumber] = true;
+    });
+    if (!rows.length) throw new Error('No COR sheets found. The import reads sheets laid out like the "CHANGE ORDER REQUEST" template.');
+    st.file = file; st.rows = rows; st.skipped = skipped; st.step = 'review';
+  } catch (e) {
+    console.error('[xc] read', e);
+    st.err = 'Could not read the workbook: ' + (e.message || e);
+  }
+  st.busy = false;
+  xcRender();
+}
+
+// ── Render ────────────────────────────────────────────────────────────
+function xcRender() {
+  var el = g('nprj-cor-list-section'); if (!el || !_xcImp) return;
+  var st = _xcImp, p = getProj(st.pid) || {};
+  var head = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
+    '<strong style="color:var(--kmi);font-size:14px">Import CORs from Excel</strong><span style="flex:1"></span>' +
+    (st.step === 'done' ? '<button class="btn btn-sm btn-p" onclick="xcCancel()">Done</button>' : '<button class="btn btn-sm" onclick="xcCancel()"' + (st.busy ? ' disabled' : '') + '>Cancel</button>') + '</div>';
+  var body = '';
+  if (st.step === 'pick') {
+    body = '<div style="border:2px dashed #cfd2db;border-radius:10px;padding:28px 20px;text-align:center;background:#fafafc">' +
+      '<div style="font-size:14px;font-weight:600;color:var(--kmi)">Choose the COR workbook for ' + corEsc((p.number || '') + ' ' + (p.name || '')) + '</div>' +
+      '<div style="color:#5f6368;margin:6px 0 14px;font-size:12px">One sheet per COR, in the "CHANGE ORDER REQUEST" layout. Totals come in exactly as sent (no bond added), at each sheet\u2019s own labor rates. Nothing is saved until you confirm.</div>' +
+      '<input type="file" id="xc-file" accept=".xlsx,.xlsm,.xls"' + (st.busy ? ' disabled' : '') + '> ' +
+      '<button class="btn btn-p" onclick="xcRead()"' + (st.busy ? ' disabled' : '') + '>' + (st.busy ? 'Reading\u2026' : 'Read workbook') + '</button></div>';
+  } else if (st.step === 'done') {
+    var dn = st.done || {};
+    body = '<div style="padding:14px;border-radius:8px;background:#E3F1D7;color:#2F5A0C;font-size:13px">' +
+      'Created ' + (dn.created || 0) + ' COR' + (dn.created === 1 ? '' : 's') + ' as Pending.' +
+      (dn.failed && dn.failed.length ? '</div><div style="margin-top:8px;padding:12px;border-radius:8px;background:#FDF1F1;color:#8E2424;font-size:13px">Not created: ' + dn.failed.map(corEsc).join('<br>') : '') + '</div>' +
+      '<div style="font-size:12px;color:#5f6368;margin-top:10px">When the owner\u2019s CO arrives, import it on the CO\u2019s tab to roll these up to Approved.</div>';
+  } else {
+    body = xcReviewHtml(st, p);
+  }
+  el.innerHTML = head + body + (st.err ? '<div style="color:#A32D2D;font-size:13px;margin-top:10px">' + corEsc(st.err) + '</div>' : '');
+}
+
+function xcReviewHtml(st, p) {
+  var nNew = st.rows.filter(function(r){ return !r.existing; }).length;
+  var nDiff = st.rows.filter(function(r){ return r.existing && Math.abs(corRound2(Number(r.existing.totalAmount) || 0) - r.wbTotal) >= 0.01; }).length;
+  var sel = st.rows.filter(function(r){ return r.include; });
+  var selTot = sel.reduce(function(s, r){ return s + r.wbTotal; }, 0);
+  var wbProj = (st.rows[0] && st.rows[0].wbProject) || '';
+  var th = 'padding:7px 8px;text-align:left;font-size:12px;background:#f5f5f5;white-space:nowrap';
+  var rows = st.rows.map(function(r, i){
+    var exTot = r.existing ? corRound2(Number(r.existing.totalAmount) || 0) : null;
+    var status = r.existing
+      ? (Math.abs(exTot - r.wbTotal) >= 0.01
+          ? '<span style="color:#8A5A00;font-weight:600">In the app at ' + corFmtMoney(exTot) + ' \u2014 skipped</span>'
+          : '<span style="color:#888">Already in the app \u2014 skipped</span>')
+      : (r.flags.length ? '<span style="color:#8E2424">' + r.flags.map(corEsc).join('<br>') + '</span>' : '<span style="color:#2F5A0C">Ready</span>');
+    var hrs = r.labor.reduce(function(s, x){ return s + x.hours; }, 0);
+    var dateCell = r.existing ? corEsc(r.corDate || r.rawDate)
+      : '<input type="date" value="' + corEsc(r.corDate) + '" style="font-size:12px;padding:3px 4px" onchange="xcSetDate(' + i + ',this.value)">';
+    return '<tr style="border-top:1px solid #eee;' + (r.existing ? 'opacity:.6' : '') + '">' +
+      '<td style="padding:6px 8px"><input type="checkbox"' + (r.include ? ' checked' : '') + (r.existing || !r.corDate ? ' disabled' : '') + ' onchange="xcToggle(' + i + ',this.checked)"></td>' +
+      '<td style="padding:6px 8px;font-weight:700;color:var(--kmi)">' + corEsc(r.corNumber) + '</td>' +
+      '<td style="padding:6px 8px">' + dateCell + '</td>' +
+      '<td style="padding:6px 8px;font-size:12px">' + corEsc(r.corType) + '</td>' +
+      '<td style="padding:6px 8px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + corEsc(r.description) + '">' + corEsc(r.description) + '<div style="font-size:11px;color:#888">Sheet: ' + corEsc(r.sheet) + '</div></td>' +
+      '<td style="padding:6px 8px;text-align:right">' + (hrs ? hrs : '\u2014') + '</td>' +
+      '<td style="padding:6px 8px;text-align:right"><strong>' + corFmtMoney(r.wbTotal) + '</strong></td>' +
+      '<td style="padding:6px 8px;font-size:12px">' + (r.attentionId ? corEsc(r.attention) : '<span style="color:#8A5A00">' + corEsc(r.attention || '\u2014') + ' (not a project contact)</span>') + '</td>' +
+      '<td style="padding:6px 8px;font-size:12px">' + status + '</td></tr>';
+  }).join('');
+  return '<div style="font-size:12px;color:#4a4f5c;margin-bottom:10px">' +
+      '<strong>' + corEsc(st.file ? st.file.name : '') + '</strong> \u00B7 ' + st.rows.length + ' COR sheets \u00B7 ' + nNew + ' new' +
+      (st.rows.length - nNew ? ' \u00B7 ' + (st.rows.length - nNew) + ' already in the app' + (nDiff ? ' (' + nDiff + ' at a different amount)' : '') : '') +
+      (st.skipped.length ? ' \u00B7 skipped ' + st.skipped.length + ' non-COR sheet' + (st.skipped.length === 1 ? '' : 's') + ': ' + corEsc(st.skipped.join(', ')) : '') +
+      (wbProj ? '<br>The workbook says project <strong>' + corEsc(wbProj) + '</strong>; you are importing into <strong>' + corEsc((p.number || '') + ' ' + (p.name || '')) + '</strong>.' : '') +
+    '</div>' +
+    '<div style="overflow-x:auto"><table style="width:100%;font-size:13px;min-width:980px;border:1px solid #eceef3"><thead><tr>' +
+      '<th style="' + th + '"><input type="checkbox" title="Select all new" onchange="xcToggleAll(this.checked)"></th><th style="' + th + '">COR #</th><th style="' + th + '">Date</th><th style="' + th + '">Type</th>' +
+      '<th style="' + th + '">Description</th><th style="' + th + ';text-align:right">Hours</th><th style="' + th + ';text-align:right">Total (as sent)</th><th style="' + th + '">Attention</th><th style="' + th + '">Status</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<div style="font-size:12px;color:#4a4f5c;margin-top:10px">Each COR keeps its sheet\u2019s labor rates and OH&amp;P. The workbook rounded each total up to the whole dollar; that difference is carried as a small \u201CRounding to whole dollar (as billed)\u201D material line so the app total matches what the GC received. The workbook is attached to each COR as its source file.</div>' +
+    '<div style="display:flex;gap:10px;margin-top:14px;align-items:center"><button class="btn" onclick="_xcImp.step=\'pick\';_xcImp.err=\'\';xcRender()"' + (st.busy ? ' disabled' : '') + '>Back</button><span style="flex:1"></span>' +
+      '<span style="font-size:13px;color:#4a4f5c">' + sel.length + ' selected \u00B7 ' + corFmtMoney(selTot) + '</span>' +
+      '<button class="btn btn-p" onclick="xcSave()"' + (st.busy || !sel.length ? ' disabled' : '') + '>' + (st.busy ? (st.progress || 'Saving\u2026') : 'Create ' + sel.length + ' COR' + (sel.length === 1 ? '' : 's') + ' as Pending') + '</button></div>';
+}
+
+function xcToggle(i, on) { var r = _xcImp.rows[i]; if (r && !r.existing && r.corDate) r.include = !!on; xcRender(); }
+function xcToggleAll(on) { _xcImp.rows.forEach(function(r){ if (!r.existing && r.corDate) r.include = !!on; }); xcRender(); }
+function xcSetDate(i, v) {
+  var r = _xcImp.rows[i]; if (!r) return;
+  r.corDate = /^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : '';
+  r.flags = r.flags.filter(function(f){ return !/^Date /.test(f); });
+  if (!r.corDate) { r.flags.push('Date "' + r.rawDate + '" is not a valid date \u2014 enter it below'); r.include = false; }
+  else if (!r.existing) r.include = true;
+  xcRender();
+}
+
+// ── Save ──────────────────────────────────────────────────────────────
+function xcMakeCor(p, r, fileRef, idOffset) {
+  var nowIso = new Date().toISOString(), t = r.totals;
+  return {
+    id: Date.now() + idOffset,
+    corNumber: String(r.corNumber),
+    corDate: r.corDate,
+    corType: r.corType,
+    projectId: Number(p.id),
+    attentionContactId: r.attentionId,
+    description: r.description,
+    status: 'Pending',
+    rolledUpTicketIds: [], laborRows: [],
+    manualLaborRows: r.labor.map(function(x){ return { classification: x.classification, hourType: x.hourType, hours: x.hours, rate: x.rate }; }),
+    autoMaterialRows: [],
+    manualMaterialRows: r.mat.map(function(x){ return { description: x.description, quantity: x.quantity, unit: corMatUnitNorm(x.unit), unitPrice: x.unitPrice }; }),
+    subRows: r.subs.map(function(x){ return { name: x.name, total: x.total }; }),
+    equipmentRows: r.equip.map(function(x){ return { description: x.description, quantity: x.quantity, unit: x.unit || 'DAY', unitPrice: x.unitPrice }; }),
+    unitPriceRows: [],
+    matEqMarkupPct: r.pct, subMarkupPct: r.subPct, equipmentMarkupPct: r.pct, unitPriceMarkupPct: 0, bondRatePct: 0,
+    timeExtensionDays: null, addedScope: '', omittedScope: '',
+    totalLabor: t.totalLabor, totalMaterial: t.totalMaterial, totalSub: t.totalSub, totalEquipment: t.totalEquipment, totalUnitPrice: 0,
+    mateqOhp: t.mateqOhp, subOhp: t.subOhp, equipmentOhp: t.equipmentOhp, unitPriceOhp: 0, bondCost: 0, totalAmount: t.totalAmount,
+    createdAt: nowIso, createdByUserId: ocoUid(),
+    createdByName: _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '',
+    updatedAt: nowIso, updatedByUserId: ocoUid(),
+    sentAt: null, sentByUserId: null, decisionAt: null, decisionByUserId: null,
+    voidedAt: null, voidedByUserId: null, voidReason: null,
+    customerCoNumber: null, customerCoDate: null, gcRef: null,
+    smartUploaded: true, smartUploadedAt: nowIso, smartUploadedByUserId: ocoUid(),
+    smartUploadedFile: fileRef ? Object.assign({}, fileRef, { sheet: r.sheet }) : null
+  };
+}
+
+async function xcSave() {
+  var st = _xcImp; if (!st || st.busy) return;
+  if (!supabaseClient) { st.err = 'Importing CORs needs the cloud connection.'; xcRender(); return; }
+  var p = getProj(st.pid); if (!p) { st.err = 'Project not found.'; xcRender(); return; }
+  var sel = st.rows.filter(function(r){ return r.include && !r.existing && r.corDate; });
+  if (!sel.length) return;
+  // Re-check against the live list in case a COR number was added meanwhile.
+  var clash = sel.filter(function(r){
+    return (db.cors || []).some(function(c){ return String(c.projectId) === String(p.id) && String(corExtractKmiSeq(c.corNumber)) === String(Number(r.corNumber) || r.corNumber); });
+  });
+  if (clash.length) { st.err = 'These COR numbers now exist in the app: ' + clash.map(function(r){ return r.corNumber; }).join(', ') + '. Read the workbook again.'; xcRender(); return; }
+  if (!confirm('Create ' + sel.length + ' COR' + (sel.length === 1 ? '' : 's') + ' as Pending on ' + (p.number || p.name) + '?')) return;
+  st.busy = true; st.err = ''; st.progress = 'Uploading workbook\u2026'; xcRender();
+
+  var fileRef = null;
+  try {
+    var safe = String(st.file.name || 'cor-workbook.xlsx').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+    var path = 'cors/imports/' + p.id + '/' + Date.now() + '_' + safe;
+    var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).upload(path, st.file, { contentType: st.file.type || 'application/octet-stream', upsert: false });
+    if (up && up.error) throw new Error(up.error.message);
+    fileRef = { name: st.file.name, path: path, size: st.file.size, contentType: st.file.type || '', uploadedAt: new Date().toISOString(),
+                uploadedByUserId: ocoUid(), uploadedByName: _currentUser ? ((_currentUser.firstName || '') + ' ' + (_currentUser.lastName || '')).trim() : '' };
+  } catch (e) {
+    console.warn('[xc] workbook upload', e);   // CORs still import; they just have no source file attached
+  }
+
+  var created = 0, failed = [];
+  for (var i = 0; i < sel.length; i++) {
+    var r = sel[i];
+    st.progress = 'Creating COR ' + r.corNumber + ' (' + (i + 1) + ' of ' + sel.length + ')\u2026'; xcRender();
+    var nc = xcMakeCor(p, r, fileRef, i);
+    db.cors = db.cors || [];
+    db.cors.unshift(nc);
+    saveDB();
+    try {
+      var res = await kmiVgUpsert('cors', toSBCor(nc));
+      if (res && res.error) throw new Error(res.error.message);
+      try { await corSyncDistribution(nc, p); } catch (e) { console.warn('distribution sync', e); }
+      created++;
+    } catch (e) {
+      db.cors = db.cors.filter(function(x){ return String(x.id) !== String(nc.id); });
+      saveDB();
+      failed.push('COR ' + r.corNumber + ': ' + (e.message || e));
+    }
+  }
+  // Keep the project's next COR number past everything imported.
+  var maxSeq = 0;
+  (db.cors || []).forEach(function(c){
+    if (String(c.projectId) !== String(p.id)) return;
+    var n = parseInt(corExtractKmiSeq(c.corNumber), 10);
+    if (!isNaN(n) && n > maxSeq) maxSeq = n;
+  });
+  if (maxSeq && Number(p.nextCorSeq || 0) <= maxSeq) {
+    p.nextCorSeq = maxSeq + 1;
+    saveDB();
+    try { var pr = await supabaseClient.from('kmi_projects').upsert(toSBProject(p)); if (pr && pr.error) console.warn('[xc] project seq', pr.error.message); }
+    catch (e) { console.warn('[xc] project seq', e); }
+  }
+  db.activity = db.activity || [];
+  db.activity.unshift({ text: created + ' COR' + (created === 1 ? '' : 's') + ' imported from Excel (Pending)', type: 'won', time: 'Just now' });
+  saveDB();
+  st.busy = false; st.progress = ''; st.step = 'done'; st.done = { created: created, failed: failed };
+  showToast('Imported ' + created + ' COR' + (created === 1 ? '' : 's') + ' from Excel.', failed.length ? 'info' : 'success');
+  xcRender();
 }
 
 // Launch the New COR type-picker with this project pre-selected and locked.
@@ -58930,7 +59310,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-21-OCO2b';
+var KMI_BUILD = '2026-10-23-OCO3';
 
 var _kmiSessionId = (function(){
   try {
