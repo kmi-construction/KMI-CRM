@@ -1725,6 +1725,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="ni" onclick="nav('product-library')"><span class="nico">▣</span>Product Library</div>
       <div class="ni" onclick="nav('email-log')"><span class="nico">&#9993;</span>Email log</div>
       <div class="ni" onclick="nav('email-settings')"><span class="nico">&#9881;</span>Email settings</div>
+      <div class="ni" onclick="nav('integrations')"><span class="nico">&#8644;</span>Integrations</div>
     </div>
   </div>
   <div style="margin-top:auto;padding:10px 20px 4px;border-top:1px solid var(--kmi2)">
@@ -1755,6 +1756,7 @@ tr.gc-line:hover td{background:#fafafa}
 </div>
 
 <div class="main">
+<div id="kmi-cred-banner" style="display:none"></div><!-- SPFUI1 -->
 
 <!-- DASHBOARD -->
 <div class="pg active" id="pg-dashboard">
@@ -3440,6 +3442,12 @@ tr.gc-line:hover td{background:#fafafa}
   <div id="es-content"></div>
 </div>
 
+<!-- INTEGRATIONS (SPFUI1) - credential expiry dates; Admin only -->
+<div class="pg" id="pg-integrations">
+  <div class="ph"><div><h1>Integrations</h1><div class="sub">Credentials KMI.Build uses to reach Microsoft and GitHub</div><div class="stripe"></div></div></div>
+  <div id="int-content"></div>
+</div>
+
 <!-- PRODUCT LIBRARY (Round 1) — manufacturers + products + documents -->
 <div class="pg" id="pg-product-library">
   <div class="ph"><div><h1>Product Library</h1><div class="sub">Manufacturers, products, and the data sheets / test reports we submit</div><div class="stripe"></div></div></div>
@@ -4367,6 +4375,8 @@ var PERMISSIONS = {
   'fin-statements': ['full','none','none','full','none','none','none'],
   'email-log': ['full','none','none','none','none','none','none'],
   'email-settings': ['full','none','none','none','none','none','none'],
+  // SPFUI1: credential expiry editor. RLS (kmi_is_admin) is the real gate.
+  'integrations': ['full','none','none','none','none','none','none'],
   // Projects module: the project record itself + its workspace. view-project
   // gates the Projects list, the project detail, and the Details/Directory tabs.
   // create/edit gate the New/Edit Project page and Save; delete is Admin-only.
@@ -4559,6 +4569,7 @@ var PAGE_ACTION_MAP = {
   'new-tm-ticket':  'create-tm-ticket',
   'email-log':      'email-log',
   'email-settings': 'email-settings',
+  'integrations':   'integrations',
   'product-library': 'view-product-library',
   'edit-product':    'edit-product-library',
   'submittals':      'view-submittals',
@@ -5165,6 +5176,9 @@ async function logout() {
   await kmiAuthSignOut();
   _currentUser = null;
   clearSession();
+  // SPFUI1: drop the credential banner and its per-session hide.
+  try { sessionStorage.removeItem('kmiCredBannerHide'); } catch (e) {}
+  var _credB = g('kmi-cred-banner'); if (_credB) { _credB.style.display = 'none'; _credB.innerHTML = ''; }
   closeModal();
   // Re-hide mobile chrome at logout so the login screen isn't framed by it
   var mh = g('mob-header'); if (mh) mh.style.display = 'none';
@@ -5586,6 +5600,7 @@ function applyUserPermissions() {
   if (avEl)   avEl.textContent   = ini;
   if (box)    box.style.display  = 'flex';
   kmiPaintBuild();
+  kmiCredBannerRefresh();   // SPFUI1
 }
 
 // True if this device had no app data in localStorage before this page load.
@@ -6553,6 +6568,7 @@ function nav(page) {
     'new-cor':        initNewCor,
     'email-log':      renderEmailLog,
     'email-settings': renderEmailSettings,
+    'integrations':   renderIntegrations,
     'product-library': renderProductLibrary,
     'edit-product':    renderEditProductPage,
     'configure-form':  renderConfigureFormPage,
@@ -7373,7 +7389,7 @@ function mobShowDesktopOnly(pageId) {
     'vendor-contacts':'Vendor Contacts', users:'Users', templates:'Templates',
     projects:'Projects', budget:'Budget', cors:'Change Order Requests',
     'new-cor':'New COR', 'new-opportunity':'New Opportunity',
-    'email-log':'Email Log', 'email-settings':'Email Settings',
+    'email-log':'Email Log', 'email-settings':'Email Settings', 'integrations':'Integrations',
     'product-library':'Product Library', 'edit-product':'Edit Product',
     'configure-form':'Configure Form', 'edit-submittal':'Edit Submittal',
     submittals:'Submittals (desktop)', 'new-project':'New Project',
@@ -34063,6 +34079,8 @@ function renderProjectOverviewTab() {
       (sentAt
         ? 'Kickoff sent ' + _ovEsc(sentAt) + (sentByName ? ' by ' + _ovEsc(sentByName) : '')
         : 'Kickoff not sent') + '</span>');
+    // SPFUI1: SharePoint job folder - create / creating / open / retry.
+    bits.push('<span style="font-size:11.5px;color:#ccc">|</span>' + spfSlotHtml(p));
 
     if (p.opportunityId) {
       bits.push('<span style="font-size:11.5px;color:#ccc">|</span>' +
@@ -59313,7 +59331,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-23-OCO3b';
+var KMI_BUILD = '2026-10-26-SPFUI1';
 
 var _kmiSessionId = (function(){
   try {
@@ -60338,7 +60356,13 @@ function fromSBProject(r) {
     endDate:                   r.end_date   || '',
     status:                    (r.status === 'inactive') ? 'inactive' : 'active',
     kickoffSentAt:             r.kickoff_sent_at         || null,
-    kickoffSentByUserId:       r.kickoff_sent_by_user_id || null
+    kickoffSentByUserId:       r.kickoff_sent_by_user_id || null,
+    // SPFUI1: server-owned (trigger drops browser writes). Read-only here;
+    // deliberately NOT in toSBProject.
+    spFolderStatus:            r.sp_folder_status        || null,
+    spFolderUrl:               r.sp_folder_url           || null,
+    spFolderError:             r.sp_folder_error         || null,
+    spFolderUpdatedAt:         r.sp_folder_updated_at    || null
   };
 }
 
@@ -63575,6 +63599,11 @@ async function _openProjectKickoffComposer(projectId) {
   var taxExStored = (p.apTaxExempt || '').toString().trim().toUpperCase();
   var taxExInitial = (taxExStored === 'Y' || taxExStored === 'YES' || taxExStored === 'TRUE');
 
+  // SPFUI1: job folder line. Ready -> real link. Otherwise the checkbox
+  // (on by default) adds a placeholder that is filled in at send.
+  var spfReady = !!(p.spFolderStatus === 'ready' && p.spFolderUrl);
+  var spfCan   = spfCanCreate();
+
   function buildBody(taxExemptYes) {
     var lines = [];
     lines.push('A new project has been created and is ready for kickoff.');
@@ -63591,6 +63620,8 @@ async function _openProjectKickoffComposer(projectId) {
     lines.push('End date:         ' + endStr);
     lines.push('Contract amount:  ' + amtStr);
     lines.push('Tax exempt:       ' + (taxExemptYes ? 'Yes' : 'No'));
+    if (spfReady)    lines.push('Job folder:       ' + p.spFolderUrl);
+    else if (spfCan) lines.push('Job folder:       ' + SPF_PENDING_LINK);
     lines.push('');
     lines.push('The Foundation Job File CSV is attached.');
     lines.push('');
@@ -63641,6 +63672,17 @@ async function _openProjectKickoffComposer(projectId) {
         '</label>' +
         '<div style="font-size:11px;color:#888;margin-top:4px">Toggling this updates the project record AND the value written to the attached CSV. Edits the "Tax exempt" line in the message body too.</div>' +
       '</div>' +
+      (spfReady
+        ? '<div class="fgr full"><div style="font-size:12px;color:#2F5D1E">\u{1F4C1} Job folder ready. The link is in the message.</div></div>'
+        : (spfCan
+          ? '<div class="fgr full">' +
+              '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:500;text-transform:none;letter-spacing:0;color:#333">' +
+                '<input type="checkbox" id="pkm-folder" checked style="width:auto;margin:0" onchange="_pkmFolderChanged()"> ' +
+                'Create SharePoint job folder' +
+              '</label>' +
+              '<div style="font-size:11px;color:#888;margin-top:4px">Copies the job folder template into Projects Files/&lt;year&gt;. The link is added to the message at send. The email still goes out if the folder fails.</div>' +
+            '</div>'
+          : '')) +
       '<div class="fgr full"><label>Attachment</label>' +
         '<div style="background:#F5F5F3;border-radius:7px;padding:10px 12px;font-size:13px;display:flex;align-items:center;gap:10px">' +
           '<span style="font-size:18px">\u{1F4CE}</span>' +
@@ -63709,6 +63751,19 @@ async function sendProjectKickoffEmail() {
 
   sendBtn.disabled = true; cancelBtn.disabled = true;
   sendBtn.textContent = 'Sending\u2026';
+
+  // SPFUI1: create the job folder first so its link can go in the message.
+  // Decision 5-B: the email goes out whether or not the folder succeeds.
+  var spfResult = null;
+  var spfCb = g('pkm-folder');
+  if (spfCb && spfCb.checked) {
+    sendBtn.textContent = 'Creating job folder\u2026';
+    spfResult = await spfStart(p.id);
+    var spfLink = spfResult.ok ? (spfResult.url || spfResult.expectedUrl) : null;
+    body = body.replace(/^(Job folder:\s+)\(link added when sent\)[ \t]*(?=\r?$)/m,
+      '$1' + (spfLink || '(not created yet \u2014 see the project in KMI.Build)'));
+    sendBtn.textContent = 'Sending\u2026';
+  }
 
   // Persist the tax-exempt toggle BEFORE generating the CSV so the project
   // record and the attached file agree. Save flushes to Supabase too.
@@ -63779,6 +63834,7 @@ async function sendProjectKickoffEmail() {
       'success'
     );
     delete window._pendingKickoffEmail;
+    if (spfResult && !spfResult.ok) showToast('Kickoff sent, but the job folder failed: ' + spfResult.error, 'error');
     // Refresh whichever surface is showing the "last sent" state. The
     // Overview action strip replaced the modal as its home; the modal is
     // still refreshed when the send was launched from there.
@@ -63794,6 +63850,253 @@ async function sendProjectKickoffEmail() {
     sendBtn.disabled = false; cancelBtn.disabled = false; sendBtn.textContent = 'Send Project Kickoff';
     showErr('<strong>Send failed:</strong> ' + _vendorEsc(result.error || 'Unknown error'));
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SPFUI1 — SharePoint job folder provisioning + credential expiry notices.
+// Server side: sp-folder-provision Edge Function (Graph, Sites.Selected),
+// kmi_projects.sp_folder_* (server-owned; trigger drops browser writes),
+// kmi_credential_expiry + kmi_credential_status (Admin-only via RLS),
+// credential-alerts Edge Function on a daily cron for the emails.
+// ═══════════════════════════════════════════════════════════════════════
+var SPF_FOLDER_FN = 'sp-folder-provision';
+var SPF_PENDING_LINK = '(link added when sent)';
+var _spfPolls = {};
+
+function _spfEsc(v){ return (v==null?'':String(v)).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function spfCanCreate(){ return (typeof hasFull === 'function') && hasFull('send-project-kickoff'); }
+
+function spfApplyRow(p, r) {
+  if (!p || !r) return;
+  p.spFolderStatus    = r.sp_folder_status     || null;
+  p.spFolderUrl       = r.sp_folder_url        || null;
+  p.spFolderError     = r.sp_folder_error      || null;
+  p.spFolderUpdatedAt = r.sp_folder_updated_at || null;
+}
+
+async function _spfErrMsg(err) {
+  try {
+    if (err && err.context && typeof err.context.json === 'function') {
+      var j = await err.context.json();
+      if (j && j.error) return String(j.error);
+    }
+  } catch (e) {}
+  return (err && err.message) ? String(err.message) : 'Unknown error';
+}
+
+// Starts (or re-checks) folder creation. Resolves with the final URL when the
+// folder already exists, or the URL it will have once the copy finishes.
+async function spfStart(projectId) {
+  var p = getProj(projectId);
+  if (!p) return { ok: false, error: 'Project not found' };
+  p.spFolderStatus = 'creating'; p.spFolderError = null;
+  spfRefreshUi(p.id);
+  try {
+    var res = await supabaseClient.functions.invoke(SPF_FOLDER_FN, { body: { project_id: Number(p.id) } });
+    if (res.error) {
+      var msg = await _spfErrMsg(res.error);
+      p.spFolderStatus = 'error'; p.spFolderError = msg;
+      spfRefreshUi(p.id);
+      return { ok: false, error: msg };
+    }
+    var d = res.data || {};
+    p.spFolderStatus = d.status || 'creating';
+    if (d.url) p.spFolderUrl = d.url;
+    if (p.spFolderStatus !== 'ready') spfPoll(p.id);
+    spfRefreshUi(p.id);
+    return { ok: true, status: p.spFolderStatus, url: d.url || null, expectedUrl: d.expected_url || null };
+  } catch (e) {
+    var m = (e && e.message) ? e.message : String(e);
+    p.spFolderStatus = 'error'; p.spFolderError = m;
+    spfRefreshUi(p.id);
+    return { ok: false, error: m };
+  }
+}
+
+// Watches the project row until the background copy lands (5 s, up to 6 min).
+function spfPoll(projectId) {
+  var key = String(projectId);
+  if (_spfPolls[key]) return;
+  var started = Date.now();
+  _spfPolls[key] = setInterval(async function(){
+    var p = getProj(projectId);
+    if (!p || Date.now() - started > 6 * 60 * 1000) { clearInterval(_spfPolls[key]); delete _spfPolls[key]; return; }
+    try {
+      var r = await supabaseClient.from('kmi_projects')
+        .select('sp_folder_status,sp_folder_url,sp_folder_error,sp_folder_updated_at')
+        .eq('id', p.id).maybeSingle();
+      if (r.error || !r.data) return;
+      spfApplyRow(p, r.data);
+      if (p.spFolderStatus !== 'creating') {
+        clearInterval(_spfPolls[key]); delete _spfPolls[key];
+        spfRefreshUi(p.id);
+        if (p.spFolderStatus === 'ready') showToast('Job folder ready for ' + (p.number || 'project'), 'success');
+        else showToast('Job folder could not be created for ' + (p.number || 'project') + ': ' + (p.spFolderError || 'unknown error'), 'error');
+      }
+    } catch (e) { console.warn('[spf] poll', e); }
+  }, 5000);
+}
+
+function spfSlotInner(p) {
+  var can = spfCanCreate();
+  var st = p.spFolderStatus || '';
+  if (st === 'ready' && p.spFolderUrl) {
+    return '<a href="' + _spfEsc(p.spFolderUrl) + '" target="_blank" rel="noopener" ' +
+      'style="font-size:11.5px;color:var(--kmi);text-decoration:none">\u{1F4C1} Job folder \u2197</a>';
+  }
+  if (st === 'creating') {
+    return '<span style="font-size:11.5px;color:#888">\u{1F4C1} Creating job folder\u2026</span>';
+  }
+  if (st === 'error') {
+    return '<span style="font-size:11.5px;color:#A32D2D" title="' + _spfEsc(p.spFolderError || '') + '">' +
+      '\u{1F4C1} Job folder failed</span>' +
+      (can ? ' <button class="btn btn-sm" onclick="spfCreateClick(' + Number(p.id) + ')">Retry</button>' : '');
+  }
+  return can
+    ? '<button class="btn btn-sm" onclick="spfCreateClick(' + Number(p.id) + ')">\u{1F4C1} Create job folder</button>'
+    : '<span style="font-size:11.5px;color:#888">No job folder yet</span>';
+}
+
+function spfSlotHtml(p) {
+  if (p.spFolderStatus === 'creating') spfPoll(p.id);
+  return '<span id="spf-slot" data-pid="' + _spfEsc(p.id) + '" style="display:inline-flex;align-items:center;gap:6px">' +
+    spfSlotInner(p) + '</span>';
+}
+
+function spfRefreshUi(projectId) {
+  var el = g('spf-slot');
+  var p = getProj(projectId);
+  if (el && p && String(el.getAttribute('data-pid')) === String(projectId)) el.innerHTML = spfSlotInner(p);
+}
+
+async function spfCreateClick(projectId) {
+  var r = await spfStart(projectId);
+  if (!r.ok) showToast('Job folder could not be created: ' + r.error, 'error');
+}
+
+// Kickoff modal: add/remove the "Job folder:" line as the checkbox flips.
+function _pkmFolderChanged() {
+  var cb = g('pkm-folder'), body = g('pkm-body');
+  if (!cb || !body) return;
+  var has = /^Job folder:[ \t]+/m;
+  if (cb.checked) {
+    if (!has.test(body.value)) {
+      var tx = /^(Tax exempt:[ \t]+(?:Yes|No))[ \t]*(?=\r?$)/m;
+      body.value = tx.test(body.value)
+        ? body.value.replace(tx, '$1\nJob folder:       ' + SPF_PENDING_LINK)
+        : body.value + '\nJob folder:       ' + SPF_PENDING_LINK;
+    }
+  } else {
+    body.value = body.value.replace(/^Job folder:[ \t]+\(link added when sent\)[ \t]*\r?\n?/m, '');
+  }
+}
+
+// ── Credential expiry: admin banner + Maintenance › Integrations page ──
+var KMI_CRED_HIDE_KEY = 'kmiCredBannerHide';
+var _kmiCredTimer = null;
+
+async function kmiCredLoad() {
+  if (!_currentUser || _currentUser.role !== 'Admin' || typeof supabaseClient === 'undefined' || !supabaseClient) return null;
+  var r = await supabaseClient.from('kmi_credential_status').select('*').order('name');
+  if (r.error) { console.warn('[cred] load', r.error.message); return null; }
+  return r.data || [];
+}
+
+function _kmiCredBannerItems(rows) {
+  var items = [];
+  (rows || []).forEach(function(r){
+    if (r.status === 'failing') items.push({ sev: 3, sig: r.key + ':failing', text: r.name + ' is failing. ' + (r.purpose ? r.purpose + ' stopped.' : '') });
+    else if (r.status === 'expired') items.push({ sev: 3, sig: r.key + ':expired', text: r.name + ' expired ' + Math.abs(r.days_left) + ' day' + (Math.abs(r.days_left) === 1 ? '' : 's') + ' ago. ' + (r.purpose ? r.purpose + ' stopped.' : '') });
+    else if (r.status === 'warn') items.push({ sev: 2, sig: r.key + ':warn:' + r.days_left, text: r.name + ' expires in ' + r.days_left + ' day' + (r.days_left === 1 ? '' : 's') + ' (' + r.expires_on + ').' });
+  });
+  items.sort(function(a, b){ return b.sev - a.sev; });
+  return items;
+}
+
+async function kmiCredBannerRefresh() {
+  var el = g('kmi-cred-banner');
+  if (!el) return;
+  if (!_kmiCredTimer) _kmiCredTimer = setInterval(function(){ kmiCredBannerRefresh(); }, 30 * 60 * 1000);
+  var rows = null;
+  try { rows = await kmiCredLoad(); } catch (e) { console.warn('[cred] banner', e); }
+  var items = _kmiCredBannerItems(rows);
+  if (!items.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  var top = items[0], red = top.sev === 3;
+  var sig = items.map(function(i){ return i.sig; }).join('|');
+  var hidden = '';
+  try { hidden = sessionStorage.getItem(KMI_CRED_HIDE_KEY) || ''; } catch (e) {}
+  if (!red && hidden === sig) { el.style.display = 'none'; return; }
+  var bg = red ? '#FBE9E9' : '#FFF4DB', fg = red ? '#7A2E2E' : '#7A5410', bd = red ? '#E8B8B8' : '#EBCB8B';
+  el.style.cssText = 'display:flex;align-items:center;gap:10px;margin:-28px -28px 20px;padding:10px 28px;' +
+    'background:' + bg + ';color:' + fg + ';border-bottom:1px solid ' + bd + ';font-size:13px';
+  el.innerHTML =
+    '<span style="font-size:16px">' + (red ? '\u26D4' : '\u26A0') + '</span>' +
+    '<span style="flex:1">' + _spfEsc(top.text) +
+      (items.length > 1 ? ' <span style="font-size:12px;opacity:.85">+' + (items.length - 1) + ' more</span>' : '') + '</span>' +
+    '<span style="cursor:pointer;text-decoration:underline;white-space:nowrap" onclick="nav(\'integrations\')">Open integrations</span>' +
+    (red ? '' : '<button aria-label="Hide" title="Hide until you sign in again" onclick="kmiCredBannerHide(\'' + _spfEsc(sig) + '\')" ' +
+      'style="background:none;border:none;color:' + fg + ';font-size:16px;cursor:pointer;padding:0 4px">\u00D7</button>');
+}
+
+function kmiCredBannerHide(sig) {
+  try { sessionStorage.setItem(KMI_CRED_HIDE_KEY, sig); } catch (e) {}
+  var el = g('kmi-cred-banner'); if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+}
+
+var _KMI_CRED_PILL = {
+  ok:      ['OK', '#E6F2E1', '#2F5D1E'],
+  warn:    ['Expiring', '#FFF4DB', '#7A5410'],
+  expired: ['Expired', '#FBE9E9', '#7A2E2E'],
+  failing: ['Failing', '#FBE9E9', '#7A2E2E'],
+  unset:   ['Date not set', '#F1F1EE', '#666']
+};
+
+async function renderIntegrations() {
+  var box = g('int-content');
+  if (!box) return;
+  box.innerHTML = '<div style="font-size:13px;color:#888">Loading\u2026</div>';
+  var rows = await kmiCredLoad();
+  if (rows === null) { box.innerHTML = '<div class="card" style="font-size:13px;color:#A32D2D">Could not load credentials. Only admins can view this page.</div>'; return; }
+  var trs = rows.map(function(r){
+    var pl = _KMI_CRED_PILL[r.status] || _KMI_CRED_PILL.unset;
+    return '<tr>' +
+      '<td style="padding:10px;vertical-align:top;border-bottom:.5px solid #eee">' +
+        '<div style="font-weight:600;font-size:13px">' + _spfEsc(r.name) + '</div>' +
+        '<div style="font-size:12px;color:#888">' + _spfEsc(r.purpose || '') + '</div>' +
+        (r.status === 'failing' ? '<div style="font-size:12px;color:#A32D2D;margin-top:4px">' + _spfEsc(r.last_failure_msg || '') + '</div>' : '') +
+        (r.renew_notes ? '<div style="font-size:11.5px;color:#888;margin-top:4px;line-height:1.5">' + _spfEsc(r.renew_notes) + '</div>' : '') +
+      '</td>' +
+      '<td style="padding:10px;vertical-align:top;border-bottom:.5px solid #eee"><span style="font-size:11.5px;padding:2px 8px;border-radius:6px;white-space:nowrap;background:' + pl[1] + ';color:' + pl[2] + '">' + pl[0] + '</span>' +
+        (r.days_left !== null && r.days_left !== undefined && r.status !== 'unset' ? '<div style="font-size:11.5px;color:#888;margin-top:4px">' + (r.days_left >= 0 ? r.days_left + ' days left' : Math.abs(r.days_left) + ' days ago') + '</div>' : '') + '</td>' +
+      '<td style="padding:10px;vertical-align:top;border-bottom:.5px solid #eee"><input type="date" value="' + _spfEsc(r.expires_on || '') + '" ' +
+        'onchange="kmiCredSaveDate(\'' + _spfEsc(r.key) + '\', this.value)" style="font-size:13px"></td>' +
+      '<td style="padding:10px;vertical-align:top;border-bottom:.5px solid #eee">' +
+        (r.renew_url ? '<a href="' + _spfEsc(r.renew_url) + '" target="_blank" rel="noopener" style="font-size:12.5px;color:var(--kmi)">Renew \u2197</a>' : '') + '</td>' +
+    '</tr>';
+  }).join('');
+  box.innerHTML =
+    '<div class="card">' +
+      '<div class="ch"><span class="ct">Credentials and expiry dates</span></div>' +
+      '<table style="width:100%;border-collapse:collapse">' +
+        '<thead><tr style="text-align:left;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.6px">' +
+          '<th style="padding:6px 10px">Credential</th><th style="padding:6px 10px">Status</th><th style="padding:6px 10px">Expires</th><th style="padding:6px 10px"></th></tr></thead>' +
+        '<tbody>' + (trs || '<tr><td colspan="4" style="padding:10px;font-size:12px;color:#aaa">No credentials registered</td></tr>') + '</tbody>' +
+      '</table>' +
+      '<div style="font-size:11.5px;color:#888;margin-top:10px;line-height:1.5">Dates save as soon as you change them and reset the 30/14/7-day email reminders. ' +
+        'Admins get a daily email once a credential has expired or Microsoft rejects it.</div>' +
+    '</div>';
+}
+
+async function kmiCredSaveDate(key, val) {
+  var r = await supabaseClient.from('kmi_credential_expiry').update({ expires_on: val || null }).eq('key', key).select('key');
+  if (r.error || !r.data || !r.data.length) {
+    showToast('Expiry date not saved: ' + (r.error ? r.error.message : 'no permission'), 'error');
+  } else {
+    showToast('Expiry date saved', 'success');
+    try { sessionStorage.removeItem(KMI_CRED_HIDE_KEY); } catch (e) {}
+  }
+  renderIntegrations();
+  kmiCredBannerRefresh();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
