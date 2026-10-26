@@ -2427,13 +2427,14 @@ tr.gc-line:hover td{background:#fafafa}
             <option value="Rejected">Rejected</option>
             <option value="Voided">Voided</option>
           </select>
+          <select id="nprj-cor-filing-filter" class="fs" onchange="renderProjectCorList()" title="Filter by SharePoint filing"><option value="">Filing: all</option><option value="notfiled">Not filed</option><option value="failed">Failed</option></select><!-- CFILE1 -->
           <button class="btn btn-sm" onclick="showCorLogModal()" id="nprj-cor-log-btn" title="Download a Change Order Log PDF with a contract summary">&#8595; Download log</button>
           <button class="btn btn-sm" onclick="corSmartUploadForProject()" id="nprj-cor-smart-up-btn" title="Upload a historical COR PDF (e.g. exported from Excel) &#8212; AI fills in the form, COR goes straight to Pending for PM disposition">&#10024; Smart upload</button>
           <button class="btn btn-sm" onclick="xcStart()" id="nprj-cor-xl-btn" title="Create CORs from KMI&#8217;s old Excel COR workbook (one sheet per COR)">&#8679; Import Excel</button>
           <button class="btn btn-sm btn-p" onclick="corNewForProject()" id="nprj-cor-new-btn">+ New COR</button>
         </div>
       </div>
-      <div style="font-size:12px;color:#888;margin-bottom:10px">Change Order Requests on this project. Click any column header to sort; use the dropdown to filter by status.</div>
+      <div style="font-size:12px;color:#888;margin-bottom:10px">Change Order Requests on this project. Click any column header to sort; use the dropdown to filter by status. <span id="nprj-cor-filing-sum"></span><!-- CFILE1 --></div>
       <div id="nprj-cor-list-section"></div>
     </div>
     <div id="nprj-oco-section" style="display:none"></div>
@@ -3327,6 +3328,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="fgr"><label>Owner CO #</label><input id="ncor-customer-co-num" list="ncor-oco-dl" autocomplete="off" placeholder="Pick or type the owner's CO number" onfocus="ocoFillDatalist(ocoFormPid(),'ncor-oco-dl')" oninput="ocoCoNumInput(this,'ncor-customer-co-date',ocoFormPid())"><datalist id="ncor-oco-dl"></datalist><div style="font-size:11px;color:#888;margin-top:4px">Pick an owner CO already on this project or type a new number &mdash; the COR is linked to it when you save.</div><div id="ncor-oco-info" style="font-size:12px;margin-top:4px"></div></div>
       <div class="fgr"><label>Owner CO date</label><input type="date" id="ncor-customer-co-date"><div style="font-size:11px;color:#888;margin-top:4px">The owner CO&rsquo;s date. It applies to every COR on that CO.</div></div>
       <div class="fgr full"><label id="ncor-desc-label">Description *</label><textarea id="ncor-desc" rows="3" placeholder="Describe the change being requested..."></textarea></div>
+      <div class="fgr full" id="ncor-file-title-row"><label>File name <span style="color:#aaa;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px">(SharePoint)</span></label><div style="display:flex;gap:6px;align-items:center"><input id="ncor-file-title" maxlength="80" placeholder="Short keywords, e.g. CB-17 Head and Jamb Patching" style="flex:1"><button type="button" class="btn btn-sm" id="ncor-file-title-ai" onclick="corFileTitleSuggestClick()" title="Suggest a file name from the description">&#10024; Suggest</button><button type="button" class="btn btn-sm btn-p" id="ncor-file-title-save" style="display:none" onclick="corFileTitleSaveClick()">Save name</button></div><div style="font-size:11px;color:#888;margin-top:4px">Names this COR&rsquo;s PDF in the project&rsquo;s SharePoint Change Orders folder. Left blank, it&rsquo;s filled in automatically when the COR goes Pending.</div></div><!-- CFILE1 -->
     </div>
   </div>
 
@@ -19949,18 +19951,24 @@ function renderProjectCorList() {
   if (_xcImp && String(_xcImp.pid) !== String(pid)) _xcImp = null;   // OCO3
   if (_xcImp) { xcRender(); return; }
   var statusFilter = (g('nprj-cor-status-filter') && g('nprj-cor-status-filter').value) || '';
+  var filingFilter = (g('nprj-cor-filing-filter') && g('nprj-cor-filing-filter').value) || '';   // CFILE1
+  var cfd = cfData(pid);                                                                       // CFILE1
   var rows = (db.cors || []).filter(function(c){
     if (String(c.projectId) !== String(pid)) return false;
     if (statusFilter && (c.status || 'Draft') !== statusFilter) return false;
+    if (filingFilter && cfCorKind(c, cfd) !== filingFilter) return false;   // CFILE1
     return true;
   });
   rows.sort(function(a, b){ return _corCompare(a, b, _prjCorSort.key, _prjCorSort.dir); });
 
   var head = _corHeadHtml(PRJ_COR_COLS, _prjCorSort, 'prjCorSetSort', 'padding:8px 10px;text-align:left');
+  head = head.replace('<th style="padding:8px 10px;text-align:left">Actions</th>',                       // CFILE1
+    '<th style="padding:8px 10px;text-align:left;white-space:nowrap">SharePoint</th><th style="padding:8px 10px;text-align:left">Actions</th>');
+  cfSummary(pid, cfd);                                                                         // CFILE1
 
   if (!rows.length) {
     el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
-      '</tr></thead><tbody><tr><td colspan="9" style="text-align:center;color:#aaa;padding:24px;font-size:13px">' +
+      '</tr></thead><tbody><tr><td colspan="10" style="text-align:center;color:#aaa;padding:24px;font-size:13px">' +
       (statusFilter ? ('No ' + corEsc(statusFilter) + ' change orders on this project.') : 'No change orders on this project yet.') +
       '</td></tr></tbody></table>';
     return;
@@ -19985,6 +19993,7 @@ function renderProjectCorList() {
       '<td style="padding:8px 10px">' + corStatusBadge(c) + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap">' + ocoChipHtml(c) + '</td>' +   // OCO2
       '<td style="padding:8px 10px">' + corEsc(creatorName) + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap">' + cfCorCellHtml(c, cfd) + '</td>' +   // CFILE1
       '<td style="padding:8px 10px;white-space:nowrap">' + actions + '</td>' +
       '</tr>';
   }).join('');
@@ -20074,6 +20083,373 @@ async function ocoRefreshCors(ids) {
   });
   _vgApply('cors', items);
   saveDB();
+  corFilingEnsure(ids);   // CFILE1
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CFILE1: SharePoint filing of CORs and owner CO's. The cor-filing Edge
+// Function moves files between 01-Pending, 02-Change Orders/<CO> and
+// 03-Rejected. The browser renders each COR's PDF (the same file the
+// Download button builds), uploads it, and shows filing status.
+// ═══════════════════════════════════════════════════════════════════════
+var _cfCache = {};   // pid -> { data:{cors:{}, cos:{}}, at, loading }
+var _cfBusy  = {};   // corId -> true while its PDF is rendering/uploading
+
+function cfData(pid) {
+  var k = String(pid || '');
+  var ent = _cfCache[k];
+  if (!ent || (!ent.loading && Date.now() - (ent.at || 0) > 60000)) cfLoad(pid);
+  ent = _cfCache[k];
+  return (ent && ent.data) ? ent.data : { cors: {}, cos: {} };
+}
+
+async function cfLoad(pid) {
+  var k = String(pid || '');
+  if (!k || !supabaseClient) return;
+  var ent = _cfCache[k] || (_cfCache[k] = {});
+  if (ent.loading) return;
+  ent.loading = true;
+  try {
+    var r1 = await supabaseClient.from('kmi_cor_filing')
+      .select('cor_id,state,last_error,attempts,pdf_path,sp_item_id,sp_web_url,sp_location,sp_owner_co_id,sp_file_name')
+      .eq('project_id', Number(pid));
+    if (r1.error) throw r1.error;
+    var r2 = await supabaseClient.from('kmi_owner_co_filing')
+      .select('owner_co_id,state,last_error,attempts,folder_web_url,folder_name,attachment_item_id')
+      .eq('project_id', Number(pid));
+    if (r2.error) throw r2.error;
+    var d = { cors: {}, cos: {} };
+    (r1.data || []).forEach(function(r){ d.cors[String(r.cor_id)] = r; });
+    (r2.data || []).forEach(function(r){ d.cos[String(r.owner_co_id)] = r; });
+    var changed = JSON.stringify(d) !== JSON.stringify(ent.data || null);
+    ent.data = d;
+    ent.at = Date.now();
+    if (changed && String(_editProjectId) === k) renderProjectCorList();
+  } catch (e) {
+    console.warn('[cfile] load', e && e.message ? e.message : e);
+    ent.at = Date.now();
+  } finally {
+    ent.loading = false;
+  }
+}
+
+function cfInvalidate(pid) {
+  var ent = _cfCache[String(pid || '')];
+  if (ent) ent.at = 0;
+}
+
+// Wake the filing worker now (cron also sweeps every minute), then re-read
+// filing status a few times so the column catches up without a reload.
+function cfKick(pid) {
+  if (!supabaseClient) return;
+  try {
+    var p = supabaseClient.functions.invoke('cor-filing', { body: {} });
+    if (p && p.catch) p.catch(function(e){ console.warn('[cfile] kick', e); });
+  } catch (e) { console.warn('[cfile] kick', e); }
+  [6000, 20000, 45000].forEach(function(ms){
+    setTimeout(function(){
+      cfInvalidate(pid);
+      if (String(_editProjectId) === String(pid)) cfLoad(pid);
+    }, ms);
+  });
+}
+
+function cfCoFolderName(num) {
+  var s = String(num || '').trim();
+  return /^\d+$/.test(s) ? 'CO-' + s.padStart(3, '0') : s;
+}
+
+// 'filed' | 'filing' | 'failed' | 'notfiled' | 'na'
+function cfCorKind(c, d) {
+  if (!c || corIsBackCharge(c.corType)) return 'na';
+  var r = d.cors[String(c.id)];
+  var st = c.status || 'Draft';
+  if (r && (r.state === 'failed' || (r.state === 'queued' && r.last_error))) return 'failed';
+  if (r && (r.state === 'queued' || r.state === 'filing')) return 'filing';
+  if (_cfBusy[String(c.id)]) return 'filing';
+  if (r && r.sp_item_id && r.state === 'filed') return 'filed';
+  if (st === 'Pending') return 'notfiled';
+  if (st === 'Approved' && c.ownerCoId && r) return 'notfiled';
+  return 'na';
+}
+
+function cfPill(bg, fg, inner, title) {
+  return '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:' + bg + ';color:' + fg + '"' +
+    (title ? ' title="' + corEsc(title) + '"' : '') + '>' + inner + '</span>';
+}
+
+function cfLinkWrap(url, inner) {
+  if (!url) return inner;
+  return '<a href="' + corEsc(url) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="text-decoration:none" title="Open in SharePoint">' +
+    inner + ' <span style="color:#888;font-size:11px">\u2197</span></a>';
+}
+
+function cfBtn(label, onclick) {
+  return ' <button class="btn btn-sm" style="font-size:11px;padding:1px 8px" onclick="event.stopPropagation();' + onclick + '">' + label + '</button>';
+}
+
+function cfCorCellHtml(c, d) {
+  var kind = cfCorKind(c, d);
+  var r = d.cors[String(c.id)];
+  var canAct = hasFull('create-cor');
+  if (kind === 'filed') {
+    var loc = r.sp_location === 'co' ? (cfCoFolderName(c.customerCoNumber) || 'CO folder')
+            : (r.sp_location === 'rejected' ? '03-Rejected' : '01-Pending');
+    return cfLinkWrap(r.sp_web_url, cfPill('#EAF3DE', '#27500A', '\uD83D\uDCC1 ' + corEsc(loc), r.sp_file_name || ''));
+  }
+  if (kind === 'filing') return cfPill('#F1EFE8', '#5F5E5A', 'Filing\u2026');
+  if (kind === 'failed') {
+    return cfPill('#FCEBEB', '#791F1F', '\u26A0 Failed', (r && r.last_error) || '') +
+      (canAct ? cfBtn('Retry', 'cfRetry(\'cor\',' + Number(c.id) + ')') : '');
+  }
+  if (kind === 'notfiled') {
+    return '<span style="font-size:11px;color:#999">Not filed</span>' +
+      (canAct ? cfBtn('File now', 'cfFileNow(' + Number(c.id) + ')') : '');
+  }
+  return '<span style="color:#bbb">\u2014</span>';
+}
+
+function cfCoCellHtml(m, d) {
+  var co = m.co, r = d.cos[String(co.id)];
+  if (!r) return '<span style="color:#bbb">\u2014</span>';
+  if (r.state === 'failed' || (r.state === 'queued' && r.last_error)) {
+    return cfPill('#FCEBEB', '#791F1F', '\u26A0 Failed', r.last_error || '') +
+      (ocoCanEdit() ? cfBtn('Retry', 'cfRetry(\'co\',' + Number(co.id) + ')') : '');
+  }
+  if (r.state === 'queued' || r.state === 'filing') return cfPill('#F1EFE8', '#5F5E5A', 'Filing\u2026');
+  var nOn = m.cors.length;
+  var nIn = m.cors.filter(function(x){
+    var cr = x.cor && d.cors[String(x.cor.id)];
+    return cr && cr.sp_location === 'co' && String(cr.sp_owner_co_id) === String(co.id);
+  }).length;
+  var full = nIn >= nOn;
+  var label = corEsc(r.folder_name || cfCoFolderName(co.co_number)) + ' \u00B7 ' + nIn + ' of ' + nOn + ' COR' + (nOn === 1 ? '' : 's') + ' filed';
+  return cfLinkWrap(r.folder_web_url, cfPill(full ? '#EAF3DE' : '#FAEEDA', full ? '#27500A' : '#633806', '\uD83D\uDCC1 ' + label));
+}
+
+function cfSummary(pid, d) {
+  var el = g('nprj-cor-filing-sum'); if (!el) return;
+  var nNot = 0, nFail = 0;
+  (db.cors || []).forEach(function(c){
+    if (String(c.projectId) !== String(pid)) return;
+    var k = cfCorKind(c, d);
+    if (k === 'notfiled') nNot++; else if (k === 'failed') nFail++;
+  });
+  var parts = [];
+  if (nNot) parts.push(nNot + ' not filed');
+  if (nFail) parts.push('<span style="color:#A32D2D">' + nFail + ' failed</span>');
+  el.innerHTML = parts.length ? '\u00B7 SharePoint: ' + parts.join(' \u00B7 ') : '';
+}
+
+async function cfRetry(kind, id) {
+  if (!supabaseClient) return;
+  var r = await supabaseClient.rpc('kmi_filing_retry', { p_kind: kind, p_id: Number(id) });
+  if (r && r.error) { alert('Could not retry: ' + r.error.message); return; }
+  var pid = _editProjectId;
+  var ent = _cfCache[String(pid)];
+  if (ent && ent.data) {
+    var row = (kind === 'co' ? ent.data.cos : ent.data.cors)[String(id)];
+    if (row) { row.state = 'queued'; row.last_error = null; }
+  }
+  renderProjectCorList();
+  cfKick(pid);
+}
+
+async function cfFileNow(corId) {
+  var c = (db.cors || []).find(function(x){ return String(x.id) === String(corId); });
+  if (!c || _cfBusy[String(c.id)]) return;
+  _cfBusy[String(c.id)] = true;
+  renderProjectCorList();
+  try {
+    await corFilingRender(c);
+    showToast('COR ' + (corExtractKmiSeq(c.corNumber) || c.id) + ' sent to SharePoint.', 'success');
+  } catch (e) {
+    alert('Could not file this COR: ' + (e.message || e));
+  } finally {
+    delete _cfBusy[String(c.id)];
+    cfInvalidate(c.projectId);
+    renderProjectCorList();
+    cfKick(c.projectId);
+  }
+}
+
+// Ask AI for a short keyword file name (CB-17 Head and Jamb Patching).
+async function corAiFileTitle(description, corType) {
+  var desc = String(description || '').trim();
+  if (!desc) return '';
+  var prompt =
+    'You name change order request (COR) PDFs for a masonry subcontractor\'s SharePoint folder.\n' +
+    'Return ONLY the name: 2 to 6 words of keywords. No COR number, no file extension, no quotes, no explanation.\n\n' +
+    'Rules:\n' +
+    '- Write document references compactly: CB #17 -> CB-17, ASI 4 -> ASI-4, RFI #112 -> RFI-112, PR 3 -> PR-3, Bulletin 2 -> Bulletin-2.\n' +
+    '- Premium time / overtime CORs start with "Premium Time", then the work date as M-D-YYYY, then the area or work in 1 to 3 words.\n' +
+    '- Leave out building or location prefixes (e.g. "Middle School") unless they are needed to tell the work apart.\n' +
+    '- Use "and", never "&". Title Case. Keep trade abbreviations like CMU, MW8 as written.\n\n' +
+    'Examples:\n' +
+    'Type: T&M | Description: Middle School CB #17 - Head & Jamb masonry patching for added door 706.2. Patching only demo excluded.\n' +
+    'Name: CB-17 Head and Jamb Patching\n' +
+    'Type: T&M | Description: High School CB #17 - MW8 added grout & rebar to masonry precast support\n' +
+    'Name: CB-17 MW8 Grout and Rebar\n' +
+    'Type: Prem. (OT) | Description: Saturday 10/10/2026 overtime premium for interior cmu. (See attached Field Report)\n' +
+    'Name: Premium Time 10-10-2026 Interior CMU\n' +
+    'Type: T&M | Description: CO #13 COR Reconciliation\n' +
+    'Name: CO 13 COR Reconciliation\n\n' +
+    'Now name this one:\n' +
+    'Type: ' + String(corType || '') + ' | Description: ' + desc.slice(0, 1500) + '\n' +
+    'Name:';
+  var resp = await kmiAIFetch('cor-file-title', {
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 60,
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+  if (!resp.ok) {
+    var t = await resp.text();
+    throw new Error('AI ' + resp.status + ': ' + t.slice(0, 200));
+  }
+  var data = await resp.json();
+  var txt = (data.content || []).map(function(b){ return b.type === 'text' ? b.text : ''; }).join('').trim().split(/\r?\n/)[0] || '';
+  txt = txt.replace(/^name:\s*/i, '')
+           .replace(/^["'`\s]+|["'`\s.]+$/g, '')
+           .replace(/\.pdf$/i, '')
+           .replace(/^COR\s*\d+\s*-\s*/i, '')
+           .replace(/\s*&\s*/g, ' and ')
+           .replace(/["*:<>?\/\\|#%~{}]/g, '-')
+           .replace(/\s+/g, ' ')
+           .trim();
+  return txt.slice(0, 80).trim();
+}
+
+// Render + upload the COR PDF and hand it to the filing queue. Fills in the
+// file name first (AI) when it is blank.
+async function corFilingRender(c) {
+  if (!c || !supabaseClient || corIsBackCharge(c.corType)) return;
+  var p = getProj(c.projectId) || {};
+  if (!String(c.fileTitle || '').trim()) {
+    try {
+      var t = await corAiFileTitle(c.description, c.corType);
+      if (t) {
+        c.fileTitle = t;
+        c.updatedAt = new Date().toISOString();
+        c.updatedByUserId = _currentUser ? _currentUser.id : null;
+        saveDB();
+        var ur = await kmiVgUpsert('cors', toSBCor(c));
+        if (ur && ur.error) console.warn('[cfile] title save', ur.error.message);
+        var inp = g('ncor-file-title');
+        if (inp && String(_editCorId) === String(c.id) && !inp.value) inp.value = t;
+      }
+    } catch (e) { console.warn('[cfile] title', e); }
+  }
+  var doc = await _corBuildFullPDF(c, p);
+  if (!doc) throw new Error('The COR PDF could not be built.');
+  var path = 'cor-pdfs/' + c.id + '/' + Date.now() + '.pdf';
+  var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+    .upload(path, doc.output('blob'), { contentType: 'application/pdf', upsert: false });
+  if (up && up.error) throw new Error(up.error.message);
+  var rr = await supabaseClient.rpc('kmi_cor_filing_pdf_ready', { p_cor_id: Number(c.id), p_pdf_path: path });
+  if (rr && rr.error) throw new Error(rr.error.message);
+}
+
+// Called after every COR status change made in this browser.
+async function corFilingAfterTransition(c) {
+  if (!c || !supabaseClient || corIsBackCharge(c.corType)) return;
+  var id = String(c.id);
+  try {
+    if ((c.status || 'Draft') === 'Pending') {
+      if (_cfBusy[id]) return;
+      _cfBusy[id] = true;
+      try { await corFilingRender(c); } finally { delete _cfBusy[id]; }
+    } else if (c.status === 'Approved') {
+      await corFilingEnsure([c.id]);
+      return;
+    }
+  } catch (e) {
+    console.warn('[cfile] after transition', e);
+    showToast('COR saved, but its PDF did not reach SharePoint (' + (e.message || e) + '). Use File now on the Change Orders tab.', 'error');
+  }
+  cfInvalidate(c.projectId);
+  cfKick(c.projectId);
+}
+
+// After server-side changes (owner CO import / link / approve): any COR the
+// filing queue picked up that has no PDF yet gets one rendered here.
+async function corFilingEnsure(ids) {
+  if (!supabaseClient) return;
+  ids = (ids || []).map(String).filter(function(x, i, a){ return x && a.indexOf(x) === i; });
+  if (!ids.length) return;
+  var res;
+  try { res = await supabaseClient.from('kmi_cor_filing').select('cor_id,pdf_path,sp_item_id').in('cor_id', ids.map(Number)); }
+  catch (e) { console.warn('[cfile] ensure', e); return; }
+  if (!res || res.error) { console.warn('[cfile] ensure', res && res.error); return; }
+  var pids = {};
+  var rows = res.data || [];
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var c = (db.cors || []).find(function(x){ return String(x.id) === String(row.cor_id); });
+    if (!c) continue;
+    pids[String(c.projectId)] = true;
+    var st = c.status || 'Draft';
+    var needs = !row.pdf_path && !row.sp_item_id && !corIsBackCharge(c.corType) &&
+      (st === 'Pending' || (st === 'Approved' && c.ownerCoId));
+    if (!needs || _cfBusy[String(c.id)]) continue;
+    _cfBusy[String(c.id)] = true;
+    try { await corFilingRender(c); }
+    catch (e) { console.warn('[cfile] ensure render', c.id, e); }
+    finally { delete _cfBusy[String(c.id)]; }
+  }
+  Object.keys(pids).forEach(function(pid){ cfInvalidate(pid); cfKick(pid); });
+}
+
+// ── COR form: File name field ─────────────────────────────────────────
+function corFileTitleFill(c, canEdit) {
+  var inp = g('ncor-file-title'); if (!inp) return;
+  inp.value = (c && c.fileTitle) || '';
+  var type = c ? c.corType : (g('ncor-type-display') ? g('ncor-type-display').dataset.corType : '');
+  var bc = corIsBackCharge(type);
+  var rowEl = g('ncor-file-title-row'); if (rowEl) rowEl.style.display = bc ? 'none' : '';
+  var draft = !c || (c.status || 'Draft') === 'Draft';
+  var may = hasFull('create-cor');
+  inp.disabled = draft ? !canEdit : !may;
+  if (g('ncor-file-title-ai')) g('ncor-file-title-ai').style.display = inp.disabled ? 'none' : '';
+  if (g('ncor-file-title-save')) g('ncor-file-title-save').style.display = (!draft && may && !bc) ? '' : 'none';
+}
+
+async function corFileTitleSuggestClick() {
+  var btn = g('ncor-file-title-ai');
+  var desc = g('ncor-desc') ? g('ncor-desc').value : '';
+  var tdisp = g('ncor-type-display');
+  var type = tdisp ? (tdisp.dataset.corType || tdisp.value || '') : '';
+  if (!String(desc || '').trim()) { alert('Enter a description first.'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Thinking\u2026'; }
+  try {
+    var t = await corAiFileTitle(desc, type);
+    if (t && g('ncor-file-title')) g('ncor-file-title').value = t;
+    if (!t) alert('No suggestion came back. Type a short name instead.');
+  } catch (e) {
+    alert('Could not suggest a name: ' + (e.message || e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '\u2728 Suggest'; }
+  }
+}
+
+// Non-Draft CORs: save just the file name (the rest of the form is locked).
+async function corFileTitleSaveClick() {
+  var c = _corCurrent();
+  if (!c) return;
+  if (!hasFull('create-cor')) { alert('You do not have permission to rename CORs.'); return; }
+  var v = (g('ncor-file-title').value || '').trim();
+  if (v === String(c.fileTitle || '')) { showToast('File name unchanged.', 'info'); return; }
+  var prev = c.fileTitle;
+  c.fileTitle = v || null;
+  c.updatedAt = new Date().toISOString();
+  c.updatedByUserId = _currentUser ? _currentUser.id : null;
+  saveDB();
+  var r = supabaseClient ? await kmiVgUpsert('cors', toSBCor(c)) : null;
+  if (r && r.error) { c.fileTitle = prev; saveDB(); alert('Could not save the file name: ' + r.error.message); return; }
+  showToast('File name saved.', 'success');
+  cfInvalidate(c.projectId);
+  cfKick(c.projectId);
 }
 
 // Build a display model for one owner CO.
@@ -20192,6 +20568,7 @@ async function ocoReload() {
 }
 
 function ocoListHtml(pid, data) {
+  var cfd = cfData(pid);   // CFILE1
   var models = data.cos.map(function(co){ return ocoCoModel(data, co); });
   models.sort(function(a, b){
     return String(b.co.co_date || '').localeCompare(String(a.co.co_date || '')) ||
@@ -20211,6 +20588,7 @@ function ocoListHtml(pid, data) {
   var head = '<tr style="background:#f5f5f5"><th style="width:34px"></th><th style="' + th + '">CO #</th><th style="' + th + '">CO date</th>' +
     '<th style="' + th + '">Description</th><th style="' + th + '">CORs</th><th style="' + th + ';text-align:right">KMI requested</th>' +
     '<th style="' + th + ';text-align:right">Owner approved</th><th style="' + th + ';text-align:right">Variance</th><th style="' + th + '">Document</th>' +
+    '<th style="' + th + '">SharePoint</th>' +   // CFILE1
     '<th style="' + th + '">Actions</th></tr>';
 
   var body = models.map(function(m){
@@ -20232,13 +20610,14 @@ function ocoListHtml(pid, data) {
       '<td style="padding:8px 10px;text-align:right"><strong>' + corFmtMoney(m.total) + '</strong></td>' +
       '<td style="padding:8px 10px;text-align:right">' + ocoVarHtml(m.v) + '</td>' +
       '<td style="padding:6px 10px" onclick="event.stopPropagation()">' + doc + '</td>' +
+      '<td style="padding:6px 10px;white-space:nowrap" onclick="event.stopPropagation()">' + cfCoCellHtml(m, cfd) + '</td>' +   // CFILE1
       '<td style="padding:6px 10px;white-space:nowrap" onclick="event.stopPropagation()">' + acts + '</td>' +
       '</tr>';
-    if (open) row += '<tr><td colspan="10" style="padding:0;background:#fafafc;border-top:1px dashed #e0e2ea">' + ocoDetailHtml(m) + '</td></tr>';
+    if (open) row += '<tr><td colspan="11" style="padding:0;background:#fafafc;border-top:1px dashed #e0e2ea">' + ocoDetailHtml(m) + '</td></tr>';
     return row;
   }).join('');
   if (!models.length) {
-    body = '<tr><td colspan="10" style="text-align:center;color:#aaa;padding:24px;font-size:13px">No owner change orders on this project yet.</td></tr>';
+    body = '<tr><td colspan="11" style="text-align:center;color:#aaa;padding:24px;font-size:13px">No owner change orders on this project yet.</td></tr>';
   }
 
   return '<div class="card">' +
@@ -20247,7 +20626,7 @@ function ocoListHtml(pid, data) {
       (ocoCanEdit() ? '<button class="btn btn-sm btn-p" onclick="ocoImpStart()">\u2B06 Import owner CO</button>' : '') +
     '</div></div>' +
     '<div style="margin-bottom:12px">' + chips + '</div>' +
-    '<div style="overflow-x:auto"><table style="width:100%;font-size:13px;min-width:980px"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
+    '<div style="overflow-x:auto"><table style="width:100%;font-size:13px;min-width:1120px"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
   '</div>';
 }
 
@@ -22347,6 +22726,7 @@ function initNewCor() {
   // Customer CO Date — empty on new
   if (g('ncor-customer-co-date')) g('ncor-customer-co-date').value = '';
   if (g('ncor-gc-ref')) g('ncor-gc-ref').value = '';   // OCO2
+  corFileTitleFill(null, true);   // CFILE1
   ocoFormInfo(null);                                    // OCO2
 
   // Trigger project-changed handler to populate customer + attention
@@ -22434,6 +22814,7 @@ function viewCor(id) {
   }
   // OCO2: GC ref + linked owner CO line
   if (g('ncor-gc-ref')) { g('ncor-gc-ref').value = c.gcRef || ''; g('ncor-gc-ref').disabled = !canEdit; }
+  corFileTitleFill(c, canEdit);   // CFILE1
   ocoFormInfo(c);
 
   // Disable inputs if read-only
@@ -22532,6 +22913,7 @@ async function saveCor() {
   // Customer CO Date — optional; captured when KMI receives the formal CO from the customer
   var customerCoDate = g('ncor-customer-co-date') ? (g('ncor-customer-co-date').value || '').trim() : '';
   var gcRef = g('ncor-gc-ref') ? (g('ncor-gc-ref').value || '').trim() : '';   // OCO2
+  var fileTitle = g('ncor-file-title') ? (g('ncor-file-title').value || '').trim() : '';   // CFILE1
 
   if (!projectId) { alert('Please select a project.'); return; }
   if (!corDate)   { alert('Please pick a date.'); return; }
@@ -22634,6 +23016,7 @@ async function saveCor() {
     // OCO2: the owner CO # / date are linked through ocoApplyCorCo() after
     // the upsert below; the server derives them onto the COR.
     existingCor.gcRef = gcRef || null;
+    existingCor.fileTitle = fileTitle || null;   // CFILE1
     existingCor.rolledUpTicketIds = newRolledIds;
     existingCor.laborRows         = snapshotAutoLabor;       // auto-pivot snapshot
     existingCor.manualLaborRows   = newManualLabor;
@@ -22763,7 +23146,8 @@ async function saveCor() {
     voidReason: null,
     customerCoNumber: null,   // OCO2: linked after the upsert
     customerCoDate: null,
-    gcRef: gcRef || null
+    gcRef: gcRef || null,
+    fileTitle: fileTitle || null   // CFILE1
   };
 
   // Lock all rolled-up tickets onto the new COR
@@ -23495,6 +23879,7 @@ async function confirmSmartUploadCor() {
   var customerCoNumber = g('ncor-customer-co-num') ? (g('ncor-customer-co-num').value || '').trim() : '';
   var customerCoDate = g('ncor-customer-co-date') ? (g('ncor-customer-co-date').value || '').trim() : '';
   var gcRef = g('ncor-gc-ref') ? (g('ncor-gc-ref').value || '').trim() : '';   // OCO2
+  var fileTitle = g('ncor-file-title') ? (g('ncor-file-title').value || '').trim() : '';   // CFILE1
   var corNumber = g('ncor-num') ? (g('ncor-num').value || '').trim() : '';
 
   if (!corNumber) { alert('Please enter or confirm the COR # from the original document.'); return; }
@@ -23631,6 +24016,7 @@ async function confirmSmartUploadCor() {
     customerCoNumber: null,   // OCO2: linked after the upsert
     customerCoDate: null,
     gcRef: gcRef || null,
+    fileTitle: fileTitle || null,   // CFILE1
     // Smart Upload provenance — synced if the SQL migration ran, local-only otherwise
     smartUploaded: true,
     smartUploadedAt: nowIso,
@@ -23715,6 +24101,7 @@ async function confirmSmartUploadCor() {
   saveDB();
 
   showToast('Smart Upload complete — COR ' + newCor.corNumber + ' saved as Pending.', 'success');
+  corFilingAfterTransition(newCor);   // CFILE1
 
   // Clean up state. Reset the smart-up save button to its default state
   // BEFORE hiding it — otherwise the next smart-upload flow will show a
@@ -25096,6 +25483,7 @@ async function _corPersistTransition(c, opts) {
 // refreshes the status card, action buttons, and read-only state.
 function _corAfterTransition(c) {
   _corRefreshForm(c.id);
+  corFilingAfterTransition(c);   // CFILE1
 }
 
 // Helper: extract the COR's PDF as base64 (no data: prefix). Used as
@@ -59331,7 +59719,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-26-SPFUI1';
+var KMI_BUILD = '2026-10-26-cfile1';
 
 var _kmiSessionId = (function(){
   try {
@@ -60682,6 +61070,7 @@ function toSBCor(r) {
     // OCO2: customer_co_number / customer_co_date are server-owned (derived
     // from the linked owner CO by trigger) and are no longer written here.
     gc_ref: r.gcRef || null,
+    file_title: r.fileTitle || null,   // CFILE1
     // Smart Upload provenance — added with COR Smart Upload feature.
     // Requires a SQL migration to add these four columns. Until the
     // migration is run these fields will fail-silent on upsert; the
@@ -60776,6 +61165,7 @@ function fromSBCor(r) {
     ownerCoId:        r.owner_co_id || null,                                                    // OCO2
     approvedAmount:   (r.approved_amount !== null && r.approved_amount !== undefined) ? Number(r.approved_amount) : null,
     gcRef:            r.gc_ref || '',
+    fileTitle:        r.file_title || '',   // CFILE1
     // Smart Upload provenance (only present after the SQL migration runs)
     smartUploaded:         !!r.smart_uploaded,
     smartUploadedFile:     r.smart_uploaded_file        || null,
