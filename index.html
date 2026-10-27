@@ -22833,7 +22833,9 @@ function viewCor(id) {
 
   // Round 4.2: hydrate working state from saved COR + recompute auto rows
   ncorInitWorking(c);
-  ncorRebuildAutoMaterialRows();  // recompute on every open per Q9
+  // EQROLL1: only editable (Draft) CORs re-roll on open; read-only CORs show
+  // the saved snapshot, which is what the PDF and the customer have.
+  if (canEdit) ncorRebuildAutoMaterialRows();  // recompute on every open per Q9
   ncorRenderSections();
 
   renderCorStatusCard(c);
@@ -24140,10 +24142,10 @@ async function confirmSmartUploadCor() {
 //                  Hunzinger: Contractor / Work Description / Document
 //                  Reference Number; LABOR COST table with Reg/T&H/DT
 //                  columns; MATERIALS section with markup; EQUIPMENT
-//                  section with markup (note: KMI bundles materials &
-//                  equipment, so we put everything under MATERIALS and
-//                  leave EQUIPMENT empty — totals match because both use
-//                  the same 10% markup); SUBCONTRACTORS, UNIT PRICING
+//                  section with markup (EQROLL1: T&M ticket equipment
+//                  hours roll into EQUIPMENT as auto rows, alongside any
+//                  manual equipment rows; Materials holds materials only,
+//                  each with its own markup); SUBCONTRACTORS, UNIT PRICING
 //                  (always empty for KMI), CHANGE Sub Total, BOND, CHANGE
 //                  Total; then bottom Contractor block; WORK SCOPE
 //                  NARRATIVE — Added Scope / Omitted Scope.
@@ -26728,9 +26730,72 @@ function ncorRemoveManualLabor(idx) {
 // in unit prices (or they auto-fill from project material list when desc
 // matches). Manual rows added on top.
 
+// EQROLL1: T&M ticket equipment -> COR Equipment section.
+// Each rolled-up ticket's equipment rows (description + hours) aggregate by
+// description into auto rows at the top of w.equipmentRows, tagged
+// source:'auto'. Manual rows (no source) are never touched. Unit and rate
+// are KMI's and carry across re-rollups; quantity tracks the summed ticket
+// hours unless KMI overrides it (qtyOverride). Rows that older builds rolled
+// into Materials as "<desc> (equipment hrs)" hand over their unit, rate and
+// saved quantity the first time a Draft is reopened, so this must run BEFORE
+// autoMaterialRows is rebuilt (ncorRebuildAutoMaterialRows calls it first).
+var EQROLL_LEGACY_SUFFIX = ' (equipment hrs)';
+function ncorRebuildAutoEquipmentRows() {
+  var w = _ncorWorking;
+  if (!w) return;
+  var all = Array.isArray(w.equipmentRows) ? w.equipmentRows : [];
+  var manual  = all.filter(function(r){ return r && r.source !== 'auto'; });
+  var oldAuto = all.filter(function(r){ return r && r.source === 'auto'; });
+  if (corIsNoRollupType(w.corType)) { w.equipmentRows = manual; return; }
+
+  // Legacy "(equipment hrs)" material rows, keyed by the bare description
+  var legacy = {};
+  var sfx = EQROLL_LEGACY_SUFFIX;
+  (w.autoMaterialRows || []).forEach(function(r){
+    var d = String((r && r.description) || '');
+    if (d.length > sfx.length && d.slice(-sfx.length) === sfx) legacy[d.slice(0, -sfx.length).trim()] = r;
+  });
+
+  // Aggregate ticket equipment hours by description (first-seen order)
+  var order = [], byDesc = {};
+  (w.rolledUpTicketIds || []).forEach(function(tid){
+    var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(tid); });
+    if (!t) return;
+    (t.equipmentRows || []).forEach(function(r){
+      var desc = String((r && r.description) || '').trim();
+      if (!desc) return;
+      var hrs = Number(r.hours) || 0;
+      if (hrs <= 0) return;
+      if (!byDesc[desc]) { byDesc[desc] = { hours: 0, sourceTickets: [] }; order.push(desc); }
+      byDesc[desc].hours += hrs;
+      if (byDesc[desc].sourceTickets.indexOf(t.ticketNumber) === -1) byDesc[desc].sourceTickets.push(t.ticketNumber);
+    });
+  });
+
+  var newAuto = order.map(function(desc){
+    var agg   = byDesc[desc];
+    var hrs   = corRound2(agg.hours);
+    var prior = oldAuto.find(function(r){ return r.description === desc; });
+    var leg   = prior ? null : legacy[desc];
+    var unit  = prior ? (prior.unit || 'HR') : ((leg && leg.unit) ? String(leg.unit) : 'HR');
+    var unitPrice = 0;
+    if (prior && Number(prior.unitPrice) > 0)  unitPrice = Number(prior.unitPrice);
+    else if (leg && Number(leg.unitPrice) > 0) unitPrice = Number(leg.unitPrice);
+    var override = false, qty = hrs;
+    if (prior && prior.qtyOverride) { override = true; qty = Number(prior.quantity) || 0; }
+    else if (leg && Math.abs((Number(leg.quantity) || 0) - hrs) > 0.001) { override = true; qty = Number(leg.quantity) || 0; }
+    return {
+      description: desc, quantity: qty, unit: unit, unitPrice: unitPrice,
+      source: 'auto', sourceTickets: agg.sourceTickets, ticketHours: hrs, qtyOverride: override
+    };
+  });
+  w.equipmentRows = newAuto.concat(manual);
+}
+
 function ncorRebuildAutoMaterialRows() {
   var w = _ncorWorking;
   if (!w) return;
+  ncorRebuildAutoEquipmentRows();  // EQROLL1: must run first (reads legacy "(equipment hrs)" rows below)
   if (corIsNoRollupType(w.corType)) { w.autoMaterialRows = []; return; }  // BACKCHG1
 
   // Project material list for description-based price match
@@ -26754,18 +26819,8 @@ function ncorRebuildAutoMaterialRows() {
         byDesc[desc].sourceTickets.push(t.ticketNumber);
       }
     });
-    (t.equipmentRows || []).forEach(function(r){
-      var desc = (r.description || '').trim();
-      if (!desc) return;
-      var hrs = Number(r.hours) || 0;
-      if (hrs <= 0) return;
-      var label = desc + ' (equipment hrs)';
-      if (!byDesc[label]) byDesc[label] = { quantity: 0, sourceTickets: [], unit: 'HR' };  // MATUNIT1
-      byDesc[label].quantity += hrs;
-      if (byDesc[label].sourceTickets.indexOf(t.ticketNumber) === -1) {
-        byDesc[label].sourceTickets.push(t.ticketNumber);
-      }
-    });
+    // EQROLL1: ticket equipment rows no longer roll into Materials; they
+    // go to the Equipment section via ncorRebuildAutoEquipmentRows().
   });
 
   // Preserve any unit prices KMI already overrode on existing auto rows
@@ -27158,12 +27213,23 @@ function ncorRenderEquipmentSection() {
   }
 
   var rowsHtml = rows.map(function(r, idx){
-    var descCell = canEdit
+    // EQROLL1: auto rows come from rolled-up T&M tickets. Description is
+    // locked, quantity defaults to the summed ticket hours (override OK),
+    // unit + rate are KMI's. Remove the ticket to drop an auto row.
+    var isAuto = r.source === 'auto';
+    var autoTag = isAuto
+      ? ' <span style="font-size:10px;color:#888" title="From rolled-up tickets: ' + corEsc((r.sourceTickets || []).join(', ')) + '">auto</span>'
+      : '';
+    var hrsNote = (isAuto && r.qtyOverride && r.ticketHours !== undefined && r.ticketHours !== null)
+      ? '<div style="font-size:10px;color:#888;margin-top:2px">Tickets: ' + tmFmtHrs(r.ticketHours) + ' hrs' +
+        (canEdit ? ' &middot; <a href="#" onclick="ncorResetEquipQty(' + idx + ');return false" title="Reset to the summed ticket hours">reset</a>' : '') + '</div>'
+      : '';
+    var descCell = (canEdit && !isAuto)
       ? '<input type="text" value="' + corEsc(r.description || '') + '" onchange="ncorUpdateEquip(' + idx + ',\'description\',this.value)" style="width:100%;font-size:12px;padding:3px 4px">'
-      : corEsc(r.description || '');
-    var qtyCell = canEdit
+      : corEsc(r.description || '') + autoTag;
+    var qtyCell = (canEdit
       ? '<input type="number" step="0.01" min="0" value="' + (Number(r.quantity) || 0) + '" onchange="ncorUpdateEquip(' + idx + ',\'quantity\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
-      : '<span style="font-family:monospace">' + tmFmtHrs(r.quantity) + '</span>';
+      : '<span style="font-family:monospace">' + tmFmtHrs(r.quantity) + '</span>') + hrsNote;
     var unitCell = canEdit
       ? '<input type="text" value="' + corEsc(r.unit || '') + '" onchange="ncorUpdateEquip(' + idx + ',\'unit\',this.value)" placeholder="DAY/HR/EA" style="width:70px;text-align:center;font-size:12px;padding:3px 4px">'
       : corEsc(r.unit || '');
@@ -27171,7 +27237,7 @@ function ncorRenderEquipmentSection() {
       ? '<input type="number" step="0.01" min="0" value="' + (Number(r.unitPrice) || 0) + '" onchange="ncorUpdateEquip(' + idx + ',\'unitPrice\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'
       : '<span style="font-family:monospace">' + corFmtMoney(r.unitPrice) + '</span>';
     var cost = (Number(r.quantity) || 0) * (Number(r.unitPrice) || 0);
-    var removeCell = canEdit
+    var removeCell = (canEdit && !isAuto)
       ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="ncorRemoveEquip(' + idx + ')">×</button>'
       : '';
     return '<tr>' +
@@ -27218,11 +27284,26 @@ function ncorAddEquipmentRow() {
 }
 function ncorUpdateEquip(idx, field, value) {
   var r = (_ncorWorking.equipmentRows || [])[idx]; if (!r) return;
-  if (field === 'description' || field === 'unit') r[field] = value;
-  else if (field === 'quantity' || field === 'unitPrice') r[field] = Number(value) || 0;
+  if (field === 'description') { if (r.source !== 'auto') r.description = value; }  // EQROLL1: auto descriptions come from the tickets
+  else if (field === 'unit') r.unit = value;
+  else if (field === 'quantity') {
+    r.quantity = Number(value) || 0;
+    if (r.source === 'auto') r.qtyOverride = true;  // EQROLL1: override survives re-rollup
+  }
+  else if (field === 'unitPrice') r.unitPrice = Number(value) || 0;
+  ncorRenderSections();
+}
+// EQROLL1: drop a quantity override and go back to the summed ticket hours.
+function ncorResetEquipQty(idx) {
+  var r = (_ncorWorking.equipmentRows || [])[idx];
+  if (!r || r.source !== 'auto') return;
+  r.qtyOverride = false;
+  ncorRebuildAutoEquipmentRows();
   ncorRenderSections();
 }
 function ncorRemoveEquip(idx) {
+  var r = (_ncorWorking.equipmentRows || [])[idx];
+  if (r && r.source === 'auto') return;  // EQROLL1: remove the ticket from the COR instead
   (_ncorWorking.equipmentRows || []).splice(idx, 1);
   ncorRenderSections();
 }
@@ -59719,7 +59800,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-26-cfile1';
+var KMI_BUILD = '2026-10-27-EQROLL1';
 
 var _kmiSessionId = (function(){
   try {
