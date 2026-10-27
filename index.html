@@ -22951,7 +22951,10 @@ async function saveCor() {
       quantity:    Number(r.quantity)  || 0,
       unit:        corMatUnitNorm(r.unit),  // MATUNIT1
       unitPrice:   Number(r.unitPrice) || 0,
-      sourceTickets: r.sourceTickets || []
+      sourceTickets: r.sourceTickets || [],
+      // MATQTY1: override flag + ticket sum persist so the edit survives reopen
+      ticketQty:   (r.ticketQty !== undefined && r.ticketQty !== null) ? Number(r.ticketQty) : null,
+      qtyOverride: r.qtyOverride === true
     };
   });
   var newManualMat = (w.manualMaterialRows || []).map(function(r){
@@ -22972,7 +22975,9 @@ async function saveCor() {
   // MIX2: keep hourType on the snapshot. Without it every saved row reads
   // as legacy, so PDFs and the Foundation cost export lose ST/OT/DT.
   var snapshotAutoLabor = ncorComputeAutoLaborRows().map(function(r){
-    return { classification: r.classification, hourType: corHourTypeOf(r), hours: r.hours, rate: r.rate, source: 'auto' };
+    // MATQTY1: qtyOverride + ticketHours ride along so overrides survive reopen
+    return { classification: r.classification, hourType: corHourTypeOf(r), hours: r.hours, rate: r.rate, source: 'auto',
+             ticketHours: r.ticketHours, qtyOverride: !!r.qtyOverride };
   });
 
   // Read Hunzinger fields back into working state before snapshotting
@@ -26179,6 +26184,9 @@ function ncorInitWorking(c) {
     manualLaborRows:    Array.isArray(c.manualLaborRows)    ? JSON.parse(JSON.stringify(c.manualLaborRows))    : [],
     manualMaterialRows: Array.isArray(c.manualMaterialRows) ? JSON.parse(JSON.stringify(c.manualMaterialRows)) : [],
     autoMaterialRows:   Array.isArray(c.autoMaterialRows)   ? JSON.parse(JSON.stringify(c.autoMaterialRows))   : [],
+    // MATQTY1: PM hour overrides on auto (ticket) labor rows, keyed
+    // "<classification>\u0000<hourType>". Rebuilt from the saved snapshot.
+    laborHourOverrides: ncorLaborOverridesFrom(c.laborRows),
     subRows:            Array.isArray(c.subRows)            ? JSON.parse(JSON.stringify(c.subRows))            : [],
     // Snapshotted markup (immutable on the COR; project edits don't disturb)
     matEqMarkupPct: (c.matEqMarkupPct !== null && c.matEqMarkupPct !== undefined) ? c.matEqMarkupPct : 10,
@@ -26569,14 +26577,22 @@ function ncorComputeAutoLaborRows() {
     });
     var rate = corResolveRateByHour(rateRow, corType, b.hourType);
     if (rate === null || rate === undefined) rate = 0;
+    // MATQTY1: a PM hour override survives re-rollup; ticketHours keeps the
+    // summed ticket hours so the form can show what the tickets said.
+    var ov = w.laborHourOverrides || {};
+    var ovKey = b.classification + '\u0000' + b.hourType;
+    var isOv = Object.prototype.hasOwnProperty.call(ov, ovKey);
+    var hrs = isOv ? (Number(ov[ovKey]) || 0) : b.hours;
     return {
       classification: b.classification,
       hourType: b.hourType,
-      hours: b.hours,
+      hours: hrs,
       rate: rate,
-      total: b.hours * rate,
+      total: hrs * rate,
       source: 'auto',
-      missingRate: !rateRow
+      missingRate: !rateRow,
+      ticketHours: corRound2(b.hours),
+      qtyOverride: isOv
     };
   });
 }
@@ -26643,9 +26659,17 @@ function ncorRenderLaborSection() {
             return '<option value="' + h + '"' + (h === rowHt ? ' selected' : '') + '>' + COR_HOUR_LABEL[h] + '</option>';
           }).join('') +
         '</select>';
-    var hoursCell = isAuto || !canEdit
+    // MATQTY1: auto (ticket) hours are editable; an override shows the
+    // summed ticket hours with a reset link (same pattern as EQROLL1).
+    var laborHrsNote = (isAuto && r.qtyOverride && r.ticketHours !== undefined && r.ticketHours !== null)
+      ? '<div style="font-size:10px;color:#888;margin-top:2px">Tickets: ' + tmFmtHrs(r.ticketHours) + ' hrs' +
+        (canEdit ? ' &middot; <a href="#" onclick="ncorResetLaborHours(' + idx + ');return false" title="Reset to the summed ticket hours">reset</a>' : '') + '</div>'
+      : '';
+    var hoursCell = (!canEdit
       ? '<span style="font-family:monospace">' + tmFmtHrs(r.hours) + '</span>'
-      : '<input type="number" step="0.25" min="0" value="' + (Number(r.hours) || 0) + '" onchange="ncorUpdateManualLabor(' + manualIdx + ',\'hours\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">';
+      : (isAuto
+          ? '<input type="number" step="0.25" min="0" value="' + (Number(r.hours) || 0) + '" onchange="ncorUpdateAutoLabor(' + idx + ',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px" title="Override the rolled-up hours">'
+          : '<input type="number" step="0.25" min="0" value="' + (Number(r.hours) || 0) + '" onchange="ncorUpdateManualLabor(' + manualIdx + ',\'hours\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">')) + laborHrsNote;
     var rateCell = isAuto || !canEdit
       ? '<span style="font-family:monospace">' + corFmtMoney(r.rate) + '</span>'
       : '<input type="number" step="0.01" min="0" value="' + (Number(r.rate) || 0) + '" onchange="ncorUpdateManualLabor(' + manualIdx + ',\'rate\',this.value)" style="width:90px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">';
@@ -26721,6 +26745,34 @@ function ncorRemoveManualLabor(idx) {
   var rows = _ncorWorking.manualLaborRows || [];
   rows.splice(idx, 1);
   ncorRenderSections();
+}
+
+// MATQTY1: override / reset hours on an auto (ticket) labor row. idx is the
+// row's position in ncorComputeAutoLaborRows() (auto rows render first).
+function ncorUpdateAutoLabor(idx, value) {
+  var w = _ncorWorking; if (!w) return;
+  var r = ncorComputeAutoLaborRows()[idx]; if (!r) return;
+  w.laborHourOverrides = w.laborHourOverrides || {};
+  w.laborHourOverrides[r.classification + '\u0000' + r.hourType] = Math.max(0, Number(value) || 0);
+  ncorRenderSections();
+}
+function ncorResetLaborHours(idx) {
+  var w = _ncorWorking; if (!w) return;
+  var r = ncorComputeAutoLaborRows()[idx]; if (!r) return;
+  if (w.laborHourOverrides) delete w.laborHourOverrides[r.classification + '\u0000' + r.hourType];
+  ncorRenderSections();
+}
+// MATQTY1: saved auto labor snapshot -> { "<cls>\u0000<ht>": hours } for rows a PM overrode.
+function ncorLaborOverridesFrom(rows) {
+  var out = {};
+  (Array.isArray(rows) ? rows : []).forEach(function(r){
+    if (!r || r.qtyOverride !== true) return;
+    var cls = String(r.classification || '').trim();
+    var ht  = corHourTypeOf(r);
+    if (!cls || !ht) return;
+    out[cls + '\u0000' + ht] = Number(r.hours) || 0;
+  });
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -26839,14 +26891,27 @@ function ncorRebuildAutoMaterialRows() {
     // MATUNIT1: unit = user override > ticket row > project material list > blank
     var unit = (prior && prior.unit) ? corMatUnitNorm(prior.unit)
              : (agg.unit || (matched ? corMatUnitNorm(matched.unit) : ''));
+    // MATQTY1: keep a PM quantity override across re-rollups. Rows saved
+    // before MATQTY1 have no qtyOverride flag at all; on those, a saved
+    // quantity that differs from the ticket sum was a PM edit the old
+    // rebuild would have wiped, so it is handed over as an override once.
+    var override = false, qty = agg.quantity;
+    if (prior && prior.qtyOverride === true) {
+      override = true; qty = Number(prior.quantity) || 0;
+    } else if (prior && prior.qtyOverride === undefined &&
+               Math.abs((Number(prior.quantity) || 0) - agg.quantity) > 0.001) {
+      override = true; qty = Number(prior.quantity) || 0;
+    }
     return {
       description: desc,
-      quantity: agg.quantity,
+      quantity: qty,
       unit: unit,
       unitPrice: unitPrice,
-      cost: agg.quantity * unitPrice,
+      cost: qty * unitPrice,
       sourceTickets: agg.sourceTickets,
-      source: 'auto'
+      source: 'auto',
+      ticketQty: corRound2(agg.quantity),
+      qtyOverride: override
     };
   });
   w.autoMaterialRows = newAuto;
@@ -26901,11 +26966,12 @@ function ncorRenderMaterialsSection() {
     var descCell = isAuto || !canEdit
       ? corEsc(r.description || '')
       : '<input type="text" value="' + corEsc(r.description || '') + '" onchange="ncorUpdateManualMat(' + manualIdx + ',\'description\',this.value)" style="width:100%;font-size:12px;padding:3px 4px">';
-    var qtyCell = !canEdit
+    var qtyCell = (!canEdit
       ? '<span style="font-family:monospace">' + tmFmtHrs(r.quantity) + '</span>'
       : (isAuto
           ? '<input type="number" step="0.01" min="0" value="' + (Number(r.quantity) || 0) + '" onchange="ncorUpdateAutoMat(' + autoIdx + ',\'quantity\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px" title="Override the rolled-up quantity">'
-          : '<input type="number" step="0.01" min="0" value="' + (Number(r.quantity) || 0) + '" onchange="ncorUpdateManualMat(' + manualIdx + ',\'quantity\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">');
+          : '<input type="number" step="0.01" min="0" value="' + (Number(r.quantity) || 0) + '" onchange="ncorUpdateManualMat(' + manualIdx + ',\'quantity\',this.value)" style="width:80px;text-align:right;font-family:monospace;font-size:12px;padding:3px 4px">'))
+      + (isAuto ? ncorMatQtyNote(r, autoIdx, canEdit) : '');  // MATQTY1
     var priceCell = !canEdit
       ? '<span style="font-family:monospace">' + corFmtMoney(r.unitPrice) + '</span>'
       : (isAuto
@@ -26976,9 +27042,26 @@ function ncorUpdateManualMat(idx, field, value) {
 
 function ncorUpdateAutoMat(idx, field, value) {
   var r = (_ncorWorking.autoMaterialRows || [])[idx]; if (!r) return;
-  if (field === 'quantity' || field === 'unitPrice') r[field] = Number(value) || 0;
+  if (field === 'quantity') { r.quantity = Number(value) || 0; r.qtyOverride = true; }  // MATQTY1: survives re-rollup
+  else if (field === 'unitPrice') r.unitPrice = Number(value) || 0;
   else if (field === 'unit') r.unit = corMatUnitNorm(value);  // MATUNIT1 (survives re-rollup)
   ncorRenderSections();
+}
+
+// MATQTY1: drop a material quantity override and go back to the ticket sum.
+function ncorResetMatQty(idx) {
+  var r = (_ncorWorking && _ncorWorking.autoMaterialRows || [])[idx];
+  if (!r || r.source !== 'auto') return;
+  r.qtyOverride = false;
+  ncorRebuildAutoMaterialRows();
+  ncorRenderSections();
+}
+// MATQTY1: "Tickets: X - reset" note under an overridden auto material quantity.
+function ncorMatQtyNote(r, idx, canEdit) {
+  if (!r || r.source !== 'auto' || r.qtyOverride !== true) return '';
+  if (r.ticketQty === undefined || r.ticketQty === null) return '';
+  return '<div style="font-size:10px;color:#888;margin-top:2px">Tickets: ' + tmFmtHrs(r.ticketQty) +
+    (canEdit ? ' &middot; <a href="#" onclick="ncorResetMatQty(' + idx + ');return false" title="Reset to the summed ticket quantity">reset</a>' : '') + '</div>';
 }
 
 function ncorRemoveManualMat(idx) {
@@ -59800,7 +59883,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-27-EQROLL1';
+var KMI_BUILD = '2026-10-27-MATQTY1';
 
 var _kmiSessionId = (function(){
   try {
