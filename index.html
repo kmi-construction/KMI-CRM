@@ -1930,6 +1930,15 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="fgr full"><label>Notes</label><textarea id="nop-notes" placeholder="Any notes about this opportunity..."></textarea></div>
     </div>
   </div>
+  <div class="card" id="nop-sp-card"><!-- OGUARD2 -->
+    <div class="ch"><span class="ct">SharePoint bid folder</span><span style="font-size:12px;color:#888">Created automatically when you save</span></div>
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px 14px">
+      <div class="fgr"><label>Folder name</label><div style="display:flex"><span id="nop-sp-prefix" style="display:flex;align-items:center;padding:0 10px;font-size:13px;color:#5F5E5A;background:#F5F5F3;border:0.5px solid #ddd;border-right:0;border-radius:7px 0 0 7px;white-space:nowrap">YYYY-###-</span><input id="nop-spname" style="border-radius:0 7px 7px 0" oninput="_ogSpTouched=true;_ogSpPreview()"></div></div>
+      <div class="fgr"><label>Location</label><select id="nop-sploc" onchange="_ogSpPreview()"><option value="main">Main year folder</option><option value="_Budgets">_Budgets</option><option value="_Small Projects">_Small Projects</option></select></div>
+    </div>
+    <div style="font-size:12px;color:#888;margin-top:8px">### is the opportunity number assigned on save. The year folder follows the bid due date. Shorten the name the way you would by hand.</div>
+    <div id="nop-sp-preview" style="font-size:12px;color:#1a1a1a;background:#F0F2F8;border-radius:6px;padding:8px 10px;margin-top:8px"></div>
+  </div>
   <div class="card">
     <div class="ch">
       <span class="ct">Vendor assignments</span>
@@ -1971,6 +1980,7 @@ tr.gc-line:hover td{background:#fafafa}
     </div>
   </div>
   <div id="od-outcome-section"></div>
+  <div id="od-spfolder-section"></div><!-- OGUARD2 -->
   <div id="od-bidinvites-section"></div>
   <div class="card"><div class="pmg" id="od-meta"></div></div>
   <div id="od-final-bid-section"></div>
@@ -6666,7 +6676,7 @@ function _biStashForm(){
   var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); }); if(!r) return;
   var f=_biReadForm(); var ex=r.extracted||{};
   ex.project=f.project; ex.gc=f.gc; ex.bid_due_date=f.bidDate; ex.address=f.address;
-  ex.city=f.city; ex.state=f.state; ex.zip=f.zip; ex.type=f.type; ex.contact=f.contact; ex.plan_room_url=f.planUrl;
+  ex.city=f.city; ex.state=f.state; ex.zip=f.zip; ex.type=f.type; ex.contact=f.contact; ex.plan_room_url=f.planUrl; ex.gc_email=f.gcEmail;
   r.extracted=ex;
 }
 
@@ -6831,6 +6841,7 @@ function openBidReview(id){
   var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(id); });
   _biCands=_biSeedCands(r);
   _biRouteTouched=false; _biConfirmBar=false; _biHardAck=false; _biBusy=false; _biRoutedNotice=false;
+  _biSpName=''; _biSpTouched=false; _biSpLoc='main';   // OGUARD2
   _biOpenedOpen=_biIsOpen(r);
   _biApplyDefaultRoute();
   _biChosenCustomerId = _biFuzzyCustomerId((r&&r.extracted?r.extracted.gc:'')||'');
@@ -6948,6 +6959,7 @@ function renderBidInboxReview(){
           ? '<div style="font-size:12px;color:#777">Locked because the plan room link matches '+_biEsc(hard.opportunity_id)+'.</div>'
             + '<label class="og-ack" onclick="event.stopPropagation()"><input type="checkbox" '+(_biHardAck?'checked ':'')+(canRoute?'':'disabled ')+'onchange="biHardAck(this)">I checked, and this is a different job</label>'
           : '<div style="font-size:12px;color:#777">Treat this as a distinct job. A new opp is created from the details, with this GC as its first invitation.</div>')
+    +     (_biRoute==='new'?_ogBiFolderFields(r):'')   // OGUARD2
     +   '</div>'
     + '</label>';
 
@@ -7020,6 +7032,7 @@ function renderBidInboxReview(){
     +         '<div class="bi-fld"><label>State / Zip</label><input id="bif-state" value="'+_biEsc([ex.state,ex.zip].filter(Boolean).join(' '))+'"></div>'
     +         '<div class="bi-fld"><label>Scope / type '+_biConf(ex,'type')+'</label><input id="bif-type" value="'+_biEsc(ex.type||'')+'"></div>'
     +         '<div class="bi-fld"><label>GC contact</label><input id="bif-contact" value="'+_biEsc(ex.contact||'')+'"></div>'
+    +         '<div class="bi-fld full"><label>GC email</label><input id="bif-gcEmail" value="'+_biEsc(_ogGcEmailDefault(r))+'"></div>'   // OGUARD2
     +         '<div class="bi-fld full"><label>Plan room link '+_biConf(ex,'plan_room_url')+'</label><input id="bif-planUrl" value="'+_biEsc(ex.plan_room_url||'')+'"></div>'
     +       '</div>'
     +     '</div>'
@@ -7037,7 +7050,7 @@ function _biReadForm(){
   return {
     project:v('bif-project'), gc:v('bif-gc'), bidDate:v('bif-bidDate'),
     address:v('bif-address'), city:v('bif-city'), state:st, zip:zip,
-    type:v('bif-type'), contact:v('bif-contact'), planUrl:v('bif-planUrl')
+    type:v('bif-type'), contact:v('bif-contact'), planUrl:v('bif-planUrl'), gcEmail:v('bif-gcEmail')
   };
 }
 
@@ -7204,6 +7217,221 @@ function _ogEnsureStyles(){
   document.head.appendChild(st);
 }
 
+// ═══ OGUARD2: bid folders, server-side delete, GC email ═══════════════
+// Server-owned opportunity fields: never sent by toSBOpp, carried into open
+// tabs by the delta pull even when the editable fields did not change.
+var _OG_SERVER_KEYS = ['deletedAt','spFolderStatus','spFolderUrl','spFolderError','spFolderName','spFolderLocation','spFolderLink','spFolderUpdatedAt'];
+var _OG_SP_SUBS = { main:'', _Budgets:'_Budgets', '_Small Projects':'_Small Projects' };
+var _ogFolderEdit = {};                                      // oppId -> "change name or location" form open
+var _ogSpTouched = false;                                    // New opportunity: folder name edited by hand
+var _biSpName = '', _biSpTouched = false, _biSpLoc = 'main'; // inbox review: Create folder fields
+var _OG_LBL = 'display:block;font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px';
+
+function _dpCopyServerKeys(e, cur, inc){
+  var ch = false;
+  (e.serverKeys || []).forEach(function(k){
+    if (JSON.stringify(cur[k]) !== JSON.stringify(inc[k])) { cur[k] = inc[k]; ch = true; }
+  });
+  return ch;
+}
+
+function _ogAdoptServerKeys(raw){
+  if(!raw) return null;
+  var inc=fromSBOpp(raw), cur=getOpp(inc.id);
+  if(!cur) return null;
+  _OG_SERVER_KEYS.forEach(function(k){ cur[k]=inc[k]; });
+  return cur;
+}
+
+// Same rules as the server (sp-folder-provision) so the preview matches.
+function _ogCleanSeg(s){ return String(s||'').replace(/["*:<>?\/\\|#%~&{}]/g,'-').replace(/\s+/g,' ').trim(); }
+function _ogTrimName(s){ s=String(s||''); if(s.length>80) s=s.slice(0,80); return s.replace(/[\s.\-]+$/g,'').replace(/^[\s.]+/,''); }
+function _ogOppPrefix(id){ var m=/^OPP-(\d{4})-(\d+)$/i.exec(String(id||'')); return m?(m[1]+'-'+m[2]+'-'):''; }
+function _ogFolderName(id, name, link){ return _ogTrimName(link?_ogCleanSeg(name):(_ogOppPrefix(id)+_ogCleanSeg(name))); }
+function _ogBidYear(d){ var s=String(d||''), m=/^(\d{4})-\d{2}-\d{2}/.exec(s)||/^\d{1,2}\/\d{1,2}\/(\d{4})$/.exec(s); return m?Number(m[1]):new Date().getFullYear(); }
+function _ogLocLabel(year, loc){ var sub=_OG_SP_SUBS[loc||'main']||''; return 'Bid Documents / '+year+(sub?' / '+sub:''); }
+function _ogLocOptions(sel, year){
+  return [['main',year?String(year):'Main year folder'],['_Budgets',(year?year+' / ':'')+'_Budgets'],['_Small Projects',(year?year+' / ':'')+'_Small Projects']].map(function(x){
+    return '<option value="'+x[0]+'"'+((sel||'main')===x[0]?' selected':'')+'>'+_biEsc(x[1])+'</option>';
+  }).join('');
+}
+function _ogPrefixBox(text, idAttr, hidden){
+  return '<span'+(idAttr?' id="'+idAttr+'"':'')+' style="display:'+(hidden?'none':'flex')+';align-items:center;padding:0 10px;font-size:13px;color:#5F5E5A;background:#F5F5F3;border:1px solid #ddd;border-right:0;border-radius:6px 0 0 6px;white-space:nowrap">'+_biEsc(text)+'</span>';
+}
+function _ogUrlName(url){ try{ var p=String(url||'').replace(/\/+$/,'').split('/'); return decodeURIComponent(p[p.length-1]||''); }catch(x){ return ''; } }
+
+function _ogCleanEmail(v){
+  var e=String(v||'').trim().toLowerCase();
+  if(!/^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/.test(e)) return '';
+  var p=e.split('@');
+  if(['kmi-construction.com','kmi.build','inbound.kmi.build'].indexOf(p[1])>=0) return '';
+  if(/^(no-?reply|do-?not-?reply|notifications?|mailer-daemon)/.test(p[0])) return '';
+  return e;
+}
+function _ogGcEmailDefault(r){
+  var ex=(r&&r.extracted)||{};
+  if(Object.prototype.hasOwnProperty.call(ex,'gc_email') && ex.gc_email!=null && String(ex.gc_email).trim()!=='' ) return String(ex.gc_email).trim();
+  return _ogCleanEmail(r&&r.fromEmail);
+}
+
+// Inbox review: folder name + location inside "Create a new opportunity".
+function _ogBiFolderFields(r){
+  var ex=(r&&r.extracted)||{}, nm=_biSpTouched?_biSpName:(ex.project||''), yr=_ogBidYear(ex.bid_due_date);
+  return '<div onclick="event.stopPropagation()" style="display:grid;grid-template-columns:2fr 1fr;gap:10px;margin-top:10px">'
+    + '<div><label style="'+_OG_LBL+'">Bid folder name</label><div style="display:flex">'+_ogPrefixBox(new Date().getFullYear()+'-###-')
+    +   '<input id="biSpName" value="'+_biEsc(nm)+'" oninput="_biSpName=this.value;_biSpTouched=true" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid #ddd;border-radius:0 6px 6px 0"></div></div>'
+    + '<div><label style="'+_OG_LBL+'">Location</label><select id="biSpLoc" onchange="_biSpLoc=this.value" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid #ddd;border-radius:6px">'
+    +   _ogLocOptions(_biSpLoc, yr)+'</select></div>'
+    + '</div>';
+}
+
+// New opportunity page: folder card (name follows the project name until edited).
+function _ogSpFormReset(){
+  var card=g('nop-sp-card'); if(!card) return;
+  card.style.display='';
+  _ogSpTouched=false;
+  if(g('nop-spname')) g('nop-spname').value='';
+  if(g('nop-sploc')) g('nop-sploc').value='main';
+  if(g('nop-sp-prefix')) g('nop-sp-prefix').textContent=new Date().getFullYear()+'-###-';
+  if(!_ogSpFormReset._wired){
+    _ogSpFormReset._wired=true;
+    var p=g('nop-project'); if(p) p.addEventListener('input', function(){ if(!_ogSpTouched && g('nop-spname')) g('nop-spname').value=this.value; _ogSpPreview(); });
+    var d=g('nop-date'); if(d) d.addEventListener('change', _ogSpPreview);
+  }
+  _ogSpPreview();
+}
+function _ogSpPreview(){
+  var el=g('nop-sp-preview'); if(!el) return;
+  var nm=_ogTrimName(new Date().getFullYear()+'-###-'+_ogCleanSeg(_ogSpVal('nop-spname')));
+  el.innerHTML=_biEsc(_ogLocLabel(_ogBidYear(_ogSpVal('nop-date')), _ogSpVal('nop-sploc')))+' / <b>'+_biEsc(nm)+'</b>';
+}
+function _ogSpVal(id){ var el=g(id); return el?String(el.value||'').trim():''; }
+
+// Ask the server to process the queued folder request; the delta pull brings
+// the result back (a few quick pulls so the card updates without waiting).
+function _ogFolderKick(id, quiet){
+  if(!supabaseClient||!id) return;
+  try{
+    supabaseClient.functions.invoke('sp-folder-provision',{ body:{ opportunity_id:id } }).then(function(res){
+      var d=res&&res.data, o=getOpp(id);
+      if(o&&d&&d.status&&d.status!=='none'){ o.spFolderStatus=d.status; if(d.url) o.spFolderUrl=d.url; if(d.error) o.spFolderError=d.error; _ogFolderRefresh(id); }
+    }).catch(function(){});
+  }catch(x){}
+  if(!quiet){ [4000,20000,60000].forEach(function(t){ setTimeout(function(){ kmiDeltaPull('push'); }, t); }); }
+}
+function _ogFolderRefresh(id){
+  var pg=document.querySelector('.pg.active');
+  if(pg&&pg.id==='pg-opp-detail'&&String(currentOppId)===String(id)) _ogRenderFolderCard(getOpp(id));
+}
+
+function _ogRenderFolderCard(o){
+  var host=g('od-spfolder-section'); if(!host) return;
+  if(!o){ host.innerHTML=''; return; }
+  _ogEnsureStyles();
+  var id=String(o.id), ide=_biEsc(id), st=o.spFolderStatus||'', editing=!!_ogFolderEdit[id];
+  var year=_ogBidYear(o.bidDate), loc=_ogLocLabel(year, o.spFolderLocation);
+  var nm=_ogFolderName(id, o.spFolderName||o.project||'', !!o.spFolderLink);
+  var pill=function(t,fg,bg){ return '<span class="og-pill" style="color:'+fg+';background:'+bg+';border:0">'+t+'</span>'; };
+  var head=function(p){ return '<div class="ch" style="margin-bottom:10px"><span class="ct">Bid folder</span>'+(p||'')+'</div>'; };
+  // Keep what someone is typing when a refresh re-renders the form.
+  var keep=(host.dataset.opp===id&&g('og-sp-name'))?{ name:g('og-sp-name').value, loc:g('og-sp-loc').value, link:g('og-sp-link').checked }:null;
+  var html;
+  if(st==='ready'&&o.spFolderUrl&&!editing){
+    html=head(pill('Ready','#3B6D11','#EAF3DE'))
+      + '<div style="font-size:13px;font-weight:600">'+_biEsc(_ogUrlName(o.spFolderUrl)||nm)+'</div>'
+      + '<div style="font-size:12px;color:#5F5E5A;margin:2px 0 10px">'+_biEsc(loc)+'</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn btn-p btn-sm" style="text-decoration:none" href="'+_biEsc(o.spFolderUrl)+'" target="_blank" rel="noopener">Open in SharePoint</a>'
+      + '<button class="btn btn-sm" type="button" onclick="_ogCopyFolderLink(\''+ide+'\')">Copy link</button></div>';
+  } else if((st==='pending'||st==='creating')&&!editing){
+    html=head(pill('Creating\u2026','#185FA5','#E6F1FB'))
+      + '<div style="font-size:13px;font-weight:600">'+_biEsc(nm)+'</div>'
+      + '<div style="font-size:12px;color:#5F5E5A;margin-top:2px">Copying the bid template into '+_biEsc(loc)+'. This usually takes under a minute.</div>';
+  } else if(st==='error'&&!editing){
+    html=head(pill('Not created','#7A1F1F','#FCEBEB'))
+      + '<div style="font-size:13px;color:#1a1a1a">'+_biEsc(o.spFolderError||'Folder creation failed.')+'</div>'
+      + '<div style="font-size:12px;color:#5F5E5A;margin:2px 0 10px">'+_biEsc(nm)+' \u00b7 '+_biEsc(loc)+'</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-p btn-sm" type="button" onclick="_ogFolderRetry(\''+ide+'\')">Retry</button>'
+      + '<button class="btn btn-sm" type="button" onclick="_ogFolderEdit[\''+ide+'\']=true;_ogRenderFolderCard(getOpp(\''+ide+'\'))">Change name or location</button></div>';
+  } else {
+    var fName=keep?keep.name:(o.spFolderName||o.project||''), fLoc=keep?keep.loc:(o.spFolderLocation||'main'), fLink=keep?keep.link:!!o.spFolderLink;
+    html=head(editing?'':pill('None','#5F5E5A','#F1EFE8'))
+      + '<div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">'
+      +   '<div><label style="'+_OG_LBL+'">Folder name</label><div style="display:flex">'+_ogPrefixBox(_ogOppPrefix(id),'og-sp-pre',fLink)
+      +     '<input id="og-sp-name" value="'+_biEsc(fName)+'" style="border-radius:0 7px 7px 0"></div></div>'
+      +   '<div><label style="'+_OG_LBL+'">Location</label><select id="og-sp-loc">'+_ogLocOptions(fLoc, year)+'</select></div>'
+      + '</div>'
+      + '<label class="og-ack"><input type="checkbox" id="og-sp-link" '+(fLink?'checked ':'')+'onchange="g(\'og-sp-pre\').style.display=this.checked?\'none\':\'flex\'">Link an existing folder instead (type its exact name, no number)</label>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-p btn-sm" type="button" onclick="_ogFolderRequest(\''+ide+'\')">'+(editing?'Save and retry':'Create folder')+'</button>'
+      + (editing?'<button class="btn btn-sm" type="button" onclick="delete _ogFolderEdit[\''+ide+'\'];_ogRenderFolderCard(getOpp(\''+ide+'\'))">Cancel</button>':'')
+      + '</div>';
+  }
+  host.dataset.opp=id;
+  host.innerHTML='<div class="card">'+html+'</div>';
+}
+
+function _ogCopyFolderLink(id){
+  var o=getOpp(id); if(!o||!o.spFolderUrl) return;
+  try{ navigator.clipboard.writeText(o.spFolderUrl).then(function(){ showToast('Folder link copied','success'); }, function(){ showToast('Could not copy the link','error'); }); }
+  catch(x){ showToast('Could not copy the link','error'); }
+}
+async function _ogFolderRequest(id){
+  var name=_ogSpVal('og-sp-name'), loc=_ogSpVal('og-sp-loc')||'main', link=!!(g('og-sp-link')&&g('og-sp-link').checked);
+  if(!name){ showToast('Enter a folder name','error'); return; }
+  await _ogFolderSubmit(id, name, loc, link);
+}
+async function _ogFolderRetry(id){
+  var o=getOpp(id); if(!o) return;
+  await _ogFolderSubmit(id, o.spFolderName||o.project||'', o.spFolderLocation||'main', !!o.spFolderLink);
+}
+async function _ogFolderSubmit(id, name, loc, link){
+  if(!supabaseClient){ showToast('Not connected','error'); return; }
+  var res=await _ogRpc('kmi_opp_folder_request',{ p_opp_id:id, p_name:name, p_location:loc, p_link_existing:link });
+  if(res.opportunity) _ogAdoptServerKeys(res.opportunity);
+  if(res.ok){ delete _ogFolderEdit[id]; var h=g('od-spfolder-section'); if(h) h.dataset.opp=''; _ogFolderRefresh(id); _ogFolderKick(id); return; }
+  _ogFolderRefresh(id);
+  showToast(res.code==='busy'?'The folder is being created right now':res.code==='ready'?'This opportunity already has a folder':('Could not request the folder: '+(res.message||res.code||'unknown error')),'error');
+}
+
+function _ogDeleteBlocked(id, why){
+  showModal('<div class="mt">'+_biEsc(id)+' can\u2019t be deleted</div>'
+    + '<div class="msb">'+why+'</div>'
+    + '<div style="font-size:13px;color:#5F5E5A">If this job isn\u2019t going forward, mark it <b>Not bidding</b>. If it\u2019s a duplicate, use reason <b>Duplicate Job</b>.</div>'
+    + '<div class="mf"><button class="btn" onclick="closeModal()">Close</button>'
+    + '<button class="btn btn-p" onclick="closeModal();promptNotBidding(\''+_biEsc(id)+'\')">Mark not bidding\u2026</button></div>');
+}
+async function _ogDeleteConfirm(id){
+  if(!supabaseClient){ showToast('Not connected','error'); return; }
+  var b=g('og-del-btn'); if(b){ if(b.disabled) return; b.disabled=true; b.textContent='Deleting\u2026'; }
+  var res=await _ogRpc('kmi_opp_delete',{ p_opp_id:id, p_actor:_ogActor() });
+  if(res.ok||res.code==='not_found'){
+    closeModal();
+    _ogRemoveOppLocal(id);
+    if(res.ok) db.activity.unshift({ text:id+' deleted', type:'not-bidding', time:'Just now' });
+    saveDB();
+    var pg=document.querySelector('.pg.active');
+    if(pg&&pg.id==='pg-opp-detail') nav('opportunities'); else if(typeof filterOpp==='function') filterOpp();
+    showToast(res.ok?('Deleted '+id):(id+' was already deleted'), res.ok?'success':'info');
+    return;
+  }
+  if(res.code==='has_proposal'){ _ogDeleteBlocked(id, 'It has proposal <b>'+_biEsc(res.proposal_id||'')+'</b>. Deleting it would orphan that proposal.'); return; }
+  if(res.code==='has_project'){ _ogDeleteBlocked(id, 'It is linked to project <b>'+_biEsc(((res.project_number||'')+' '+(res.project_name||'')).trim())+'</b>.'); return; }
+  closeModal();
+  showToast('Delete failed: '+(res.message||res.code||'unknown error'),'error');
+}
+function _ogRemoveOppLocal(id){
+  id=String(id);
+  var wasClean=!_tblDirty('opportunities');
+  db.opportunities=(db.opportunities||[]).filter(function(o){ return String(o.id)!==id; });
+  if(_rowHash.opportunities) delete _rowHash.opportunities[id];
+  if(_vgBase.opportunities) delete _vgBase.opportunities[id];
+  if(wasClean){ var snap=_tblSnapshot('opportunities'); if(snap!==null) _tblHash.opportunities=snap; }
+  db.bidInvites=(db.bidInvites||[]).filter(function(v){ return String(v.opportunityId)!==id; });
+  (db.bidInbox||[]).forEach(function(r){
+    if(String(r.resolvedOpportunityId)===id){ r.status='new'; r.resolvedOpportunityId=null; r.resolvedInviteId=null; r.reviewedBy=null; r.reviewedAt=null; }
+  });
+  updateBidInboxNavCount();
+}
+
 function _biRouteFail(r, res){
   if(res.code==='already_routed'){
     _ogApplyRouted(r, res); _biRoutedNotice=true;
@@ -7224,7 +7452,7 @@ async function biAttach(){
   if(!supabaseClient){ showToast('Not connected','error'); return; }
   _biStashForm();
   var f=_biReadForm();
-  var invite={ gc_name:(f.gc||r.fromName||'').trim(), gc_email:r.fromEmail||'', gc_contact:f.contact||'',
+  var invite={ gc_name:(f.gc||r.fromName||'').trim(), gc_email:_ogCleanEmail(f.gcEmail), gc_contact:f.contact||'',
                bid_due_date:f.bidDate||'', plan_room_url:f.planUrl||'',
                customer_id:(_biChosenCustomerId!=null?String(_biChosenCustomerId):null) };
   _biBusy=true; renderBidInboxReview();
@@ -7257,8 +7485,9 @@ async function biCreateOpp(confirmed){
     } else if((_biCands||[]).length){ _biConfirmBar=true; renderBidInboxReview(); return; }
   }
   var opp={ project:f.project, customer_id:_biChosenCustomerId||null, type:f.type||'', types:f.type?[f.type]:[],
-            bid_date:f.bidDate||'', address:f.address||'', city:f.city||'', state:f.state||'', zip:f.zip||'', est_value:0 };
-  var invite={ gc_name:f.gc||r.fromName||'', gc_email:r.fromEmail||'', gc_contact:f.contact||'',
+            bid_date:f.bidDate||'', address:f.address||'', city:f.city||'', state:f.state||'', zip:f.zip||'', est_value:0,
+            sp_folder_name:(_biSpTouched?_biSpName:f.project), sp_folder_location:(_biSpLoc||'main') };   // OGUARD2
+  var invite={ gc_name:f.gc||r.fromName||'', gc_email:_ogCleanEmail(f.gcEmail), gc_contact:f.contact||'',
                bid_due_date:f.bidDate||'', plan_room_url:f.planUrl||'', source:'inbox',
                customer_id:(_biChosenCustomerId!=null?String(_biChosenCustomerId):null) };
   _biBusy=true; renderBidInboxReview();
@@ -7268,6 +7497,7 @@ async function biCreateOpp(confirmed){
   if(res.ok){
     var o=_ogAdoptOpp(res.opportunity); _ogAdoptInvite(res.invite); _ogAdoptInbox(res.inbox);
     db.activity.unshift({text:o.id+' created from bid inbox \u2014 '+o.project, type:'pending', time:'Just now'});
+    _ogFolderKick(o.id);   // OGUARD2
     saveDB(); showToast('Created '+o.id, 'success'); biBackToList(); updateBidInboxNavCount();
     return;
   }
@@ -30548,7 +30778,9 @@ function importCSV(evt, type) {
           pm_id: pmRec ? pmRec.id : null,
           notes: r['Notes'] || '',
           decision: dec,
-          no_reason: r['No-Bid Reason'] || ''
+          no_reason: r['No-Bid Reason'] || '',
+          sp_folder_name: project,   // OGUARD2
+          sp_folder_location: 'main'
         }});
       });
       _ogImportOpps(oppQueue, skipped, errors, type);
@@ -30578,7 +30810,7 @@ async function _ogImportOpps(queue, skipped, errors, type) {
   for (var i = 0; i < queue.length; i++) {
     var q = queue[i];
     var res = await _ogRpc('kmi_opp_create', { p_opp: q.payload, p_actor: _ogActor(), p_confirm_duplicate: true });
-    if (res.ok) { _ogAdoptOpp(res.opportunity); added++; ids.push(res.opportunity.id); }
+    if (res.ok) { _ogAdoptOpp(res.opportunity); added++; ids.push(res.opportunity.id); _ogFolderKick(res.opportunity.id, true); }   // OGUARD2
     else errors.push('Row ' + q.row + ': ' + (res.message || res.code || 'create failed'));
   }
   saveDB();
@@ -30937,6 +31169,7 @@ function renderOppDetail(id) {
   g('od-id').textContent    = o.id;
   g('od-title').textContent = o.project;
   g('od-cust').textContent  = c.name + (c.city ? ' \u00b7 ' + c.city : '');
+  _ogRenderFolderCard(o);   // OGUARD2
 
   var banner = g('od-banner');
   banner.className = 'opp-banner ' + dec;
@@ -32107,6 +32340,7 @@ function initNewOpp() {
   g('nop-save-btn').disabled        = false;
   g('nop-id-display').textContent   = 'Opportunity # assigned when saved';
   g('nop-id-display').dataset.oid   = '';
+  _ogSpFormReset();   // OGUARD2
   g('nop-cust').innerHTML = '<option value="">Select customer...</option>' +
     db.customers.slice().sort(function(a,b){return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase());}).map(function(c){ return '<option value="' + c.id + '">' + c.name + ' \u2014 ' + c.contact + '</option>'; }).join('');
   g('nop-cust').onchange = function(){ populatePMDropdown(parseInt(g('nop-cust').value)||null, null); };
@@ -32214,7 +32448,9 @@ async function _ogNopCreate(confirmed) {
     city:    (g('nop-city').value || '').trim(),
     state:   (g('nop-state').value || '').trim(),
     zip:     (g('nop-zip').value || '').trim(),
-    vendor_assignments: readOppVendorAssignments()
+    vendor_assignments: readOppVendorAssignments(),
+    sp_folder_name: _ogSpVal('nop-spname') || project,   // OGUARD2
+    sp_folder_location: _ogSpVal('nop-sploc') || 'main'
   };
   if (btn) { btn.disabled = true; btn.textContent = 'Creating\u2026'; }
   var res = await _ogRpc('kmi_opp_create', { p_opp: payload, p_actor: _ogActor(), p_confirm_duplicate: !!confirmed });
@@ -32224,6 +32460,7 @@ async function _ogNopCreate(confirmed) {
     db.activity.unshift({text: o.id + ' created \u2014 ' + o.project, type: 'pending', time: 'Just now'});
     saveDB();
     maybeNotifyEstimator(o.id, null);
+    _ogFolderKick(o.id);   // OGUARD2
     openOppDetail(o.id);
     return;
   }
@@ -32237,6 +32474,7 @@ function editOpp(id) {
   document.querySelectorAll('.pg').forEach(function(el){ el.classList.remove('active'); });
   g('pg-new-opportunity').classList.add('active');
   g('nop-heading').textContent    = 'Edit opportunity';
+  if (g('nop-sp-card')) g('nop-sp-card').style.display = 'none';   // OGUARD2: folder lives on the opportunity page
   g('nop-save-btn').textContent   = 'Save changes';
   g('nop-id-display').textContent = o.id;
   g('nop-id-display').dataset.oid = o.id;
@@ -32257,12 +32495,29 @@ function editOpp(id) {
   renderOppVendorAssignmentRows(Array.isArray(o.vendorAssignments) ? o.vendorAssignments : []);
 }
 
+// OGUARD2: server-side soft delete (kmi_opp_delete). Blocked when a proposal
+// or project hangs off the opportunity; invites go with it, inbox emails go
+// back to New, the SharePoint folder is never touched.
 function deleteOpp(id) {
   var o = getOpp(id); if (!o) return;
-  if (!confirm('Delete ' + o.id + ' \u2014 ' + o.project + '?\nThis will also delete any linked proposal.')) return;
-  db.opportunities = db.opportunities.filter(function(x){ return x.id !== id; });
-  if (o.proposalId) db.proposals = db.proposals.filter(function(x){ return x.id !== o.proposalId; });
-  saveDB(); filterOpp();
+  _ogEnsureStyles();
+  var prop = o.proposalId || ((db.proposals || []).find(function(p){ return String(p.opportunityId) === String(id); }) || {}).id;
+  var proj = (db.projects || []).find(function(p){ return String(p.opportunityId) === String(id); });
+  if (prop) { _ogDeleteBlocked(id, 'It has proposal <b>' + _biEsc(prop) + '</b>. Deleting it would orphan that proposal.'); return; }
+  if (proj) { _ogDeleteBlocked(id, 'It is linked to project <b>' + _biEsc(((proj.number || '') + ' ' + (proj.name || '')).trim()) + '</b>.'); return; }
+  var invN = (db.bidInvites || []).filter(function(v){ return String(v.opportunityId) === String(id); }).length;
+  var mailN = (db.bidInbox || []).filter(function(r){ return String(r.resolvedOpportunityId) === String(id); }).length;
+  var li = function(t){ return '<div style="display:flex;gap:8px;font-size:13px;color:#1a1a1a"><span aria-hidden="true">\u00b7</span><span>' + t + '</span></div>'; };
+  var lines = [];
+  if (invN) lines.push(li(invN + ' bid invitation' + (invN === 1 ? ' is' : 's are') + ' removed with it'));
+  if (mailN) lines.push(li(mailN + ' bid inbox email' + (mailN === 1 ? ' goes' : 's go') + ' back to <b>New</b> so ' + (mailN === 1 ? 'it' : 'they') + ' can be routed again'));
+  if (o.spFolderUrl || o.spFolderStatus) lines.push(li('Its SharePoint bid folder is left as it is'));
+  showModal('<div class="mt">Delete ' + _biEsc(o.id) + '?</div>' +
+    '<div class="msb">' + _biEsc(o.project || '') + '</div>' +
+    (lines.length ? '<div style="display:flex;flex-direction:column;gap:6px;background:#FAFAF8;border:1px solid #eee;border-radius:8px;padding:10px 12px;margin-bottom:10px">' + lines.join('') + '</div>' : '') +
+    '<div style="font-size:12px;color:#888">It disappears for everyone. An admin can restore it if needed.</div>' +
+    '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn" id="og-del-btn" style="background:#A32D2D;border-color:#A32D2D;color:#fff" onclick="_ogDeleteConfirm(\'' + _biEsc(id) + '\')">Delete opportunity</button></div>');
 }
 
 
@@ -60112,7 +60367,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-02-OGUARD1';
+var KMI_BUILD = '2026-11-02-OGUARD2';
 
 var _kmiSessionId = (function(){
   try {
@@ -60960,7 +61215,16 @@ function fromSBOpp(r) {
     addenda:r.addenda||[],
     vendorAssignments:r.vendor_assignments||[],
     created:r.created||'',
-    versionAt:r.version_at||null   // OGUARD1 (VG); not mapped back by toSBOpp
+    versionAt:r.version_at||null,   // OGUARD1 (VG); not mapped back by toSBOpp
+    // OGUARD2: server-owned, never in toSBOpp - soft delete + bid folder state
+    deletedAt:r.deleted_at||null,
+    spFolderStatus:r.sp_folder_status||null,
+    spFolderUrl:r.sp_folder_url||null,
+    spFolderError:r.sp_folder_error||null,
+    spFolderName:r.sp_folder_name||null,
+    spFolderLocation:r.sp_folder_location||null,
+    spFolderLink:!!r.sp_folder_link_existing,
+    spFolderUpdatedAt:r.sp_folder_updated_at||null
   };
 }
 
@@ -62328,7 +62592,8 @@ function DP_TABLES() {
     { k:'cors',      t:'kmi_cors',       from:fromSBCor,      page:'cors',       refresh:function(){ filterCors(); } },
     // OGUARD1: opportunities ride the row-diff/VG merge; invites and inbox
     // rows are written only by direct calls, so they merge as-is (direct).
-    { k:'opportunities', t:'kmi_opportunities', from:fromSBOpp, page:['opportunities','opp-detail','bid-inbox'], refresh:function(){ _ogRefreshOppViews(); } },
+    { k:'opportunities', t:'kmi_opportunities', from:fromSBOpp, page:['opportunities','opp-detail','bid-inbox'], refresh:function(){ _ogRefreshOppViews(); },
+      serverKeys:_OG_SERVER_KEYS, removeIf:function(inc){ return !!inc.deletedAt; } },   // OGUARD2
     { k:'bidInvites',    t:'kmi_bid_invites',   from:fromSBBidInvite, direct:true, page:['opp-detail','bid-inbox'], refresh:function(){ _ogRefreshOppViews(); } },
     { k:'bidInbox',      t:'kmi_bid_inbox',     from:fromSBBidInbox,  direct:true, page:['bid-inbox'], refresh:function(){ _ogRefreshInbox(); }, after:function(){ updateBidInboxNavCount(); } }
   ];
@@ -62370,7 +62635,10 @@ function _dpOnPage(e, pid) { return Array.isArray(e.page) ? e.page.indexOf(pid) 
 
 function _ogRefreshOppViews() {
   var pg = document.querySelector('.pg.active'), pid = pg ? pg.id : '';
-  if (pid === 'pg-opp-detail') { if (typeof currentOppId !== 'undefined' && currentOppId && getOpp(currentOppId)) renderOppDetail(currentOppId); }
+  if (pid === 'pg-opp-detail') {
+    if (typeof currentOppId !== 'undefined' && currentOppId && getOpp(currentOppId)) renderOppDetail(currentOppId);
+    else if (typeof currentOppId !== 'undefined' && currentOppId) { showToast(currentOppId + ' was deleted', 'info'); nav('opportunities'); }   // OGUARD2
+  }
   else if (pid === 'pg-opportunities') renderOpportunities();
   else if (pid === 'pg-bid-inbox') _ogRefreshInbox();
 }
@@ -62424,6 +62692,15 @@ function _dpMerge(e, rows) {
     var id = String(inc.id), cur = byId[id];
     if (cur && _vgEditing(e.k, id)) { def[id] = raw; st.deferred = (st.deferred || 0) + 1; return; }   // DP1.1: open in an edit form - merge after it closes
     delete def[id];
+    if (e.removeIf && e.removeIf(inc)) {   // OGUARD2: soft-deleted on the server
+      if (cur) {
+        var ix = list.indexOf(cur); if (ix >= 0) list.splice(ix, 1);
+        delete byId[id]; delete base[id];
+        if (_vgBase[e.k]) delete _vgBase[e.k][id];
+        st.merged++;
+      } else st.skipped++;
+      return;
+    }
     if (!cur) { list.push(inc); byId[id] = inc; base[id] = h; _vgSetBase(e.k, id, mapped); st.added++; return; }   // VG1
     var curH = null;
     try { curH = _rowHash64(JSON.stringify(sync.m(cur))); } catch (x) {}
@@ -62431,10 +62708,10 @@ function _dpMerge(e, rows) {
       base[id] = h;
       if (inc.versionAt) cur.versionAt = inc.versionAt;
       _vgSetBase(e.k, id, mapped);
-      st.skipped++;
+      if (_dpCopyServerKeys(e, cur, inc)) st.merged++; else st.skipped++;   // OGUARD2
       return;
     }
-    if (curH === null || base[id] !== curH) { st.kept++; return; }   // unsaved local edit keeps its OLD version stamp
+    if (curH === null || base[id] !== curH) { if (_dpCopyServerKeys(e, cur, inc)) st.merged++; st.kept++; return; }   // OGUARD2: server fields still land   // unsaved local edit keeps its OLD version stamp
     Object.keys(cur).forEach(function(key){ if (!(key in inc)) delete cur[key]; });
     Object.assign(cur, inc);
     base[id] = h;
@@ -63080,7 +63357,7 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_vendors').select('*'),
       supabaseClient.from('kmi_vendor_contacts').select('*'),
       supabaseClient.from('kmi_users').select(KMI_USER_COLS),   // PFC1
-      supabaseClient.from('kmi_opportunities').select('*'),
+      supabaseClient.from('kmi_opportunities').select('*').is('deleted_at', null),   // OGUARD2
       supabaseClient.from('kmi_proposals').select('*'),
       supabaseClient.from('kmi_projects').select('*'),
       supabaseClient.from('kmi_activity').select('*').order('created_at', {ascending:false}).limit(50),
