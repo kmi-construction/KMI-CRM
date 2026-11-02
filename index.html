@@ -6820,20 +6820,66 @@ function renderBidInboxList(){
   var _si=g('biSearch'); if(_si && _biSearch){ _si.focus(); try{ _si.setSelectionRange(_si.value.length,_si.value.length); }catch(e){} }
 }
 
+// OGUARD1 review state: duplicate candidates from the server scorer, whether
+// the reviewer picked a route, the "Create anyway" bar, the hard-match
+// acknowledgement, an RPC in flight, and the "already routed" notice.
+var _biCands = [], _biRouteTouched = false, _biConfirmBar = false, _biHardAck = false;
+var _biBusy = false, _biRoutedNotice = false, _biOpenedOpen = false;
+
 function openBidReview(id){
   _biReviewId=id;
   var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(id); });
-  var ms=r&&r.matchSuggestion?r.matchSuggestion:{};
-  _biRoute = (ms&&ms.opportunity_id) ? 'attach' : 'new';
-  _biChosenOppId = (ms&&ms.opportunity_id) ? ms.opportunity_id : null;
+  _biCands=_biSeedCands(r);
+  _biRouteTouched=false; _biConfirmBar=false; _biHardAck=false; _biBusy=false; _biRoutedNotice=false;
+  _biOpenedOpen=_biIsOpen(r);
+  _biApplyDefaultRoute();
   _biChosenCustomerId = _biFuzzyCustomerId((r&&r.extracted?r.extracted.gc:'')||'');
   _biView='review';
   renderBidInboxReview();
+  if(r && _biOpenedOpen) _biLiveCheck(r);
 }
+
+function _biIsOpen(r){ return !!r && ['new','reviewed'].indexOf(r.status||'new')>=0; }
+
+// Candidates stored on the email when it arrived (inbound-bid), until the
+// live check returns. Older rows carry only a single suggestion.
+function _biSeedCands(r){
+  var ms=(r&&r.matchSuggestion)||{};
+  if(Array.isArray(ms.candidates)&&ms.candidates.length) return ms.candidates.slice();
+  if(ms.opportunity_id) return [{ opportunity_id:ms.opportunity_id, opportunity_name:ms.opportunity_name||'', score:ms.score, hard:!!ms.hard, signals:ms.signals||[] }];
+  return [];
+}
+
+function _biApplyDefaultRoute(){
+  if(_biRouteTouched) return;
+  if(_biCands.length){ _biRoute='attach'; _biChosenOppId=_biCands[0].opportunity_id; }
+  else { _biRoute='new'; _biChosenOppId=null; }
+}
+
+// Re-score against the opportunities as they are now.
+async function _biLiveCheck(r){
+  if(!supabaseClient||!r) return;
+  var ex=r.extracted||{}, res;
+  try{
+    res=await supabaseClient.rpc('kmi_opp_dup_check',{ p_project:ex.project||null, p_address:ex.address||null, p_city:ex.city||null,
+      p_zip:ex.zip||null, p_bid_date:ex.bid_due_date||null, p_plan_room_url:ex.plan_room_url||null, p_exclude_id:null, p_limit:5 });
+  }catch(x){ return; }
+  if(!res||res.error||!Array.isArray(res.data)) return;
+  if(_biView!=='review'||String(_biReviewId)!==String(r.id)||!_biIsOpen(r)||_biBusy) return;
+  _biStashForm();
+  _biCands=res.data;
+  _biApplyDefaultRoute();
+  renderBidInboxReview();
+}
+
+function biPickCand(id){ _biStashForm(); _biRoute='attach'; _biRouteTouched=true; _biChosenOppId=id; _biConfirmBar=false; renderBidInboxReview(); }
+function biPickOpp(id){ _biStashForm(); _biChosenOppId=id||null; renderBidInboxReview(); }
+function biHardAck(cb){ _biStashForm(); _biHardAck=!!(cb&&cb.checked); if(_biHardAck){ _biRoute='new'; _biRouteTouched=true; } renderBidInboxReview(); }
+function biConfirmBack(){ _biStashForm(); _biConfirmBar=false; renderBidInboxReview(); }
 
 function biBackToList(){ _biView='list'; _biReviewId=null; renderBidInboxList(); }
 
-function biSetRoute(route){ if(route===_biRoute) return; _biStashForm(); _biRoute=route; renderBidInboxReview(); }
+function biSetRoute(route){ if(route===_biRoute) return; _biStashForm(); _biRoute=route; _biRouteTouched=true; _biConfirmBar=false; renderBidInboxReview(); }   // OGUARD1
 
 function _biConf(ex,key){
   var c=(ex&&ex.confidence)?ex.confidence[key]:null;
@@ -6853,38 +6899,42 @@ function renderBidInboxReview(){
     return '<span class="bi-chip" onclick="biOpenAttachment(\''+_biEsc(a.storage_path||'')+'\')">\uD83D\uDCCE '+_biEsc(a.filename||'attachment')+'</span>';
   }).join('');
 
-  // opp dropdown (attach target) — open opps, suggested first
+  // opp dropdown (attach target)
+  _ogEnsureStyles();   // OGUARD1
+  var routed=!_biIsOpen(r);
   var opps=(db.opportunities||[]).slice().sort(function(a,b){ return String(b.created||'').localeCompare(String(a.created||'')); });
   var oppOpts=opps.map(function(o){
     var sel=(String(o.id)===String(_biChosenOppId))?' selected':'';
     return '<option value="'+_biEsc(o.id)+'"'+sel+'>'+_biEsc(o.id)+' \u2014 '+_biEsc(o.project||'(untitled)')+'</option>';
   }).join('');
 
-  // signals
-  var sigHtml='';
-  if(ms.signals&&ms.signals.length){
-    sigHtml=ms.signals.map(function(s){
-      return '<div class="bi-sig '+(s.hit?'hit':'no')+'"><span class="ic">'+(s.hit?'\u2713':'~')+'</span>'+_biEsc(s.detail||s.type)+'</div>';
-    }).join('');
-  }
-
-  var matchCard='';
-  if(ms.opportunity_id){
-    matchCard='<div class="bi-note" style="background:#fff;border:0.5px solid #e5e5e5;border-left:3px solid var(--ac)"><b>'+_biEsc(ms.opportunity_id)+'</b> \u2014 '+_biEsc(ms.opportunity_name||'')+(ms.score!=null?' \u00b7 score '+ms.score:'')+'</div>'+sigHtml;
-  }
+  // OGUARD1: duplicate candidates. Hard = same plan room link already on an
+  // invitation; it locks Create behind an explicit acknowledgement.
+  var cands=Array.isArray(_biCands)?_biCands:[];
+  var hard=cands.filter(function(c){ return c&&c.hard; })[0]||null;
+  var soft=cands.filter(function(c){ return c&&!c.hard; });
+  var hardCard=hard?_ogCandHtml(hard,{hardCard:true}):'';
+  var candCards=soft.map(function(c){ return _ogCandHtml(c,{pick:true, sel:(_biRoute==='attach'&&String(c.opportunity_id)===String(_biChosenOppId))}); }).join('');
+  var gcNow=(((r.extracted&&r.extracted.gc)||r.fromName||'')+'').trim().toLowerCase();
+  var dupInv=(_biChosenOppId&&gcNow)?(db.bidInvites||[]).find(function(v){
+    return String(v.opportunityId)===String(_biChosenOppId)&&(v.gcName||'').trim().toLowerCase()===gcNow;
+  }):null;
+  var attachNote=dupInv
+    ? '<div class="bi-note">'+_biEsc(dupInv.gcName||'This GC')+' is already invited on '+_biEsc(_biChosenOppId)+', so this updates that invitation instead of adding a second one.</div>'
+    : '<div class="bi-note">Your takeoff &amp; scope stay shared on the opportunity. This adds a bid invitation so you can track this GC\u2019s due date, contact, and the number you submit separately.</div>';
 
   var attachBlock=''
     + '<label class="bi-opt'+(_biRoute==='attach'?' sel':'')+'" onclick="biSetRoute(\'attach\')">'
     +   '<input type="radio" name="biRoute" '+(_biRoute==='attach'?'checked':'')+' '+(canRoute?'':'disabled')+'>'
-    +   '<div style="flex:1">'
+    +   '<div style="flex:1;min-width:0">'
     +     '<div style="font-weight:600;font-size:13px;margin-bottom:2px">Attach to existing opportunity</div>'
     +     '<div style="font-size:12px;color:#777">Add this GC as another invitation on the same job.</div>'
+    +     candCards
     +     (_biRoute==='attach'?(
-          matchCard
-          + '<div style="margin-top:10px"><label style="font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Opportunity</label>'
-          + '<select id="biOppSelect" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()" onchange="_biChosenOppId=this.value;event.stopPropagation()" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid #ddd;border-radius:6px">'
+          '<div style="margin-top:10px"><label style="font-size:10px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px">Opportunity</label>'
+          + '<select id="biOppSelect" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()" onchange="event.stopPropagation();biPickOpp(this.value)" style="width:100%;padding:8px 10px;font-size:13px;border:1px solid #ddd;border-radius:6px">'
           + '<option value="">Select an opportunity\u2026</option>'+oppOpts+'</select></div>'
-          + '<div class="bi-note">Your takeoff &amp; scope stay shared on the opportunity. This adds a bid invitation so you can track this GC\u2019s due date, contact, and the number you submit separately.</div>'
+          + attachNote
         ):'')
     +   '</div>'
     + '</label>';
@@ -6892,18 +6942,40 @@ function renderBidInboxReview(){
   var newBlock=''
     + '<label class="bi-opt'+(_biRoute==='new'?' sel':'')+'" onclick="biSetRoute(\'new\')">'
     +   '<input type="radio" name="biRoute" '+(_biRoute==='new'?'checked':'')+' '+(canRoute?'':'disabled')+'>'
-    +   '<div style="flex:1">'
+    +   '<div style="flex:1;min-width:0">'
     +     '<div style="font-weight:600;font-size:13px;margin-bottom:2px">Create a new opportunity</div>'
-    +     '<div style="font-size:12px;color:#777">Treat this as a distinct job. A new opp is created from the details, with this GC as its first invitation.</div>'
+    +     (hard
+          ? '<div style="font-size:12px;color:#777">Locked because the plan room link matches '+_biEsc(hard.opportunity_id)+'.</div>'
+            + '<label class="og-ack" onclick="event.stopPropagation()"><input type="checkbox" '+(_biHardAck?'checked ':'')+(canRoute?'':'disabled ')+'onchange="biHardAck(this)">I checked, and this is a different job</label>'
+          : '<div style="font-size:12px;color:#777">Treat this as a distinct job. A new opp is created from the details, with this GC as its first invitation.</div>')
     +   '</div>'
     + '</label>';
 
+  var confirmBar='';
+  if(!hard && _biConfirmBar && _biRoute==='new' && cands.length){
+    var lead=cands.length===1 ? _biEsc(cands[0].opportunity_id)+' looks like the same job.' : cands.length+' existing opportunities look like this job.';
+    confirmBar='<div class="og-confirm"><div style="font-size:13px;color:#1a1a1a"><b>'+lead+'</b> Create a new opportunity anyway?</div>'
+      + '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:10px;flex-wrap:wrap">'
+      +   '<button class="btn" type="button" onclick="biConfirmBack()">Back</button>'
+      +   '<button class="btn btn-p" type="button" '+(_biBusy?'disabled ':'')+'onclick="biCreateOpp(true)">Create anyway</button>'
+      + '</div></div>';
+  }
+
+  var primaryOff=_biBusy || (_biRoute==='new' && ((hard && !_biHardAck) || (!hard && _biConfirmBar)));
   var actions = canRoute
     ? ('<div class="bi-acts">'
-        + '<button class="btn" onclick="biNotBidding()">Mark not bidding</button>'
-        + '<button class="btn btn-p" onclick="biConfirmRoute()">'+(_biRoute==='attach'?'Attach invitation':'Create opportunity')+'</button>'
+        + '<button class="btn" '+(_biBusy?'disabled ':'')+'onclick="biNotBidding()">Mark not bidding</button>'
+        + '<button class="btn btn-p" '+(primaryOff?'disabled style="opacity:.45" ':'')+'onclick="biConfirmRoute()">'+(_biBusy?'Saving\u2026':(_biRoute==='attach'?'Attach invitation':'Create opportunity'))+'</button>'
       + '</div>')
     : '<div class="bi-note" style="margin-top:14px">Your role can review invitations but not route them. Contact an Admin, PM, or Project Coordinator to attach or create.</div>';
+
+  var routePanel = routed
+    ? '<div class="card" style="padding:14px 16px;margin-top:12px;font-size:13px;color:#5F5E5A">Routing options are hidden once an email is routed.</div>'
+    : ('<div class="bi-panel">'
+      + '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#9A7A2E;margin-bottom:12px">Route this invitation</div>'
+      + hardCard + attachBlock + newBlock + confirmBar + actions
+      + '</div>');
+  var routedBanner = routed ? _biRoutedBanner(r) : '';
 
   var custMatched = _biChosenCustomerId ? getCust(_biChosenCustomerId) : null;
   var custOpts=(db.customers||[]).slice().sort(function(a,b){ return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase()); })
@@ -6919,9 +6991,11 @@ function renderBidInboxReview(){
     +     '<option value="">\u2014 no customer \u2014</option>'+custOpts+'</select>'
     +   (canRoute?'<button class="btn btn-sm" onclick="biCreateCustomerFromGC()">+ Create from GC</button>':'')
     + '</div></div>';
+  if(routed) custBlock='';   // OGUARD1
 
   host.innerHTML=_biStyles()
     + '<div style="margin-bottom:14px"><button class="btn" onclick="biBackToList()">\u2190 Back to inbox</button></div>'
+    + routedBanner
     + '<div class="bi-split">'
     +   '<div class="card" style="padding:16px 18px">'
     +     '<div class="bi-ehead">'
@@ -6936,7 +7010,7 @@ function renderBidInboxReview(){
     +   '</div>'
     +   '<div>'
     +     '<div class="card" style="padding:16px 18px">'
-    +       '<div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:#555;margin-bottom:12px">Extracted details</div>'
+    +       '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px"><div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:#555">Extracted details</div>'+(routed?_biStatusBadge(r.status):'')+'</div>'
     +       '<div class="bi-fg">'
     +         '<div class="bi-fld full"><label>Project '+_biConf(ex,'project')+'</label><input id="bif-project" value="'+_biEsc(ex.project||'')+'"></div>'
     +         '<div class="bi-fld"><label>General contractor '+_biConf(ex,'gc')+'</label><input id="bif-gc" value="'+_biEsc(ex.gc||'')+'"></div>'
@@ -6950,12 +7024,10 @@ function renderBidInboxReview(){
     +       '</div>'
     +     '</div>'
     +     custBlock
-    +     '<div class="bi-panel">'
-    +       '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#9A7A2E;margin-bottom:12px">Route this invitation</div>'
-    +       attachBlock + newBlock + actions
-    +     '</div>'
+    +     routePanel
     +   '</div>'
     + '</div>';
+  if(routed){ host.querySelectorAll('.bi-fld input').forEach(function(el){ el.readOnly=true; }); }   // OGUARD1
 }
 
 function _biReadForm(){
@@ -6980,122 +7052,245 @@ function _biIsDupInvite(err){
   return /duplicate key|kmi_bid_invites_opp_gc/i.test(m);
 }
 
+// ═══ OGUARD1: server-side routing + duplicate guard ═══════════════════
+// kmi_opp_create / kmi_bid_inbox_route lock the email row, refuse one that
+// was already routed, and (for creates) assign the OPP number and run the
+// duplicate check. Results are adopted into db with row-diff and VG
+// baselines set, so the regular push never re-sends them.
+function _ogActor(){ return (_currentUser && _currentUser.id != null) ? String(_currentUser.id) : null; }
+
+async function _ogRpc(name, args){
+  try{
+    var r=await supabaseClient.rpc(name, args);
+    if(r.error) return { ok:false, code:'error', message:r.error.message||String(r.error) };
+    return r.data || { ok:false, code:'error', message:'empty response' };
+  }catch(x){ return { ok:false, code:'error', message:(x&&x.message)||String(x) }; }
+}
+
+function _ogAdoptOpp(raw){
+  var inc=fromSBOpp(raw), id=String(inc.id), list=db.opportunities||(db.opportunities=[]);
+  var wasClean=!_tblDirty('opportunities');
+  var cur=list.find(function(o){ return String(o.id)===id; });
+  if(cur){ Object.keys(cur).forEach(function(k){ if(!(k in inc)) delete cur[k]; }); Object.assign(cur, inc); }
+  else { list.push(inc); cur=inc; }
+  try{
+    var mapped=toSBOpp(cur);
+    if(_rowHash.opportunities) _rowHash.opportunities[id]=_rowHash64(JSON.stringify(mapped));
+    _vgSetBase('opportunities', id, mapped);
+  }catch(x){}
+  if(wasClean){ var snap=_tblSnapshot('opportunities'); if(snap!==null) _tblHash.opportunities=snap; }
+  return cur;
+}
+
+function _ogAdoptInvite(raw){
+  if(!raw) return null;
+  var inc=fromSBBidInvite(raw), list=db.bidInvites||(db.bidInvites=[]);
+  var cur=list.find(function(v){ return String(v.id)===String(inc.id); });
+  if(cur){ Object.keys(cur).forEach(function(k){ if(!(k in inc)) delete cur[k]; }); Object.assign(cur, inc); return cur; }
+  list.push(inc); return inc;
+}
+
+// RPC inbox rows come back without the email bodies: update fields in place.
+function _ogAdoptInbox(raw){
+  if(!raw) return;
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(raw.id); });
+  if(!r){ (db.bidInbox||(db.bidInbox=[])).push(fromSBBidInbox(raw)); return; }
+  r.status=raw.status||r.status;
+  r.resolvedOpportunityId=raw.resolved_opportunity_id||null;
+  r.resolvedInviteId=raw.resolved_invite_id||null;
+  r.reviewedBy=raw.reviewed_by||null;
+  r.reviewedAt=raw.reviewed_at||null;
+  if(raw.extracted) r.extracted=raw.extracted;
+}
+
+function _ogApplyRouted(r, res){
+  r.status=res.status||r.status;
+  r.resolvedOpportunityId=res.opportunity_id||null;
+  r.resolvedInviteId=res.invite_id||null;
+  r.reviewedBy=res.reviewed_by||null;
+  r.reviewedAt=res.reviewed_at||null;
+}
+
+function _ogUserName(uid){
+  if(uid==null||uid==='') return 'Someone';
+  if(_currentUser && String(uid)===String(_currentUser.id)) return 'You';
+  var u=(db.users||[]).find(function(x){ return String(x.id)===String(uid); });
+  var nm=u?((((u.firstName||'')+' '+(u.lastName||'')).trim())||u.email||''):'';
+  return nm||'Someone';
+}
+
+function _ogShortDate(s){
+  var m=/^(\d{4})-(\d{2})-(\d{2})/.exec(String(s||''));
+  return m ? (m[2]+'/'+m[3]+'/'+m[1].slice(2)) : String(s||'');
+}
+
+function _ogCandMeta(c){
+  var dl={pending:'Pending', bidding:'Bidding', 'not-bidding':'Not bidding'};
+  return [dl[c.decision]||c.decision||'', c.bid_date?('bid '+_ogShortDate(c.bid_date)):'', c.city||''].filter(Boolean).join(' \u00b7 ');
+}
+
+var _OG_LINK_SVG='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>';
+var _OG_INFO_SVG='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#185FA5" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="flex:none;margin-top:1px"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5v.5"/></svg>';
+
+// One candidate. opts: hardCard (red banner), pick (button that selects it
+// as the attach target), open (link that opens it, used in the dialog).
+function _ogCandHtml(c, opts){
+  opts=opts||{};
+  var id=String(c.opportunity_id||''), ide=_biEsc(id), meta=_ogCandMeta(c);
+  var sigs=(c.signals||[]).map(function(s){
+    return '<span class="og-sig'+(s.hit?'':' miss')+'"><span class="og-ic">'+(s.hit?'\u2713':'\u2013')+'</span>'+_biEsc(s.detail||s.type||'')+'</span>';
+  }).join('');
+  if(opts.hardCard){
+    return '<div class="og-hard"><div class="og-hard-h">'+_OG_LINK_SVG+'This invitation is already in KMI.Build</div>'
+      + '<div style="font-size:13px;color:#1a1a1a;margin-bottom:4px"><b>'+ide+'</b>: '+_biEsc(c.opportunity_name||'')+(meta?' \u00b7 '+_biEsc(meta):'')+'</div>'
+      + sigs
+      + '<a href="#" class="og-open" onclick="openOppDetail(\''+ide+'\');return false;">Open '+ide+'</a></div>';
+  }
+  var pill=c.hard ? '<span class="og-pill hard">Same plan room link</span>'
+                  : '<span class="og-pill">Possible match \u00b7 '+(c.score!=null?_biEsc(String(c.score)):'?')+'</span>';
+  var inner='<span class="og-cand-h"><span><b>'+ide+'</b>: '+_biEsc(c.opportunity_name||'')+'</span>'+pill+'</span>'
+    + (meta?'<span class="og-meta">'+_biEsc(meta)+'</span>':'') + sigs;
+  if(opts.pick){
+    return '<button type="button" class="og-cand'+(opts.sel?' sel':'')+'" onclick="event.stopPropagation();event.preventDefault();biPickCand(\''+ide+'\')">'+inner+'</button>';
+  }
+  return '<div class="og-cand">'+inner+(opts.open?'<a href="#" class="og-open" onclick="closeModal();openOppDetail(\''+ide+'\');return false;">Open '+ide+'</a>':'')+'</div>';
+}
+
+function _ogShowDupModal(cands, retryJs){
+  _ogEnsureStyles();
+  showModal('<h3 style="margin:0 0 6px;font-size:16px">This may already be in KMI.Build</h3>'
+    + '<div style="font-size:13px;color:#5F5E5A">Nothing has been created yet. Open the existing opportunity, or create a new one if this is a different job.</div>'
+    + (cands||[]).map(function(c){ return _ogCandHtml(c,{open:true}); }).join('')
+    + '<div class="mf" style="margin-top:14px"><button class="btn" onclick="closeModal()">Back to form</button>'
+    + '<button class="btn btn-p" onclick="closeModal();'+retryJs+'">Create anyway</button></div>');
+}
+
+function _biRoutedBanner(r){
+  var opp=r.resolvedOpportunityId||'', ope=_biEsc(opp), when=_vgWhen(r.reviewedAt);
+  var verb = r.status==='created' ? ('created <b>'+ope+'</b> from it')
+           : r.status==='attached' ? ('attached it to <b>'+ope+'</b>')
+           : r.status==='not_bidding' ? 'marked it not bidding'
+           : ('set it to '+_biEsc(r.status||''));
+  return '<div class="og-routed">'+_OG_INFO_SVG
+    + '<div style="flex:1 1 360px;min-width:0"><div style="font-size:14px;font-weight:600;color:#0F3F70">This email was already routed</div>'
+    + '<div style="font-size:13px;color:#1a1a1a;margin-top:3px">'+_biEsc(_ogUserName(r.reviewedBy))+' '+verb+(when?' at '+_biEsc(when):'')+'.'
+    + (_biRoutedNotice?' Nothing on this screen was saved.':'')+'</div></div>'
+    + '<div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn" onclick="biBackToList()">Back to inbox</button>'
+    + ((opp&&getOpp(opp))?'<button class="btn btn-p" onclick="openOppDetail(\''+ope+'\')">Open '+ope+'</button>':'')
+    + '</div></div>';
+}
+
+function _ogEnsureStyles(){
+  if(document.getElementById('og-styles')) return;
+  var st=document.createElement('style'); st.id='og-styles';
+  st.textContent=''
+    + '.og-hard{background:#FCEBEB;border:1px solid #E3B3B3;border-radius:8px;padding:12px 14px;margin-bottom:10px}'
+    + '.og-hard-h{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:#7A1F1F;margin-bottom:6px}'
+    + '.og-cand{display:block;width:100%;box-sizing:border-box;text-align:left;background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:10px 12px;margin-top:8px;font-family:inherit;font-size:13px;color:#1a1a1a}'
+    + 'button.og-cand{cursor:pointer}button.og-cand:hover{border-color:#C4C9DF}'
+    + '.og-cand.sel{border-color:var(--kmi3);box-shadow:0 0 0 1px var(--kmi3)}'
+    + '.og-cand-h{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}'
+    + '.og-meta{display:block;font-size:12px;color:#5F5E5A;margin-bottom:2px}'
+    + '.og-pill{font-size:11px;font-weight:600;color:#7A5F1F;background:#faf1d6;border:1px solid #E8D08A;border-radius:100px;padding:2px 9px;white-space:nowrap}'
+    + '.og-pill.hard{color:#7A1F1F;background:#FCEBEB;border-color:#E3B3B3}'
+    + '.og-sig{display:flex;align-items:center;gap:8px;font-size:12px;color:#333;margin-top:4px}'
+    + '.og-sig.miss{color:#5F5E5A}'
+    + '.og-ic{width:16px;height:16px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;background:#EAF3DE;color:#3B6D11;flex:none}'
+    + '.og-sig.miss .og-ic{background:#faf1d6;color:#9A7A2E}'
+    + '.og-open{display:inline-block;margin-top:8px;font-size:12px;color:var(--kmi3);text-decoration:underline}'
+    + '.og-ack{display:flex;gap:8px;align-items:center;font-size:12px;color:#333;margin-top:8px;cursor:pointer}.og-ack input{width:auto;margin:0}'
+    + '.og-confirm{background:#FFF7E0;border:1px solid #E8D08A;border-radius:8px;padding:12px 14px;margin-bottom:4px}'
+    + '.og-routed{background:#E6F1FB;border:1px solid #A9C8E8;border-radius:10px;padding:14px 16px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}';
+  document.head.appendChild(st);
+}
+
+function _biRouteFail(r, res){
+  if(res.code==='already_routed'){
+    _ogApplyRouted(r, res); _biRoutedNotice=true;
+    renderBidInboxReview(); updateBidInboxNavCount(); return;
+  }
+  renderBidInboxReview();
+  if(res.code==='opp_not_found'){ showToast('That opportunity no longer exists \u2014 pick another','error'); return; }
+  if(res.code==='inbox_not_found'){ showToast('This email is no longer in the inbox','error'); return; }
+  showToast('Save failed: '+(res.message||res.code||'unknown error'),'error');
+}
+
 async function biAttach(){
   if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
   var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
-  if(!r) return;
+  if(!r||_biBusy) return;
   var oppId=_biChosenOppId||(g('biOppSelect')?g('biOppSelect').value:'');
   if(!oppId){ showToast('Pick an opportunity to attach to','error'); return; }
+  if(!supabaseClient){ showToast('Not connected','error'); return; }
+  _biStashForm();
   var f=_biReadForm();
-  var now=new Date().toISOString();
-  var gcEmail=r.fromEmail||'';
-  var gcName=(f.gc||r.fromName||'').trim();
-  db.bidInvites=db.bidInvites||[];
-  // The DB enforces one invite per GC (company) per opportunity, keyed on
-  // (opportunity_id, lower(trim(gc_name))). Email is NOT the key — multiple GCs
-  // can share a sender address. If this GC is already invited on this opp, reuse
-  // that invitation instead of inserting a duplicate.
-  var existing=gcName ? db.bidInvites.find(function(x){
-    return String(x.opportunityId)===String(oppId)
-      && (x.gcName||'').trim().toLowerCase()===gcName.toLowerCase();
-  }) : null;
-  var isUpdate=!!existing, invite;
-  if(existing){
-    invite=existing;
-    invite.gcName=f.gc||invite.gcName||r.fromName||'';
-    invite.gcContact=f.contact||invite.gcContact||'';
-    invite.bidDueDate=f.bidDate||invite.bidDueDate||'';
-    invite.planRoomUrl=f.planUrl||invite.planRoomUrl||'';
-    if(!invite.customerId) invite.customerId=_biChosenCustomerId;
-    invite.inboxId=r.id;
-  } else {
-    invite={
-      id:'biv-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
-      opportunityId:oppId, customerId:_biChosenCustomerId,
-      gcName:f.gc||r.fromName||'', gcEmail:gcEmail, gcContact:f.contact||'',
-      bidDueDate:f.bidDate||'', planRoomUrl:f.planUrl||'',
-      source:'inbox', inboxId:r.id, submittedAmount:null, submissionStatus:'pending',
-      notes:'', created:now
-    };
-    db.bidInvites.push(invite);
+  var invite={ gc_name:(f.gc||r.fromName||'').trim(), gc_email:r.fromEmail||'', gc_contact:f.contact||'',
+               bid_due_date:f.bidDate||'', plan_room_url:f.planUrl||'',
+               customer_id:(_biChosenCustomerId!=null?String(_biChosenCustomerId):null) };
+  _biBusy=true; renderBidInboxReview();
+  var res=await _ogRpc('kmi_bid_inbox_route',{ p_inbox_id:r.id, p_action:'attach', p_actor:_ogActor(), p_opp_id:oppId, p_invite:invite, p_extracted:r.extracted||{} });
+  _biBusy=false;
+  if(res.ok){
+    var inv=_ogAdoptInvite(res.invite); _ogAdoptInbox(res.inbox);
+    db.activity.unshift({text:'Bid invite from '+((inv&&inv.gcName)||'GC')+(res.invite_existing?' updated on ':' attached to ')+oppId, type:'pending', time:'Just now'});
+    saveDB();
+    showToast(res.invite_existing?('Updated existing invitation on '+oppId):('Invitation attached to '+oppId), 'success');
+    biBackToList(); updateBidInboxNavCount();
+    return;
   }
-  r.status='attached'; r.resolvedOpportunityId=oppId; r.resolvedInviteId=invite.id;
-  r.reviewedBy=(_currentUser?_currentUser.id:null); r.reviewedAt=now;
-  try{
-    var a=await supabaseClient.from('kmi_bid_invites').upsert(toSBBidInvite(invite));
-    if(a.error){
-      // This GC already exists on this opp (created elsewhere/earlier).
-      // Treat as already-attached rather than a hard failure.
-      if(_biIsDupInvite(a.error)){
-        if(!isUpdate){ db.bidInvites=db.bidInvites.filter(function(x){ return x.id!==invite.id; }); }
-        var b0=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
-        if(b0.error) throw b0.error;
-        saveDB(); showToast('This GC is already invited on '+oppId+' \u2014 kept the existing invitation', 'info'); biBackToList(); return;
-      }
-      throw a.error;
-    }
-    var b=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
-    if(b.error) throw b.error;
-    db.activity.unshift({text:'Bid invite from '+(invite.gcName||'GC')+(isUpdate?' updated on ':' attached to ')+oppId, type:'pending', time:'Just now'});
-    saveDB(); showToast(isUpdate?('Updated existing invitation on '+oppId):('Invitation attached to '+oppId), 'success'); biBackToList();
-  }catch(e){
-    // Roll back the optimistic local insert so the UI doesn't show a phantom invite.
-    if(!isUpdate){ db.bidInvites=db.bidInvites.filter(function(x){ return x.id!==invite.id; }); }
-    console.error('biAttach', e); showToast('Save failed: '+(e.message||e), 'error');
-  }
+  _biRouteFail(r, res);
 }
 
-async function biCreateOpp(){
+async function biCreateOpp(confirmed){
   if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
   var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
-  if(!r) return;
+  if(!r||_biBusy) return;
+  if(!supabaseClient){ showToast('Not connected','error'); return; }
+  _biStashForm();
   var f=_biReadForm();
   if(!f.project){ showToast('Project name is required','error'); return; }
-  var now=new Date().toISOString();
-  var oppId=nextSeqId(db.opportunities||[], 'OPP');
-  var opp={
-    id:oppId, project:f.project, customerId:_biChosenCustomerId,
-    type:f.type||'', types:f.type?[f.type]:[], bidDate:f.bidDate||'', estValue:0,
-    estimatorId:null, pmId:null, address:f.address||'', city:f.city||'', state:f.state||'', zip:f.zip||'',
-    notes:'', decision:'pending', noReason:'', proposalId:null, finalBidAmount:null,
-    outcomeStatus:null, scopeItems:[], scopeSourceUrl:'', addenda:[], vendorAssignments:[],
-    created:now.slice(0,10)
-  };
-  var invite={
-    id:'biv-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
-    opportunityId:oppId, customerId:opp.customerId,
-    gcName:f.gc||r.fromName||'', gcEmail:r.fromEmail||'', gcContact:f.contact||'',
-    bidDueDate:f.bidDate||'', planRoomUrl:f.planUrl||'',
-    source:'inbox', inboxId:r.id, submittedAmount:null, submissionStatus:'pending',
-    notes:'', created:now
-  };
-  db.opportunities.push(opp);
-  db.bidInvites=db.bidInvites||[]; db.bidInvites.push(invite);
-  r.status='created'; r.resolvedOpportunityId=oppId; r.resolvedInviteId=invite.id;
-  r.reviewedBy=(_currentUser?_currentUser.id:null); r.reviewedAt=now;
-  try{
-    var a=await supabaseClient.from('kmi_opportunities').upsert(toSBOpp(opp));
-    if(a.error) throw a.error;
-    var b=await supabaseClient.from('kmi_bid_invites').upsert(toSBBidInvite(invite));
-    if(b.error) throw b.error;
-    var c=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
-    if(c.error) throw c.error;
-    db.activity.unshift({text:oppId+' created from bid inbox \u2014 '+f.project, type:'pending', time:'Just now'});
-    saveDB(); showToast('Created '+oppId, 'success'); biBackToList();
-  }catch(e){ console.error('biCreateOpp', e); showToast('Save failed: '+(e.message||e), 'error'); }
+  var hard=(_biCands||[]).some(function(c){ return c&&c.hard; });
+  if(!confirmed){
+    if(hard){
+      if(!_biHardAck){ showToast('This plan room link is already on an opportunity \u2014 tick \u201cI checked, and this is a different job\u201d to create a new one','error'); return; }
+      confirmed=true;
+    } else if((_biCands||[]).length){ _biConfirmBar=true; renderBidInboxReview(); return; }
+  }
+  var opp={ project:f.project, customer_id:_biChosenCustomerId||null, type:f.type||'', types:f.type?[f.type]:[],
+            bid_date:f.bidDate||'', address:f.address||'', city:f.city||'', state:f.state||'', zip:f.zip||'', est_value:0 };
+  var invite={ gc_name:f.gc||r.fromName||'', gc_email:r.fromEmail||'', gc_contact:f.contact||'',
+               bid_due_date:f.bidDate||'', plan_room_url:f.planUrl||'', source:'inbox',
+               customer_id:(_biChosenCustomerId!=null?String(_biChosenCustomerId):null) };
+  _biBusy=true; renderBidInboxReview();
+  var res=await _ogRpc('kmi_opp_create',{ p_opp:opp, p_actor:_ogActor(), p_confirm_duplicate:!!confirmed,
+                                          p_inbox_id:r.id, p_invite:invite, p_extracted:r.extracted||{} });
+  _biBusy=false;
+  if(res.ok){
+    var o=_ogAdoptOpp(res.opportunity); _ogAdoptInvite(res.invite); _ogAdoptInbox(res.inbox);
+    db.activity.unshift({text:o.id+' created from bid inbox \u2014 '+o.project, type:'pending', time:'Just now'});
+    saveDB(); showToast('Created '+o.id, 'success'); biBackToList(); updateBidInboxNavCount();
+    return;
+  }
+  if(res.code==='possible_duplicate'){
+    _biCands=res.candidates||[]; _biHardAck=false;
+    _biConfirmBar=!_biCands.some(function(c){ return c&&c.hard; });
+    renderBidInboxReview();
+    return;
+  }
+  _biRouteFail(r, res);
 }
 
 async function biNotBidding(){
   if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
   var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
-  if(!r) return;
-  var now=new Date().toISOString();
-  r.status='not_bidding'; r.reviewedBy=(_currentUser?_currentUser.id:null); r.reviewedAt=now;
-  try{
-    var b=await supabaseClient.from('kmi_bid_inbox').upsert(toSBBidInbox(r));
-    if(b.error) throw b.error;
-    saveDB(); showToast('Marked not bidding', 'success'); biBackToList();
-  }catch(e){ console.error('biNotBidding', e); showToast('Save failed: '+(e.message||e), 'error'); }
+  if(!r||_biBusy) return;
+  if(!supabaseClient){ showToast('Not connected','error'); return; }
+  _biStashForm();
+  _biBusy=true; renderBidInboxReview();
+  var res=await _ogRpc('kmi_bid_inbox_route',{ p_inbox_id:r.id, p_action:'not_bidding', p_actor:_ogActor(), p_extracted:r.extracted||{} });
+  _biBusy=false;
+  if(res.ok){ _ogAdoptInbox(res.inbox); saveDB(); showToast('Marked not bidding', 'success'); biBackToList(); updateBidInboxNavCount(); return; }
+  _biRouteFail(r, res);
 }
 
 async function biOpenAttachment(path){
@@ -30322,45 +30517,42 @@ function importCSV(evt, type) {
     }
 
     else if (type === 'opportunities') {
+      // OGUARD1: rows are created one at a time by kmi_opp_create, which
+      // assigns the number. An "Opportunity ID" that already exists still
+      // skips the row (safe re-import); a new one is not honored.
+      var oppQueue = [];
       rows.forEach(function(r, i) {
         var project = r['Project Name'], coName = r['Customer Company Name'];
         if (!project) { errors.push('Row ' + (i+2) + ': missing Project Name'); return; }
         var cust = db.customers.find(function(c){ return c.name.toLowerCase() === (coName||'').toLowerCase(); });
-        if (!cust) { errors.push('Row ' + (i+2) + ': customer "' + coName + '" not found — import customers first'); return; }
-        // Resolve estimator by email
+        if (!cust) { errors.push('Row ' + (i+2) + ': customer "' + coName + '" not found \u2014 import customers first'); return; }
         var estEmail = r['Assigned Estimator Email'];
         var estUser  = estEmail ? db.users.find(function(u){ return u.email.toLowerCase() === estEmail.toLowerCase(); }) : null;
-        // Resolve PM by first + last name
         var pmFirst = r['Customer PM First Name'], pmLast = r['Customer PM Last Name'];
         var pmRec   = (pmFirst && pmLast) ? db.pms.find(function(p){ return p.firstName.toLowerCase()===pmFirst.toLowerCase() && p.lastName.toLowerCase()===pmLast.toLowerCase() && p.customerId===cust.id; }) : null;
-        // Use provided ID or auto-generate
-        var id = r['Opportunity ID'] || nextSeqId(db.opportunities, 'OPP');
-        var exists = db.opportunities.find(function(o){ return o.id === id; });
-        if (exists) { skipped++; return; }
+        var given = r['Opportunity ID'];
+        if (given && db.opportunities.find(function(o){ return o.id === given; })) { skipped++; return; }
         var dec = (r['Decision'] || 'pending').toLowerCase().replace(' ','-');
         if (['bidding','not-bidding','pending'].indexOf(dec) === -1) dec = 'pending';
-        db.opportunities.push({
-          id: id,
+        oppQueue.push({ row: i + 2, payload: {
           project: project,
-          customerId: cust.id,
+          customer_id: cust.id,
           type: r['Project Type'] || '',
-          bidDate: r['Bid Due Date'] || '',
+          bid_date: r['Bid Due Date'] || '',
           address: r['Project Address'] || '',
           city:    r['City'] || '',
           state:   (r['State'] || '').toUpperCase().trim(),
           zip:     r['Zip Code'] || r['Zip'] || '',
-          estValue: parseFloat(r['Estimated Value']) || 0,
-          estimatorId: estUser ? estUser.id : null,
-          pmId: pmRec ? pmRec.id : null,
+          est_value: parseFloat(r['Estimated Value']) || 0,
+          estimator_id: estUser ? estUser.id : null,
+          pm_id: pmRec ? pmRec.id : null,
           notes: r['Notes'] || '',
           decision: dec,
-          noReason: r['No-Bid Reason'] || '',
-          proposalId: null,
-          finalBidAmount: null,
-          created: new Date().toISOString().slice(0,10)
-        });
-        added++;
+          no_reason: r['No-Bid Reason'] || ''
+        }});
       });
+      _ogImportOpps(oppQueue, skipped, errors, type);
+      return;
     }
 
     saveDB();
@@ -30373,6 +30565,30 @@ function importCSV(evt, type) {
     if (added > 0) logImport('  \u2714 Data saved to CRM', true);
   };
   reader.readAsText(file);
+}
+
+// OGUARD1: sequential server creates for the opportunities CSV import.
+// Duplicate check is bypassed (confirmed) - an import is deliberate.
+async function _ogImportOpps(queue, skipped, errors, type) {
+  var added = 0, ids = [];
+  if (queue.length && !supabaseClient) {
+    errors.push('Not connected \u2014 opportunities are numbered by the server, so the import needs a connection');
+    queue = [];
+  }
+  for (var i = 0; i < queue.length; i++) {
+    var q = queue[i];
+    var res = await _ogRpc('kmi_opp_create', { p_opp: q.payload, p_actor: _ogActor(), p_confirm_duplicate: true });
+    if (res.ok) { _ogAdoptOpp(res.opportunity); added++; ids.push(res.opportunity.id); }
+    else errors.push('Row ' + q.row + ': ' + (res.message || res.code || 'create failed'));
+  }
+  saveDB();
+  var msg = added + ' record' + (added===1?'':'s') + ' imported';
+  if (skipped) msg += ', ' + skipped + ' skipped (already exist)';
+  if (errors.length) msg += ', ' + errors.length + ' error' + (errors.length===1?'':'s');
+  setStatus(type, msg, errors.length === 0);
+  logImport('[' + type.toUpperCase() + '] ' + msg, errors.length === 0);
+  errors.forEach(function(e){ logImport('  \u26a0 ' + e, false); });
+  if (added > 0) logImport('  \u2714 Saved: ' + ids[0] + (ids.length > 1 ? ' \u2013 ' + ids[ids.length - 1] : ''), true);
 }
 
 // ── CSV TEMPLATE DOWNLOAD ───────────────────────────────────────
@@ -31885,12 +32101,12 @@ async function sendEstimatorNotification(usr, o, cust, assignedBy, action) {
 // ── NEW / EDIT OPPORTUNITY ──────────────────────────────────────
 function initNewOpp() {
   _editOppId = null;
-  // Preview only -- re-derived in the create branch of the opportunity save path.
-  var id = nextSeqId(db.opportunities, 'OPP');
+  // OGUARD1: the server numbers new opportunities (kmi_opp_create) on save.
   g('nop-heading').textContent      = 'New bid opportunity';
   g('nop-save-btn').textContent     = 'Create opportunity';
-  g('nop-id-display').textContent   = id;
-  g('nop-id-display').dataset.oid   = id;
+  g('nop-save-btn').disabled        = false;
+  g('nop-id-display').textContent   = 'Opportunity # assigned when saved';
+  g('nop-id-display').dataset.oid   = '';
   g('nop-cust').innerHTML = '<option value="">Select customer...</option>' +
     db.customers.slice().sort(function(a,b){return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase());}).map(function(c){ return '<option value="' + c.id + '">' + c.name + ' \u2014 ' + c.contact + '</option>'; }).join('');
   g('nop-cust').onchange = function(){ populatePMDropdown(parseInt(g('nop-cust').value)||null, null); };
@@ -31971,35 +32187,48 @@ function nopSave() {
     maybeNotifyEstimator(o.id, prevEstimatorId);
     openOppDetail(o.id);
   } else {
-    // Preview ID re-derived at save -- see the matching guard in saveProposal().
-    var id = nextSeqId(db.opportunities, 'OPP');
-    var oidEl = g('nop-id-display');
-    if (oidEl) { oidEl.textContent = id; oidEl.dataset.oid = id; }
-    if (db.opportunities.some(function(x){ return String(x.id) === String(id); })) {
-      alert('Could not generate a unique opportunity ID (' + id + ' is already in use).\n\nNothing was saved. Please report this before retrying.');
-      return;
-    }
-    db.opportunities.push({
-      id: id, project: project, customerId: custId,
-      types: getCheckedProjectTypes(), type: getCheckedProjectTypes()[0] || '', bidDate: g('nop-date').value,
-      estValue: parseFloat(g('nop-value').value) || 0,
-      notes: (g('nop-notes').value || '').trim(),
-      estimatorId: newEstimatorId,
-      pmId: parseInt(g('nop-pm').value) || null,
-      address: (g('nop-addr').value || '').trim(),
-      city:    (g('nop-city').value || '').trim(),
-      state:   (g('nop-state').value || '').trim(),
-      zip:     (g('nop-zip').value || '').trim(),
-      finalBidAmount: null,
-      decision: 'pending', noReason: '', proposalId: null,
-      vendorAssignments: vendorAssignments,
-      created: new Date().toISOString().slice(0,10)
-    });
-    db.activity.unshift({text: id + ' created \u2014 ' + project, type: 'pending', time: 'Just now'});
-    saveDB();
-    maybeNotifyEstimator(id, null);
-    openOppDetail(id);
+    _ogNopCreate(false);   // OGUARD1: server-numbered create with duplicate check
   }
+}
+
+// OGUARD1: create through kmi_opp_create. The server assigns the number and
+// runs the duplicate check; "Create anyway" in the dialog re-sends confirmed.
+async function _ogNopCreate(confirmed) {
+  var project = (g('nop-project').value || '').trim();
+  var custId  = parseInt(g('nop-cust').value);
+  if (!project) { alert('Please enter a project name.'); return; }
+  if (!custId)  { alert('Please select a customer.'); return; }
+  if (!supabaseClient) { alert('Not connected. New opportunities are numbered by the server, so creating one needs a connection.'); return; }
+  var btn = g('nop-save-btn');
+  if (btn && btn.disabled) return;
+  var types = getCheckedProjectTypes();
+  var payload = {
+    project: project, customer_id: custId,
+    type: types[0] || '', types: types,
+    bid_date: g('nop-date').value || '',
+    est_value: parseFloat(g('nop-value').value) || 0,
+    notes: (g('nop-notes').value || '').trim(),
+    estimator_id: parseInt(g('nop-estimator').value) || null,
+    pm_id: parseInt(g('nop-pm').value) || null,
+    address: (g('nop-addr').value || '').trim(),
+    city:    (g('nop-city').value || '').trim(),
+    state:   (g('nop-state').value || '').trim(),
+    zip:     (g('nop-zip').value || '').trim(),
+    vendor_assignments: readOppVendorAssignments()
+  };
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating\u2026'; }
+  var res = await _ogRpc('kmi_opp_create', { p_opp: payload, p_actor: _ogActor(), p_confirm_duplicate: !!confirmed });
+  if (btn) { btn.disabled = false; btn.textContent = 'Create opportunity'; }
+  if (res.ok) {
+    var o = _ogAdoptOpp(res.opportunity);
+    db.activity.unshift({text: o.id + ' created \u2014 ' + o.project, type: 'pending', time: 'Just now'});
+    saveDB();
+    maybeNotifyEstimator(o.id, null);
+    openOppDetail(o.id);
+    return;
+  }
+  if (res.code === 'possible_duplicate') { _ogShowDupModal(res.candidates || [], '_ogNopCreate(true)'); return; }
+  alert('Could not create the opportunity: ' + (res.message || res.code || 'unknown error') + '\n\nNothing was saved.');
 }
 
 function editOpp(id) {
@@ -59883,7 +60112,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-10-29-gc-trunc-split';
+var KMI_BUILD = '2026-11-02-OGUARD1';
 
 var _kmiSessionId = (function(){
   try {
@@ -60730,7 +60959,8 @@ function fromSBOpp(r) {
     scopeSourceUrl:r.scope_source_url||'',
     addenda:r.addenda||[],
     vendorAssignments:r.vendor_assignments||[],
-    created:r.created||''
+    created:r.created||'',
+    versionAt:r.version_at||null   // OGUARD1 (VG); not mapped back by toSBOpp
   };
 }
 
@@ -62095,7 +62325,12 @@ function DP_TABLES() {
   if (_DP_TABLES) return _DP_TABLES;
   _DP_TABLES = [
     { k:'tmTickets', t:'kmi_tm_tickets', from:fromSBTmTicket, page:'tm-tickets', refresh:function(){ filterTmTickets(); } },
-    { k:'cors',      t:'kmi_cors',       from:fromSBCor,      page:'cors',       refresh:function(){ filterCors(); } }
+    { k:'cors',      t:'kmi_cors',       from:fromSBCor,      page:'cors',       refresh:function(){ filterCors(); } },
+    // OGUARD1: opportunities ride the row-diff/VG merge; invites and inbox
+    // rows are written only by direct calls, so they merge as-is (direct).
+    { k:'opportunities', t:'kmi_opportunities', from:fromSBOpp, page:['opportunities','opp-detail','bid-inbox'], refresh:function(){ _ogRefreshOppViews(); } },
+    { k:'bidInvites',    t:'kmi_bid_invites',   from:fromSBBidInvite, direct:true, page:['opp-detail','bid-inbox'], refresh:function(){ _ogRefreshOppViews(); } },
+    { k:'bidInbox',      t:'kmi_bid_inbox',     from:fromSBBidInbox,  direct:true, page:['bid-inbox'], refresh:function(){ _ogRefreshInbox(); }, after:function(){ updateBidInboxNavCount(); } }
   ];
   return _DP_TABLES;
 }
@@ -62130,8 +62365,48 @@ function _dpNoteMax(k, rows) {
   _dpStartTimer();   // DP1.1
 }
 
+// OGUARD1 helpers -------------------------------------------------------
+function _dpOnPage(e, pid) { return Array.isArray(e.page) ? e.page.indexOf(pid) >= 0 : e.page === pid; }
+
+function _ogRefreshOppViews() {
+  var pg = document.querySelector('.pg.active'), pid = pg ? pg.id : '';
+  if (pid === 'pg-opp-detail') { if (typeof currentOppId !== 'undefined' && currentOppId && getOpp(currentOppId)) renderOppDetail(currentOppId); }
+  else if (pid === 'pg-opportunities') renderOpportunities();
+  else if (pid === 'pg-bid-inbox') _ogRefreshInbox();
+}
+
+// Review screen: only re-render when the open email was routed elsewhere
+// (re-rendering otherwise would drop focus while someone is typing).
+function _ogRefreshInbox() {
+  if (_biView === 'review' && _biReviewId != null) {
+    var r = (db.bidInbox || []).find(function(x){ return String(x.id) === String(_biReviewId); });
+    if (r && _biOpenedOpen && !_biBusy && !_biIsOpen(r) && !_biRoutedNotice) { _biRoutedNotice = true; renderBidInboxReview(); }
+    return;
+  }
+  renderBidInboxList();
+}
+
+// Tables written only by direct calls (never by the push): no dirty state to
+// protect, so the server copy simply replaces the local one.
+function _dpMergeDirect(e, rows, st) {
+  var list = db[e.k] || (db[e.k] = []), byId = {};
+  for (var i = 0; i < list.length; i++) byId[String(list[i].id)] = list[i];
+  rows.forEach(function(raw){
+    var inc;
+    try { inc = e.from(raw); } catch (x) { st.skipped++; return; }
+    var id = String(inc.id), cur = byId[id];
+    if (!cur) { list.push(inc); byId[id] = inc; st.added++; return; }
+    if (JSON.stringify(cur) === JSON.stringify(inc)) { st.skipped++; return; }
+    Object.keys(cur).forEach(function(key){ if (!(key in inc)) delete cur[key]; });
+    Object.assign(cur, inc);
+    st.merged++;
+  });
+  return st;
+}
+
 function _dpMerge(e, rows) {
   var st = { merged: 0, added: 0, kept: 0, skipped: 0 };
+  if (e.direct) return _dpMergeDirect(e, rows, st);   // OGUARD1
   var sync = SYNC_TABLES().filter(function(x){ return x.k === e.k; })[0];
   var base = _rowHash[e.k];
   if (!sync || !base) { st.skipped = rows.length; return st; }   // no baseline: can't tell clean from dirty
@@ -62215,11 +62490,12 @@ async function kmiDeltaPull(reason) {
     else if (t.merged || t.added || t.kept)
       console.info('[delta] ' + t.k + ': ' + t.merged + ' updated, ' + t.added + ' added, ' + t.kept + ' kept (unsaved local edit)');
   });
+  touched.forEach(function(e){ if (e.after) { try { e.after(); } catch (x) { console.warn('[delta] after ' + e.k + ':', x); } } });   // OGUARD1
   if (touched.length) {
     var pg = document.querySelector('.pg.active');
     var pid = pg ? pg.id.replace('pg-', '') : '';
     touched.forEach(function(e){
-      if (e.page !== pid) return;
+      if (!_dpOnPage(e, pid)) return;   // OGUARD1
       try { e.refresh(); } catch (x) { console.warn('[delta] refresh ' + e.k + ':', x); }
     });
   }
@@ -62297,6 +62573,21 @@ var _VG = {
       approved_by_user_id: 'Approved by', sent_for_signature_at: 'Sent for signature'
     }
   },
+  opportunities: {   // OGUARD1
+    t: 'kmi_opportunities', noun: 'opportunity', stampUser: true,
+    name: function(r){ return (r && r.id) ? (r.id + (r.project ? ' (' + r.project + ')' : '')) : 'opportunity'; },
+    open: function(id){ openOppDetail(id); },
+    from: function(x){ return fromSBOpp(x); },
+    skip: [],
+    labels: {
+      project: 'Project', customer_id: 'Customer', type: 'Type', types: 'Project types', bid_date: 'Bid date',
+      est_value: 'Estimated value', estimator_id: 'Estimator', pm_id: 'Customer PM', address: 'Address',
+      city: 'City', state: 'State', zip: 'Zip', notes: 'Notes', decision: 'Decision', no_reason: 'No-bid reason',
+      proposal_id: 'Proposal', final_bid_amount: 'Final bid amount', outcome_status: 'Outcome',
+      scope_items: 'Scope items', scope_source_url: 'Scope source', addenda: 'Addenda',
+      vendor_assignments: 'Vendor assignments'
+    }
+  },
   cors: {
     t: 'kmi_cors', noun: 'COR',
     name: function(r){ return 'COR ' + ((r && (r.corNumber || r.id)) || ''); },
@@ -62318,7 +62609,7 @@ var _VG = {
     }
   }
 };
-var _vgBase  = { tmTickets: {}, cors: {} };   // k -> id -> JSON of the last synced mapped row
+var _vgBase  = { tmTickets: {}, cors: {}, opportunities: {} };   // OGUARD1: + opportunities   // k -> id -> JSON of the last synced mapped row
 var _vgChain = {};
 var _vgLast  = [];
 
@@ -62331,6 +62622,7 @@ function _vgEditing(k, id) {
   var pg = document.querySelector('.pg.active'), pid = pg ? pg.id : '';
   if (k === 'tmTickets') return pid === 'pg-new-tm-ticket' && typeof _editTmTicketId !== 'undefined' && _editTmTicketId != null && String(_editTmTicketId) === String(id);
   if (k === 'cors')      return pid === 'pg-new-cor' && typeof _editCorId !== 'undefined' && _editCorId != null && String(_editCorId) === String(id);
+  if (k === 'opportunities') return pid === 'pg-new-opportunity' && typeof _editOppId !== 'undefined' && _editOppId != null && String(_editOppId) === String(id);   // OGUARD1
   return false;
 }
 
@@ -62383,6 +62675,7 @@ function _vgUpsert(k, payload) {
     var rows = arr.map(function(p){
       var o = Object.assign({}, p), loc = by[String(p.id)];
       o.base_version_at = (loc && loc.versionAt) || null;   // read at send time, inside the lock
+      if (e.stampUser) o.updated_by_user_id = (_currentUser && _currentUser.id != null) ? String(_currentUser.id) : null;   // OGUARD1
       return o;
     });
     var r;
@@ -62443,7 +62736,7 @@ async function _vgClassify(k, rej) {
 function _vgRefreshView(k) {
   var pg = document.querySelector('.pg.active'), pid = pg ? pg.id.replace('pg-', '') : '';
   DP_TABLES().forEach(function(e){
-    if (e.k !== k || e.page !== pid) return;
+    if (e.k !== k || !_dpOnPage(e, pid)) return;   // OGUARD1
     try { e.refresh(); } catch (x) { console.warn('[vg] refresh ' + k + ':', x); }
   });
 }
@@ -62952,6 +63245,7 @@ async function pullFromSupabase() {
       if (_rebound) _currentUser = _rebound;
     }
     db.opportunities = (opps.data   || []).map(fromSBOpp);
+    if (opps && !opps.error) _dpNoteMax('opportunities', opps.data);   // OGUARD1
     db.proposals     = (props.data  || []).map(fromSBProposal);
     db.projects      = (projs.data  || []).map(fromSBProject);
     db.activity      = (acts.data   || []).map(function(a){ return {text:a.text, type:a.type, time:a.time}; });
@@ -63217,12 +63511,14 @@ async function pullFromSupabase() {
     // Bid Inbox / inbound invitations — same preserve-on-missing pattern.
     if (biRes && !biRes.error) {
       db.bidInbox = (biRes.data || []).map(fromSBBidInbox);
+      _dpNoteMax('bidInbox', biRes.data);   // OGUARD1
     } else if (biRes && biRes.error) {
       console.warn('kmi_bid_inbox load error (table missing?):', biRes.error.message);
       if (!Array.isArray(db.bidInbox)) db.bidInbox = [];
     }
     if (bivRes && !bivRes.error) {
       db.bidInvites = (bivRes.data || []).map(fromSBBidInvite);
+      _dpNoteMax('bidInvites', bivRes.data);   // OGUARD1
     } else if (bivRes && bivRes.error) {
       console.warn('kmi_bid_invites load error (table missing?):', bivRes.error.message);
       if (!Array.isArray(db.bidInvites)) db.bidInvites = [];
@@ -63315,6 +63611,7 @@ async function pullFromSupabase() {
     _tblBaselineAll();
     _rowBaselineAll();   // RD1
     _vgSnapAll('tmTickets'); _vgSnapAll('cors');   // VG1
+    _vgSnapAll('opportunities');   // OGUARD1
 
     // Re-render current page
     var activePg = document.querySelector('.pg.active');
