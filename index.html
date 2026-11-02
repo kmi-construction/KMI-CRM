@@ -6711,13 +6711,13 @@ function renderBidInbox(){
 function updateBidInboxNavCount(){
   var el=g('biNavCount'); if(!el) return;
   var rows=Array.isArray(db.bidInbox)?db.bidInbox:[];
-  var n=rows.filter(function(r){ return r.status==='new'; }).length;
+  var n=rows.filter(function(r){ return r.status==='new' || r.status==='reviewed'; }).length;   // OGUARD3: opened but not routed still needs action
   if(n>0){ el.textContent=n; el.style.display=''; } else { el.textContent=''; el.style.display='none'; }
 }
 
 function _biStyles(){
   return '<style>'
-  + '.bi-mets{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}'
+  + '.bi-mets{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}'   // OGUARD3: 5 cards
   + '.bi-mc{background:#fff;border:0.5px solid #e5e5e5;border-radius:8px;padding:13px 15px;border-left:3px solid var(--kmi)}'
   + '.bi-mc.am{border-left-color:var(--ac)}.bi-mc.gn{border-left-color:#3B6D11}.bi-mc.bl{border-left-color:#185FA5}'
   + '.bi-ml{font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}'
@@ -6732,6 +6732,12 @@ function _biStyles(){
   + '.bi-b-new{background:#e6f1fb;color:#185FA5}.bi-b-rev{background:#f1efe8;color:#5F5E5A}'
   + '.bi-b-match{background:#faf1d6;color:#9A7A2E;border:1px solid #E8D08A}.bi-b-none{background:#f5f5f5;color:#999}'
   + '.bi-b-att{background:#EAF3DE;color:#3B6D11}.bi-b-cre{background:#EAF3DE;color:#3B6D11}.bi-b-no{background:#FCEBEB;color:#A32D2D}'
+  + '.bi-b-dis{background:#F1EFE8;color:#5F5E5A;border:1px dashed #B4B2A9}'   // OGUARD3
+  + '.bi-sub{display:block;font-size:11px;color:#5F5E5A;margin-top:3px;white-space:nowrap}'
+  + '.bi-ck{width:34px;cursor:default}.bi-ck input{width:auto;margin:0;cursor:pointer}'
+  + '.bi-bulk{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;background:var(--kmi);color:#fff;border-radius:10px;padding:10px 14px;margin-bottom:12px}'
+  + '.bi-bulk .btn{background:#fff;color:#1a1a1a}.bi-bulk .bi-clear{background:transparent;color:#fff;border-color:rgba(255,255,255,.45)}'
+  + '.bi-dr{display:flex;gap:10px;align-items:center;font-size:13px;padding:9px 10px;border:1px solid #e5e5e5;border-radius:8px;cursor:pointer;margin-bottom:6px}.bi-dr input{width:auto;margin:0}'
   + '.bi-split{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}'
   + '.bi-split>*{min-width:0}'
   + '.bi-fg{display:grid;grid-template-columns:1fr 1fr;gap:11px 13px}.bi-fg .full{grid-column:1/-1}'
@@ -6759,8 +6765,24 @@ function _biStatusBadge(s){
   if(s==='reviewed') return '<span class="bi-bdg bi-b-rev">Reviewed</span>';
   if(s==='attached') return '<span class="bi-bdg bi-b-att">Attached</span>';
   if(s==='created') return '<span class="bi-bdg bi-b-cre">Opp created</span>';
+  if(s==='dismissed') return '<span class="bi-bdg bi-b-dis">Dismissed</span>';   // OGUARD3
   if(s==='not_bidding') return '<span class="bi-bdg bi-b-no">Not bidding</span>';
   return '<span class="bi-bdg bi-b-none">'+_biEsc(s)+'</span>';
+}
+
+// OGUARD3: checkboxes on open emails (new + reviewed) feed a bulk bar for
+// Dismiss and Mark not bidding; Attach / Create stay on the review screen.
+var _biSel = {};             // inbox id -> true
+var _biVisibleOpen = [];     // open ids in the current view (select-all)
+var _biDisIds = [];          // ids the Dismiss dialog applies to
+var _BI_DIS_REASONS = { not_a_bid:'Not a bid invite', duplicate:'Duplicate email', spam:'Spam or marketing', other:'Other' };
+
+function _biShortName(uid){
+  if(uid==null||uid==='') return '';
+  if(_currentUser && String(uid)===String(_currentUser.id)) return 'You';
+  var u=(db.users||[]).find(function(x){ return String(x.id)===String(uid); });
+  if(!u) return '';
+  return ((u.firstName||'')+' '+(u.lastName?u.lastName.charAt(0)+'.':'')).trim()||u.email||'';
 }
 
 function renderBidInboxList(){
@@ -6770,6 +6792,14 @@ function renderBidInboxList(){
   var matchN=all.filter(function(r){return r.status==='new' && r.matchSuggestion && r.matchSuggestion.opportunity_id;}).length;
   var revN=all.filter(function(r){return r.status==='reviewed';}).length;
   var creN=all.filter(function(r){return r.status==='created';}).length;
+  var disN=all.filter(function(r){return r.status==='dismissed';}).length;
+  var canRoute=_biCanRoute();
+
+  // Drop selections that are no longer open (routed here or in another tab).
+  Object.keys(_biSel).forEach(function(id){
+    var r=all.find(function(x){ return String(x.id)===id; });
+    if(!r||!_biIsOpen(r)) delete _biSel[id];
+  });
 
   var q=_biSearch.trim().toLowerCase();
   var rows=all.filter(function(r){
@@ -6784,28 +6814,52 @@ function renderBidInboxList(){
     return true;
   }).sort(function(a,b){ return String(b.receivedAt||b.created||'').localeCompare(String(a.receivedAt||a.created||'')); });
 
+  _biVisibleOpen=rows.filter(function(r){ return _biIsOpen(r); }).map(function(r){ return String(r.id); });
+  var selN=Object.keys(_biSel).length;
+  var allSel=_biVisibleOpen.length>0 && _biVisibleOpen.every(function(id){ return _biSel[id]; });
+
   var body='';
   if(rows.length===0){
-    body='<tr><td colspan="6" style="text-align:center;color:#999;padding:30px">No invitations match this view.</td></tr>';
+    body='<tr><td colspan="7" style="text-align:center;color:#999;padding:30px">No invitations match this view.</td></tr>';
   } else {
     body=rows.map(function(r){
-      var ex=r.extracted||{}, ms=r.matchSuggestion||{};
-      var gc=r.fromName||ex.gc||r.fromEmail||'—';
+      var ex=r.extracted||{}, ms=r.matchSuggestion||{}, id=String(r.id), ide=_biEsc(id);
+      var gc=r.fromName||ex.gc||r.fromEmail||'\u2014';
       var proj=ex.project||r.subject||'(no subject)';
-      var loc=[ex.city,ex.state].filter(Boolean).join(', ')||'—';
+      var loc=[ex.city,ex.state].filter(Boolean).join(', ')||'\u2014';
       var matchCell = (r.status==='new'||r.status==='reviewed')
         ? (ms.opportunity_id?'<span class="bi-bdg bi-b-match">\u25C6 Possible match</span>':'<span class="bi-bdg bi-b-none">No match</span>')
-        : (r.resolvedOpportunityId?'<span class="bi-bdg bi-b-att">\u2192 '+_biEsc(r.resolvedOpportunityId)+'</span>':'—');
-      return '<tr onclick="openBidReview(\''+_biEsc(r.id)+'\')">'
+        : (r.resolvedOpportunityId?'<span class="bi-bdg bi-b-att">\u2192 '+_biEsc(r.resolvedOpportunityId)+'</span>':'\u2014');
+      var sub='';
+      if(r.status==='reviewed'){
+        var nm=_biShortName(r.reviewedBy), wh=_vgWhen(r.reviewedAt);
+        if(nm||wh) sub='<span class="bi-sub">'+_biEsc([nm,wh].filter(Boolean).join(' \u00b7 '))+'</span>';
+      } else if(r.status==='dismissed'){
+        sub='<span class="bi-sub">'+_biEsc(_BI_DIS_REASONS[r.dismissReason]||'Other')+'</span>';
+      }
+      var ck=(canRoute&&_biIsOpen(r))
+        ? '<input type="checkbox" aria-label="Select" '+(_biSel[id]?'checked ':'')+'onchange="biToggleSel(\''+ide+'\',this.checked)">'
+        : '';
+      return '<tr'+(_biSel[id]?' style="background:#F0F2F8"':'')+' onclick="openBidReview(\''+ide+'\')">'
+        + '<td class="bi-ck" onclick="event.stopPropagation()">'+ck+'</td>'
         + '<td><div style="font-weight:600">'+_biEsc(gc)+'</div><div style="font-size:11px;color:#888">'+_biEsc(r.fromEmail||'')+'</div></td>'
         + '<td>'+_biEsc(proj)+'</td>'
         + '<td>'+_biFmtDate(ex.bid_due_date)+'</td>'
         + '<td>'+_biEsc(loc)+'</td>'
         + '<td>'+matchCell+'</td>'
-        + '<td>'+_biStatusBadge(r.status)+'</td>'
+        + '<td>'+_biStatusBadge(r.status)+sub+'</td>'
         + '</tr>';
     }).join('');
   }
+
+  var bulk = (canRoute && selN)
+    ? '<div class="bi-bulk"><span style="font-size:13px;font-weight:600">'+selN+' selected</span>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+      +   '<button class="btn" type="button" onclick="biBulkDismiss()">Dismiss\u2026</button>'
+      +   '<button class="btn" type="button" onclick="biBulkNotBidding()">Mark not bidding</button>'
+      +   '<button class="btn bi-clear" type="button" onclick="biClearSel()">Clear</button>'
+      + '</div></div>'
+    : '';
 
   host.innerHTML=_biStyles()
     + '<div class="bi-mets">'
@@ -6813,6 +6867,7 @@ function renderBidInboxList(){
     +   '<div class="bi-mc am"><div class="bi-ml">Possible match</div><div class="bi-mv">'+matchN+'</div></div>'
     +   '<div class="bi-mc"><div class="bi-ml">Reviewed</div><div class="bi-mv">'+revN+'</div></div>'
     +   '<div class="bi-mc gn"><div class="bi-ml">Opps created</div><div class="bi-mv">'+creN+'</div></div>'
+    +   '<div class="bi-mc" style="border-left-color:#B4B2A9"><div class="bi-ml">Dismissed</div><div class="bi-mv">'+disN+'</div></div>'
     + '</div>'
     + '<div class="bi-tools">'
     +   '<input id="biSearch" placeholder="Search GC, project, city\u2026" value="'+_biEsc(_biSearch)+'" oninput="_biSearch=this.value;clearTimeout(window._biT);window._biT=setTimeout(renderBidInboxList,200)">'
@@ -6822,13 +6877,114 @@ function renderBidInboxList(){
     +     '<option value="attached"'+(_biStatusFilter==='attached'?' selected':'')+'>Attached</option>'
     +     '<option value="created"'+(_biStatusFilter==='created'?' selected':'')+'>Opp created</option>'
     +     '<option value="not_bidding"'+(_biStatusFilter==='not_bidding'?' selected':'')+'>Not bidding</option>'
+    +     '<option value="dismissed"'+(_biStatusFilter==='dismissed'?' selected':'')+'>Dismissed</option>'
     +   '</select>'
     + '</div>'
-    + '<div class="card" style="padding:0;overflow:hidden">'
-    +   '<table class="bi-tbl"><thead><tr><th>From (GC)</th><th>Project</th><th>Bid due</th><th>Location</th><th>Match</th><th>Status</th></tr></thead>'
+    + bulk
+    + '<div class="card" style="padding:0;overflow-x:auto">'
+    +   '<table class="bi-tbl"><thead><tr>'
+    +     '<th class="bi-ck">'+((canRoute&&_biVisibleOpen.length)?'<input type="checkbox" aria-label="Select all open" '+(allSel?'checked ':'')+'onchange="biSelectAll(this.checked)">':'')+'</th>'
+    +     '<th>From (GC)</th><th>Project</th><th>Bid due</th><th>Location</th><th>Match</th><th>Status</th></tr></thead>'
     +   '<tbody>'+body+'</tbody></table>'
     + '</div>';
   var _si=g('biSearch'); if(_si && _biSearch){ _si.focus(); try{ _si.setSelectionRange(_si.value.length,_si.value.length); }catch(e){} }
+}
+
+function biToggleSel(id, on){ if(on) _biSel[String(id)]=true; else delete _biSel[String(id)]; renderBidInboxList(); }
+function biSelectAll(on){ if(on) _biVisibleOpen.forEach(function(id){ _biSel[id]=true; }); else _biSel={}; renderBidInboxList(); }
+function biClearSel(){ _biSel={}; renderBidInboxList(); }
+function biBulkDismiss(){ var ids=Object.keys(_biSel); if(ids.length) _biDismissDialog(ids); }
+function biDismissOne(){ if(_biReviewId!=null){ _biStashForm(); _biDismissDialog([String(_biReviewId)]); } }
+
+function biBulkNotBidding(){
+  var ids=Object.keys(_biSel); if(!ids.length) return;
+  showModal('<div class="mt">Mark '+ids.length+' email'+(ids.length===1?'':'s')+' not bidding?</div>'
+    + '<div class="msb">They leave the Open list. You can move any of them back to New later.</div>'
+    + '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>'
+    + '<button class="btn btn-nobid" onclick="closeModal();_biBulkRun(Object.keys(_biSel),\'not_bidding\')">Mark not bidding</button></div>');
+}
+
+function _biDismissDialog(ids){
+  _biDisIds=ids.slice();
+  var opts=Object.keys(_BI_DIS_REASONS).map(function(k,i){
+    return '<label class="bi-dr"><input type="radio" name="biDisReason" value="'+k+'"'+(i===0?' checked':'')+'>'+_biEsc(_BI_DIS_REASONS[k])+'</label>';
+  }).join('');
+  showModal(_biStyles()
+    + '<div class="mt">Dismiss '+(ids.length===1?'this email':ids.length+' emails')+'?</div>'
+    + '<div class="msb">'+(ids.length===1?'It leaves':'They leave')+' the Open list. You can move '+(ids.length===1?'it':'them')+' back to New later.</div>'
+    + opts
+    + '<input id="biDisNote" placeholder="Note (optional)" style="margin-top:4px">'
+    + '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>'
+    + '<button class="btn btn-p" onclick="_biDismissGo()">Dismiss</button></div>');
+}
+
+function _biDismissGo(){
+  var pick=document.querySelector('input[name="biDisReason"]:checked');
+  var reason=pick?pick.value:'other', note=((g('biDisNote')||{}).value||'').trim();
+  closeModal();
+  _biBulkRun(_biDisIds, 'dismiss', reason, note);
+}
+
+// Runs a bulk action through kmi_bid_inbox_bulk. Emails someone else already
+// routed are skipped and updated locally. From the review screen (one email)
+// the result goes back to the list, or shows the routed banner if skipped.
+async function _biBulkRun(ids, action, reason, note){
+  if(!ids||!ids.length) return;
+  if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
+  if(!supabaseClient){ showToast('Not connected','error'); return; }
+  var fromReview=(_biView==='review' && ids.length===1 && String(ids[0])===String(_biReviewId));
+  if(fromReview){ _biBusy=true; renderBidInboxReview(); }
+  var res=await _ogRpc('kmi_bid_inbox_bulk',{ p_ids:ids, p_action:action, p_actor:_ogActor(), p_reason:reason||null, p_note:note||null });
+  _biBusy=false;
+  if(!res.ok){
+    if(fromReview) renderBidInboxReview(); else renderBidInboxList();
+    showToast('Could not update: '+(res.message||res.code||'unknown error'),'error');
+    return;
+  }
+  (res.done||[]).forEach(function(raw){ _ogAdoptInbox(raw); delete _biSel[String(raw.id)]; });
+  (res.skipped||[]).forEach(function(sk){
+    var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(sk.id); });
+    if(r && sk.code==='already_routed') _ogApplyRouted(r, sk);
+    delete _biSel[String(sk.id)];
+  });
+  saveDB(); updateBidInboxNavCount();
+  var n=(res.done||[]).length, sN=(res.skipped||[]).length;
+  var verb=action==='dismiss'?'dismissed':'marked not bidding';
+  if(fromReview){
+    if(n){ showToast((action==='dismiss'?'Dismissed':'Marked not bidding'),'success'); biBackToList(); }
+    else { _biRoutedNotice=true; renderBidInboxReview(); }
+    return;
+  }
+  renderBidInboxList();
+  showToast(n+' email'+(n===1?'':'s')+' '+verb+(sN?(', '+sN+' skipped (already routed)'):''), sN?'info':'success');
+}
+
+async function biReopen(){
+  var r=(db.bidInbox||[]).find(function(x){ return String(x.id)===String(_biReviewId); });
+  if(!r||_biBusy) return;
+  if(!_biCanRoute()){ showToast('Not permitted','error'); return; }
+  if(!supabaseClient){ showToast('Not connected','error'); return; }
+  _biBusy=true; renderBidInboxReview();
+  var res=await _ogRpc('kmi_bid_inbox_reopen',{ p_id:r.id });
+  _biBusy=false;
+  if(res.ok){
+    _ogAdoptInbox(res.inbox); saveDB(); updateBidInboxNavCount();
+    showToast('Moved back to New','success');
+    openBidReview(r.id);
+    return;
+  }
+  renderBidInboxReview();
+  showToast(res.code==='routed_to_opp'?('This email is on '+(res.opportunity_id||'an opportunity')+'. Delete that opportunity to reopen it.'):('Could not reopen: '+(res.message||res.code||'unknown error')),'error');
+}
+
+// First open of a New email marks it Reviewed (by whom, when) for everyone.
+async function _biMarkReviewed(r){
+  if(!supabaseClient||!r) return;
+  var res;
+  try{ res=await supabaseClient.rpc('kmi_bid_inbox_mark_reviewed',{ p_id:r.id, p_actor:_ogActor() }); }catch(x){ return; }
+  if(!res||res.error||!res.data) return;
+  _ogAdoptInbox(res.data);
+  updateBidInboxNavCount();
 }
 
 // OGUARD1 review state: duplicate candidates from the server scorer, whether
@@ -6849,6 +7005,7 @@ function openBidReview(id){
   _biView='review';
   renderBidInboxReview();
   if(r && _biOpenedOpen) _biLiveCheck(r);
+  if(r && (r.status||'new')==='new') _biMarkReviewed(r);   // OGUARD3
 }
 
 function _biIsOpen(r){ return !!r && ['new','reviewed'].indexOf(r.status||'new')>=0; }
@@ -6977,13 +7134,14 @@ function renderBidInboxReview(){
   var primaryOff=_biBusy || (_biRoute==='new' && ((hard && !_biHardAck) || (!hard && _biConfirmBar)));
   var actions = canRoute
     ? ('<div class="bi-acts">'
+        + '<button class="btn" type="button" style="margin-right:auto;color:#5F5E5A" '+(_biBusy?'disabled ':'')+'onclick="biDismissOne()">Dismiss\u2026</button>'   // OGUARD3
         + '<button class="btn" '+(_biBusy?'disabled ':'')+'onclick="biNotBidding()">Mark not bidding</button>'
         + '<button class="btn btn-p" '+(primaryOff?'disabled style="opacity:.45" ':'')+'onclick="biConfirmRoute()">'+(_biBusy?'Saving\u2026':(_biRoute==='attach'?'Attach invitation':'Create opportunity'))+'</button>'
       + '</div>')
     : '<div class="bi-note" style="margin-top:14px">Your role can review invitations but not route them. Contact an Admin, PM, or Project Coordinator to attach or create.</div>';
 
   var routePanel = routed
-    ? '<div class="card" style="padding:14px 16px;margin-top:12px;font-size:13px;color:#5F5E5A">Routing options are hidden once an email is routed.</div>'
+    ? '<div class="card" style="padding:14px 16px;margin-top:12px;font-size:13px;color:#5F5E5A">Routing options are hidden once an email is routed.'+((r.status==='dismissed'||r.status==='not_bidding')?' Move it back to New to route it.':'')+'</div>'   // OGUARD3
     : ('<div class="bi-panel">'
       + '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#9A7A2E;margin-bottom:12px">Route this invitation</div>'
       + hardCard + attachBlock + newBlock + confirmBar + actions
@@ -7114,6 +7272,8 @@ function _ogAdoptInbox(raw){
   r.resolvedInviteId=raw.resolved_invite_id||null;
   r.reviewedBy=raw.reviewed_by||null;
   r.reviewedAt=raw.reviewed_at||null;
+  r.dismissReason=raw.dismiss_reason||null;   // OGUARD3
+  r.dismissNote=raw.dismiss_note||null;
   if(raw.extracted) r.extracted=raw.extracted;
 }
 
@@ -7123,6 +7283,8 @@ function _ogApplyRouted(r, res){
   r.resolvedInviteId=res.invite_id||null;
   r.reviewedBy=res.reviewed_by||null;
   r.reviewedAt=res.reviewed_at||null;
+  r.dismissReason=res.dismiss_reason||null;   // OGUARD3
+  r.dismissNote=res.dismiss_note||null;
 }
 
 function _ogUserName(uid){
@@ -7180,6 +7342,18 @@ function _ogShowDupModal(cands, retryJs){
 }
 
 function _biRoutedBanner(r){
+  if(r.status==='dismissed'||r.status==='not_bidding'){   // OGUARD3: reversible outcomes get Move back to New
+    var dis=r.status==='dismissed', whenD=_vgWhen(r.reviewedAt);
+    var title=dis?('Dismissed: '+_biEsc(_BI_DIS_REASONS[r.dismissReason]||'Other')):'Marked not bidding';
+    return '<div class="og-routed" style="background:'+(dis?'#F1EFE8':'#FCEBEB')+';border-color:'+(dis?'#D3D1C7':'#E3B3B3')+'">'
+      + '<div style="flex:1 1 360px;min-width:0"><div style="font-size:14px;font-weight:600;color:'+(dis?'#1a1a1a':'#7A1F1F')+'">'+title+'</div>'
+      + '<div style="font-size:13px;color:#1a1a1a;margin-top:3px">'+_biEsc(_ogUserName(r.reviewedBy))+(dis?' dismissed this email':' marked this email not bidding')+(whenD?' at '+_biEsc(whenD):'')+'.'
+      + (r.dismissNote?' \u201c'+_biEsc(r.dismissNote)+'\u201d':'')
+      + (_biRoutedNotice?' Nothing on this screen was saved.':'')+'</div></div>'
+      + '<div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn" onclick="biBackToList()">Back to inbox</button>'
+      + (_biCanRoute()?'<button class="btn btn-p" '+(_biBusy?'disabled ':'')+'onclick="biReopen()">Move back to New</button>':'')
+      + '</div></div>';
+  }
   var opp=r.resolvedOpportunityId||'', ope=_biEsc(opp), when=_vgWhen(r.reviewedAt);
   var verb = r.status==='created' ? ('created <b>'+ope+'</b> from it')
            : r.status==='attached' ? ('attached it to <b>'+ope+'</b>')
@@ -60371,7 +60545,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-02-OGUARD2a';
+var KMI_BUILD = '2026-11-02-OGUARD3';
 
 var _kmiSessionId = (function(){
   try {
@@ -62030,6 +62204,8 @@ function fromSBBidInbox(r) {
     resolvedInviteId: r.resolved_invite_id || null,
     reviewedBy: r.reviewed_by || null,
     reviewedAt: r.reviewed_at || null,
+    dismissReason: r.dismiss_reason || null,   // OGUARD3
+    dismissNote: r.dismiss_note || null,
     created: r.created || ''
   };
 }
