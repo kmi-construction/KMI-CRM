@@ -18028,13 +18028,13 @@ async function tmAttUpload() {
     if (typeof showToast === 'function') showToast('Attachment added.', 'success');
     await tmAttRender(t);
   } catch (e) {
-    if (path) {
-      try { await supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([path]); } catch (_) {}
-    }
     var msg = (e && e.message) ? e.message : String(e);
     if (/row-level security/i.test(msg)) msg = 'attachments are locked for this ticket (its COR has been sent), or you do not have permission.';
     if (err) err.textContent = 'Upload failed: ' + msg;
     if (btn) { btn.disabled = false; btn.textContent = 'Upload'; }
+    if (path) {   // OCOSAVE1: cleanup after the button is released, never awaited
+      try { supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([path]).catch(function(){}); } catch (_) {}
+    }
   } finally {
     _tmAttBusy = false;
   }
@@ -22084,8 +22084,23 @@ function ocoMakeCor(p, line, hdr, idOffset) {
   };
 }
 
+// OCOSAVE1: settle a hung request as an error so a save can't strand the UI.
+function ocoWithTimeout(promise, ms, what) {
+  var t;
+  return Promise.race([
+    Promise.resolve(promise).finally(function(){ clearTimeout(t); }),
+    new Promise(function(_, rej){
+      t = setTimeout(function(){
+        var e = new Error(what + ' timed out after ' + Math.round(ms / 1000) + 's');
+        e.ocoTimeout = true; rej(e);
+      }, ms);
+    })
+  ]);
+}
+
 async function ocoImpSave() {
   var st = _ocoImp; if (!st || st.busy) return;
+  if (st.maybeSaved) { alert('This CO may already be saved. Cancel this import, reload the page and check the CO list before importing it again.'); return; }   // OCOSAVE1
   if (!supabaseClient) { st.err = 'Saving an owner CO needs the cloud connection.'; ocoRenderImport(); return; }
   var p = getProj(st.pid); if (!p) { st.err = 'Project not found.'; ocoRenderImport(); return; }
   st.busy = true; st.err = ''; ocoRenderImport();
@@ -22113,7 +22128,7 @@ async function ocoImpSave() {
       var safe = String(st.file.name || 'owner-co.pdf').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
       if (!/\.pdf$/i.test(safe)) safe += '.pdf';
       path = 'owner-cos/' + st.pid + '/' + Date.now() + '_' + safe;
-      var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET).upload(path, st.file, { contentType: 'application/pdf', upsert: false });
+      var up = await ocoWithTimeout(supabaseClient.storage.from(PROJECT_FILES_BUCKET).upload(path, st.file, { contentType: 'application/pdf', upsert: false }), 120000, 'PDF upload');   // OCOSAVE1
       if (up && up.error) throw new Error('PDF upload failed: ' + up.error.message);
     }
     // 3. One transaction on the server
@@ -22139,10 +22154,12 @@ async function ocoImpSave() {
       file_path: path, file_name: st.file ? st.file.name : null, user_id: ocoUid(),
       lines: lines, allocs: allocs
     };
-    var r = await supabaseClient.rpc('kmi_owner_co_import', { p: payload });
+    var r;   // OCOSAVE1
+    try { r = await ocoWithTimeout(supabaseClient.rpc('kmi_owner_co_import', { p: payload }), 60000, 'Saving the CO'); }
+    catch (te) { if (te && te.ocoTimeout) te.ocoMaybeCommitted = true; throw te; }
     if (r.error) throw new Error(r.error.message);
-    // 4. Pull the CORs the server just changed
-    await ocoRefreshCors(corIds);
+    // 4. Pull the CORs the server just changed (the CO is saved; a slow refresh must not block)
+    try { await ocoWithTimeout(ocoRefreshCors(corIds), 30000, 'COR refresh'); } catch (rx) { console.warn('[oco] refresh', rx); }
     var coNo = payload.co_number, newId = r.data;
     _ocoImp = null;
     if (newId) _ocoExpanded[String(newId)] = true;
@@ -22154,11 +22171,19 @@ async function ocoImpSave() {
     renderProjectCorList();
   } catch (e) {
     console.error('[oco] save', e);
-    if (path) { try { await supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([path]); } catch (x) {} }
-    st.busy = false;
-    st.err = 'Not saved: ' + (e.message || e) +
-      (created.length ? ' \u2014 note: ' + created.join(', ') + ' were already created as Pending; they will be reused if you save again.' : '');
+    st.busy = false;   // OCOSAVE1: release the UI before any cleanup
+    if (e && e.ocoMaybeCommitted) {
+      st.maybeSaved = true;
+      path = null;     // the new CO row may point at this PDF - keep it
+      st.err = 'The server did not answer in time, so CO ' + String(st.hdr.no) + ' may or may not have saved. Cancel this import, reload the page and check the CO list before trying again.';
+    } else {
+      var em = String(e.message || e);
+      st.err = 'Not saved: ' + em +
+        (/\b50[234]\b|timed out|gateway/i.test(em) ? ' \u2014 the file server did not respond. Wait a minute and click Save again.' : '') +
+        (created.length ? ' \u2014 note: ' + created.join(', ') + ' were already created as Pending; they will be reused if you save again.' : '');
+    }
     ocoRenderImport();
+    if (path) { try { supabaseClient.storage.from(PROJECT_FILES_BUCKET).remove([path]).catch(function(x){ console.warn('[oco] pdf cleanup', x); }); } catch (x) {} }
   }
 }
 
@@ -60545,7 +60570,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-02-OGUARD3';
+var KMI_BUILD = '2026-11-02-OCOSAVE1';
 
 var _kmiSessionId = (function(){
   try {
