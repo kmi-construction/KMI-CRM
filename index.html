@@ -1698,6 +1698,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="ni" onclick="nav('ap-approvals')"><span class="nico">✓</span>AP Approvals</div>
       <div class="ni" onclick="nav('ap-checks')"><span class="nico">▤</span>Check Register</div>
       <div class="ni" onclick="nav('fin-statements')"><span class="nico">▥</span>Financial Statements</div>
+      <div class="ni" onclick="nav('wip')"><span class="nico">◫</span>WIP Report</div>
     </div>
   </div>
   <div class="sb-group" data-group="resources">
@@ -2803,6 +2804,76 @@ tr.gc-line:hover td{background:#fafafa}
   <div id="fs-periods" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px"></div>
   <div id="fs-tabs" style="display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid #e5e5e5;margin-bottom:14px"></div>
   <div id="fs-body"></div>
+</div>
+
+<!-- WIP REPORT (B1) -->
+<div class="pg" id="pg-wip">
+  <style>
+    #pg-wip .wp-pill{min-height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--stl);background:#fff;color:var(--kmi);font-size:12.5px;cursor:pointer;font-family:inherit}
+    #pg-wip .wp-pill.on{background:var(--kmi);border-color:var(--kmi);color:#fff;font-weight:600}
+    #pg-wip .wp-pill .wp-lk{display:inline-block;width:6px;height:6px;border-radius:3px;background:var(--ac);margin-left:5px;vertical-align:middle}
+    #pg-wip .wp-tab{min-height:40px;padding:0 16px;border:0;border-bottom:3px solid transparent;margin-bottom:-2px;background:none;color:#555;font-size:13.5px;cursor:pointer;font-family:inherit}
+    #pg-wip .wp-tab.on{border-bottom-color:var(--ac);color:var(--kmi);font-weight:700}
+    #pg-wip .wp-status{display:inline-block;padding:4px 11px;border-radius:14px;font-size:12px;font-weight:600}
+    #pg-wip .wp-st-open{background:#FBF3DC;color:#6B5320}
+    #pg-wip .wp-st-locked{background:#EEF0F7;color:var(--kmi)}
+    #pg-wip .wp-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px}
+    #pg-wip .wp-card{background:#fff;border:.5px solid #e5e5e5;border-radius:10px;padding:11px 14px}
+    #pg-wip .wp-card .l{font-size:11px;color:#666}
+    #pg-wip .wp-card .v{font-size:18px;font-weight:700;color:var(--kmi);font-variant-numeric:tabular-nums;margin:2px 0}
+    #pg-wip .wp-card .s{font-size:11px;color:#777}
+    #pg-wip .wp-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:10px}
+    #pg-wip .wp-chip{min-height:30px;padding:0 11px;border-radius:15px;border:1px solid #ddd;background:#fff;color:#333;font-size:12px;cursor:pointer;font-family:inherit}
+    #pg-wip .wp-chip.on{background:var(--kmi);border-color:var(--kmi);color:#fff;font-weight:600}
+    #pg-wip .wp-wrap{display:flex;gap:14px;align-items:flex-start}
+    #pg-wip .wp-tablebox{flex:1 1 auto;min-width:0;background:#fff;border:.5px solid #e5e5e5;border-radius:10px;overflow:hidden}
+    #pg-wip .wp-scroll{overflow:auto;max-height:calc(100vh - 330px)}
+    #pg-wip table.wp-t{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+    #pg-wip table.wp-t th{position:sticky;top:0;z-index:2;background:#fafafa;color:#777;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;padding:9px 10px;text-align:right;white-space:nowrap;border-bottom:.5px solid #eee}
+    #pg-wip table.wp-t th.g{border-left:.5px solid #eee}
+    #pg-wip table.wp-t td{padding:7px 10px;text-align:right;white-space:nowrap;border-bottom:.5px solid #f0f0f0}
+    #pg-wip table.wp-t td.g{border-left:.5px solid #f3f3f3}
+    #pg-wip table.wp-t th.job,#pg-wip table.wp-t td.job{position:sticky;left:0;z-index:1;text-align:left;background:#fff;min-width:230px;max-width:300px;white-space:normal}
+    #pg-wip table.wp-t th.job{z-index:3;background:#fafafa}
+    #pg-wip table.wp-t tr.r{cursor:pointer}
+    #pg-wip table.wp-t tr.r:hover td{background:#fafaf7}
+    #pg-wip table.wp-t tr.r.sel td{background:#F4F1E3}
+    #pg-wip table.wp-t tr.r.sel td.job{box-shadow:inset 3px 0 0 var(--ac)}
+    #pg-wip table.wp-t tfoot td{position:sticky;bottom:0;background:#fafafa;font-weight:700;border-top:.5px solid #ddd}
+    #pg-wip .wp-jn{font-weight:600;color:var(--kmi)}
+    #pg-wip .wp-flags{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px}
+    #pg-wip .wp-f{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10.5px;font-weight:600;line-height:1.6;white-space:nowrap}
+    #pg-wip .wp-f-risk{background:#F6E3DC;color:#8A3B1E}
+    #pg-wip .wp-f-warn{background:#FBF3DC;color:#6B5320}
+    #pg-wip .wp-f-info{background:#E7E9F3;color:var(--kmi2)}
+    #pg-wip .neg{color:#8A3B1E}
+    #pg-wip .pos{color:#2F5D3A}
+    #pg-wip .wp-panel{flex:0 0 420px;max-width:440px;background:#fff;border:.5px solid #e5e5e5;border-radius:10px;padding:16px 18px;max-height:calc(100vh - 200px);overflow:auto}
+    #pg-wip .wp-sec{border-top:.5px solid #eee;padding-top:12px;margin-top:12px}
+    #pg-wip .wp-sec h4{margin:0 0 8px;font-size:13px;color:#1a1a1a}
+    #pg-wip .wp-kv{display:grid;grid-template-columns:1fr auto;gap:6px 14px;font-size:12.5px}
+    #pg-wip .wp-kv .k{color:#666}
+    #pg-wip .wp-kv .v{text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
+    #pg-wip .wp-in{padding:8px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;width:100%;box-sizing:border-box;min-width:0}
+    #pg-wip .wp-in.num{text-align:right}
+    #pg-wip .wp-in.act{border:1.5px solid var(--ac);background:#FFFDF5}
+    #pg-wip .wp-note{font-size:12px;border-radius:6px;padding:8px 10px}
+    #pg-wip .wp-note.w{background:#FBF3DC;color:#6B5320}
+    #pg-wip .wp-note.i{background:#EEF0F7;color:var(--kmi2)}
+    #pg-wip .wp-note.e{background:#FCEBEB;color:#A32D2D}
+    #pg-wip .wp-hist{background:#fafafa;border-radius:6px;padding:7px 10px;font-size:12px;margin-top:6px}
+    #pg-wip label.wp-lbl{display:flex;flex-direction:column;justify-content:flex-end;gap:4px;font-size:12px;color:#555;text-transform:none;letter-spacing:0;font-weight:400;margin:0}
+    #pg-wip .btn:disabled{opacity:.45;cursor:not-allowed}
+    #pg-wip .wp-banner{padding:10px 14px;border-radius:8px;font-size:12.5px;margin-bottom:12px}
+    @media (max-width:1100px){ #pg-wip .wp-wrap{flex-direction:column} #pg-wip .wp-panel{flex:1 1 auto;max-width:none;width:100%;box-sizing:border-box} }
+  </style>
+  <div class="ph"><div><h1>WIP Report</h1><div class="sub" id="wp-sub">Work in progress, percentage of completion, cost-to-cost.</div><div class="stripe"></div></div>
+    <div id="wp-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"></div></div>
+  <div id="wp-periods" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px"></div>
+  <div id="wp-meta" style="display:flex;flex-wrap:wrap;gap:18px;font-size:12px;color:#666;margin-bottom:10px"></div>
+  <div id="wp-banner"></div>
+  <div id="wp-tabs" style="display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid #e5e5e5;margin-bottom:14px"></div>
+  <div id="wp-body"></div>
 </div>
 
 <!-- AP CHECK REGISTER -->
@@ -4385,6 +4456,11 @@ var PERMISSIONS = {
   // Financial statements (FS1): Admin + Accounting. RLS (kmi_fs_can_read) is
   // the real gate; this row only shapes the sidebar and router.
   'fin-statements': ['full','none','none','full','none','none','none'],
+  // WIP report (B1): Admin, PM and Accounting view; RLS limits PMs to their
+  // own jobs. Accounting/Admin lock and manage contract items; Admin reopens.
+  'view-wip':   ['full','full','none','full','none','none','none'],
+  'manage-wip': ['full','none','none','full','none','none','none'],
+  'reopen-wip': ['full','none','none','none','none','none','none'],
   'email-log': ['full','none','none','none','none','none','none'],
   'email-settings': ['full','none','none','none','none','none','none'],
   // SPFUI1: credential expiry editor. RLS (kmi_is_admin) is the real gate.
@@ -4576,6 +4652,7 @@ var PAGE_ACTION_MAP = {
   'ap-checks':      'ap-checks',
   'rental-review':  'rental-review',
   'fin-statements': 'fin-statements',
+  'wip':            'view-wip',
   'budget':         'view_project_budget',
   'tm-tickets':     'view-tm-tickets',
   'new-tm-ticket':  'create-tm-ticket',
@@ -6568,6 +6645,7 @@ function nav(page) {
     'ap-checks':      renderApChecks,
     'rental-review':  renderRentalReview,
     'fin-statements': renderFinStatements,
+    'wip':            renderWip,
     projects:         renderProjects,
     'new-project':    initNewProject,
     budget:           renderBudget,
@@ -49182,6 +49260,644 @@ async function apChkCommit(){
   }
 }
 
+// ═══ WIP REPORT (B1) ══════════════════════════════════════════════════════
+// Monthly WIP schedule (percentage of completion, cost-to-cost). All math is in
+// the database (WIP-M1..M1d):
+//   kmi_wip_report(period_end, labor)   live rows for an open month, frozen
+//                                       snapshot for a locked one
+//   kmi_wip_save_forecast(...)          eac | ctc | gp | complete | confirm
+//   kmi_wip_lock / kmi_wip_reopen       Accounting locks, Admin reopens
+// RLS decides which jobs a user sees (PMs: their own). The 'view-wip',
+// 'manage-wip' and 'reopen-wip' rows only shape the UI. Labor % comes from
+// _prodTrackingCompute (same as Production / Job Cost) and is passed in.
+var _wip = {
+  period: null,                 // 'YYYY-MM-DD' month end
+  periods: {},                  // period_end -> kmi_wip_periods row
+  cache: {},                    // period_end -> rows
+  je: {},                       // period_end -> kmi_wip_period_je row
+  tab: 'wip', filter: 'all', sel: null,
+  groups: { contract: true, prior: false, ytd: true, billing: true, forecast: true },
+  panel: null,                  // { job, hist, tf, settings, note }
+  f: { mode: null, text: '', note: '' },
+  tfAmt: '', tfNote: '', nteAmt: '', nteNote: '', noteText: null,
+  busy: false, err: ''
+};
+var _WIP_FIRST = '2026-07-31';
+var _WIP_MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+var _WIP_GROUPS_KEY = 'kmi.wip.groups';
+
+function _wipNum(v){ var n = Number(v); return isFinite(n) ? n : 0; }
+function _wipMoney(v){
+  if (v === null || v === undefined || v === '') return '\u2013';
+  var n = _wipNum(v), a = Math.abs(n);
+  if (a < 0.5) return '\u2013';
+  var s = Math.round(a).toLocaleString('en-US');
+  return n < 0 ? '(' + s + ')' : s;
+}
+function _wipMoney2(v){
+  var n = _wipNum(v), s = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return n < 0 ? '(' + s + ')' : s;
+}
+function _wipPct(v){ return (v === null || v === undefined) ? '\u2013' : (_wipNum(v) * 100).toFixed(1) + '%'; }
+function _wipEsc(v){ return escapeHtml(v == null ? '' : v); }
+function _wipJs(v){ return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '\\x3c'); }
+function _wipRole(){ return normalizeRole(_currentUser && _currentUser.role); }
+function _wipIsAcct(){ return hasFull('manage-wip'); }
+function _wipIsAdmin(){ return hasFull('reopen-wip'); }
+function _wipLabel(pe){ var p = String(pe).split('-'); return _WIP_MON[Number(p[1]) - 1] + ' ' + p[0]; }
+function _wipMonthEnd(y, m){ var d = new Date(Date.UTC(y, m, 0)); return d.toISOString().slice(0, 10); }
+function _wipNextMonthEnd(pe){ var p = pe.split('-').map(Number); return _wipMonthEnd(p[1] === 12 ? p[0] + 1 : p[0], p[1] === 12 ? 1 : p[1] + 1); }
+function _wipLastClosed(){ var d = new Date(); return _wipMonthEnd(d.getFullYear(), d.getMonth()); }
+function _wipLocked(pe){ var p = _wip.periods[pe || _wip.period]; return !!(p && p.status === 'locked'); }
+function _wipRows(){ return _wip.cache[_wip.period] || null; }
+function _wipRow(job){ var rs = _wipRows() || []; for (var i = 0; i < rs.length; i++) if (rs[i].job_no === job && rs[i].section === 'wip') return rs[i]; return null; }
+function _wipProject(job){ return (db.projects || []).find(function(p){ return String(p.number || '').trim() === String(job); }) || null; }
+function _wipHasFlag(r, f){ return (r.flags || []).some(function(x){ return x === f || String(x).indexOf(f + ':') === 0; }); }
+
+function _wipLoadGroups(){
+  try { var s = localStorage.getItem(_WIP_GROUPS_KEY); if (s) { var o = JSON.parse(s); Object.keys(_wip.groups).forEach(function(k){ if (k in o) _wip.groups[k] = !!o[k]; }); } } catch (e) {}
+}
+function _wipSaveGroups(){ try { localStorage.setItem(_WIP_GROUPS_KEY, JSON.stringify(_wip.groups)); } catch (e) {} }
+
+// Labor-weighted % complete at a month end, as a fraction. Null when the
+// project has no production estimate (unknown, not zero).
+function _wipLaborPct(p, asOf){
+  try {
+    if (!p || typeof _prodTrackingCompute !== 'function') return null;
+    var C = _prodTrackingCompute(p, asOf);
+    if (!C || !(Number(C.catLaborSum) > 0)) return null;
+    var v = Number(C.pctCompleteLabor);
+    return isFinite(v) ? v : null;
+  } catch (e) { console.warn('[wip] labor %', e); return null; }
+}
+function _wipLaborMap(pe){
+  var m = {};
+  (db.projects || []).forEach(function(p){
+    var no = String(p.number || '').trim();
+    if (!no || p.category !== 'project') return;
+    var v = _wipLaborPct(p, pe);
+    if (v !== null) m[no] = Math.round(v * 10000) / 10000;
+  });
+  return m;
+}
+
+var _WIP_FLAG = {
+  provisional_nte:    ['Provisional NTE', 'warn'],
+  no_contract:        ['No contract', 'risk'],
+  over_100:           ['Over 100%', 'risk'],
+  cost_over_estimate: ['Cost over estimate', 'risk'],
+  target_15:          ['15% target', 'info'],
+  forecast_due:       ['Forecast due', 'warn'],
+  labor_gap:          ['Labor % differs', 'info'],
+  tm_cors_in:         ['T&M CORs in', 'info'],
+  complete:           ['Marked complete', 'info'],
+  no_opening:         ['No opening balance', 'warn'],
+  not_in_kmi:         ['Not in kmi.build', 'warn']
+};
+function _wipFlagHtml(f, r){
+  var s = String(f), lab, cls;
+  if (s.indexOf('oco_unlinked:') === 0) { lab = 'Owner CO $' + _wipMoney(s.slice(13)) + ' not on a COR'; cls = 'risk'; }
+  else if (s === 'labor_gap' && r && r.labor_pct !== null && r.labor_pct !== undefined) { lab = 'Labor ' + Math.round(_wipNum(r.labor_pct) * 100) + '%'; cls = 'info'; }
+  else { var d = _WIP_FLAG[s] || [s, 'info']; lab = d[0]; cls = d[1]; }
+  return '<span class="wp-f wp-f-' + cls + '">' + _wipEsc(lab) + '</span>';
+}
+function _wipAttention(r){
+  return (r.flags || []).some(function(f){
+    var s = String(f); if (s.indexOf('oco_unlinked:') === 0) return true;
+    var d = _WIP_FLAG[s]; return d && d[1] !== 'info';
+  });
+}
+
+// ── entry ───────────────────────────────────────────────────────────────
+async function renderWip(){
+  if (!hasRead('view-wip')) return;
+  _wipLoadGroups();
+  _wipRenderChrome();
+  await _wipLoadPeriods();
+  if (!_wip.period) _wip.period = _wipDefaultPeriod();
+  _wipRenderChrome();
+  await _wipLoad(false);
+}
+
+async function _wipLoadPeriods(){
+  if (!supabaseClient) return;
+  var r = await supabaseClient.from('kmi_wip_periods').select('*');
+  if (r.error) { _wip.err = r.error.message; return; }
+  _wip.periods = {};
+  (r.data || []).forEach(function(p){ _wip.periods[p.period_end] = p; });
+}
+
+// The month after the latest locked one, but never past last month.
+function _wipDefaultPeriod(){
+  var locked = Object.keys(_wip.periods).filter(function(k){ return _wip.periods[k].status === 'locked'; }).sort();
+  var last = _wipLastClosed();
+  if (!locked.length) return last < _WIP_FIRST ? _WIP_FIRST : last;
+  var nx = _wipNextMonthEnd(locked[locked.length - 1]);
+  return nx <= last ? nx : locked[locked.length - 1];
+}
+
+function _wipPeriodList(){
+  var out = [], pe = _WIP_FIRST, last = _wipLastClosed();
+  while (pe <= last) { out.push(pe); pe = _wipNextMonthEnd(pe); }
+  if (!out.length) out.push(_WIP_FIRST);
+  return out;
+}
+
+async function _wipLoad(force){
+  var body = g('wp-body'); if (!body) return;
+  if (!supabaseClient) { body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Not connected.</div>'; return; }
+  var pe = _wip.period;
+  if (force) { delete _wip.cache[pe]; delete _wip.je[pe]; }
+  if (!_wip.cache[pe]) {
+    body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Building the ' + _wipLabel(pe) + ' WIP\u2026</div>';
+    try {
+      var labor = _wipLocked(pe) ? {} : _wipLaborMap(pe);
+      var res = await Promise.all([
+        supabaseClient.rpc('kmi_wip_report', { p_period_end: pe, p_labor: labor }),
+        _wipIsAcct() ? supabaseClient.from('kmi_wip_period_je').select('*').lte('period_end', pe).order('period_end', { ascending: false }).limit(2) : Promise.resolve({ data: [] })
+      ]);
+      if (res[0].error) throw res[0].error;
+      _wip.cache[pe] = res[0].data || [];
+      _wip.je[pe] = (res[1] && res[1].data) || [];
+    } catch (e) {
+      body.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not load the WIP: ' + _wipEsc(e.message || e) + '</div>';
+      return;
+    }
+  }
+  if (pe !== _wip.period) return;
+  _wipRenderChrome();
+  _wipRenderBody();
+}
+
+// ── chrome: actions, periods, meta, banner, tabs ────────────────────────
+function _wipRenderChrome(){
+  var pe = _wip.period, locked = pe && _wipLocked(pe), per = pe ? _wip.periods[pe] : null;
+  var acts = g('wp-actions');
+  if (acts) {
+    var h = '';
+    if (pe) h += '<span class="wp-status ' + (locked ? 'wp-st-locked' : 'wp-st-open') + '">' +
+      (locked ? (per && per.is_baseline ? 'Baseline (imported)' : 'Locked' + (per && per.locked_at ? ' ' + new Date(per.locked_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '')) : 'Open for forecasts') + '</span>';
+    if (pe && _wipRows()) h += '<button class="btn btn-sm" onclick="wipExportCsv()">Export CSV</button>';
+    if (pe && !locked && _wipIsAcct()) h += '<button class="btn btn-p btn-sm" onclick="wipLock()"' + (_wip.busy ? ' disabled' : '') + '>Lock ' + _wipLabel(pe) + '</button>';
+    if (pe && locked && _wipIsAdmin() && !(per && per.is_baseline)) h += '<button class="btn btn-sm" onclick="wipReopen()"' + (_wip.busy ? ' disabled' : '') + '>Reopen ' + _wipLabel(pe) + '</button>';
+    acts.innerHTML = h;
+  }
+  var ph = g('wp-periods');
+  if (ph) {
+    ph.innerHTML = '<span style="font-size:12px;color:#555;margin-right:4px">Month</span>' + _wipPeriodList().map(function(p){
+      var lk = _wipLocked(p);
+      return '<button class="wp-pill' + (p === pe ? ' on' : '') + '" onclick="wipPickPeriod(\'' + p + '\')"' + (lk ? ' title="Locked"' : '') + '>' + _wipLabel(p) + (lk ? '<span class="wp-lk"></span>' : '') + '</button>';
+    }).join('');
+  }
+  var meta = g('wp-meta'), rows = _wipRows();
+  if (meta) {
+    var m = [];
+    if (rows && !locked) {
+      var wr = rows.filter(function(r){ return r.section === 'wip'; });
+      var due = wr.filter(function(r){ return _wipHasFlag(r, 'forecast_due'); }).length;
+      m.push((wr.length - due) + ' of ' + wr.length + ' jobs forecast for ' + _wipLabel(pe));
+      m.push('PM forecasts due the 15th');
+      m.push('Cost and billings from Foundation (nightly)');
+    } else if (rows) {
+      m.push('Frozen as locked. Numbers, forecasts and notes for ' + _wipLabel(pe) + ' do not change.');
+    }
+    meta.innerHTML = m.map(function(x){ return '<span>' + _wipEsc(x) + '</span>'; }).join('');
+  }
+  var bn = g('wp-banner');
+  if (bn) bn.innerHTML = _wip.err ? '<div class="wp-banner" style="background:#FCEBEB;color:#A32D2D">' + _wipEsc(_wip.err) + ' <a href="#" onclick="_wip.err=\'\';_wipRenderChrome();return false">Dismiss</a></div>' : '';
+  var th = g('wp-tabs');
+  if (th) {
+    var tabs = [['wip', 'WIP']];
+    if (_wipIsAcct()) tabs.push(['je', 'Over/under entry']);
+    th.innerHTML = tabs.map(function(t){ return '<button class="wp-tab' + (_wip.tab === t[0] ? ' on' : '') + '" onclick="wipPickTab(\'' + t[0] + '\')">' + t[1] + '</button>'; }).join('');
+  }
+  var sub = g('wp-sub');
+  if (sub && pe) sub.textContent = 'Work in progress for the month ending ' + new Date(pe + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) + ' \u00b7 cost-to-cost, direct cost';
+}
+
+function wipPickPeriod(pe){ _wip.period = pe; _wip.sel = null; _wip.panel = null; _wipRenderChrome(); _wipLoad(false); }
+function wipPickTab(t){ _wip.tab = t; _wipRenderChrome(); _wipRenderBody(); }
+function wipPickFilter(f){ _wip.filter = f; _wipRenderBody(); }
+function wipToggleGroup(k){ _wip.groups[k] = !_wip.groups[k]; _wipSaveGroups(); _wipRenderBody(); }
+
+// ── body ────────────────────────────────────────────────────────────────
+function _wipRenderBody(){
+  var body = g('wp-body'), rows = _wipRows();
+  if (!body || !rows) return;
+  if (_wip.tab === 'je' && _wipIsAcct()) { body.innerHTML = _wipJeHtml(); return; }
+  var wr = rows.filter(function(r){ return r.section === 'wip'; });
+  var um = rows.filter(function(r){ return r.section === 'unmatched'; });
+  var shown = wr.filter(function(r){
+    if (_wip.filter === 'due') return _wipHasFlag(r, 'forecast_due');
+    if (_wip.filter === 'flags') return _wipAttention(r);
+    if (_wip.filter === 'under') return _wipNum(r.under_over) > 0.5;
+    if (_wip.filter === 'over') return _wipNum(r.under_over) < -0.5;
+    return true;
+  });
+  var S = function(list, k){ return list.reduce(function(a, r){ return a + _wipNum(r[k]); }, 0); };
+  var adj = S(wr, 'adj_contract'), gp = S(wr, 'est_gp');
+  var under = wr.reduce(function(a, r){ var v = _wipNum(r.under_over); return a + (v > 0 ? v : 0); }, 0);
+  var over = wr.reduce(function(a, r){ var v = _wipNum(r.under_over); return a + (v < 0 ? v : 0); }, 0);
+  var cards = [
+    ['Adjusted contract', _wipMoney(adj), wr.length + ' jobs on the WIP'],
+    ['Projected gross profit', _wipMoney(gp), adj ? (gp / adj * 100).toFixed(1) + '% of contract' : ''],
+    ['Earned revenue YTD', _wipMoney(S(wr, 'earned_ytd')), 'Profit YTD ' + _wipMoney(S(wr, 'profit_ytd'))],
+    ['Billed to date', _wipMoney(S(wr, 'billed_td')), 'From Foundation A/R'],
+    ['Net under / (over)', _wipMoney(under + over), 'Under ' + _wipMoney(under) + ', over ' + _wipMoney(over)],
+    ['Backlog', _wipMoney(S(wr, 'backlog')), 'Contract not yet earned']
+  ];
+  var h = '<div class="wp-cards">' + cards.map(function(c){ return '<div class="wp-card"><div class="l">' + c[0] + '</div><div class="v">' + c[1] + '</div><div class="s">' + _wipEsc(c[2]) + '</div></div>'; }).join('') + '</div>';
+
+  var cnt = {
+    all: wr.length,
+    due: wr.filter(function(r){ return _wipHasFlag(r, 'forecast_due'); }).length,
+    flags: wr.filter(_wipAttention).length,
+    under: wr.filter(function(r){ return _wipNum(r.under_over) > 0.5; }).length,
+    over: wr.filter(function(r){ return _wipNum(r.under_over) < -0.5; }).length
+  };
+  h += '<div class="wp-bar"><div style="display:flex;gap:6px;flex-wrap:wrap">' +
+    [['all','All jobs'],['due','Forecast due'],['flags','Needs attention'],['under','Underbilled'],['over','Overbilled']].map(function(f){
+      return '<button class="wp-chip' + (_wip.filter === f[0] ? ' on' : '') + '" onclick="wipPickFilter(\'' + f[0] + '\')">' + f[1] + ' ' + cnt[f[0]] + '</button>';
+    }).join('') + '</div><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px;color:#555">Columns ' +
+    [['contract','Contract'],['prior','Prior years'],['ytd','This year'],['billing','Billing'],['forecast','Forecast']].map(function(gp2){
+      return '<button class="wp-chip' + (_wip.groups[gp2[0]] ? ' on' : '') + '" aria-pressed="' + (_wip.groups[gp2[0]] ? 'true' : 'false') + '" onclick="wipToggleGroup(\'' + gp2[0] + '\')">' + gp2[1] + '</button>';
+    }).join('') + '</div></div>';
+
+  var G = _wip.groups, cols = [];
+  if (G.contract) cols.push(['Contract','base_contract',1],['Target Fund','target_fund'],['COs','approved_cos'],['Adj. contract','adj_contract'],['Est. cost','est_cost'],['Est. GP','est_gp'],['GP %','est_gp_pct','pct']);
+  if (G.prior) cols.push(['Costs to 12/31','py_cost',1],['Earned to 12/31','py_earned']);
+  if (G.ytd) cols.push(['Cost to date','cost_jtd',1],['Cost YTD','cost_ytd'],['Earned YTD','earned_ytd'],['Profit YTD','profit_ytd'],['YTD GP %','ytd_gp_pct','pct']);
+  if (G.billing) cols.push(['Billed to date','billed_td',1],['Under / (over)','under_over','ou'],['Backlog','backlog']);
+  if (G.forecast) cols.push(['Cost to complete','cost_to_complete',1],['Fade / gain, month','fade_month','fade'],['Pending COs (memo)','pending_all']);
+
+  h += '<div class="wp-wrap"><div class="wp-tablebox"><div class="wp-scroll"><table class="wp-t"><thead><tr><th class="job">Job</th><th>% comp</th>' +
+    cols.map(function(c){ return '<th' + (c[2] === 1 ? ' class="g"' : '') + '>' + c[0] + '</th>'; }).join('') + '</tr></thead><tbody>';
+  if (!shown.length) h += '<tr><td colspan="' + (cols.length + 2) + '" style="text-align:center;color:#666;padding:26px">No jobs match this filter.</td></tr>';
+  shown.forEach(function(r){
+    h += '<tr class="r' + (_wip.sel === r.job_no ? ' sel' : '') + '" onclick="wipOpen(\'' + _wipJs(r.job_no) + '\')">' +
+      '<td class="job"><div><span class="wp-jn">' + _wipEsc(r.job_no) + '</span> ' + _wipEsc(r.job_name || '') + '</div>' +
+      ((r.flags || []).length ? '<div class="wp-flags">' + r.flags.map(function(f){ return _wipFlagHtml(f, r); }).join('') + '</div>' : '') + '</td>' +
+      '<td style="font-weight:600">' + _wipPct(r.pct_complete) + '</td>' +
+      cols.map(function(c){
+        var v = r[c[1]], cls = c[2] === 1 ? 'g' : '', txt;
+        if (c[2] === 'pct') txt = _wipPct(v);
+        else txt = _wipMoney(v);
+        if (c[2] === 'fade' && v !== null && v !== undefined) cls += _wipNum(v) < -0.5 ? ' neg' : (_wipNum(v) > 0.5 ? ' pos' : '');
+        return '<td class="' + cls + '"' + (c[2] === 'ou' ? ' style="font-weight:600"' : '') + '>' + txt + '</td>';
+      }).join('') + '</tr>';
+  });
+  h += '</tbody><tfoot><tr><td class="job">Shown jobs (' + shown.length + ')</td><td></td>' + cols.map(function(c){
+    if (c[2] === 'pct') {
+      var num = c[1] === 'est_gp_pct' ? S(shown, 'est_gp') : S(shown, 'profit_ytd');
+      var den = c[1] === 'est_gp_pct' ? S(shown, 'adj_contract') : S(shown, 'earned_ytd');
+      return '<td' + (c[2] === 1 ? ' class="g"' : '') + '>' + (Math.abs(den) >= 0.5 ? (num / den * 100).toFixed(1) + '%' : '\u2013') + '</td>';
+    }
+    return '<td' + (c[2] === 1 ? ' class="g"' : '') + '>' + _wipMoney(S(shown, c[1])) + '</td>';
+  }).join('') + '</tr></tfoot></table></div></div>';
+  h += _wip.sel ? _wipPanelHtml() : '';
+  h += '</div>';
+
+  if (um.length) {
+    h += '<div class="card" style="margin-top:14px"><div class="ch"><span class="ct" style="color:#6B5320">Active in Foundation, not in kmi.build</span><span style="font-size:12px;color:#666">Not on the WIP until a project is created for them</span></div>' +
+      '<table class="wp-t"><thead><tr><th class="job" style="position:static">Job</th><th>Foundation contract</th><th>Cost to date</th></tr></thead><tbody>' +
+      um.map(function(r){ return '<tr><td class="job" style="position:static"><span class="wp-jn">' + _wipEsc(r.job_no) + '</span> ' + _wipEsc(r.job_name || '') + '</td><td>' + _wipMoney(r.base_contract) + '</td><td>' + _wipMoney(r.cost_jtd) + '</td></tr>'; }).join('') +
+      '</tbody></table></div>';
+  }
+  body.innerHTML = h;
+}
+
+// ── side panel ──────────────────────────────────────────────────────────
+async function wipOpen(job){
+  _wip.sel = job; _wip.f = { mode: null, text: '', note: '' };
+  _wip.tfAmt = ''; _wip.tfNote = ''; _wip.nteAmt = ''; _wip.nteNote = ''; _wip.noteText = null;
+  _wip.panel = { job: job, loading: true };
+  _wipRenderBody();
+  try {
+    var res = await Promise.all([
+      supabaseClient.from('kmi_wip_forecasts').select('*').eq('job_no', job).order('period_end', { ascending: false }).order('id', { ascending: false }).limit(30),
+      supabaseClient.from('kmi_wip_target_fund').select('*').eq('job_no', job).order('entry_date'),
+      supabaseClient.from('kmi_wip_job_settings').select('*').eq('job_no', job),
+      supabaseClient.from('kmi_wip_job_notes').select('*').eq('job_no', job).lte('period_end', _wip.period).order('period_end', { ascending: false }).limit(1)
+    ]);
+    if (_wip.sel !== job) return;
+    res.forEach(function(x){ if (x.error) throw x.error; });
+    _wip.panel = { job: job, hist: res[0].data || [], tf: res[1].data || [], settings: (res[2].data || [])[0] || null, note: (res[3].data || [])[0] || null };
+  } catch (e) {
+    if (_wip.sel !== job) return;
+    _wip.panel = { job: job, error: e.message || String(e) };
+  }
+  _wipRenderBody();
+}
+function wipClose(){ _wip.sel = null; _wip.panel = null; _wipRenderBody(); }
+
+function _wipCanForecast(r){
+  if (_wipLocked() || !r) return false;
+  var role = _wipRole();
+  return role === 'Admin' || role === 'Accounting' || role === 'Project Manager';
+}
+
+// Draft forecast: what the three linked fields show while typing.
+function _wipDraft(r){
+  var cJtd = _wipNum(r.cost_jtd), adj = _wipNum(r.adj_contract), est = _wipNum(r.est_cost);
+  var m = _wip.f.mode, t = String(_wip.f.text).replace(/[^0-9.\-]/g, ''), n = (t === '' || t === '-' || t === '.') ? NaN : Number(t);
+  var dEst = est;
+  if (m && isFinite(n)) {
+    if (m === 'eac') dEst = n;
+    if (m === 'ctc') dEst = cJtd + n;
+    if (m === 'gp') dEst = adj * (1 - n / 100);
+  }
+  var changed = !!m && isFinite(n) && Math.round(dEst) !== Math.round(est);
+  return { est: dEst, ctc: dEst - cJtd, gp: adj ? (adj - dEst) / adj : 0, n: n, changed: changed, below: changed && dEst < cJtd - 0.5 };
+}
+
+function _wipPanelHtml(){
+  var r = _wipRow(_wip.sel), P = _wip.panel || {};
+  if (!r) return '';
+  var locked = _wipLocked(), acct = _wipIsAcct();
+  var h = '<div class="wp-panel"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">' +
+    '<div><div style="font-size:16px;font-weight:700;color:var(--kmi)">' + _wipEsc(r.job_no) + ' ' + _wipEsc(r.job_name || '') + '</div>' +
+    '<div style="font-size:12px;color:#666;margin-top:2px">Contract from ' + ({ kmi: 'kmi.build', foundation: 'Foundation', nte: 'provisional NTE', none: 'nowhere yet', excel: 'the imported WIP' }[r.contract_source] || _wipEsc(r.contract_source)) + '</div></div>' +
+    '<button class="btn btn-sm" onclick="wipClose()" aria-label="Close job detail">Close</button></div>';
+  if ((r.flags || []).length) h += '<div class="wp-flags" style="margin-top:8px">' + r.flags.map(function(f){ return _wipFlagHtml(f, r); }).join('') + '</div>';
+  var basis = r.basis_mode === 'gp' ? 'GP ' + _wipPct(r.basis_value) : (r.basis_mode === 'ctd' ? 'Cost to date (complete)' : 'Final cost ' + _wipMoney(r.basis_value));
+  h += '<div class="wp-kv" style="margin-top:12px">' +
+    '<div class="k">Cost to date</div><div class="v">' + _wipMoney(r.cost_jtd) + '</div>' +
+    '<div class="k">Est. cost at completion</div><div class="v">' + _wipMoney(r.est_cost) + '</div>' +
+    '<div class="k">Projected GP</div><div class="v">' + _wipMoney(r.est_gp) + ' (' + _wipPct(r.est_gp_pct) + ')</div>' +
+    '<div class="k">Forecast holds</div><div class="v">' + basis + '</div>' +
+    '<div class="k">Cost-to-cost / labor %</div><div class="v">' + _wipPct(r.pct_complete) + ' / ' + (r.labor_pct === null || r.labor_pct === undefined ? '\u2013' : _wipPct(r.labor_pct)) + '</div>' +
+    '<div class="k">Fade / gain, month</div><div class="v' + (_wipNum(r.fade_month) < -0.5 ? ' neg' : (_wipNum(r.fade_month) > 0.5 ? ' pos' : '')) + '">' + _wipMoney(r.fade_month) + '</div>' +
+    '<div class="k">Fade / gain since start</div><div class="v' + (_wipNum(r.fade_start) < -0.5 ? ' neg' : (_wipNum(r.fade_start) > 0.5 ? ' pos' : '')) + '">' + _wipMoney(r.fade_start) + '</div>' +
+    '</div>';
+  if (P.loading) return h + '<div style="color:#888;font-size:12px;margin-top:12px">Loading\u2026</div></div>';
+  if (P.error) return h + '<div class="wp-note e" style="margin-top:12px">Could not load this job: ' + _wipEsc(P.error) + '</div></div>';
+
+  // Forecast
+  h += '<div class="wp-sec"><h4>Forecast for ' + _wipLabel(_wip.period) + '</h4>';
+  if (_wipCanForecast(r) && r.basis_mode !== 'ctd') {
+    var d = _wipDraft(r), m = _wip.f.mode;
+    if (_wipHasFlag(r, 'target_15') && !m) h += '<div class="wp-note w" style="margin-bottom:8px">This estimate is the 15% target. Replace it with a real forecast once the job has enough history.</div>';
+    h += '<div style="font-size:12px;color:#555;margin-bottom:6px">Type in whichever is easiest. The other two follow.</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">' +
+      '<label class="wp-lbl">Final cost<input class="wp-in num' + (m === 'eac' ? ' act' : '') + '" inputmode="decimal" value="' + _wipEsc(m === 'eac' ? _wip.f.text : Math.round(d.est).toLocaleString('en-US')) + '" oninput="wipFType(\'eac\',this.value)"></label>' +
+      '<label class="wp-lbl">Cost to complete<input class="wp-in num' + (m === 'ctc' ? ' act' : '') + '" inputmode="decimal" value="' + _wipEsc(m === 'ctc' ? _wip.f.text : Math.round(d.ctc).toLocaleString('en-US')) + '" oninput="wipFType(\'ctc\',this.value)"></label>' +
+      '<label class="wp-lbl">GP %<input class="wp-in num' + (m === 'gp' ? ' act' : '') + '" inputmode="decimal" value="' + _wipEsc(m === 'gp' ? _wip.f.text : (d.gp * 100).toFixed(1)) + '" oninput="wipFType(\'gp\',this.value)"></label></div>';
+    var hint = !m ? (r.basis_mode === 'gp' ? 'This job holds a GP %, so its final cost moves when the contract changes.' : 'This job holds a final cost. Cost to complete shrinks as cost comes in.')
+      : (m === 'gp' ? 'Saves as a GP %. Final cost will follow approved COs and Target Fund changes.' : (m === 'ctc' ? 'Saves as a final cost of ' + Math.round(d.est).toLocaleString('en-US') + '. Next month, cost to complete shrinks as cost comes in.' : 'Saves as a fixed final cost. Cost to complete shrinks as cost comes in.'));
+    h += '<div class="wp-note i" style="margin-top:8px" id="wp-fhint">' + _wipEsc(hint) + '</div>' +
+      '<label class="wp-lbl" style="margin-top:8px">Why it changed (required)<textarea class="wp-in" style="min-height:52px;resize:vertical" oninput="wipFNote(this.value)">' + _wipEsc(_wip.f.note) + '</textarea></label>';
+    var ok = d.changed && !d.below && String(_wip.f.note).trim().length > 0 && !_wip.busy;
+    var why = !d.changed ? 'Change any of the three to record a new forecast.' : d.below ? 'Final cost can\u2019t be less than cost to date (' + _wipMoney(r.cost_jtd) + ').' : (!String(_wip.f.note).trim() ? 'Add a note to save.' : 'Saved with your name and the date.');
+    h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px"><button id="wp-fsave" class="btn btn-p btn-sm" onclick="wipSaveForecast()"' + (ok ? '' : ' disabled') + '>Save forecast</button>' +
+      (_wipHasFlag(r, 'forecast_due') && !m ? '<button class="btn btn-sm" onclick="wipConfirm()"' + (_wip.busy ? ' disabled' : '') + '>Confirm unchanged</button>' : '') +
+      '<span id="wp-fwhy" style="font-size:11.5px;color:#666">' + _wipEsc(why) + '</span></div>';
+  } else if (r.basis_mode === 'ctd') {
+    h += '<div style="font-size:12px;color:#666">Marked complete: estimated cost is fixed at cost to date.</div>';
+  } else {
+    h += '<div style="font-size:12px;color:#666">' + (_wipLocked() ? _wipLabel(_wip.period) + ' is locked, so forecasts are read-only.' : 'Forecasts on this job are entered by its PM or Accounting.') + '</div>';
+  }
+  (P.hist || []).forEach(function(f){
+    var what = f.mode === 'gp' ? 'GP ' + _wipPct(f.value) : (f.mode === 'ctd' ? 'Marked complete' : 'Final cost ' + _wipMoney(f.value));
+    var how = { eac: 'entered as final cost', ctc: 'entered as cost to complete', gp: 'entered as GP %', complete: 'marked complete', confirm: 'confirmed unchanged' }[f.entered_as] || f.entered_as;
+    var line = f.entered_as === 'import' ? 'Starting value from the ' + _wipLabel(f.period_end) + ' Excel WIP'
+      : _wipEsc(_wipWho(f.created_by)) + ' \u00b7 ' + _wipEsc(how) + (f.note ? ': ' + _wipEsc(f.note) : '');
+    h += '<div class="wp-hist"><div style="display:flex;justify-content:space-between;gap:8px"><span style="font-weight:600">' + _wipLabel(f.period_end) + '</span><span>' + what + '</span></div>' +
+      '<div style="color:#555">' + line + '</div></div>';
+  });
+  h += '</div>';
+
+  // Contract
+  h += '<div class="wp-sec"><h4>Contract</h4><div class="wp-kv">' +
+    '<div class="k">Base contract</div><div class="v">' + _wipMoney(r.base_contract) + '</div>' +
+    '<div class="k">Target Fund</div><div class="v">' + _wipMoney(r.target_fund) + '</div>' +
+    '<div class="k">Approved COs</div><div class="v">' + _wipMoney(r.approved_cos) + '</div>' +
+    '<div class="k">Pending T&amp;M CORs' + (r.pending_tm_included ? ' (included)' : '') + '</div><div class="v">' + _wipMoney(r.pending_tm) + '</div>' +
+    '<div class="k" style="font-weight:600">Adjusted contract</div><div class="v">' + _wipMoney(r.adj_contract) + '</div>' +
+    '<div class="k">All pending COs (memo)</div><div class="v" style="font-weight:400;color:#555">' + _wipMoney(r.pending_all) + '</div></div>';
+  if (acct && !locked) {
+    var tmOn = !!(P.settings && P.settings.include_pending_tm);
+    h += '<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;min-height:32px;cursor:pointer;margin-top:6px"><input type="checkbox"' + (tmOn ? ' checked' : '') + ' onchange="wipToggleTm(this.checked)"' + (_wip.busy ? ' disabled' : '') + '> Include pending T&amp;M CORs in this job\u2019s contract</label>';
+    if (r.contract_source === 'nte' || r.contract_source === 'none') {
+      h += '<div style="margin-top:8px;font-size:12px;color:#555">Provisional NTE contract (used only when kmi.build and Foundation have none)' +
+        (P.settings && P.settings.contract_override ? ': <strong>' + _wipMoney(P.settings.contract_override) + '</strong>' + (P.settings.override_note ? ' \u00b7 ' + _wipEsc(P.settings.override_note) : '') : '') + '</div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><input class="wp-in num" style="flex:1 1 110px" placeholder="Amount" aria-label="NTE amount" value="' + _wipEsc(_wip.nteAmt) + '" oninput="_wip.nteAmt=this.value">' +
+        '<input class="wp-in" style="flex:2 1 150px" placeholder="Note, e.g. proposal date" aria-label="NTE note" value="' + _wipEsc(_wip.nteNote) + '" oninput="_wip.nteNote=this.value">' +
+        '<button class="btn btn-sm" onclick="wipSaveNte()">Set NTE</button></div>';
+    }
+    h += '<div style="margin-top:10px;font-size:12px;color:#555">Target Fund entries</div>';
+    (P.tf || []).forEach(function(e){
+      h += '<div class="wp-hist" style="display:flex;justify-content:space-between;gap:8px;align-items:center"><span>' + _wipEsc(e.entry_date) + ': ' + _wipEsc(e.note) + '</span><span style="display:flex;gap:8px;align-items:center"><strong>' + _wipMoney2(e.amount) + '</strong>' +
+        '<a href="#" style="font-size:11px" onclick="wipDelTf(' + Number(e.id) + ');return false">Remove</a></span></div>';
+    });
+    if (!(P.tf || []).length) h += '<div style="font-size:12px;color:#777">No union fund dollars recorded on this job.</div>';
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><input class="wp-in num" style="flex:1 1 110px" placeholder="Amount" aria-label="Target Fund amount" value="' + _wipEsc(_wip.tfAmt) + '" oninput="_wip.tfAmt=this.value">' +
+      '<input class="wp-in" style="flex:2 1 150px" placeholder="Note, e.g. fund letter date" aria-label="Target Fund note" value="' + _wipEsc(_wip.tfNote) + '" oninput="_wip.tfNote=this.value">' +
+      '<button class="btn btn-sm" onclick="wipAddTf()">Add entry</button></div>';
+  }
+  h += '</div>';
+
+  // Notes
+  var noteVal = _wip.noteText !== null ? _wip.noteText : (P.note ? P.note.note : '');
+  h += '<div class="wp-sec"><label class="wp-lbl" style="font-size:13px;font-weight:600;color:#1a1a1a">Job notes' +
+    '<textarea class="wp-in" style="min-height:54px;resize:vertical;font-weight:400" oninput="_wip.noteText=this.value"' + (locked ? ' disabled' : '') + '>' + _wipEsc(noteVal) + '</textarea></label>' +
+    '<div style="display:flex;gap:8px;align-items:center;margin-top:6px">' + (locked ? '' : '<button class="btn btn-sm" onclick="wipSaveNote()">Save note</button>') +
+    '<span style="font-size:11.5px;color:#666">' + (P.note && P.note.period_end !== _wip.period ? 'Carried forward from ' + _wipLabel(P.note.period_end) + '. ' : '') + 'Notes carry forward until edited.</span></div></div>';
+
+  // Mark complete
+  if (acct && !locked && r.basis_mode !== 'ctd') {
+    h += '<div class="wp-sec"><button class="btn btn-sm" onclick="wipMarkComplete()"' + (_wip.busy ? ' disabled' : '') + '>Mark complete</button>' +
+      '<div style="font-size:11.5px;color:#666;margin-top:6px">Sets estimated cost to cost to date, so the job reads 100% and its final GP is fixed. It leaves the WIP once billing matches and it has no activity this year.</div></div>';
+  }
+  return h + '</div>';
+}
+
+function _wipWho(uid){
+  if (!uid) return 'Import';
+  var u = (db.users || []).find(function(x){ return String(x.id) === String(uid); });
+  if (!u) return 'Someone';
+  return (((u.firstName || '') + ' ' + (u.lastName || '')).trim()) || u.email || 'Someone';
+}
+
+// Typing in a linked field updates the other two without re-rendering the
+// input being typed in (keeps the cursor where it is).
+function wipFType(mode, val){
+  _wip.f.mode = mode; _wip.f.text = val;
+  var r = _wipRow(_wip.sel); if (!r) return;
+  var d = _wipDraft(r), ins = document.querySelectorAll('#pg-wip .wp-panel input.wp-in.num');
+  var keys = ['eac', 'ctc', 'gp'];
+  for (var i = 0; i < 3 && i < ins.length; i++) {
+    ins[i].classList.toggle('act', keys[i] === mode);
+    if (keys[i] === mode) continue;
+    ins[i].value = keys[i] === 'eac' ? Math.round(d.est).toLocaleString('en-US') : keys[i] === 'ctc' ? Math.round(d.ctc).toLocaleString('en-US') : (d.gp * 100).toFixed(1);
+  }
+  _wipSyncSave(r, d);
+}
+function wipFNote(v){ _wip.f.note = v; var r = _wipRow(_wip.sel); if (r) _wipSyncSave(r, _wipDraft(r)); }
+function _wipSyncSave(r, d){
+  var ok = d.changed && !d.below && String(_wip.f.note).trim().length > 0 && !_wip.busy;
+  var b = g('wp-fsave'); if (b) b.disabled = !ok;
+  var w = g('wp-fwhy');
+  if (w) w.textContent = !d.changed ? 'Change any of the three to record a new forecast.' : d.below ? 'Final cost can\u2019t be less than cost to date (' + _wipMoney(r.cost_jtd) + ').' : (!String(_wip.f.note).trim() ? 'Add a note to save.' : 'Saved with your name and the date.');
+  var hn = g('wp-fhint');
+  if (hn) hn.textContent = _wip.f.mode === 'gp' ? 'Saves as a GP %. Final cost will follow approved COs and Target Fund changes.' : (_wip.f.mode === 'ctc' ? 'Saves as a final cost of ' + Math.round(d.est).toLocaleString('en-US') + '. Next month, cost to complete shrinks as cost comes in.' : 'Saves as a fixed final cost. Cost to complete shrinks as cost comes in.');
+}
+
+// ── actions ─────────────────────────────────────────────────────────────
+async function _wipRun(fn, okMsg){
+  if (_wip.busy) return;
+  _wip.busy = true; _wip.err = '';
+  try {
+    var r = await fn();
+    if (r && r.error) throw r.error;
+    if (okMsg) showToast(okMsg, 'success');
+    _wip.busy = false;
+    var job = _wip.sel;
+    delete _wip.cache[_wip.period];
+    await _wipLoad(false);
+    if (job && _wipRow(job)) await wipOpen(job); else { _wip.sel = null; _wip.panel = null; _wipRenderBody(); }
+  } catch (e) {
+    _wip.busy = false;
+    _wip.err = String(e.message || e).replace(/^WIP [a-z ]+: /i, '');
+    _wipRenderChrome(); _wipRenderBody();
+  }
+}
+
+function wipSaveForecast(){
+  var r = _wipRow(_wip.sel); if (!r) return;
+  var d = _wipDraft(r), note = String(_wip.f.note).trim();
+  if (!d.changed || d.below || !note) return;
+  var m = _wip.f.mode;
+  var val = m === 'gp' ? d.n / 100 : (m === 'ctc' ? d.n : d.n);
+  _wipRun(function(){
+    return supabaseClient.rpc('kmi_wip_save_forecast', { p_job_no: r.job_no, p_period_end: _wip.period, p_entered_as: m, p_value: val, p_note: note });
+  }, 'Forecast saved for ' + r.job_no + '.');
+}
+function wipConfirm(){
+  var r = _wipRow(_wip.sel); if (!r) return;
+  _wipRun(function(){
+    return supabaseClient.rpc('kmi_wip_save_forecast', { p_job_no: r.job_no, p_period_end: _wip.period, p_entered_as: 'confirm', p_value: null, p_note: null });
+  }, r.job_no + ' confirmed unchanged for ' + _wipLabel(_wip.period) + '.');
+}
+function wipMarkComplete(){
+  var r = _wipRow(_wip.sel); if (!r) return;
+  var note = prompt('Mark ' + r.job_no + ' complete?\n\nEstimated cost becomes cost to date (' + _wipMoney(r.cost_jtd) + ') and the job reads 100%. Add a note:', 'Job complete');
+  if (note === null) return;
+  if (!String(note).trim()) { alert('A note is required.'); return; }
+  _wipRun(function(){
+    return supabaseClient.rpc('kmi_wip_save_forecast', { p_job_no: r.job_no, p_period_end: _wip.period, p_entered_as: 'complete', p_value: null, p_note: String(note).trim() });
+  }, r.job_no + ' marked complete.');
+}
+function wipToggleTm(on){
+  var job = _wip.sel; if (!job) return;
+  _wipRun(function(){
+    return supabaseClient.from('kmi_wip_job_settings').upsert({ job_no: job, include_pending_tm: !!on, updated_at: new Date().toISOString() }, { onConflict: 'job_no' });
+  }, on ? 'Pending T&M CORs included for ' + job + '.' : 'Pending T&M CORs removed for ' + job + '.');
+}
+function wipSaveNte(){
+  var job = _wip.sel; if (!job) return;
+  var amt = Number(String(_wip.nteAmt).replace(/[^0-9.\-]/g, ''));
+  if (!(amt > 0)) { alert('Enter the NTE amount.'); return; }
+  if (!String(_wip.nteNote).trim()) { alert('Add a note saying where the NTE comes from.'); return; }
+  _wipRun(function(){
+    return supabaseClient.from('kmi_wip_job_settings').upsert({ job_no: job, contract_override: amt, override_note: String(_wip.nteNote).trim(), updated_at: new Date().toISOString() }, { onConflict: 'job_no' });
+  }, 'Provisional NTE set for ' + job + '.');
+}
+function wipAddTf(){
+  var job = _wip.sel; if (!job) return;
+  var amt = Number(String(_wip.tfAmt).replace(/[^0-9.\-]/g, ''));
+  if (!amt) { alert('Enter the Target Fund amount.'); return; }
+  if (!String(_wip.tfNote).trim()) { alert('Add a note for this Target Fund entry.'); return; }
+  _wipRun(function(){
+    return supabaseClient.from('kmi_wip_target_fund').insert({ job_no: job, entry_date: _wip.period, amount: amt, note: String(_wip.tfNote).trim() });
+  }, 'Target Fund entry added to ' + job + '.');
+}
+function wipDelTf(id){
+  if (!confirm('Remove this Target Fund entry?')) return;
+  _wipRun(function(){ return supabaseClient.from('kmi_wip_target_fund').delete().eq('id', id); }, 'Target Fund entry removed.');
+}
+function wipSaveNote(){
+  var job = _wip.sel; if (!job || _wip.noteText === null) return;
+  var txt = String(_wip.noteText).trim();
+  if (!txt) { alert('Type a note first.'); return; }
+  _wipRun(function(){
+    return supabaseClient.from('kmi_wip_job_notes').upsert({ job_no: job, period_end: _wip.period, note: txt }, { onConflict: 'job_no,period_end' });
+  }, 'Note saved.');
+}
+function wipLock(){
+  var pe = _wip.period, rows = (_wipRows() || []).filter(function(r){ return r.section === 'wip'; });
+  var due = rows.filter(function(r){ return _wipHasFlag(r, 'forecast_due'); }).length;
+  var msg = 'Lock ' + _wipLabel(pe) + '?\n\n' + rows.length + ' jobs will be frozen and the over/under entry generated.' +
+    (due ? '\n\n' + due + ' job(s) still show Forecast due.' : '') + '\n\nOnly an Admin can reopen a locked month.';
+  if (!confirm(msg)) return;
+  _wipRun(function(){ return supabaseClient.rpc('kmi_wip_lock', { p_period_end: pe, p_labor: _wipLaborMap(pe) }); }, _wipLabel(pe) + ' locked.')
+    .then(function(){ return _wipLoadPeriods(); }).then(function(){ delete _wip.je[pe]; delete _wip.cache[pe]; _wipRenderChrome(); return _wipLoad(false); });
+}
+function wipReopen(){
+  var pe = _wip.period;
+  var reason = prompt('Reopen ' + _wipLabel(pe) + '?\n\nIts snapshot and over/under entry are removed until it is locked again. Reason (logged):', '');
+  if (reason === null) return;
+  if (!String(reason).trim()) { alert('A reason is required.'); return; }
+  _wipRun(function(){ return supabaseClient.rpc('kmi_wip_reopen', { p_period_end: pe, p_reason: String(reason).trim() }); }, _wipLabel(pe) + ' reopened.')
+    .then(function(){ return _wipLoadPeriods(); }).then(function(){ delete _wip.je[pe]; delete _wip.cache[pe]; _wipRenderChrome(); return _wipLoad(false); });
+}
+
+// ── over/under entry ────────────────────────────────────────────────────
+function _wipJeHtml(){
+  var pe = _wip.period, rows = (_wipRows() || []).filter(function(r){ return r.section === 'wip'; });
+  var list = _wip.je[pe] || [], cur = list.filter(function(j){ return j.period_end === pe; })[0] || null;
+  var prior = list.filter(function(j){ return j.period_end < pe; })[0] || null;
+  var under, over, pu, po, live = !cur;
+  if (cur) { under = _wipNum(cur.underbillings); over = _wipNum(cur.overbillings); pu = _wipNum(cur.prior_under); po = _wipNum(cur.prior_over); }
+  else {
+    under = rows.reduce(function(a, r){ var v = _wipNum(r.under_over); return a + (v > 0 ? v : 0); }, 0);
+    over = rows.reduce(function(a, r){ var v = _wipNum(r.under_over); return a + (v < 0 ? v : 0); }, 0);
+    pu = prior ? _wipNum(prior.underbillings) : 0; po = prior ? _wipNum(prior.overbillings) : 0;
+  }
+  var du = Math.round((under - pu) * 100) / 100, dov = Math.round((over - po) * 100) / 100, net = Math.round((du + dov) * 100) / 100;
+  var lines = [];
+  lines.push(['1400', 'Underbillings', du > 0 ? du : 0, du < 0 ? -du : 0]);
+  lines.push(['5300', 'Overbillings', dov > 0 ? dov : 0, dov < 0 ? -dov : 0]);
+  lines.push(['10002', 'Net over/under', net < 0 ? -net : 0, net > 0 ? net : 0]);
+  var dr = lines.reduce(function(a, l){ return a + l[2]; }, 0), cr = lines.reduce(function(a, l){ return a + l[3]; }, 0);
+  _wip.jeText = lines.map(function(l){ return l[0] + '\t' + l[1] + '\t' + (l[2] ? l[2].toFixed(2) : '') + '\t' + (l[3] ? l[3].toFixed(2) : ''); }).join('\n');
+  var td = function(v, b){ return '<td' + (b ? ' style="font-weight:700"' : '') + '>' + v + '</td>'; };
+  return '<div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start">' +
+    '<div class="card" style="flex:1 1 420px;margin:0"><div class="ch"><span class="ct">Over / under billing, ' + _wipLabel(pe) + '</span></div>' +
+    (live ? '<div class="wp-note w" style="margin-bottom:10px">Preview from the open month. The entry is fixed when ' + _wipLabel(pe) + ' is locked.</div>' : '') +
+    '<table class="wp-t"><thead><tr><th class="job" style="position:static">GL</th><th style="text-align:left">Account</th><th>This month</th><th>' + (prior || cur ? 'Last month' : 'Prior') + '</th><th>Change</th></tr></thead><tbody>' +
+    '<tr><td class="job" style="position:static">1400</td><td style="text-align:left">Underbillings</td>' + td(_wipMoney2(under)) + td(_wipMoney2(pu)) + td(_wipMoney2(du)) + '</tr>' +
+    '<tr><td class="job" style="position:static">5300</td><td style="text-align:left">Overbillings</td>' + td(_wipMoney2(over)) + td(_wipMoney2(po)) + td(_wipMoney2(dov)) + '</tr>' +
+    '<tr><td class="job" style="position:static;font-weight:700"></td><td style="text-align:left;font-weight:700">Net</td>' + td(_wipMoney2(under + over), 1) + td(_wipMoney2(pu + po), 1) + td(_wipMoney2(net), 1) + '</tr>' +
+    '</tbody></table></div>' +
+    '<div class="card" style="flex:1 1 340px;margin:0"><div class="ch"><span class="ct">Journal entry</span></div>' +
+    '<table class="wp-t"><thead><tr><th class="job" style="position:static">GL</th><th style="text-align:left">Account</th><th>Debit</th><th>Credit</th></tr></thead><tbody>' +
+    lines.map(function(l){ return '<tr><td class="job" style="position:static">' + l[0] + '</td><td style="text-align:left">' + l[1] + '</td>' + td(l[2] ? _wipMoney2(l[2]) : '') + td(l[3] ? _wipMoney2(l[3]) : '') + '</tr>'; }).join('') +
+    '<tr><td class="job" style="position:static"></td><td style="text-align:left;font-weight:700">Total</td>' + td(_wipMoney2(dr), 1) + td(_wipMoney2(cr), 1) + '</tr></tbody></table>' +
+    '<div style="font-size:11.5px;color:#666;margin:8px 0">' + (live ? 'Generated when the month is locked.' : 'Generated when ' + _wipLabel(pe) + ' was locked.') + ' Enter it in Foundation; nothing is posted from kmi.build.</div>' +
+    '<button class="btn btn-sm" onclick="wipCopyJe()">Copy entry</button></div></div>';
+}
+function wipCopyJe(){
+  var t = _wip.jeText || '';
+  try { navigator.clipboard.writeText(t).then(function(){ showToast('Journal entry copied.', 'success'); }, function(){ prompt('Copy the entry:', t); }); }
+  catch (e) { prompt('Copy the entry:', t); }
+}
+
+// ── CSV export (internal; the formatted Excel exports are B2) ───────────
+function wipExportCsv(){
+  var rows = (_wipRows() || []).filter(function(r){ return r.section === 'wip'; });
+  var cols = [['Job','job_no'],['Name','job_name'],['% complete','pct_complete'],['Contract','base_contract'],['Target Fund','target_fund'],['Approved COs','approved_cos'],
+    ['Pending T&M included','pending_tm'],['Adjusted contract','adj_contract'],['Est. cost','est_cost'],['Est. GP','est_gp'],['GP %','est_gp_pct'],
+    ['Costs to 12/31','py_cost'],['Earned to 12/31','py_earned'],['Cost to date','cost_jtd'],['Cost YTD','cost_ytd'],['Earned to date','earned_td'],['Earned YTD','earned_ytd'],
+    ['Profit YTD','profit_ytd'],['YTD GP %','ytd_gp_pct'],['Billed to date','billed_td'],['Billed YTD','billed_ytd'],['Retainage','retainage'],['Under / (over)','under_over'],
+    ['Backlog','backlog'],['Cost to complete','cost_to_complete'],['Fade/gain month','fade_month'],['Fade/gain since start','fade_start'],['Pending COs memo','pending_all'],
+    ['Labor %','labor_pct'],['Contract source','contract_source'],['Forecast basis','basis_mode'],['Flags','flags'],['Note','note']];
+  var q = function(v){ v = Array.isArray(v) ? v.join('; ') : (v == null ? '' : String(v)); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  var csv = cols.map(function(c){ return q(c[0]); }).join(',') + '\n' + rows.map(function(r){ return cols.map(function(c){ return q(r[c[1]]); }).join(','); }).join('\n');
+  var blob = new Blob([csv], { type: 'text/csv' }), a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'WIP_' + _wip.period + '.csv';
+  document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+
 // ═══ FINANCIAL STATEMENTS (FS1) ═══════════════════════════════════════════
 // Monthly income statement + balance sheet compiled in the database from the
 // Foundation GL (fnd_gl_balances, synced by fnd_gl_sync.py on the VM) through
@@ -60570,7 +61286,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-02-OCOSAVE1';
+var KMI_BUILD = '2026-11-03-WIPB1';
 
 var _kmiSessionId = (function(){
   try {
