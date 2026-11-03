@@ -2864,6 +2864,7 @@ tr.gc-line:hover td{background:#fafafa}
     #pg-wip .wp-hist{background:#fafafa;border-radius:6px;padding:7px 10px;font-size:12px;margin-top:6px}
     #pg-wip label.wp-lbl{display:flex;flex-direction:column;justify-content:flex-end;gap:4px;font-size:12px;color:#555;text-transform:none;letter-spacing:0;font-weight:400;margin:0}
     #pg-wip .btn:disabled{opacity:.45;cursor:not-allowed}
+    #pg-wip .wp-panel input[type=radio],#pg-wip .wp-panel input[type=checkbox]{width:auto;min-width:0;margin:0;flex:0 0 auto;accent-color:var(--kmi)}
     #pg-wip .wp-banner{padding:10px 14px;border-radius:8px;font-size:12.5px;margin-bottom:12px}
     @media (max-width:1100px){ #pg-wip .wp-wrap{flex-direction:column} #pg-wip .wp-panel{flex:1 1 auto;max-width:none;width:100%;box-sizing:border-box;position:static;max-height:none} }
   </style>
@@ -49280,6 +49281,7 @@ var _wip = {
   panel: null,                  // { job, hist, tf, settings, note }
   f: { mode: null, text: '', note: '' },
   tfAmt: '', tfNote: '', nteAmt: '', nteNote: '', noteText: null,
+  phForm: null,                 // phase set-up / edit form values while open
   busy: false, err: ''
 };
 var _WIP_FIRST = '2026-07-31';
@@ -49357,10 +49359,16 @@ var _WIP_FLAG = {
 function _wipFlagHtml(f, r){
   var s = String(f), lab, cls;
   if (s.indexOf('oco_unlinked:') === 0) { lab = 'Owner CO $' + _wipMoney(s.slice(13)) + ' not on a COR'; cls = 'risk'; }
+  else if (s.indexOf('phase:') === 0) { lab = 'Phase \u00b7 split ' + _wipShortDate(s.slice(6)); cls = 'info'; }
+  else if (s.indexOf('has_phase:') === 0) { lab = 'Phase split ' + _wipShortDate(s.slice(10)); cls = 'info'; }
   else if (s === 'labor_gap' && r && r.labor_pct !== null && r.labor_pct !== undefined) { lab = 'Labor ' + Math.round(_wipNum(r.labor_pct) * 100) + '%'; cls = 'info'; }
   else { var d = _WIP_FLAG[s] || [s, 'info']; lab = d[0]; cls = d[1]; }
   return '<span class="wp-f wp-f-' + cls + '">' + _wipEsc(lab) + '</span>';
 }
+function _wipShortDate(d){ var p = String(d).split('-'); return p.length === 3 ? Number(p[1]) + '/' + Number(p[2]) + '/' + p[0].slice(2) : d; }
+function _wipIsPhaseRow(r){ return !!r && r.contract_source === 'phase'; }
+function _wipParentOf(r){ return _wipIsPhaseRow(r) ? String(r.job_no).replace(/-[^-]+$/, '') : (r ? r.job_no : null); }
+function _wipHasPhase(r){ return !!r && (r.flags || []).some(function(f){ return String(f).indexOf('has_phase:') === 0 || String(f).indexOf('phase:') === 0; }); }
 function _wipAttention(r){
   return (r.flags || []).some(function(f){
     var s = String(f); if (s.indexOf('oco_unlinked:') === 0) return true;
@@ -49589,18 +49597,31 @@ function _wipRenderBodyInner(){
 // ── side panel ──────────────────────────────────────────────────────────
 async function wipOpen(job, silent){
   _wip.sel = job; _wip.f = { mode: null, text: '', note: '' };
-  _wip.tfAmt = ''; _wip.tfNote = ''; _wip.nteAmt = ''; _wip.nteNote = ''; _wip.noteText = null;
+  _wip.tfAmt = ''; _wip.tfNote = ''; _wip.nteAmt = ''; _wip.nteNote = ''; _wip.noteText = null; _wip.phForm = null;
   if (!silent) { _wip.panel = { job: job, loading: true }; _wipRenderBody(); }
   try {
+    var row0 = _wipRow(job), parent = _wipParentOf(row0) || job, proj = _wipProject(parent);
     var res = await Promise.all([
       supabaseClient.from('kmi_wip_forecasts').select('*').eq('job_no', job).order('period_end', { ascending: false }).order('id', { ascending: false }).limit(30),
       supabaseClient.from('kmi_wip_target_fund').select('*').eq('job_no', job).order('entry_date'),
       supabaseClient.from('kmi_wip_job_settings').select('*').eq('job_no', job),
-      supabaseClient.from('kmi_wip_job_notes').select('*').eq('job_no', job).lte('period_end', _wip.period).order('period_end', { ascending: false }).limit(1)
+      supabaseClient.from('kmi_wip_job_notes').select('*').eq('job_no', job).lte('period_end', _wip.period).order('period_end', { ascending: false }).limit(1),
+      supabaseClient.from('kmi_wip_phases').select('*').eq('job_no', parent)
     ]);
     if (_wip.sel !== job) return;
     res.forEach(function(x){ if (x.error) throw x.error; });
-    _wip.panel = { job: job, hist: res[0].data || [], tf: res[1].data || [], settings: (res[2].data || [])[0] || null, note: (res[3].data || [])[0] || null };
+    var phase = (res[4].data || [])[0] || null, cors = [], sides = [];
+    if (phase && _wipIsAcct() && proj) {
+      var cr = await Promise.all([
+        supabaseClient.from('kmi_cors').select('id,cor_number,cor_date,cor_type,status,total_amount,approved_amount,description').eq('project_id', proj.id).order('cor_number'),
+        supabaseClient.from('kmi_wip_phase_cor_side').select('*').eq('phase_id', phase.id)
+      ]);
+      if (cr[0].error) throw cr[0].error; if (cr[1].error) throw cr[1].error;
+      cors = cr[0].data || []; sides = cr[1].data || [];
+    }
+    if (_wip.sel !== job) return;
+    _wip.panel = { job: job, parent: parent, hist: res[0].data || [], tf: res[1].data || [], settings: (res[2].data || [])[0] || null, note: (res[3].data || [])[0] || null,
+                   phase: phase, cors: cors, sides: sides };
   } catch (e) {
     if (_wip.sel !== job) return;
     _wip.panel = { job: job, error: e.message || String(e) };
@@ -49637,7 +49658,7 @@ function _wipPanelHtml(){
   var locked = _wipLocked(), acct = _wipIsAcct();
   var h = '<div class="wp-panel"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">' +
     '<div><div style="font-size:16px;font-weight:700;color:var(--kmi)">' + _wipEsc(r.job_no) + ' ' + _wipEsc(r.job_name || '') + '</div>' +
-    '<div style="font-size:12px;color:#666;margin-top:2px">Contract from ' + ({ kmi: 'kmi.build', foundation: 'Foundation', nte: 'provisional NTE', none: 'nowhere yet', excel: 'the imported WIP' }[r.contract_source] || _wipEsc(r.contract_source)) + '</div></div>' +
+    '<div style="font-size:12px;color:#666;margin-top:2px">Contract from ' + ({ kmi: 'kmi.build', foundation: 'Foundation', nte: 'provisional NTE', none: 'nowhere yet', excel: 'the imported WIP', phase: 'the phase set-up' }[r.contract_source] || _wipEsc(r.contract_source)) + '</div></div>' +
     '<button class="btn btn-sm" onclick="wipClose()" aria-label="Close job detail">Close</button></div>';
   if ((r.flags || []).length) h += '<div class="wp-flags" style="margin-top:8px">' + r.flags.map(function(f){ return _wipFlagHtml(f, r); }).join('') + '</div>';
   var basis = r.basis_mode === 'gp' ? 'GP ' + _wipPct(r.basis_value) : (r.basis_mode === 'ctd' ? 'Cost to date (complete)' : 'Final cost ' + _wipMoney(r.basis_value));
@@ -49718,6 +49739,9 @@ function _wipPanelHtml(){
   }
   h += '</div>';
 
+  // Phase split (Accounting / Admin)
+  if (acct) h += _wipPhaseHtml(r, P, locked);
+
   // Notes
   var noteVal = _wip.noteText !== null ? _wip.noteText : (P.note ? P.note.note : '');
   h += '<div class="wp-sec"><label class="wp-lbl" style="font-size:13px;font-weight:600;color:#1a1a1a">Job notes' +
@@ -49731,6 +49755,109 @@ function _wipPanelHtml(){
       '<div style="font-size:11.5px;color:#666;margin-top:6px">Sets estimated cost to cost to date, so the job reads 100% and its final GP is fixed. It leaves the WIP once billing matches and it has no activity this year.</div></div>';
   }
   return h + '</div>';
+}
+
+// ── phase split ─────────────────────────────────────────────────────────
+function _wipPhaseSide(c, ph, sides){
+  var o = (sides || []).filter(function(x){ return String(x.cor_id) === String(c.id); })[0];
+  if (o) return { side: o.side, moved: true };
+  var d = c.cor_date ? String(c.cor_date).slice(0, 10) : '';
+  return { side: d && d <= ph.cutoff_date ? 'phase' : 'main', moved: false };
+}
+function _wipPhaseHtml(r, P, locked){
+  var ph = P.phase, F = _wip.phForm;
+  var h = '<div class="wp-sec"><h4>Phase split</h4>';
+  if (F) return h + _wipPhaseFormHtml(F) + '</div>';
+  if (!ph) {
+    if (_wipIsPhaseRow(r) || locked) return '';
+    return h + '<div style="font-size:12px;color:#555;margin-bottom:6px">Break out part of this job (for example a completed scope) so its profit can be recognized on its own. Cost and billings up to the cutoff date go to the phase; the rest stays here.</div>' +
+      '<button class="btn btn-sm" onclick="wipPhaseStart()">Split off a phase</button></div>';
+  }
+  var key = ph.job_no + '-' + ph.suffix;
+  h += '<div class="wp-kv">' +
+    '<div class="k">Phase</div><div class="v">' + _wipEsc(key) + ' ' + _wipEsc(ph.name) + '</div>' +
+    '<div class="k">Cutoff date</div><div class="v">' + _wipShortDate(ph.cutoff_date) + '</div>' +
+    '<div class="k">Phase contract</div><div class="v">' + _wipMoney2(ph.contract) + '</div>' +
+    '<div class="k">Cost</div><div class="v">' + (ph.cost_mode === 'amount' ? 'Set: ' + _wipMoney2(ph.cost_amount) : 'Through cutoff date') + '</div>' +
+    '<div class="k">Billed</div><div class="v">' + (ph.billed_mode === 'amount' ? 'Set: ' + _wipMoney2(ph.billed_amount) : 'Through cutoff date') + '</div>' +
+    '<div class="k">Starts</div><div class="v">' + _wipLabel(ph.effective_from) + '</div></div>' +
+    '<div style="font-size:11.5px;color:#666;margin-top:4px">' + _wipEsc(ph.note) + '</div>';
+  if (!locked) h += '<div style="margin-top:8px"><button class="btn btn-sm" onclick="wipPhaseEdit()">Edit split</button></div>';
+  if ((P.cors || []).length) {
+    h += '<div style="font-size:12px;color:#555;margin:10px 0 4px">CORs by side (COR date on or before ' + _wipShortDate(ph.cutoff_date) + ' goes to the phase unless moved)</div>';
+    P.cors.forEach(function(c){
+      if (c.status === 'Voided' || c.status === 'Rejected') return;
+      var sd = _wipPhaseSide(c, ph, P.sides), amt = c.status === 'Approved' && c.approved_amount != null ? c.approved_amount : c.total_amount;
+      h += '<div class="wp-hist" style="display:flex;justify-content:space-between;gap:8px;align-items:center"><span>#' + _wipEsc(c.cor_number) + ' · ' + _wipEsc(c.status) +
+        (c.cor_date ? ' · ' + _wipShortDate(String(c.cor_date).slice(0, 10)) : '') + '<br><span style="color:#777">' + _wipEsc(String(c.description || '').slice(0, 60)) + '</span></span>' +
+        '<span style="display:flex;gap:8px;align-items:center;white-space:nowrap"><strong>' + _wipMoney2(amt) + '</strong>' +
+        '<span class="wp-f ' + (sd.side === 'phase' ? 'wp-f-warn' : 'wp-f-info') + '">' + (sd.side === 'phase' ? key : ph.job_no) + (sd.moved ? ' (moved)' : '') + '</span>' +
+        (locked ? '' : '<a href="#" style="font-size:11px" onclick="wipPhaseMoveCor(' + Number(c.id) + ');return false">Move</a>') + '</span></div>';
+    });
+  }
+  return h + '</div>';
+}
+function _wipPhaseFormHtml(F){
+  var row = function(lab, inner){ return '<label class="wp-lbl" style="margin-top:6px">' + lab + inner + '</label>'; };
+  var inp = function(k, ph, cls){ return '<input class="wp-in' + (cls || '') + '" value="' + _wipEsc(F[k]) + '" placeholder="' + (ph || '') + '" oninput="_wip.phForm[\'' + k + '\']=this.value">'; };
+  var mode = function(k, amtK, what){
+    return '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px">' +
+      '<label style="display:flex;gap:5px;align-items:center;margin:0;text-transform:none;letter-spacing:0;font-weight:400;color:#333;font-size:12.5px"><input type="radio" name="wp-' + k + '"' + (F[k] === 'date' ? ' checked' : '') + ' onchange="_wip.phForm[\'' + k + '\']=\'date\';_wipRenderBody()"> Through cutoff date</label>' +
+      '<label style="display:flex;gap:5px;align-items:center;margin:0;text-transform:none;letter-spacing:0;font-weight:400;color:#333;font-size:12.5px"><input type="radio" name="wp-' + k + '"' + (F[k] === 'amount' ? ' checked' : '') + ' onchange="_wip.phForm[\'' + k + '\']=\'amount\';_wipRenderBody()"> Set amount</label>' +
+      (F[k] === 'amount' ? '<input class="wp-in num" style="flex:1 1 120px" value="' + _wipEsc(F[amtK]) + '" placeholder="' + what + '" oninput="_wip.phForm[\'' + amtK + '\']=this.value">' : '') + '</div>';
+  };
+  return '<div style="display:grid;grid-template-columns:90px 1fr;gap:8px">' +
+      row('Suffix', inp('suffix', '1')) + row('Phase name', inp('name', 'e.g. Wall Incident')) + '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+      row('Cutoff date', '<input type="date" class="wp-in" value="' + _wipEsc(F.cutoff) + '" oninput="_wip.phForm.cutoff=this.value">') +
+      row('Phase contract', inp('contract', '0.00', ' num')) + '</div>' +
+    row('Cost', mode('cost_mode', 'cost_amount', 'Cost to date')) +
+    row('Billed to date', mode('billed_mode', 'billed_amount', 'Billed amount')) +
+    row('Note (required)', '<textarea class="wp-in" style="min-height:44px;resize:vertical" oninput="_wip.phForm.note=this.value">' + _wipEsc(F.note) + '</textarea>') +
+    (F.err ? '<div class="wp-note e" style="margin-top:6px">' + _wipEsc(F.err) + '</div>' : '') +
+    '<div style="display:flex;gap:8px;margin-top:8px"><button class="btn btn-p btn-sm" onclick="wipPhaseSave()"' + (_wip.busy ? ' disabled' : '') + '>' + (F.id ? 'Save split' : 'Create phase') + '</button>' +
+    '<button class="btn btn-sm" onclick="_wip.phForm=null;_wipRenderBody()">Cancel</button></div>' +
+    '<div style="font-size:11.5px;color:#666;margin-top:6px">' + (F.id ? 'Changes apply to open months. Locked months keep their numbers.' : 'The phase starts in ' + _wipLabel(_wip.period) + '. Locked months keep their numbers.') + '</div>';
+}
+function wipPhaseStart(){
+  _wip.phForm = { id: null, suffix: '1', name: '', cutoff: '', contract: '', cost_mode: 'date', cost_amount: '', billed_mode: 'date', billed_amount: '', note: '', err: '' };
+  _wip.keepPanelScroll = true; _wipRenderBody();
+}
+function wipPhaseEdit(){
+  var ph = (_wip.panel || {}).phase; if (!ph) return;
+  _wip.phForm = { id: ph.id, suffix: ph.suffix, name: ph.name, cutoff: ph.cutoff_date, contract: String(ph.contract), cost_mode: ph.cost_mode,
+                  cost_amount: ph.cost_amount == null ? '' : String(ph.cost_amount), billed_mode: ph.billed_mode,
+                  billed_amount: ph.billed_amount == null ? '' : String(ph.billed_amount), note: ph.note, err: '' };
+  _wip.keepPanelScroll = true; _wipRenderBody();
+}
+function wipPhaseSave(){
+  var F = _wip.phForm, P = _wip.panel || {}; if (!F) return;
+  var num = function(v){ var t = String(v).replace(/[^0-9.\-]/g, ''); return t === '' ? NaN : Number(t); };
+  var err = !String(F.name).trim() ? 'Enter a phase name.' : !/^[0-9A-Za-z]{1,4}$/.test(String(F.suffix).trim()) ? 'The suffix is 1 to 4 letters or numbers (for example 1).' :
+    !/^\d{4}-\d{2}-\d{2}$/.test(String(F.cutoff)) ? 'Pick the cutoff date.' : !isFinite(num(F.contract)) ? 'Enter the phase contract.' :
+    (F.cost_mode === 'amount' && !isFinite(num(F.cost_amount))) ? 'Enter the phase cost amount.' :
+    (F.billed_mode === 'amount' && !isFinite(num(F.billed_amount))) ? 'Enter the phase billed amount.' : !String(F.note).trim() ? 'Add a note.' : '';
+  if (err) { F.err = err; _wip.keepPanelScroll = true; _wipRenderBody(); return; }
+  var rec = { suffix: String(F.suffix).trim(), name: String(F.name).trim(), cutoff_date: F.cutoff, contract: num(F.contract),
+              cost_mode: F.cost_mode, cost_amount: F.cost_mode === 'amount' ? num(F.cost_amount) : null,
+              billed_mode: F.billed_mode, billed_amount: F.billed_mode === 'amount' ? num(F.billed_amount) : null, note: String(F.note).trim() };
+  var parent = P.parent || _wip.sel, isNew = !F.id;
+  _wip.phForm = null;
+  _wipRun(function(){
+    if (isNew) { rec.job_no = parent; rec.effective_from = _wip.period; return supabaseClient.from('kmi_wip_phases').insert(rec); }
+    return supabaseClient.from('kmi_wip_phases').update(rec).eq('id', F.id);
+  }, isNew ? 'Phase ' + parent + '-' + rec.suffix + ' created.' : 'Phase split updated.');
+}
+function wipPhaseMoveCor(corId){
+  var P = _wip.panel || {}, ph = P.phase; if (!ph) return;
+  var c = (P.cors || []).filter(function(x){ return String(x.id) === String(corId); })[0]; if (!c) return;
+  var cur = _wipPhaseSide(c, ph, P.sides), to = cur.side === 'phase' ? 'main' : 'phase';
+  var byDate = _wipPhaseSide(c, ph, []).side;
+  _wip.keepPanelScroll = true;
+  _wipRun(function(){
+    if (to === byDate) return supabaseClient.from('kmi_wip_phase_cor_side').delete().eq('phase_id', ph.id).eq('cor_id', c.id);
+    return supabaseClient.from('kmi_wip_phase_cor_side').upsert({ phase_id: ph.id, cor_id: c.id, side: to, updated_at: new Date().toISOString() }, { onConflict: 'phase_id,cor_id' });
+  }, 'COR #' + c.cor_number + ' moved to ' + (to === 'phase' ? ph.job_no + '-' + ph.suffix : ph.job_no) + '.');
 }
 
 function _wipWho(uid){
@@ -61330,7 +61457,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-03-WIPB1B';
+var KMI_BUILD = '2026-11-03-WIPB1C';
 
 var _kmiSessionId = (function(){
   try {
