@@ -2827,7 +2827,7 @@ tr.gc-line:hover td{background:#fafafa}
     #pg-wip .wp-chip.on{background:var(--kmi);border-color:var(--kmi);color:#fff;font-weight:600}
     #pg-wip .wp-wrap{display:flex;gap:14px;align-items:flex-start}
     #pg-wip .wp-tablebox{flex:1 1 auto;min-width:0;background:#fff;border:.5px solid #e5e5e5;border-radius:10px;overflow:hidden}
-    #pg-wip .wp-scroll{overflow:auto;max-height:calc(100vh - 330px)}
+    #pg-wip .wp-scroll{overflow:auto;max-height:calc(100vh - 330px);min-height:420px}
     #pg-wip table.wp-t{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
     #pg-wip table.wp-t th{position:sticky;top:0;z-index:2;background:#fafafa;color:#777;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;padding:9px 10px;text-align:right;white-space:nowrap;border-bottom:.5px solid #eee}
     #pg-wip table.wp-t th.g{border-left:.5px solid #eee}
@@ -2848,7 +2848,7 @@ tr.gc-line:hover td{background:#fafafa}
     #pg-wip .wp-f-info{background:#E7E9F3;color:var(--kmi2)}
     #pg-wip .neg{color:#8A3B1E}
     #pg-wip .pos{color:#2F5D3A}
-    #pg-wip .wp-panel{flex:0 0 420px;max-width:440px;background:#fff;border:.5px solid #e5e5e5;border-radius:10px;padding:16px 18px;max-height:calc(100vh - 200px);overflow:auto}
+    #pg-wip .wp-panel{flex:0 0 420px;max-width:440px;background:#fff;border:.5px solid #e5e5e5;border-radius:10px;padding:16px 18px;max-height:calc(100vh - 330px);min-height:420px;overflow:auto;position:sticky;top:0;align-self:flex-start;box-sizing:border-box}
     #pg-wip .wp-sec{border-top:.5px solid #eee;padding-top:12px;margin-top:12px}
     #pg-wip .wp-sec h4{margin:0 0 8px;font-size:13px;color:#1a1a1a}
     #pg-wip .wp-kv{display:grid;grid-template-columns:1fr auto;gap:6px 14px;font-size:12.5px}
@@ -2865,7 +2865,7 @@ tr.gc-line:hover td{background:#fafafa}
     #pg-wip label.wp-lbl{display:flex;flex-direction:column;justify-content:flex-end;gap:4px;font-size:12px;color:#555;text-transform:none;letter-spacing:0;font-weight:400;margin:0}
     #pg-wip .btn:disabled{opacity:.45;cursor:not-allowed}
     #pg-wip .wp-banner{padding:10px 14px;border-radius:8px;font-size:12.5px;margin-bottom:12px}
-    @media (max-width:1100px){ #pg-wip .wp-wrap{flex-direction:column} #pg-wip .wp-panel{flex:1 1 auto;max-width:none;width:100%;box-sizing:border-box} }
+    @media (max-width:1100px){ #pg-wip .wp-wrap{flex-direction:column} #pg-wip .wp-panel{flex:1 1 auto;max-width:none;width:100%;box-sizing:border-box;position:static;max-height:none} }
   </style>
   <div class="ph"><div><h1>WIP Report</h1><div class="sub" id="wp-sub">Work in progress, percentage of completion, cost-to-cost.</div><div class="stripe"></div></div>
     <div id="wp-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"></div></div>
@@ -49403,13 +49403,13 @@ function _wipPeriodList(){
   return out;
 }
 
-async function _wipLoad(force){
+async function _wipLoad(force, silent){
   var body = g('wp-body'); if (!body) return;
   if (!supabaseClient) { body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Not connected.</div>'; return; }
   var pe = _wip.period;
   if (force) { delete _wip.cache[pe]; delete _wip.je[pe]; }
   if (!_wip.cache[pe]) {
-    body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Building the ' + _wipLabel(pe) + ' WIP\u2026</div>';
+    if (!silent) body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Building the ' + _wipLabel(pe) + ' WIP\u2026</div>';
     try {
       var labor = _wipLocked(pe) ? {} : _wipLaborMap(pe);
       var res = await Promise.all([
@@ -49480,20 +49480,40 @@ function wipPickTab(t){ _wip.tab = t; _wipRenderChrome(); _wipRenderBody(); }
 function wipPickFilter(f){ _wip.filter = f; _wipRenderBody(); }
 function wipToggleGroup(k){ _wip.groups[k] = !_wip.groups[k]; _wipSaveGroups(); _wipRenderBody(); }
 
-// ── body ────────────────────────────────────────────────────────────────
-function _wipRenderBody(){
-  var body = g('wp-body'), rows = _wipRows();
-  if (!body || !rows) return;
-  if (_wip.tab === 'je' && _wipIsAcct()) { body.innerHTML = _wipJeHtml(); return; }
-  var wr = rows.filter(function(r){ return r.section === 'wip'; });
-  var um = rows.filter(function(r){ return r.section === 'unmatched'; });
-  var shown = wr.filter(function(r){
+function _wipShownRows(){
+  return (_wipRows() || []).filter(function(r){
+    if (r.section !== 'wip') return false;
     if (_wip.filter === 'due') return _wipHasFlag(r, 'forecast_due');
     if (_wip.filter === 'flags') return _wipAttention(r);
     if (_wip.filter === 'under') return _wipNum(r.under_over) > 0.5;
     if (_wip.filter === 'over') return _wipNum(r.under_over) < -0.5;
     return true;
   });
+}
+
+// Redraws replace the table and panel, so remember where the user was
+// (page, table and panel scroll) and put them back afterwards.
+function _wipKeepScroll(fn){
+  var main = document.querySelector('.main') || document.scrollingElement;
+  var tb = document.querySelector('#pg-wip .wp-scroll'), pn = document.querySelector('#pg-wip .wp-panel');
+  var st = { m: main ? main.scrollTop : 0, t: tb ? tb.scrollTop : 0, l: tb ? tb.scrollLeft : 0, p: pn ? pn.scrollTop : 0 };
+  fn();
+  if (main) main.scrollTop = st.m;
+  tb = document.querySelector('#pg-wip .wp-scroll'); pn = document.querySelector('#pg-wip .wp-panel');
+  if (tb) { tb.scrollTop = st.t; tb.scrollLeft = st.l; }
+  if (pn && _wip.keepPanelScroll) pn.scrollTop = st.p;
+  _wip.keepPanelScroll = false;
+}
+
+// ── body ────────────────────────────────────────────────────────────────
+function _wipRenderBody(){ _wipKeepScroll(_wipRenderBodyInner); }
+function _wipRenderBodyInner(){
+  var body = g('wp-body'), rows = _wipRows();
+  if (!body || !rows) return;
+  if (_wip.tab === 'je' && _wipIsAcct()) { body.innerHTML = _wipJeHtml(); return; }
+  var wr = rows.filter(function(r){ return r.section === 'wip'; });
+  var um = rows.filter(function(r){ return r.section === 'unmatched'; });
+  var shown = _wipShownRows();
   var S = function(list, k){ return list.reduce(function(a, r){ return a + _wipNum(r[k]); }, 0); };
   var adj = S(wr, 'adj_contract'), gp = S(wr, 'est_gp');
   var under = wr.reduce(function(a, r){ var v = _wipNum(r.under_over); return a + (v > 0 ? v : 0); }, 0);
@@ -49567,11 +49587,10 @@ function _wipRenderBody(){
 }
 
 // ── side panel ──────────────────────────────────────────────────────────
-async function wipOpen(job){
+async function wipOpen(job, silent){
   _wip.sel = job; _wip.f = { mode: null, text: '', note: '' };
   _wip.tfAmt = ''; _wip.tfNote = ''; _wip.nteAmt = ''; _wip.nteNote = ''; _wip.noteText = null;
-  _wip.panel = { job: job, loading: true };
-  _wipRenderBody();
+  if (!silent) { _wip.panel = { job: job, loading: true }; _wipRenderBody(); }
   try {
     var res = await Promise.all([
       supabaseClient.from('kmi_wip_forecasts').select('*').eq('job_no', job).order('period_end', { ascending: false }).order('id', { ascending: false }).limit(30),
@@ -49586,7 +49605,9 @@ async function wipOpen(job){
     if (_wip.sel !== job) return;
     _wip.panel = { job: job, error: e.message || String(e) };
   }
+  if (silent) _wip.keepPanelScroll = true;
   _wipRenderBody();
+  if (!silent) { var pn = document.querySelector('#pg-wip .wp-panel'); if (pn) pn.scrollTop = 0; }
 }
 function wipClose(){ _wip.sel = null; _wip.panel = null; _wipRenderBody(); }
 
@@ -49648,8 +49669,9 @@ function _wipPanelHtml(){
       '<label class="wp-lbl" style="margin-top:8px">Why it changed (required)<textarea class="wp-in" style="min-height:52px;resize:vertical" oninput="wipFNote(this.value)">' + _wipEsc(_wip.f.note) + '</textarea></label>';
     var ok = d.changed && !d.below && String(_wip.f.note).trim().length > 0 && !_wip.busy;
     var why = !d.changed ? 'Change any of the three to record a new forecast.' : d.below ? 'Final cost can\u2019t be less than cost to date (' + _wipMoney(r.cost_jtd) + ').' : (!String(_wip.f.note).trim() ? 'Add a note to save.' : 'Saved with your name and the date.');
-    h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px"><button id="wp-fsave" class="btn btn-p btn-sm" onclick="wipSaveForecast()"' + (ok ? '' : ' disabled') + '>Save forecast</button>' +
-      (_wipHasFlag(r, 'forecast_due') && !m ? '<button class="btn btn-sm" onclick="wipConfirm()"' + (_wip.busy ? ' disabled' : '') + '>Confirm unchanged</button>' : '') +
+    h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px"><button id="wp-fnext" class="btn btn-p btn-sm" onclick="wipSaveNext()"' + (ok ? '' : ' disabled') + ' title="Save, then open the next job still showing Forecast due">Save &amp; next</button>' +
+      '<button id="wp-fsave" class="btn btn-sm" onclick="wipSaveForecast()"' + (ok ? '' : ' disabled') + '>Save</button>' +
+      (_wipHasFlag(r, 'forecast_due') && !m ? '<button class="btn btn-sm" onclick="wipConfirmNext()"' + (_wip.busy ? ' disabled' : '') + ' title="Confirm, then open the next job still showing Forecast due">Confirm unchanged &amp; next</button>' : '') +
       '<span id="wp-fwhy" style="font-size:11.5px;color:#666">' + _wipEsc(why) + '</span></div>';
   } else if (r.basis_mode === 'ctd') {
     h += '<div style="font-size:12px;color:#666">Marked complete: estimated cost is fixed at cost to date.</div>';
@@ -49736,6 +49758,7 @@ function wipFNote(v){ _wip.f.note = v; var r = _wipRow(_wip.sel); if (r) _wipSyn
 function _wipSyncSave(r, d){
   var ok = d.changed && !d.below && String(_wip.f.note).trim().length > 0 && !_wip.busy;
   var b = g('wp-fsave'); if (b) b.disabled = !ok;
+  var bn = g('wp-fnext'); if (bn) bn.disabled = !ok;
   var w = g('wp-fwhy');
   if (w) w.textContent = !d.changed ? 'Change any of the three to record a new forecast.' : d.below ? 'Final cost can\u2019t be less than cost to date (' + _wipMoney(r.cost_jtd) + ').' : (!String(_wip.f.note).trim() ? 'Add a note to save.' : 'Saved with your name and the date.');
   var hn = g('wp-fhint');
@@ -49743,7 +49766,7 @@ function _wipSyncSave(r, d){
 }
 
 // ── actions ─────────────────────────────────────────────────────────────
-async function _wipRun(fn, okMsg){
+async function _wipRun(fn, okMsg, nextJob){
   if (_wip.busy) return;
   _wip.busy = true; _wip.err = '';
   try {
@@ -49753,8 +49776,11 @@ async function _wipRun(fn, okMsg){
     _wip.busy = false;
     var job = _wip.sel;
     delete _wip.cache[_wip.period];
-    await _wipLoad(false);
-    if (job && _wipRow(job)) await wipOpen(job); else { _wip.sel = null; _wip.panel = null; _wipRenderBody(); }
+    await _wipLoad(false, true);
+    var nx = nextJob ? nextJob() : null;
+    if (nx) await wipOpen(nx);
+    else if (job && _wipRow(job)) await wipOpen(job, true);
+    else { _wip.sel = null; _wip.panel = null; _wipRenderBody(); }
   } catch (e) {
     _wip.busy = false;
     _wip.err = String(e.message || e).replace(/^WIP [a-z ]+: /i, '');
@@ -49762,7 +49788,23 @@ async function _wipRun(fn, okMsg){
   }
 }
 
-function wipSaveForecast(){
+// The next job in the list as currently filtered that still needs an
+// August forecast, after the one just saved (wrapping to the top).
+function _wipNextDue(after){
+  var list = _wipShownRows();
+  var i = list.findIndex(function(r){ return r.job_no === after; });
+  var order = list.slice(i + 1).concat(list.slice(0, i + 1));
+  var n = order.filter(function(r){ return r.job_no !== after && _wipHasFlag(r, 'forecast_due'); })[0];
+  return n ? n.job_no : null;
+}
+function _wipScrollRowIntoView(job){
+  var tr = Array.prototype.find.call(document.querySelectorAll('#pg-wip tr.r'), function(x){ return (x.getAttribute('onclick') || '').indexOf("'" + job + "'") > -1; });
+  if (tr && tr.scrollIntoView) tr.scrollIntoView({ block: 'nearest' });
+}
+function wipSaveNext(){ wipSaveForecast(true); }
+function wipConfirmNext(){ wipConfirm(true); }
+
+function wipSaveForecast(goNext){
   var r = _wipRow(_wip.sel); if (!r) return;
   var d = _wipDraft(r), note = String(_wip.f.note).trim();
   if (!d.changed || d.below || !note) return;
@@ -49770,13 +49812,15 @@ function wipSaveForecast(){
   var val = m === 'gp' ? d.n / 100 : (m === 'ctc' ? d.n : d.n);
   _wipRun(function(){
     return supabaseClient.rpc('kmi_wip_save_forecast', { p_job_no: r.job_no, p_period_end: _wip.period, p_entered_as: m, p_value: val, p_note: note });
-  }, 'Forecast saved for ' + r.job_no + '.');
+  }, 'Forecast saved for ' + r.job_no + '.', goNext ? function(){ return _wipNextDue(r.job_no); } : null)
+    .then(function(){ if (goNext && _wip.sel && _wip.sel !== r.job_no) _wipScrollRowIntoView(_wip.sel); });
 }
-function wipConfirm(){
+function wipConfirm(goNext){
   var r = _wipRow(_wip.sel); if (!r) return;
   _wipRun(function(){
     return supabaseClient.rpc('kmi_wip_save_forecast', { p_job_no: r.job_no, p_period_end: _wip.period, p_entered_as: 'confirm', p_value: null, p_note: null });
-  }, r.job_no + ' confirmed unchanged for ' + _wipLabel(_wip.period) + '.');
+  }, r.job_no + ' confirmed unchanged for ' + _wipLabel(_wip.period) + '.', goNext ? function(){ return _wipNextDue(r.job_no); } : null)
+    .then(function(){ if (goNext && _wip.sel && _wip.sel !== r.job_no) _wipScrollRowIntoView(_wip.sel); });
 }
 function wipMarkComplete(){
   var r = _wipRow(_wip.sel); if (!r) return;
@@ -61286,7 +61330,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-03-WIPB1';
+var KMI_BUILD = '2026-11-03-WIPB1B';
 
 var _kmiSessionId = (function(){
   try {
