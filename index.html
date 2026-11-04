@@ -1699,6 +1699,7 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="ni" onclick="nav('ap-checks')"><span class="nico">▤</span>Check Register</div>
       <div class="ni" onclick="nav('fin-statements')"><span class="nico">▥</span>Financial Statements</div>
       <div class="ni" onclick="nav('wip')"><span class="nico">◫</span>WIP Report</div>
+      <div class="ni" onclick="nav('cash-flow')"><span class="nico">$</span>Cash Flow</div>
     </div>
   </div>
   <div class="sb-group" data-group="resources">
@@ -2804,6 +2805,119 @@ tr.gc-line:hover td{background:#fafafa}
   <div id="fs-periods" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px"></div>
   <div id="fs-tabs" style="display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid #e5e5e5;margin-bottom:14px"></div>
   <div id="fs-body"></div>
+</div>
+
+<!-- CASH FLOW (CF1) -->
+<div class="pg" id="pg-cash-flow">
+  <style>
+    #pg-cash-flow .cash-tab{min-height:40px;padding:0 16px;border:0;border-bottom:3px solid transparent;margin-bottom:-2px;background:none;color:#555;font-size:13.5px;cursor:pointer;font-family:inherit}
+    #pg-cash-flow .cash-tab.on{border-bottom-color:var(--ac);color:var(--kmi);font-weight:700}
+    #pg-cash-flow .cash-bar{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;background:#fff;border:.5px solid #e5e5e5;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:12.5px}
+    #pg-cash-flow .cash-lbl{font-size:11px;color:#666}
+    #pg-cash-flow .cash-pill{display:inline-block;padding:4px 11px;border-radius:14px;font-size:12px;font-weight:600;white-space:nowrap}
+    #pg-cash-flow .cash-p-draft{background:#FBF3DC;color:#6B5320}
+    #pg-cash-flow .cash-p-final{background:#F3E9C8;color:#6B5216}
+    #pg-cash-flow .cash-p-new{background:#f1f1ee;color:#555}
+    #pg-cash-flow .cash-p-ok{background:#EEF0F7;color:var(--kmi);font-weight:500}
+    #pg-cash-flow .cash-ask{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#FBF3DC;border:1px solid #E8D6A0;border-radius:10px;padding:10px 14px;margin:-4px 0 12px;font-size:12.5px;color:#5A4410}
+    #pg-cash-flow .cash-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:12px}
+    #pg-cash-flow .cash-card{background:#fff;border:.5px solid #e5e5e5;border-radius:10px;padding:11px 14px}
+    #pg-cash-flow .cash-card .l{font-size:11px;color:#666}
+    #pg-cash-flow .cash-card .v{font-size:19px;font-weight:700;color:var(--kmi);font-variant-numeric:tabular-nums;margin:2px 0}
+    #pg-cash-flow .cash-card .v.bad{color:#A32D2D}
+    #pg-cash-flow .cash-card .s{font-size:11px;color:#777}
+    #pg-cash-flow .cash-alert{background:#FCEBEB;border:1px solid #F0C4C4;color:#7A1F1F;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:12.5px}
+    #pg-cash-flow .cash-note{background:#FAF8F0;border:1px solid #EFE6C8;color:#5A4410;border-radius:10px;padding:9px 14px;margin-bottom:12px;font-size:12.5px}
+    #pg-cash-flow .cash-wrap{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+    #pg-cash-flow .cash-box{background:#fff;border:.5px solid #e5e5e5;border-radius:10px;overflow:hidden;min-width:0}
+    #pg-cash-flow .cash-wrap > .cash-box{flex:1 1 640px}
+    #pg-cash-flow .cash-pad{padding:12px 16px}
+    #pg-cash-flow .cash-scroll{overflow-x:auto;position:relative}
+    #pg-cash-flow .cash-box{position:relative}
+    #pg-cash-flow .cash-foot{font-size:11px;color:#777;padding:8px 14px;border-top:1px solid #f0f0ec}
+    #pg-cash-flow .cash-ct{font-size:13px;font-weight:700;color:var(--kmi);margin-bottom:8px}
+    #pg-cash-flow .cash-hint{font-size:11.5px;color:#777}
+    #pg-cash-flow .cash-sr{position:absolute;left:0;top:0;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+    #pg-cash-flow table.cash-g{border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;width:100%}
+    #pg-cash-flow table.cash-g th{background:var(--kmi);color:#fff;font-weight:600;font-size:11.5px;padding:8px 6px;text-align:right;white-space:nowrap;position:sticky;top:0}
+    #pg-cash-flow table.cash-g th.l{text-align:left;padding-left:14px;position:sticky;left:0;z-index:2}
+    #pg-cash-flow table.cash-g td{padding:0 2px;text-align:right;border-top:1px solid #f0f0ec;white-space:nowrap}
+    #pg-cash-flow table.cash-g td.n{padding:6px 8px}
+    #pg-cash-flow table.cash-g td.cur{background:#FAF8F0}
+    #pg-cash-flow table.cash-g td.l{text-align:left;padding:6px 10px 6px 14px;position:sticky;left:0;background:#fff;z-index:1;min-width:210px;white-space:normal}
+    #pg-cash-flow table.cash-g td.tt{padding:6px 10px;font-weight:600;background:#f7f7f4}
+    #pg-cash-flow table.cash-g tr.sec td{color:var(--acd);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding-top:12px;padding-bottom:4px;border-top:1px solid #e5e5e5}
+    #pg-cash-flow table.cash-g tr.tot td{font-weight:700;border-top:1px solid var(--stl)}
+    #pg-cash-flow table.cash-g tr.tot td.l{background:#fff}
+    #pg-cash-flow .cb{position:relative;width:100%;min-height:30px;padding:0 8px;border:1px solid transparent;border-radius:6px;background:none;font:inherit;font-variant-numeric:tabular-nums;color:inherit;text-align:right;cursor:pointer}
+    #pg-cash-flow .cb:hover{background:#f5f5f1}
+    #pg-cash-flow .cb.sel{border-color:var(--kmi);background:#EEF0F7}
+    #pg-cash-flow .cb.bad{color:#A32D2D}
+    #pg-cash-flow .cb .dot{position:absolute;top:4px;right:2px;width:6px;height:6px;border-radius:3px;background:var(--ac)}
+    #pg-cash-flow .hb{min-height:36px;padding:2px 6px;border:0;border-radius:6px;background:none;color:#fff;font:inherit;font-weight:600;cursor:pointer}
+    #pg-cash-flow .hb.on{background:var(--ac);color:var(--kmi)}
+    #pg-cash-flow .cash-side{flex:0 1 320px;min-width:260px;background:#fff;border:.5px solid #e5e5e5;border-radius:10px;padding:14px 16px;position:sticky;top:12px}
+    #pg-cash-flow .cash-kv{display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-top:1px solid #f0f0ec;border-bottom:1px solid #f0f0ec}
+    #pg-cash-flow .cash-basis{font-size:12px;color:#444;line-height:1.5;padding:10px 0 0}
+    #pg-cash-flow .cash-form{display:flex;flex-direction:column;gap:6px;margin-top:14px;padding-top:12px;border-top:1px solid #f0f0ec;font-size:12px}
+    #pg-cash-flow .cash-in{min-height:32px;padding:0 8px;border:1px solid #d6d6d0;border-radius:6px;font:inherit;font-size:12.5px;background:#fff;color:#222;text-align:right;font-variant-numeric:tabular-nums;box-sizing:border-box}
+    #pg-cash-flow .cash-in:focus{outline:2px solid var(--kmi);outline-offset:0}
+    #pg-cash-flow .cash-in:disabled{background:#f6f6f3;color:#666}
+    #pg-cash-flow .cash-in.rr{color:#999}
+    #pg-cash-flow .cash-in.rr::placeholder{color:#9a9a9a}
+    #pg-cash-flow .cash-date{width:140px;text-align:left}
+    #pg-cash-flow .cash-rowbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:10px}
+    #pg-cash-flow .cash-box > .cash-rowbar{margin-bottom:0}
+    #pg-cash-flow .cash-seg{min-height:32px;padding:0 12px;border:1px solid var(--stl);background:#fff;color:var(--kmi);font-size:12.5px;cursor:pointer;font-family:inherit;margin-right:-1px}
+    #pg-cash-flow .cash-seg:first-child{border-radius:7px 0 0 7px}
+    #pg-cash-flow .cash-seg:last-child{border-radius:0 7px 7px 0}
+    #pg-cash-flow .cash-seg.on{background:var(--kmi);color:#fff;font-weight:600}
+    #pg-cash-flow .cash-chip{min-height:30px;padding:0 11px;border-radius:15px;border:1px solid #ddd;background:#fff;color:#333;font-size:12px;cursor:pointer;font-family:inherit}
+    #pg-cash-flow .cash-chip.on{background:var(--kmi);border-color:var(--kmi);color:#fff;font-weight:600}
+    #pg-cash-flow table.cash-v{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+    #pg-cash-flow table.cash-v th{text-align:left;font-size:11px;color:#666;font-weight:600;padding:6px 8px;border-bottom:1px solid #e5e5e5;white-space:nowrap}
+    #pg-cash-flow table.cash-v td{padding:6px 8px;border-top:1px solid #f0f0ec;vertical-align:middle}
+    #pg-cash-flow table.cash-v .n{text-align:right;white-space:nowrap}
+    #pg-cash-flow table.cash-v td.warn{color:#A32D2D;font-weight:600}
+    #pg-cash-flow table.cash-v tr.tot td{font-weight:700;border-top:1px solid var(--stl)}
+    #pg-cash-flow table.cash-v tr.held td{color:#999;text-decoration:line-through}
+    #pg-cash-flow table.cash-v tr.held td:nth-child(8),#pg-cash-flow table.cash-v tr.held td:nth-child(9),#pg-cash-flow table.cash-v tr.held td:first-child{text-decoration:none}
+    #pg-cash-flow .cash-tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#EEF0F7;color:var(--kmi);white-space:nowrap}
+    #pg-cash-flow .cash-tag.bad{background:#FCEBEB;color:#A32D2D;margin-left:4px}
+    #pg-cash-flow .cash-gch,#pg-cash-flow .cash-gcrow{display:grid;grid-template-columns:22px minmax(220px,2.4fr) 1fr 1.2fr 1.2fr .8fr 1fr;gap:8px;align-items:center;padding:8px 16px}
+    #pg-cash-flow .cash-gch{font-size:11px;color:#666;font-weight:600;border-bottom:1px solid #e5e5e5}
+    #pg-cash-flow .cash-gch .n,#pg-cash-flow .cash-gcrow .n{text-align:right;font-variant-numeric:tabular-nums}
+    #pg-cash-flow .cash-gcrow{width:100%;min-height:48px;border:0;border-top:1px solid #f0f0ec;background:#fff;font:inherit;font-size:12.5px;color:inherit;text-align:left;cursor:pointer}
+    #pg-cash-flow .cash-gcrow:hover{background:#fafaf7}
+    #pg-cash-flow .cash-gcrow.open{background:#FAF8F0}
+    #pg-cash-flow .cash-inv{background:#FAF8F0;padding:4px 16px 12px 46px}
+    #pg-cash-flow .cash-inv table.cash-v td{background:#fff}
+    #pg-cash-flow .cash-legend{display:flex;gap:14px;font-size:11.5px;color:#555}
+    #pg-cash-flow .cash-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+    #pg-cash-flow .cash-weeks{display:flex;gap:6px;min-width:780px;padding-top:6px}
+    #pg-cash-flow .cash-wk{flex:1 1 0;display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 2px;border:1px solid transparent;border-radius:8px;background:none;font:inherit;font-size:11px;cursor:pointer}
+    #pg-cash-flow .cash-wk:hover{background:#fafaf7}
+    #pg-cash-flow .cash-wk.on{border-color:var(--kmi);background:#EEF0F7}
+    #pg-cash-flow .cash-stack{display:flex;flex-direction:column;justify-content:flex-end;width:26px;height:104px}
+    #pg-cash-flow .cash-stack span{display:block;width:100%}
+    #pg-cash-flow .cash-stack span + span{margin-top:1px}
+    #pg-cash-flow .cash-hold{display:inline-flex;align-items:center;gap:6px;min-height:32px;cursor:pointer}
+    #pg-cash-flow .cash-setgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:12px}
+    #pg-cash-flow .cash-srow{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 0;border-top:1px solid #f0f0ec;font-size:12.5px}
+    #pg-cash-flow .cash-srow .cash-in{width:130px}
+    #pg-cash-flow .cash-setgrid > .cash-wide{grid-column:span 2}
+    #pg-cash-flow .cash-setgrid > section{min-width:0}
+    @media (max-width:1240px){ #pg-cash-flow .cash-setgrid > .cash-wide{grid-column:auto} }
+    @media (max-width:720px){
+      #pg-cash-flow .cash-side{position:static;flex:1 1 100%}
+      #pg-cash-flow .cash-setgrid{grid-template-columns:1fr}
+      #pg-cash-flow table.cash-g td.l{min-width:150px}
+    }
+  </style>
+  <div class="ph"><div><h1>Cash Flow</h1><div class="sub">Weekly cash flow statement and 13-week projection from Foundation. Reviewed Fridays.</div><div class="stripe"></div></div></div>
+  <div id="cash-bar"></div>
+  <div id="cash-tabs" role="navigation" aria-label="Cash flow sections" style="display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid #e5e5e5;margin-bottom:14px"></div>
+  <div id="cash-body"></div>
 </div>
 
 <!-- WIP REPORT (B1) -->
@@ -4457,6 +4571,9 @@ var PERMISSIONS = {
   // Financial statements (FS1): Admin + Accounting. RLS (kmi_fs_can_read) is
   // the real gate; this row only shapes the sidebar and router.
   'fin-statements': ['full','none','none','full','none','none','none'],
+  // Cash flow (CF1): Admin + Accounting. RLS (kmi_fs_can_read) is the real
+  // gate; Reopen of a final week is Admin-only (snapshot policy).
+  'cash-flow': ['full','none','none','full','none','none','none'],
   // WIP report (B1): Admin, PM and Accounting view; RLS limits PMs to their
   // own jobs. Accounting/Admin lock and manage contract items; Admin reopens.
   'view-wip':   ['full','full','none','full','none','none','none'],
@@ -4653,6 +4770,7 @@ var PAGE_ACTION_MAP = {
   'ap-checks':      'ap-checks',
   'rental-review':  'rental-review',
   'fin-statements': 'fin-statements',
+  'cash-flow':      'cash-flow',
   'wip':            'view-wip',
   'budget':         'view_project_budget',
   'tm-tickets':     'view-tm-tickets',
@@ -6646,6 +6764,7 @@ function nav(page) {
     'ap-checks':      renderApChecks,
     'rental-review':  renderRentalReview,
     'fin-statements': renderFinStatements,
+    'cash-flow':      renderCashFlow,
     'wip':            renderWip,
     projects:         renderProjects,
     'new-project':    initNewProject,
@@ -50119,6 +50238,967 @@ function _fsDefaultPeriod(){
   _fs.year = y; _fs.month = m;
 }
 
+// ── CASH FLOW (CF1) ─────────────────────────────────────────────────────
+// Weekly cash flow statement + 13-week projection. All math lives in the
+// database (kmi_cf_* RPCs, CF-M1); this module only displays and edits
+// Accounting's inputs. Access: Admin + Accounting (RLS kmi_fs_can_read).
+var _cash = {
+  review: null,          // review Friday 'YYYY-MM-DD'
+  tab: 'proj',           // proj | act | ar | ap | pa | set
+  settings: null, snap: null, sync: null,
+  proj: null,            // {P: {line: {week: amt}}, weeks: [...], opening, loc}
+  lineOv: {},            // 'line|YYYY-MM-DD' -> override row
+  sel: { k: 'payroll', w: 1 },
+  act: null, actAcct: 'all', actWeek: null, pva: null, pvaGc: null,
+  ar: null, arDtp: null, arFilter: 'all', arSearch: '', arOpen: {},
+  ap: null, apWeek: 1, apChecked: {},
+  pa: null, rates: null, rules: null, recur: null, factors: null,
+  finalizeAsk: false, busy: false
+};
+
+var _CASH_LINES = [
+  { sec: 'Receipts' },
+  { k: 'ar_current',   label: 'Open AR – current billings',  kind: 'in' },
+  { k: 'ar_retainage', label: 'Open AR – retainage (scheduled)', kind: 'in' },
+  { k: 'payapps',      label: 'Future pay apps collected',        kind: 'in' },
+  { k: 'other_in',     label: 'Other receipts',                   kind: 'in' },
+  { k: 'total_receipts', label: 'Total receipts',                 kind: 'tot' },
+  { sec: 'Disbursements' },
+  { k: 'payroll',      label: 'Net payroll',                      kind: 'out' },
+  { k: 'fed_tax',      label: 'Federal payroll tax',              kind: 'out' },
+  { k: 'state_tax',    label: 'State payroll tax',                kind: 'out' },
+  { k: 'union',        label: 'Union fringe benefits',            kind: 'out' },
+  { k: 'ap_open',      label: 'Open AP (bills in Foundation)',    kind: 'out' },
+  { k: 'ap_new',       label: 'New AP (bills not yet received)',  kind: 'out' },
+  { k: 'loc_interest', label: 'LOC interest',                     kind: 'out' },
+  { k: 'recurring',    label: 'Loan payments & recurring',        kind: 'out' },
+  { k: 'other_out',    label: 'Other disbursements',              kind: 'out' },
+  { k: 'total_disbursements', label: 'Total disbursements',       kind: 'tot' },
+  { k: 'net_operating', label: 'Net operating cash flow',         kind: 'tot' },
+  { sec: 'Cash & line of credit' },
+  { k: 'opening_cash', label: 'Opening cash (book)',              kind: 'calc' },
+  { k: 'loc_draw',     label: 'LOC draw / (paydown)',             kind: 'loc' },
+  { k: 'ending_cash',  label: 'Ending cash (book)',               kind: 'tot', flagMin: true },
+  { k: 'loc_balance',  label: 'LOC balance – end of week',   kind: 'calc' },
+  { k: 'borrowing_base', label: 'Borrowing base',                 kind: 'calc' },
+  { k: 'availability', label: 'Availability – end of week',  kind: 'calc', flagNeg: true }
+];
+
+var _CASH_BASIS = {
+  ar_current: 'Open invoices from Foundation, each expected at invoice date + days to pay (the project’s own history when it has enough paid pay apps, otherwise the GC’s). Invoices already past that date land in week {late} (up to {lateDays} days late) or week {slow}. Change individual invoices on AR Collections.',
+  ar_retainage: 'Retainage is projected only when a date is set on an invoice in AR Collections.',
+  payapps: 'Pay apps not yet billed (Pay Apps tab), net of retainage, collected at the GC’s days to pay.',
+  other_in: 'Nothing is calculated here. Enter one-time receipts as an override.',
+  payroll: '{payroll_avg_weeks}-week average net payroll × the month’s payroll factor. Paid Fridays.',
+  fed_tax: '{payroll_avg_weeks}-week average federal deposit × the payroll factor.',
+  state_tax: 'Average state deposit, every other week after the last one paid.',
+  union: 'Each work month’s fringes (payroll weeks × the union run-rate) paid the Friday on or before the {union_pay_day}th of the following month.',
+  ap_open: 'Open bills in Foundation at invoice date + {ap_pay_days} days (vendor rules and recurring vouchers use the due date). Bills already past that are spread over weeks 1–{ap_spread_weeks}. Move or hold bills on AP Schedule.',
+  ap_new: 'Bills not yet received, at the recent weekly rate, paid {ap_pay_days} days after they arrive.',
+  loc_interest: 'LOC balance × {loc_rate_pct} ÷ 12, in the week containing month-end.',
+  recurring: 'Recurring items from Settings, plus recurring vouchers Foundation has not generated yet.',
+  other_out: 'Nothing is calculated here. Enter one-time payments as an override.',
+  loc_draw: 'Draws keep ending cash at the {min_cash} minimum while availability allows; cash above minimum + {paydown_cushion} pays the line down. Enter the actual draw or paydown here if you plan one.'
+};
+
+// ── helpers ─────────────────────────────────────────────────────────────
+function _cashEsc(v){ return escapeHtml(v == null ? '' : String(v)); }
+function _cashNum(v){ var n = Number(v); return isFinite(n) ? n : 0; }
+function _cashIso(d){ return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+function _cashDate(s){ var p = String(s).slice(0, 10).split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+function _cashAdd(s, days){ var d = _cashDate(s); d.setDate(d.getDate() + days); return _cashIso(d); }
+function _cashMD(s){ if (!s) return ''; var p = String(s).slice(0, 10).split('-'); return p[1] + '/' + p[2]; }
+function _cashMDY(s){ if (!s) return ''; var p = String(s).slice(0, 10).split('-'); return p[1] + '/' + p[2] + '/' + p[0].slice(2); }
+function _cashLastFriday(){ var d = new Date(); d.setDate(d.getDate() - ((d.getDay() - 5 + 7) % 7)); return _cashIso(d); }
+function _cashMoney(v){
+  var n = _cashNum(v), a = Math.abs(n);
+  if (a < 0.5) return '–';
+  var s = Math.round(a).toLocaleString('en-US');
+  return n < 0 ? '(' + s + ')' : s;
+}
+function _cashDollars(v){ var n = _cashNum(v), s = '$' + Math.round(Math.abs(n)).toLocaleString('en-US'); return n < 0 ? '(' + s + ')' : s; }
+function _cashShort(v){
+  var n = _cashNum(v), a = Math.abs(n);
+  var s = a >= 1e6 ? '$' + (a / 1e6).toFixed(2) + 'M' : '$' + Math.round(a / 1000).toLocaleString('en-US') + 'K';
+  return n < 0 ? '(' + s + ')' : s;
+}
+function _cashCanEdit(){ return hasFull('cash-flow'); }
+function _cashIsAdmin(){ return _currentUser && normalizeRole(_currentUser.role) === 'Admin'; }
+function _cashFinal(){ return !!(_cash.snap && _cash.snap.status === 'final'); }
+function _cashErr(e){ return _cashEsc((e && (e.message || e.details)) || e); }
+
+async function _cashRpc(name, args){
+  var r = await supabaseClient.rpc(name, args || {});
+  if (r.error) throw r.error;
+  return r.data || [];
+}
+async function _cashSelAll(q){
+  var out = [], from = 0, page = 1000;
+  for (;;) {
+    var r = await q().range(from, from + page - 1);
+    if (r.error) throw r.error;
+    out = out.concat(r.data || []);
+    if (!r.data || r.data.length < page) return out;
+    from += page;
+  }
+}
+function _cashVendorName(no){
+  var list = (window.db && db.foundationVendors) || [];
+  if (!_cash._vmap || (!_cash._vmapN && list.length)) { _cash._vmap = {}; _cash._vmapN = list.length; list.forEach(function(v){ _cash._vmap[v.vendorNo] = v.name; }); }
+  return _cash._vmap[no] || '';
+}
+
+// ── entry ───────────────────────────────────────────────────────────────
+async function renderCashFlow(){
+  if (!hasRead('cash-flow')) return;
+  if (!_cash.review) _cash.review = _cashLastFriday();
+  _cashRenderChrome();
+  await _cashLoad();
+}
+
+function cashSetTab(t){ _cash.tab = t; _cashRenderChrome(); _cashLoadTab(); }
+function cashShiftWeek(n){
+  var next = _cashAdd(_cash.review, 7 * n);
+  if (next > _cashLastFriday()) return;
+  _cash.review = next;
+  _cash.ar = _cash.ap = _cash.pa = _cash.act = _cash.pva = null;
+  _cash.finalizeAsk = false;
+  _cashLoad();
+}
+
+async function _cashLoad(){
+  var body = g('cash-body'); if (!body) return;
+  if (!supabaseClient) { body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Not connected.</div>'; return; }
+  body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Building the projection for the week ending ' + _cashMDY(_cash.review) + '…</div>';
+  var rev = _cash.review;
+  try {
+    var res = await Promise.all([
+      supabaseClient.from('kmi_cf_settings').select('*').eq('id', 1).maybeSingle(),
+      supabaseClient.from('kmi_cf_snapshots').select('*').eq('review_week', rev).maybeSingle(),
+      supabaseClient.from('fnd_sync_runs').select('started_at,finished_at,status,tables_synced')
+        .eq('tables_synced->>source', 'fnd_cf_sync').eq('status', 'success')
+        .order('started_at', { ascending: false }).limit(1),
+      supabaseClient.from('kmi_cf_line_overrides').select('*')
+        .gt('week_ending', rev).lte('week_ending', _cashAdd(rev, 91))
+    ]);
+    if (res[0].error) throw res[0].error;
+    if (res[1].error) throw res[1].error;
+    if (res[3].error) throw res[3].error;
+    _cash.settings = res[0].data;
+    _cash.snap = res[1].data;
+    _cash.sync = (!res[2].error && res[2].data && res[2].data[0]) || null;
+    _cash.lineOv = {};
+    (res[3].data || []).forEach(function(o){ _cash.lineOv[o.line_key + '|' + String(o.week_ending).slice(0, 10)] = o; });
+    var rows = _cashFinal() ? _cash.snap.projection
+             : await _cashRpc('kmi_cf_projection', { p_review: rev });
+    if (rev !== _cash.review) return;
+    _cash.proj = _cashPivot(rows);
+  } catch (e) {
+    body.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not build the projection: ' + _cashErr(e) + '</div>';
+    return;
+  }
+  _cashRenderChrome();
+  _cashLoadTab();
+}
+
+function _cashPivot(rows){
+  var P = {}, weeks = [];
+  (rows || []).forEach(function(r){
+    var w = Number(r.week_no), k = r.line_key;
+    if (!P[k]) P[k] = {};
+    P[k][w] = _cashNum(r.amount);
+    if (w > 0 && weeks.indexOf(w) < 0) weeks.push(w);
+    if (w > 0) { if (!P._dates) P._dates = {}; P._dates[w] = String(r.week_ending).slice(0, 10); }
+  });
+  weeks.sort(function(a, b){ return a - b; });
+  return { P: P, weeks: weeks, dates: P._dates || {},
+           opening: (P.opening_cash || {})[0], loc: (P.opening_loc || {})[0] };
+}
+
+function _cashLoadTab(){
+  var t = _cash.tab;
+  if (t === 'proj') return _cashRenderProj();
+  if (t === 'act') return _cashLoadActuals();
+  if (t === 'ar') return _cashLoadAr();
+  if (t === 'ap') return _cashLoadAp();
+  if (t === 'pa') return _cashLoadPa();
+  if (t === 'set') return _cashLoadSettings();
+}
+
+// ── chrome ──────────────────────────────────────────────────────────────
+function _cashRenderChrome(){
+  var tabs = [['proj','Projection'],['act','Weekly Actuals'],['ar','AR Collections'],['ap','AP Schedule'],['pa','Pay Apps'],['set','Settings']];
+  var tb = g('cash-tabs');
+  if (tb) tb.innerHTML = tabs.map(function(t){
+    return '<button type="button" class="cash-tab' + (_cash.tab === t[0] ? ' on' : '') + '" onclick="cashSetTab(\'' + t[0] + '\')"'
+      + (_cash.tab === t[0] ? ' aria-current="page"' : '') + '>' + t[1] + '</button>';
+  }).join('');
+
+  var bar = g('cash-bar'); if (!bar) return;
+  var st = _cashFinal() ? '<span class="cash-pill cash-p-final">● Final</span>'
+         : _cash.snap ? '<span class="cash-pill cash-p-draft">● Draft saved ' + _cashMD(_cash.snap.created_at) + '</span>'
+         : '<span class="cash-pill cash-p-new">○ Not saved</span>';
+  var sync = _cash.sync ? 'Foundation synced <strong>' + new Date(_cash.sync.started_at).toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: 'numeric', minute: '2-digit' }) + '</strong>' : 'Foundation sync time unavailable';
+  var ts = (_cash.sync && _cash.sync.tables_synced) || {};
+  var tie = ts.ar_open != null
+    ? '<span class="cash-pill cash-p-ok">Open AR ' + _cashDollars(ts.ar_open) + '</span><span class="cash-pill cash-p-ok">Open AP ' + _cashDollars(ts.ap_open_through_today != null ? ts.ap_open_through_today : ts.ap_open) + '</span>'
+    : '';
+  var atLast = _cash.review >= _cashLastFriday();
+  var edit = _cashCanEdit();
+  var btns = '';
+  if (edit && !_cashFinal()) btns += '<button type="button" class="btn btn-sm" onclick="cashSaveDraft()">Save draft</button>';
+  if (edit && _cash.snap && !_cashFinal()) btns += '<button type="button" class="btn btn-sm btn-p" onclick="cashFinalize()">Finalize week</button>';
+  if (_cashFinal() && _cashIsAdmin()) btns += '<button type="button" class="btn btn-sm" onclick="cashReopenAsk()">Reopen</button>';
+  btns += '<button type="button" class="btn btn-sm" onclick="cashExportXlsx()">Export to Excel</button>';
+  var ask = '';
+  if (_cash.finalizeAsk) {
+    ask = '<div class="cash-ask"><label for="cash-reason">' + (_cash.finalizeAsk === 'reopen'
+        ? 'Reason for reopening this week'
+        : 'No LOC weekly entry for this week has synced from Foundation. To finalize anyway, give a reason') + '</label>'
+      + '<input id="cash-reason" class="cash-in" type="text" style="flex:1 1 260px;text-align:left">'
+      + '<button type="button" class="btn btn-sm btn-p" onclick="cashConfirmAsk()">' + (_cash.finalizeAsk === 'reopen' ? 'Reopen' : 'Finalize') + '</button>'
+      + '<button type="button" class="btn btn-sm" onclick="_cash.finalizeAsk=false;_cashRenderChrome()">Cancel</button></div>';
+  }
+  bar.innerHTML = '<div class="cash-bar">'
+    + '<div style="display:flex;align-items:center;gap:6px"><button type="button" class="btn btn-sm" aria-label="Previous week" onclick="cashShiftWeek(-1)">‹</button>'
+    + '<div><span class="cash-lbl">Review week</span><br><strong>Fri ' + _cashMDY(_cash.review) + '</strong></div>'
+    + '<button type="button" class="btn btn-sm" aria-label="Next week" onclick="cashShiftWeek(1)"' + (atLast ? ' disabled' : '') + '>›</button></div>'
+    + st + '<span style="color:#555">' + sync + '</span>' + tie
+    + '<span style="flex:1 1 auto"></span>' + btns + '</div>' + ask;
+}
+
+async function cashSaveDraft(){
+  try {
+    await _cashRpc('kmi_cf_save_snapshot', { p_review: _cash.review });
+    showToast('Draft saved for the week ending ' + _cashMDY(_cash.review));
+    await _cashLoad();
+  } catch (e) { showToast('Could not save: ' + ((e && e.message) || e), 'error'); }
+}
+async function cashFinalize(){
+  try {
+    await _cashRpc('kmi_cf_finalize', { p_review: _cash.review, p_reason: null });
+    showToast('Week ending ' + _cashMDY(_cash.review) + ' is final');
+    _cash.finalizeAsk = false;
+    await _cashLoad();
+  } catch (e) {
+    if (/give a reason/i.test((e && e.message) || '')) { _cash.finalizeAsk = 'finalize'; _cashRenderChrome(); var i = g('cash-reason'); if (i) i.focus(); }
+    else showToast('Could not finalize: ' + ((e && e.message) || e), 'error');
+  }
+}
+function cashReopenAsk(){ _cash.finalizeAsk = 'reopen'; _cashRenderChrome(); var i = g('cash-reason'); if (i) i.focus(); }
+async function cashConfirmAsk(){
+  var reason = ((g('cash-reason') || {}).value || '').trim();
+  if (!reason) { showToast('Enter a reason first', 'error'); return; }
+  try {
+    if (_cash.finalizeAsk === 'reopen') await _cashRpc('kmi_cf_reopen', { p_review: _cash.review, p_reason: reason });
+    else await _cashRpc('kmi_cf_finalize', { p_review: _cash.review, p_reason: reason });
+    _cash.finalizeAsk = false;
+    await _cashLoad();
+  } catch (e) { showToast(((e && e.message) || e), 'error'); }
+}
+
+// ── Projection tab ──────────────────────────────────────────────────────
+function _cashBasis(k){
+  var s = _cash.settings || {}, t = _CASH_BASIS[k] || 'Calculated from the lines above.';
+  var vals = {
+    late: s.ar_late_week, slow: s.ar_slow_week, lateDays: s.ar_late_days, payroll_avg_weeks: s.payroll_avg_weeks,
+    union_pay_day: s.union_pay_day, ap_pay_days: s.ap_pay_days, ap_spread_weeks: s.ap_spread_weeks,
+    loc_rate_pct: (_cashNum(s.loc_rate) * 100).toFixed(2) + '%', min_cash: _cashDollars(s.min_cash),
+    paydown_cushion: _cashDollars(s.paydown_cushion)
+  };
+  return t.replace(/\{(\w+)\}/g, function(m, key){ return vals[key] != null ? vals[key] : m; });
+}
+
+function _cashRenderProj(){
+  var body = g('cash-body'); if (!body || !_cash.proj) return;
+  var P = _cash.proj.P, W = _cash.proj.weeks, D = _cash.proj.dates, s = _cash.settings || {};
+  var min = _cashNum(s.min_cash);
+  var sum = function(k){ var t = 0; W.forEach(function(w){ t += _cashNum((P[k] || {})[w]); }); return t; };
+  var below = W.filter(function(w){ return _cashNum((P.ending_cash || {})[w]) < min - 0.5; });
+  var over = W.filter(function(w){ return _cashNum((P.over_advance || {})[w]) > 0.5; });
+  var peakOver = over.reduce(function(m, w){ return Math.max(m, _cashNum(P.over_advance[w])); }, 0);
+  var w1 = W[0];
+
+  var h = '<div class="cash-cards">'
+    + _cashCard('Opening book cash', _cashDollars(_cash.proj.opening), 'End of Fri ' + _cashMDY(_cash.review) + ' · GL ' + ((s.cash_accounts || []).join(' + ')), _cash.proj.opening < 0)
+    + _cashCard('13-week operating net', _cashDollars(sum('net_operating')), 'Receipts ' + _cashShort(sum('total_receipts')) + ' · Disbursements ' + _cashShort(-sum('total_disbursements')), sum('net_operating') < 0)
+    + _cashCard('LOC availability, week 1', _cashDollars((P.availability || {})[w1]), 'Base ' + _cashShort((P.borrowing_base || {})[w1]) + ' · drawn ' + _cashShort(_cash.proj.loc) + ' · max ' + _cashShort(s.max_limit), _cashNum((P.availability || {})[w1]) < 0)
+    + _cashCard('Weeks below minimum', below.length + ' of ' + W.length, below.length ? 'First: week ending ' + _cashMD(D[below[0]]) + ' · minimum ' + _cashDollars(min) : 'Minimum ' + _cashDollars(min), below.length > 0)
+    + '</div>';
+  if (over.length) {
+    h += '<div class="cash-alert"><strong>Over-advance projected</strong> in ' + over.length + ' week' + (over.length > 1 ? 's' : '') + ' ('
+      + (over.length > 4 ? _cashMD(D[over[0]]) + ' to ' + _cashMD(D[over[over.length - 1]]) : over.map(function(w){ return _cashMD(D[w]); }).join(', ')) + ') — LOC above the borrowing base by up to <strong>' + _cashDollars(peakOver)
+      + '</strong>. Billing pay apps early or scheduling retainage keeps the base up.</div>';
+  }
+  if (_cashFinal()) h += '<div class="cash-note">This week is final: figures are the locked snapshot from ' + _cashMDY(_cash.snap.finalized_at) + '.</div>';
+
+  h += '<div class="cash-wrap"><section class="cash-box" aria-label="13-week projection"><div class="cash-scroll"><table class="cash-g"><thead><tr><th class="l" scope="col">Week ending (Fri)</th>';
+  W.forEach(function(w){ h += '<th scope="col">' + _cashMD(D[w]) + '</th>'; });
+  h += '<th scope="col">13 wks</th></tr></thead><tbody>';
+  var edit = _cashCanEdit() && !_cashFinal();
+  _CASH_LINES.forEach(function(L){
+    if (L.sec) { h += '<tr class="sec"><td class="l" colspan="' + (W.length + 2) + '">' + L.sec + '</td></tr>'; return; }
+    var row = P[L.k] || {}, tot = 0, isFlow = L.kind === 'in' || L.kind === 'out' || L.kind === 'tot' && L.k !== 'ending_cash' || L.kind === 'loc';
+    h += '<tr' + (L.kind === 'tot' ? ' class="tot"' : '') + '><td class="l">' + L.label + '</td>';
+    W.forEach(function(w){
+      var v = _cashNum(row[w]); tot += v;
+      var sel = _cash.sel.k === L.k && _cash.sel.w === w;
+      var ov = _cash.lineOv[L.k + '|' + D[w]];
+      var bad = (L.flagMin && v < min - 0.5) || (L.flagNeg && v < -0.5);
+      h += '<td><button type="button" class="cb' + (sel ? ' sel' : '') + (bad ? ' bad' : '') + '" onclick="cashPick(\'' + L.k + '\',' + w + ')"'
+        + ' aria-label="' + _cashEsc(L.label) + ', week ending ' + _cashMD(D[w]) + ', ' + _cashMoney(v) + '">' + _cashMoney(v)
+        + (ov ? '<span class="dot" aria-hidden="true"></span>' : '') + '</button></td>';
+    });
+    var last = W[W.length - 1];
+    h += '<td class="tt">' + (isFlow ? _cashMoney(tot) : L.k === 'ending_cash' || L.k === 'loc_balance' ? _cashMoney(row[last]) : '') + '</td></tr>';
+  });
+  h += '</tbody></table></div><div class="cash-foot">Gold dot = amount overridden for that week. Click any amount to see how it was calculated' + (edit ? ' or override it' : '') + '.</div></section>';
+  h += '<aside class="cash-side" id="cash-side" aria-label="Cell detail">' + _cashSideHtml() + '</aside></div>';
+  body.innerHTML = h;
+}
+function _cashCard(l, v, s, bad){
+  return '<div class="cash-card"><div class="l">' + l + '</div><div class="v' + (bad ? ' bad' : '') + '">' + v + '</div><div class="s">' + s + '</div></div>';
+}
+function cashPick(k, w){ _cash.sel = { k: k, w: w }; _cashRenderProj(); }
+
+function _cashSideHtml(){
+  var k = _cash.sel.k, w = _cash.sel.w, P = _cash.proj.P, D = _cash.proj.dates;
+  var L = _CASH_LINES.filter(function(x){ return x.k === k; })[0] || { label: k, kind: 'calc' };
+  var v = _cashNum((P[k] || {})[w]);
+  var ov = _cash.lineOv[k + '|' + D[w]];
+  var canOv = (L.kind === 'in' || L.kind === 'out' || L.kind === 'loc') && _cashCanEdit() && !_cashFinal();
+  var h = '<div class="cash-lbl">Week ending ' + _cashMDY(D[w]) + '</div><div style="font-size:16px;font-weight:600;margin:2px 0 12px">' + L.label + '</div>'
+    + '<div class="cash-kv"><span>' + (ov ? 'Overridden amount' : 'Calculated') + '</span><strong>' + _cashMoney(v) + '</strong></div>'
+    + '<div class="cash-basis">' + _cashBasis(k) + '</div>';
+  if (ov) h += '<div class="cash-basis" style="color:#7A5B12">Override' + (ov.note ? ': ' + _cashEsc(ov.note) : '') + ' · set ' + _cashMDY(ov.set_at) + '. Clear it to see the calculated amount.</div>';
+  if (canOv) {
+    var cur = ov ? Math.abs(_cashNum(ov.amount)) : '';
+    if (ov && k === 'loc_draw') cur = _cashNum(ov.amount);
+    h += '<div class="cash-form"><label for="cash-ov-amt">Override this week' + (L.kind === 'out' ? ' (amount paid)' : L.kind === 'loc' ? ' (+ draw / – paydown)' : '') + '</label>'
+      + '<input id="cash-ov-amt" class="cash-in" type="text" inputmode="decimal" value="' + _cashEsc(cur) + '" placeholder="Blank = use the calculation" style="width:100%;text-align:left">'
+      + '<label for="cash-ov-note">Note</label><input id="cash-ov-note" class="cash-in" type="text" value="' + _cashEsc(ov ? ov.note : '') + '" placeholder="e.g. Thanksgiving week, short crew" style="width:100%;text-align:left">'
+      + '<div class="cash-hint">Applies to this week only. To move a specific invoice or bill, use AR Collections or AP Schedule — those changes stay until the item is paid.</div>'
+      + '<div style="display:flex;gap:8px"><button type="button" class="btn btn-sm btn-p" onclick="cashSaveLineOv()">Save override</button>'
+      + (ov ? '<button type="button" class="btn btn-sm" onclick="cashClearLineOv()">Clear</button>' : '') + '</div></div>';
+  } else if (L.kind === 'tot' || L.kind === 'calc') {
+    h += '<div class="cash-hint" style="padding-top:12px">Calculated from the lines above; it can’t be overridden directly.</div>';
+  }
+  return h;
+}
+function _cashParseAmt(s){
+  var t = String(s == null ? '' : s).replace(/[$,\s]/g, '');
+  var neg = /^\(.*\)$/.test(t); t = t.replace(/[()]/g, '');
+  if (t === '') return null;
+  var n = Number(t); if (!isFinite(n)) return NaN;
+  return neg ? -n : n;
+}
+async function cashSaveLineOv(){
+  var k = _cash.sel.k, w = _cash.sel.w, wk = _cash.proj.dates[w];
+  var amt = _cashParseAmt((g('cash-ov-amt') || {}).value);
+  if (amt === null) return cashClearLineOv();
+  if (isNaN(amt)) { showToast('Enter a number', 'error'); return; }
+  var note = ((g('cash-ov-note') || {}).value || '').trim() || null;
+  var r = await supabaseClient.from('kmi_cf_line_overrides').upsert({ week_ending: wk, line_key: k, amount: amt, note: note, set_at: new Date().toISOString() }, { onConflict: 'week_ending,line_key' });
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  await _cashLoad();
+}
+async function cashClearLineOv(){
+  var k = _cash.sel.k, wk = _cash.proj.dates[_cash.sel.w];
+  var r = await supabaseClient.from('kmi_cf_line_overrides').delete().eq('week_ending', wk).eq('line_key', k);
+  if (r.error) { showToast('Could not clear: ' + r.error.message, 'error'); return; }
+  await _cashLoad();
+}
+
+// ── Weekly Actuals tab ──────────────────────────────────────────────────
+async function _cashLoadActuals(){
+  var body = g('cash-body'); if (!body) return;
+  var to = _cash.review, from = _cashAdd(to, -56);
+  if (!_cash.act || _cash.act.to !== to) {
+    body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Loading actual cash activity…</div>';
+    try {
+      var rows = await _cashSelAll(function(){
+        return supabaseClient.from('kmi_cf_cash_lines').select('week_ending,account_no,line_key,cash_amount')
+          .gte('week_ending', from).lte('week_ending', to).order('row_unique_id');
+      });
+      var gl = await supabaseClient.from('fnd_gl_balances').select('account_no,period,net').in('account_no', (_cash.settings || {}).cash_accounts || ['1002','1005']);
+      _cash.act = { to: to, rows: rows, gl: (gl.data || []) };
+    } catch (e) { body.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not load actuals: ' + _cashErr(e) + '</div>'; return; }
+    _cash.actWeek = _cashAdd(to, -7);
+    _cash.pva = null;
+  }
+  _cashRenderActuals();
+  _cashLoadPva();
+}
+function cashActAcct(a){ _cash.actAcct = a; _cashRenderActuals(); }
+function cashActWeek(w){ _cash.actWeek = w; _cash.pva = null; _cashRenderActuals(); _cashLoadPva(); }
+
+function _cashRenderActuals(){
+  var body = g('cash-body'); if (!body || !_cash.act) return;
+  var weeks = []; for (var i = 8; i >= 0; i--) weeks.push(_cashAdd(_cash.act.to, -7 * i));
+  var acct = _cash.actAcct, M = {};
+  _cash.act.rows.forEach(function(r){
+    if (acct !== 'all' && r.account_no !== acct) return;
+    var w = String(r.week_ending).slice(0, 10), k = r.line_key;
+    if (!M[k]) M[k] = {};
+    M[k][w] = (M[k][w] || 0) + _cashNum(r.cash_amount);
+  });
+  var get = function(k, w){ return (M[k] || {})[w] || 0; };
+  var lines = [
+    { sec: 'Operating' },
+    { k: 'receipts', label: 'Customer receipts' }, { k: 'ap', label: 'AP checks & payments' },
+    { k: 'union', label: 'Union fringe benefits' }, { k: 'payroll', label: 'Net payroll' },
+    { k: 'fed_tax', label: 'Federal payroll tax' }, { k: 'state_tax', label: 'State payroll tax' },
+    { k: '_op', label: 'Net operating cash flow', tot: true, of: ['receipts','ap','union','payroll','fed_tax','state_tax'] },
+    { sec: 'Financing & other' },
+    { k: 'loc', label: 'LOC draws / (paydowns)' }, { k: 'other', label: 'Transfers, loans & other' },
+    { k: '_net', label: 'Net change in book cash', tot: true, of: ['receipts','ap','union','payroll','fed_tax','state_tax','loc','other'] }
+  ];
+  var pills = [['all','Combined'],['1002','Spring Bank (1002)'],['1005','Payroll Checking (1005)']].map(function(p){
+    return '<button type="button" class="cash-seg' + (acct === p[0] ? ' on' : '') + '" onclick="cashActAcct(\'' + p[0] + '\')">' + p[1] + '</button>';
+  }).join('');
+  var h = '<div class="cash-rowbar"><div role="group" aria-label="Accounts">' + pills + '</div><span class="cash-hint">Direct method · weeks Sat–Fri · transfers between the two accounts net out in Combined</span></div>';
+  h += '<section class="cash-box" aria-label="Weekly cash flow statement"><div class="cash-scroll"><table class="cash-g"><thead><tr><th class="l" scope="col">Week ending (Fri)</th>';
+  weeks.forEach(function(w){
+    var on = w === _cash.actWeek;
+    h += '<th scope="col"><button type="button" class="hb' + (on ? ' on' : '') + '" onclick="cashActWeek(\'' + w + '\')" aria-pressed="' + on + '">' + _cashMD(w)
+      + '<br><span style="font-size:10px;font-weight:500;opacity:.85">' + (w === _cash.act.to ? 'current' : '') + '</span></button></th>';
+  });
+  h += '<th scope="col">9 wks</th></tr></thead><tbody>';
+  lines.forEach(function(L){
+    if (L.sec) { h += '<tr class="sec"><td class="l" colspan="' + (weeks.length + 2) + '">' + L.sec + '</td></tr>'; return; }
+    var tot = 0;
+    h += '<tr' + (L.tot ? ' class="tot"' : '') + '><td class="l">' + L.label + '</td>';
+    weeks.forEach(function(w){
+      var v = L.of ? L.of.reduce(function(s, k){ return s + get(k, w); }, 0) : get(L.k, w);
+      tot += v;
+      h += '<td class="n' + (w === _cash.actWeek ? ' cur' : '') + '">' + _cashMoney(v) + '</td>';
+    });
+    h += '<td class="n tt">' + _cashMoney(tot) + '</td></tr>';
+  });
+  h += '</tbody></table></div><div class="cash-foot">Foundation cash history for ' + ((_cash.settings || {}).cash_accounts || []).join(' + ')
+    + '. Payroll dated Saturday is shown in the Friday it leaves the bank. LOC lines are entries described “LOC” (weekly net on ' + _cashEsc((_cash.settings || {}).loc_account) + ').</div></section>';
+  h += '<div class="cash-wrap" style="margin-top:14px"><section class="cash-box cash-pad" id="cash-pva" style="flex:1 1 480px"></section><section class="cash-box cash-pad" id="cash-pvagc" style="flex:1 1 400px"></section></div>';
+  body.innerHTML = h;
+  _cashRenderPva();
+}
+
+async function _cashLoadPva(){
+  var w = _cash.actWeek; if (!w) return;
+  try {
+    var res = await Promise.all([
+      _cashRpc('kmi_cf_projected_vs_actual', { p_week: w }),
+      supabaseClient.from('kmi_cf_snapshots').select('receipts_by_gc,status,created_at').eq('review_week', _cashAdd(w, -7)).maybeSingle(),
+      supabaseClient.from('fnd_ar_receipts').select('customer_no,cash_amount,reversal').gte('receipt_date', _cashAdd(w, -6)).lte('receipt_date', w)
+    ]);
+    if (w !== _cash.actWeek) return;
+    _cash.pva = { lines: res[0], snap: res[1].data, rec: (res[2].data || []) };
+  } catch (e) { _cash.pva = { error: (e && e.message) || String(e) }; }
+  _cashRenderPva();
+}
+function _cashRenderPva(){
+  var a = g('cash-pva'), b = g('cash-pvagc'); if (!a || !b) return;
+  var w = _cash.actWeek, p = _cash.pva;
+  var title = '<div class="cash-ct">Projected vs actual — week ending ' + _cashMDY(w) + '</div>';
+  if (!p) { a.innerHTML = title + '<div class="cash-hint">Loading…</div>'; b.innerHTML = ''; return; }
+  if (p.error) { a.innerHTML = title + '<div class="cash-hint" style="color:#A32D2D">' + _cashEsc(p.error) + '</div>'; b.innerHTML = ''; return; }
+  if (!p.snap) {
+    a.innerHTML = title + '<div class="cash-hint">No snapshot was saved for the review on ' + _cashMDY(_cashAdd(w, -7)) + ', so there is no projection to compare. Save a draft each Friday and the comparison appears here once the next week closes.</div>';
+    b.innerHTML = '<div class="cash-ct">Receipts by GC</div><div class="cash-hint">Needs the prior Friday’s snapshot.</div>';
+    return;
+  }
+  var names = { receipts: 'Customer receipts', payroll: 'Net payroll', fed_tax: 'Federal payroll tax', state_tax: 'State payroll tax', union: 'Union fringe benefits', ap: 'AP checks & payments', loc: 'LOC draw / (paydown)', other: 'Other' };
+  var h = title + '<div class="cash-scroll"><table class="cash-v"><thead><tr><th scope="col">Line</th><th class="n" scope="col">Projected</th><th class="n" scope="col">Actual</th><th class="n" scope="col">Variance</th></tr></thead><tbody>';
+  (p.lines || []).forEach(function(r){
+    h += '<tr><td>' + _cashEsc(names[r.line_key] || r.line_key) + '</td><td class="n">' + _cashMoney(r.projected) + '</td><td class="n">' + _cashMoney(r.actual)
+      + '</td><td class="n' + (Math.abs(_cashNum(r.variance)) > 25000 ? ' warn' : '') + '">' + _cashMoney(r.variance) + '</td></tr>';
+  });
+  a.innerHTML = h + '</tbody></table></div>';
+  var exp = (p.snap.receipts_by_gc || []).filter(function(x){ return String(x.week_ending).slice(0, 10) === w; });
+  var act = {}; p.rec.forEach(function(r){ if (r.reversal !== 'Y') act[r.customer_no] = (act[r.customer_no] || 0) + _cashNum(r.cash_amount); });
+  var keys = {}; exp.forEach(function(x){ keys[x.customer_no] = x; }); Object.keys(act).forEach(function(c){ if (!keys[c]) keys[c] = { customer_no: c, customer_name: c, expected: 0, invoices: 0 }; });
+  var list = Object.keys(keys).map(function(c){ var x = keys[c]; return { c: c, name: x.customer_name || c, exp: _cashNum(x.expected), n: x.invoices || 0, got: act[c] || 0 }; })
+    .sort(function(x, y){ return (y.exp + y.got) - (x.exp + x.got); });
+  var t = '<div class="cash-ct">Receipts by GC — expected vs received</div><div class="cash-scroll"><table class="cash-v"><thead><tr><th scope="col">GC</th><th class="n" scope="col">Expected</th><th class="n" scope="col">Received</th></tr></thead><tbody>';
+  list.forEach(function(x){ t += '<tr><td>' + _cashEsc(x.name) + '</td><td class="n">' + _cashMoney(x.exp) + '</td><td class="n">' + _cashMoney(x.got) + '</td></tr>'; });
+  b.innerHTML = t + '</tbody></table></div><div class="cash-hint">A GC that pays later than expected moves its days to pay out on the next projection.</div>';
+}
+
+// ── AR Collections tab ──────────────────────────────────────────────────
+async function _cashLoadAr(){
+  var body = g('cash-body'); if (!body) return;
+  if (!_cash.ar || _cash.ar.review !== _cash.review) {
+    body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Loading open AR…</div>';
+    try {
+      var res = await Promise.all([_cashRpc('kmi_cf_ar_items', { p_review: _cash.review }), _cashRpc('kmi_cf_days_to_pay', { p_asof: _cash.review })]);
+      _cash.ar = { review: _cash.review, items: res[0] };
+      _cash.arDtp = res[1];
+    } catch (e) { body.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not load AR: ' + _cashErr(e) + '</div>'; return; }
+  }
+  _cashRenderAr();
+}
+function cashArFilter(f){ _cash.arFilter = f; _cashRenderAr(); }
+function cashArSearch(v){ _cash.arSearch = v; _cashRenderAr(true); }
+function cashArToggle(c){ _cash.arOpen[c] = !_cash.arOpen[c]; _cashRenderAr(); }
+
+function _cashRenderAr(keepSearchFocus){
+  var body = g('cash-body'); if (!body || !_cash.ar) return;
+  var rev = _cash.review, items = _cash.ar.items;
+  var in30 = _cashAdd(rev, 30);
+  var tot = { cur: 0, ret: 0, retSched: 0, cross: 0 };
+  items.forEach(function(i){
+    tot.cur += _cashNum(i.open_current); tot.ret += _cashNum(i.open_retainage);
+    if (i.retainage_date) tot.retSched += _cashNum(i.open_retainage);
+    var f = String(i.ineligible_from || '').slice(0, 10);
+    if (f > rev && f <= in30) tot.cross += _cashNum(i.open_current);
+  });
+  var co = (_cash.arDtp || []).filter(function(d){ return d.customer_no === '*'; })[0];
+  var f = _cash.arFilter, q = (_cash.arSearch || '').toLowerCase();
+  var keep = function(i){
+    if (f === 'late' && !(String(i.expected_date).slice(0, 10) <= rev && _cashNum(i.open_current) !== 0)) return false;
+    if (f === 'cross') { var x = String(i.ineligible_from || '').slice(0, 10); if (!(x > rev && x <= in30)) return false; }
+    if (f === 'ret' && !(_cashNum(i.open_retainage) > 0)) return false;
+    if (f === 'chg' && !(i.override_date || i.retainage_date || i.note)) return false;
+    if (q && (String(i.customer_name || '') + ' ' + i.customer_no + ' ' + (i.job_no || '') + ' ' + i.invoice_no).toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  };
+  var G = {};
+  items.filter(keep).forEach(function(i){
+    var c = i.customer_no;
+    if (!G[c]) G[c] = { c: c, name: i.customer_name || c, basis: i.dtp_basis, dtp: i.days_to_pay, cur: 0, ret: 0, n: 0, next: null, inv: [] };
+    var gg = G[c]; gg.cur += _cashNum(i.open_current); gg.ret += _cashNum(i.open_retainage); gg.n++; gg.inv.push(i);
+    var cw = String(i.collect_week).slice(0, 10);
+    if (_cashNum(i.open_current) > 0 && (!gg.next || cw < gg.next)) gg.next = cw;
+  });
+  var list = Object.keys(G).map(function(k){ return G[k]; }).sort(function(a, b){ return (b.cur + b.ret) - (a.cur + a.ret); });
+  var edit = _cashCanEdit() && !_cashFinal();
+
+  var h = '<div class="cash-cards">'
+    + _cashCard('Open current billings', _cashDollars(tot.cur), items.length + ' invoices')
+    + _cashCard('Open retainage', _cashDollars(tot.ret), _cashDollars(tot.retSched) + ' scheduled — set dates to project it')
+    + _cashCard('Crossing 90 days next 30', _cashDollars(tot.cross), 'Drops out of the borrowing base · −' + _cashShort(tot.cross * _cashNum((_cash.settings || {}).advance_rate)) + ' availability', tot.cross > 0)
+    + _cashCard('Company days to pay', co ? Math.round(co.days) + ' days' : '–', 'Cash-weighted, last 12 months')
+    + '</div>';
+  var chips = [['all','All'],['late','Past expected date'],['cross','Crossing 90 days'],['ret','Retainage'],['chg','Changed by Accounting']].map(function(c){
+    return '<button type="button" class="cash-chip' + (f === c[0] ? ' on' : '') + '" onclick="cashArFilter(\'' + c[0] + '\')">' + c[1] + '</button>';
+  }).join('');
+  h += '<section class="cash-box"><div class="cash-rowbar cash-pad"><div role="group" aria-label="Filter" style="display:flex;flex-wrap:wrap;gap:6px">' + chips + '</div>'
+    + '<label class="cash-hint" style="display:flex;align-items:center;gap:8px">Search <input id="cash-ar-q" class="cash-in" type="search" style="width:200px;text-align:left" value="' + _cashEsc(_cash.arSearch) + '" oninput="cashArSearch(this.value)" placeholder="GC, job or invoice"></label></div>';
+  h += '<div class="cash-scroll"><div style="min-width:820px"><div class="cash-gch"><span></span><span>GC</span><span class="n">Days to pay</span><span class="n">Current</span><span class="n">Retainage</span><span class="n">Invoices</span><span class="n">Next expected</span></div>';
+  list.forEach(function(gg){
+    var open = !!_cash.arOpen[gg.c];
+    h += '<button type="button" class="cash-gcrow' + (open ? ' open' : '') + '" data-c="' + _cashEsc(gg.c) + '" onclick="cashArToggle(this.dataset.c)" aria-expanded="' + open + '">'
+      + '<span aria-hidden="true" style="color:#888">' + (open ? '▾' : '▸') + '</span>'
+      + '<span><strong>' + _cashEsc(gg.name) + '</strong><br><span class="cash-hint">' + _cashEsc(gg.basis) + '</span></span>'
+      + '<span class="n">' + Math.round(_cashNum(gg.dtp)) + ' days</span><span class="n">' + _cashDollars(gg.cur) + '</span><span class="n">' + _cashDollars(gg.ret)
+      + '</span><span class="n">' + gg.n + '</span><span class="n">' + (gg.next ? _cashMD(gg.next) : '–') + '</span></button>';
+    if (open) {
+      h += '<div class="cash-inv"><table class="cash-v"><thead><tr><th scope="col">Job</th><th scope="col">Invoice</th><th scope="col">Inv date</th><th class="n" scope="col">Current</th><th class="n" scope="col">Retainage</th><th scope="col">Expected</th><th scope="col">Change expected date</th><th scope="col">Collect week</th><th scope="col">Retainage date</th></tr></thead><tbody>';
+      gg.inv.forEach(function(i){
+        var key = _cashEsc(i.invoice_source + '|' + i.invoice_no);
+        var x = String(i.ineligible_from || '').slice(0, 10);
+        var flag = x > rev && x <= in30 ? ' <span class="cash-tag bad">90 days ' + _cashMD(x) + '</span>' : '';
+        h += '<tr><td>' + _cashEsc(i.job_no) + '</td><td>' + _cashEsc(i.invoice_no) + '</td><td>' + _cashMDY(i.invoice_date) + '</td>'
+          + '<td class="n">' + _cashMoney(i.open_current) + '</td><td class="n">' + _cashMoney(i.open_retainage) + '</td>'
+          + '<td>' + _cashMDY(i.expected_date) + flag + '</td>'
+          + '<td><label><span class="cash-sr">Expected date for invoice ' + _cashEsc(i.invoice_no) + '</span><input class="cash-in cash-date" type="date" value="' + _cashEsc(String(i.override_date || '').slice(0, 10)) + '"'
+          + (edit ? ' data-k="' + key + '" onchange="cashArSet(this.dataset.k,\'expected_date\',this.value)"' : ' disabled') + '></label></td>'
+          + '<td>' + _cashMD(i.collect_week) + '</td>'
+          + '<td><label><span class="cash-sr">Retainage date for invoice ' + _cashEsc(i.invoice_no) + '</span><input class="cash-in cash-date" type="date" value="' + _cashEsc(String(i.retainage_date || '').slice(0, 10)) + '"'
+          + (edit ? ' data-k="' + key + '" onchange="cashArSet(this.dataset.k,\'retainage_date\',this.value)"' : ' disabled') + '></label></td></tr>';
+      });
+      h += '</tbody></table><div class="cash-hint" style="padding-top:8px">Changes stay in place each week until the invoice is paid.</div></div>';
+    }
+  });
+  if (!list.length) h += '<div class="cash-hint cash-pad">No invoices match.</div>';
+  h += '</div></div></section>';
+  body.innerHTML = h;
+  if (keepSearchFocus) { var s = g('cash-ar-q'); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); } }
+}
+
+async function cashArSet(key, field, value){
+  var p = key.split('|'), src = p[0], no = p.slice(1).join('|');
+  var it = (_cash.ar.items || []).filter(function(i){ return i.invoice_source === src && i.invoice_no === no; })[0];
+  if (!it) return;
+  var row = { invoice_source: src, invoice_no: no,
+              expected_date: field === 'expected_date' ? (value || null) : (it.override_date || null),
+              retainage_date: field === 'retainage_date' ? (value || null) : (it.retainage_date || null),
+              note: it.note || null, set_at: new Date().toISOString() };
+  var r = (!row.expected_date && !row.retainage_date && !row.note)
+    ? await supabaseClient.from('kmi_cf_ar_overrides').delete().eq('invoice_source', src).eq('invoice_no', no)
+    : await supabaseClient.from('kmi_cf_ar_overrides').upsert(row, { onConflict: 'invoice_source,invoice_no' });
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  _cash.ar = null; _cash.proj = null;
+  await _cashLoad();
+}
+
+// ── AP Schedule tab ─────────────────────────────────────────────────────
+async function _cashLoadAp(){
+  var body = g('cash-body'); if (!body) return;
+  if (!_cash.ap || _cash.ap.review !== _cash.review) {
+    body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Loading open AP…</div>';
+    try { _cash.ap = { review: _cash.review, items: await _cashRpc('kmi_cf_ap_items', { p_review: _cash.review }) }; }
+    catch (e) { body.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not load AP: ' + _cashErr(e) + '</div>'; return; }
+    _cash.apChecked = {};
+  }
+  _cashRenderAp();
+}
+function cashApWeek(w){ _cash.apWeek = w; _cash.apChecked = {}; _cashRenderAp(); }
+
+function _cashRenderAp(){
+  var body = g('cash-body'); if (!body || !_cash.ap || !_cash.proj) return;
+  var P = _cash.proj.P, W = _cash.proj.weeks, D = _cash.proj.dates, edit = _cashCanEdit() && !_cashFinal();
+  var vals = W.map(function(w){ return { o: -_cashNum((P.ap_open || {})[w]), n: -_cashNum((P.ap_new || {})[w]), u: -_cashNum((P.union || {})[w]) }; });
+  var max = Math.max.apply(null, vals.map(function(v){ return v.o + v.n + v.u; }).concat([1]));
+  var h = '<section class="cash-box cash-pad"><div class="cash-rowbar"><div class="cash-ct" style="margin:0">AP paid by week — select a week to see its bills</div>'
+    + '<div class="cash-legend"><span><i style="background:var(--kmi)"></i>Open AP</span><span><i style="background:#8B93B8"></i>New AP (not yet received)</span><span><i style="background:var(--ac)"></i>Union funds</span></div></div>'
+    + '<div class="cash-scroll"><div class="cash-weeks">';
+  W.forEach(function(w, i){
+    var v = vals[i], tot = v.o + v.n + v.u, on = _cash.apWeek === w, hh = function(x){ return Math.round(x / max * 100); };
+    h += '<button type="button" class="cash-wk' + (on ? ' on' : '') + '" onclick="cashApWeek(' + w + ')" aria-pressed="' + on + '" aria-label="Week ending ' + _cashMD(D[w]) + ', AP ' + _cashDollars(tot) + '">'
+      + '<span style="font-weight:600">' + (tot ? _cashShort(tot) : '–') + '</span><span class="cash-stack">'
+      + '<span style="height:' + hh(v.u) + 'px;background:var(--ac)"></span><span style="height:' + hh(v.n) + 'px;background:#8B93B8"></span><span style="height:' + hh(v.o) + 'px;background:var(--kmi)"></span>'
+      + '</span><span style="color:#555">' + _cashMD(D[w]) + '</span></button>';
+  });
+  h += '</div></div></section>';
+
+  var wk = D[_cash.apWeek];
+  var bills = _cash.ap.items.filter(function(b){ return String(b.pay_week).slice(0, 10) === wk; })
+    .sort(function(a, b){ return _cashNum(b.open_balance) - _cashNum(a.open_balance); });
+  var held = _cash.ap.items.filter(function(b){ return b.hold; });
+  var lump = _cash.lineOv['ap_open|' + wk];
+  var openAmt = bills.filter(function(b){ return !b.hold; }).reduce(function(s, b){ return s + _cashNum(b.open_balance); }, 0);
+  h += '<section class="cash-box" style="margin-top:14px"><div class="cash-rowbar cash-pad"><div><div class="cash-ct" style="margin:0">Week ending ' + _cashMDY(wk) + ' — ' + bills.length + ' bills · ' + _cashDollars(openAmt) + '</div>'
+    + '<div class="cash-hint">' + held.length + ' bill' + (held.length === 1 ? '' : 's') + ' on hold (' + _cashDollars(held.reduce(function(s, b){ return s + _cashNum(b.open_balance); }, 0)) + ') are left out of the projection until released.</div></div>';
+  if (edit) {
+    h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+      + '<label class="cash-hint" style="display:flex;gap:6px;align-items:center">Lump sum for this week <input id="cash-lump" class="cash-in" type="text" inputmode="decimal" value="' + (lump ? _cashEsc(Math.abs(_cashNum(lump.amount))) : '') + '" placeholder="$ amount" style="width:120px"></label>'
+      + '<button type="button" class="btn btn-sm" onclick="cashApLump()">' + (lump ? 'Update' : 'Use lump sum') + '</button>'
+      + (lump ? '<button type="button" class="btn btn-sm" onclick="cashApLumpClear()">Clear</button>' : '')
+      + '<label class="cash-hint" style="display:flex;gap:6px;align-items:center">Move selected to <input id="cash-move" class="cash-in cash-date" type="date"></label>'
+      + '<button type="button" class="btn btn-sm" onclick="cashApMove()">Move</button></div>';
+  }
+  h += '</div>';
+  if (lump) h += '<div class="cash-note" style="margin:0 16px 10px">A lump sum of ' + _cashDollars(Math.abs(_cashNum(lump.amount))) + ' replaces the bill detail for this week in the projection.</div>';
+  h += '<div class="cash-scroll"><table class="cash-v"><thead><tr><th scope="col"><span class="cash-sr">Select</span></th><th scope="col">Vendor</th><th scope="col">Voucher</th><th scope="col">Invoice</th><th scope="col">Inv date</th><th scope="col">Rule</th><th scope="col">Default pay</th><th scope="col">Pay date</th><th scope="col">Hold</th><th class="n" scope="col">Open</th></tr></thead><tbody>';
+  bills.forEach(function(b){
+    var v = _cashEsc(b.voucher_no), nm = _cashVendorName(b.vendor_no);
+    h += '<tr' + (b.hold ? ' class="held"' : '') + '><td>' + (edit ? '<input type="checkbox" aria-label="Select voucher ' + v + '"' + (_cash.apChecked[b.voucher_no] ? ' checked' : '') + ' data-v="' + v + '" onchange="_cash.apChecked[this.dataset.v]=this.checked">' : '') + '</td>'
+      + '<td>' + _cashEsc(b.vendor_no) + (nm ? '<br><span class="cash-hint">' + _cashEsc(nm) + '</span>' : '') + '</td><td>' + v + '</td><td>' + _cashEsc(b.invoice_no) + '</td><td>' + _cashMDY(b.invoice_date) + '</td>'
+      + '<td><span class="cash-tag">' + _cashEsc(b.rule) + '</span></td><td>' + _cashMDY(b.default_pay_date) + '</td>'
+      + '<td><label><span class="cash-sr">Pay date for voucher ' + v + '</span><input class="cash-in cash-date" type="date" value="' + _cashEsc(String(b.override_pay_date || '').slice(0, 10)) + '"' + (edit ? ' data-v="' + v + '" onchange="cashApSet(this.dataset.v,{pay_date:this.value||null})"' : ' disabled') + '></label></td>'
+      + '<td><label class="cash-hold"><input type="checkbox"' + (b.hold ? ' checked' : '') + (edit ? ' data-v="' + v + '" onchange="cashApSet(this.dataset.v,{hold:this.checked})"' : ' disabled') + '><span>Hold</span></label></td>'
+      + '<td class="n">' + _cashMoney(b.open_balance) + '</td></tr>';
+  });
+  if (!bills.length) h += '<tr><td colspan="10" class="cash-hint">No bills scheduled this week.</td></tr>';
+  h += '</tbody></table></div></section>';
+  body.innerHTML = h;
+}
+
+async function cashApSet(voucher, patch){
+  var b = (_cash.ap.items || []).filter(function(x){ return x.voucher_no === voucher; })[0]; if (!b) return;
+  var row = { voucher_no: voucher, pay_date: b.override_pay_date || null, hold: !!b.hold, note: b.note || null, set_at: new Date().toISOString() };
+  Object.keys(patch).forEach(function(k){ row[k] = patch[k]; });
+  var r = (!row.pay_date && !row.hold && !row.note)
+    ? await supabaseClient.from('kmi_cf_ap_overrides').delete().eq('voucher_no', voucher)
+    : await supabaseClient.from('kmi_cf_ap_overrides').upsert(row, { onConflict: 'voucher_no' });
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  _cash.ap = null; await _cashLoad();
+}
+async function cashApMove(){
+  var d = (g('cash-move') || {}).value, ids = Object.keys(_cash.apChecked).filter(function(k){ return _cash.apChecked[k]; });
+  if (!d || !ids.length) { showToast('Pick bills and a date first', 'error'); return; }
+  var now = new Date().toISOString();
+  var rows = ids.map(function(id){ var b = _cash.ap.items.filter(function(x){ return x.voucher_no === id; })[0] || {};
+    return { voucher_no: id, pay_date: d, hold: !!b.hold, note: b.note || null, set_at: now }; });
+  var r = await supabaseClient.from('kmi_cf_ap_overrides').upsert(rows, { onConflict: 'voucher_no' });
+  if (r.error) { showToast('Could not move: ' + r.error.message, 'error'); return; }
+  showToast(ids.length + ' bill' + (ids.length > 1 ? 's' : '') + ' moved to ' + _cashMDY(d));
+  _cash.ap = null; await _cashLoad();
+}
+async function cashApLump(){
+  var amt = _cashParseAmt((g('cash-lump') || {}).value);
+  if (amt === null || isNaN(amt)) { showToast('Enter an amount', 'error'); return; }
+  var wk = _cash.proj.dates[_cash.apWeek];
+  var r = await supabaseClient.from('kmi_cf_line_overrides').upsert({ week_ending: wk, line_key: 'ap_open', amount: Math.abs(amt), note: 'AP lump sum', set_at: new Date().toISOString() }, { onConflict: 'week_ending,line_key' });
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  await _cashLoad();
+}
+async function cashApLumpClear(){
+  var wk = _cash.proj.dates[_cash.apWeek];
+  var r = await supabaseClient.from('kmi_cf_line_overrides').delete().eq('week_ending', wk).eq('line_key', 'ap_open');
+  if (r.error) { showToast('Could not clear: ' + r.error.message, 'error'); return; }
+  await _cashLoad();
+}
+
+// ── Pay Apps tab ────────────────────────────────────────────────────────
+async function _cashLoadPa(){
+  var body = g('cash-body'); if (!body) return;
+  if (!_cash.pa || _cash.pa.review !== _cash.review) {
+    body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Loading pay app forecast…</div>';
+    try { _cash.pa = { review: _cash.review, items: await _cashRpc('kmi_cf_payapp_items', { p_review: _cash.review }) }; }
+    catch (e) { body.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not load pay apps: ' + _cashErr(e) + '</div>'; return; }
+  }
+  _cashRenderPa();
+}
+function _cashRenderPa(){
+  var body = g('cash-body'); if (!body || !_cash.pa) return;
+  var items = _cash.pa.items, months = [], J = {}, edit = _cashCanEdit() && !_cashFinal();
+  items.forEach(function(r){
+    var m = String(r.bill_month).slice(0, 10);
+    if (months.indexOf(m) < 0) months.push(m);
+    if (!J[r.job_no]) J[r.job_no] = { job: r.job_no, gc: r.customer_name || r.customer_no, h: [r.hist_1, r.hist_2, r.hist_3], rr: _cashNum(r.run_rate), day: r.bill_day, ret: _cashNum(r.retainage_pct), dtp: r.days_to_pay, m: {} };
+    J[r.job_no].m[m] = r;
+  });
+  months.sort(); months = months.slice(0, 3);
+  var jobs = Object.keys(J).map(function(k){ return J[k]; }).sort(function(a, b){ return b.rr - a.rr; });
+  var mName = function(m){ return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][_cashDate(m).getMonth()]; };
+  var hm = [-3, -2, -1].map(function(n){ var d = _cashDate(_cash.review); d.setDate(1); d.setMonth(d.getMonth() + n); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]; });
+  var monthTot = months.map(function(m){ return jobs.reduce(function(s, j){ return s + _cashNum((j.m[m] || {}).amount); }, 0); });
+  var entered = jobs.filter(function(j){ return months.some(function(m){ return j.m[m] && j.m[m].entered != null; }); }).length;
+  var collected = items.filter(function(r){ return String(r.collect_week).slice(0, 10) <= _cashAdd(_cash.review, 91); }).reduce(function(s, r){ return s + _cashNum(r.net_to_collect); }, 0);
+  var h = '<div class="cash-cards">'
+    + (months[0] ? _cashCard(mName(months[0]) + ' forecast', _cashDollars(monthTot[0]), 'Run-rate total ' + _cashDollars(jobs.reduce(function(s, j){ return s + j.rr; }, 0)) + ' / month') : '')
+    + _cashCard('Jobs entered', entered + ' of ' + jobs.length, 'The rest use the run-rate (grey)')
+    + _cashCard('Collected in 13 weeks', _cashDollars(collected), 'Net of retainage, at each GC’s days to pay')
+    + '</div>';
+  h += '<section class="cash-box"><div class="cash-rowbar cash-pad"><div><div class="cash-ct" style="margin:0">Pay app forecast — jobs billed in the last two months</div>'
+    + '<div class="cash-hint">Type an amount to replace the run-rate; enter 0 for a finished job. Clear the box to go back to the run-rate.</div></div></div>'
+    + '<div class="cash-scroll"><table class="cash-v"><thead><tr><th scope="col">Job</th><th scope="col">GC</th>'
+    + hm.map(function(m){ return '<th class="n" scope="col">' + m + '</th>'; }).join('')
+    + '<th class="n" scope="col">Run-rate</th>' + months.map(function(m){ return '<th class="n" scope="col">' + mName(m) + '</th>'; }).join('')
+    + '<th class="n" scope="col">Bill day</th><th class="n" scope="col">Ret.</th><th class="n" scope="col">Days to pay</th></tr></thead><tbody>';
+  jobs.forEach(function(j){
+    h += '<tr><td><strong>' + _cashEsc(j.job) + '</strong></td><td>' + _cashEsc(j.gc) + '</td>'
+      + j.h.map(function(x){ return '<td class="n">' + _cashMoney(x) + '</td>'; }).join('') + '<td class="n">' + _cashMoney(j.rr) + '</td>';
+    months.forEach(function(m){
+      var r = j.m[m];
+      if (!r) { h += '<td class="n cash-hint">billed</td>'; return; }
+      var isEnt = r.entered != null;
+      h += '<td class="n"><label><span class="cash-sr">' + mName(m) + ' pay app for job ' + _cashEsc(j.job) + '</span><input class="cash-in' + (isEnt ? '' : ' rr') + '" type="text" inputmode="decimal" value="' + (isEnt ? _cashEsc(Math.round(_cashNum(r.entered)).toLocaleString('en-US')) : '') + '" placeholder="' + _cashEsc(Math.round(_cashNum(r.forecast)).toLocaleString('en-US')) + '"'
+        + (edit ? ' data-j="' + _cashEsc(j.job) + '" data-m="' + m + '" onchange="cashPaSet(this.dataset.j,this.dataset.m,this.value)"' : ' disabled') + ' style="width:104px"></label></td>';
+    });
+    h += '<td class="n">' + _cashEsc(j.day) + '</td><td class="n">' + Math.round(j.ret * 100) + '%</td><td class="n">' + Math.round(_cashNum(j.dtp)) + '</td></tr>';
+  });
+  h += '<tr class="tot"><td colspan="6">All ' + jobs.length + ' jobs</td>' + months.map(function(m, i){ return '<td class="n">' + _cashMoney(monthTot[i]) + '</td>'; }).join('') + '<td colspan="3"></td></tr>';
+  h += '</tbody></table></div><div class="cash-foot">Billing history and retainage % from Foundation AR invoices. Winter factors on Settings scale the run-rate only, never an entered amount. “billed” = that month’s pay app is already in open AR.</div></section>';
+  body.innerHTML = h;
+}
+async function cashPaSet(job, month, value){
+  var amt = _cashParseAmt(value);
+  if (amt !== null && isNaN(amt)) { showToast('Enter a number', 'error'); return; }
+  var r = amt === null
+    ? await supabaseClient.from('kmi_cf_payapp_forecast').delete().eq('job_no', job).eq('bill_month', month)
+    : await supabaseClient.from('kmi_cf_payapp_forecast').upsert({ job_no: job, bill_month: month, amount: amt, set_at: new Date().toISOString() }, { onConflict: 'job_no,bill_month' });
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  _cash.pa = null; await _cashLoad();
+}
+
+// ── Settings tab ────────────────────────────────────────────────────────
+var _CASH_SET_FIELDS = [
+  ['Line of credit & cash', [
+    ['max_limit', 'Maximum limit', 'money'], ['advance_rate', 'Advance rate on eligible AR', 'pct'],
+    ['ineligible_days', 'Current billings ineligible after (days from invoice)', 'int'], ['retainage_eligible', 'Retainage counts as eligible', 'bool'],
+    ['min_cash', 'Minimum cash to hold', 'money'], ['paydown_cushion', 'Pay down the LOC above minimum +', 'money'],
+    ['loc_rate', 'LOC interest rate', 'pct'], ['loc_account', 'LOC liability account', 'text']]],
+  ['Timing rules', [
+    ['ap_pay_days', 'AP paid this many days after invoice date', 'int'], ['ap_spread_weeks', 'Spread AP already past that over (weeks)', 'int'],
+    ['ar_late_days', 'AR counts as slow after (days past expected)', 'int'], ['ar_late_week', 'AR past expected, not slow: collect in week', 'int'],
+    ['ar_slow_week', 'Slow AR: collect in week', 'int'], ['union_pay_day', 'Union funds paid on the Friday on/before this day of next month', 'int'],
+    ['dtp_min_payments', 'Paid pay apps needed to use a project’s own days to pay', 'int']]],
+  ['Run-rate windows', [
+    ['payroll_avg_weeks', 'Payroll & taxes: average of last (weeks)', 'int'], ['new_ap_avg_weeks', 'New AP: average of last (weeks)', 'int'],
+    ['union_avg_weeks', 'Union funds: average of last (weeks)', 'int']]]
+];
+
+async function _cashLoadSettings(){
+  var body = g('cash-body'); if (!body) return;
+  body.innerHTML = '<div class="card" style="color:#888;font-size:12px">Loading settings…</div>';
+  try {
+    var m0 = _cash.review.slice(0, 7) + '-01';
+    var res = await Promise.all([
+      _cashRpc('kmi_cf_run_rates', { p_review: _cash.review }),
+      supabaseClient.from('kmi_cf_vendor_rules').select('*').order('vendor_no'),
+      supabaseClient.from('kmi_cf_recurring').select('*').order('name'),
+      supabaseClient.from('kmi_cf_factors').select('*').gte('month', m0).order('month')
+    ]);
+    [1, 2, 3].forEach(function(i){ if (res[i].error) throw res[i].error; });
+    _cash.rates = res[0]; _cash.rules = res[1].data || []; _cash.recur = res[2].data || []; _cash.factors = res[3].data || [];
+  } catch (e) { body.innerHTML = '<div class="card" style="color:#A32D2D;font-size:12px">Could not load settings: ' + _cashErr(e) + '</div>'; return; }
+  _cashRenderSettings();
+}
+function _cashSetVal(f, type){
+  var v = (_cash.settings || {})[f];
+  if (type === 'pct') return v == null ? '' : (Math.round(_cashNum(v) * 10000) / 100) + '%';
+  if (type === 'money') return v == null ? '' : Math.round(_cashNum(v)).toLocaleString('en-US');
+  if (type === 'text') return Array.isArray(v) ? v.join(', ') : (v == null ? '' : v);
+  return v == null ? '' : v;
+}
+function _cashRenderSettings(){
+  var body = g('cash-body'); if (!body) return;
+  var edit = _cashCanEdit();
+  var h = '<div class="cash-setgrid">';
+  _CASH_SET_FIELDS.forEach(function(sec){
+    h += '<section class="cash-box cash-pad"><div class="cash-ct">' + sec[0] + '</div>';
+    sec[1].forEach(function(f){
+      var id = 'cash-s-' + f[0];
+      h += '<div class="cash-srow"><label for="' + id + '">' + f[1] + '</label>'
+        + (f[2] === 'bool' ? '<input id="' + id + '" type="checkbox"' + ((_cash.settings || {})[f[0]] ? ' checked' : '') + (edit ? '' : ' disabled') + ' style="width:20px;height:20px">'
+                           : '<input id="' + id + '" class="cash-in" type="text" value="' + _cashEsc(_cashSetVal(f[0], f[2])) + '"' + (edit ? '' : ' disabled') + '>') + '</div>';
+    });
+    if (sec[0] === 'Line of credit & cash') h += '<div class="cash-srow"><span>Cash accounts</span><strong>' + _cashEsc(((_cash.settings || {}).cash_accounts || []).join(' + ')) + '</strong></div>';
+    h += '</section>';
+  });
+  h += '</div>';
+  if (edit) h += '<div style="margin:10px 0 18px"><button type="button" class="btn btn-p" onclick="cashSaveSettings()">Save settings</button></div>';
+
+  h += '<div class="cash-setgrid">';
+  h += '<section class="cash-box cash-pad cash-wide"><div class="cash-rowbar"><div class="cash-ct" style="margin:0">Vendor payment rules</div></div><div class="cash-hint" style="margin-bottom:8px">Vendors here are paid on their own schedule instead of invoice + ' + _cashEsc((_cash.settings || {}).ap_pay_days) + ' days. Union funds are projected on their own line.</div>'
+    + '<div class="cash-scroll"><table class="cash-v"><thead><tr><th scope="col">Vendor</th><th scope="col">Rule</th><th scope="col">Days</th><th scope="col">Note</th><th scope="col"><span class="cash-sr">Remove</span></th></tr></thead><tbody>';
+  var ruleName = { union_fund: 'Union fund', due_date: 'Due date', invoice_plus_days: 'Invoice + days' };
+  (_cash.rules || []).forEach(function(r){
+    h += '<tr><td>' + _cashEsc(r.vendor_no) + '<br><span class="cash-hint">' + _cashEsc(_cashVendorName(r.vendor_no)) + '</span></td><td>' + ruleName[r.rule] + '</td><td>' + _cashEsc(r.days == null ? '' : r.days) + '</td><td>' + _cashEsc(r.note) + '</td>'
+      + '<td>' + (edit ? '<button type="button" class="btn btn-sm" data-v="' + _cashEsc(r.vendor_no) + '" onclick="cashRuleDel(this.dataset.v)" aria-label="Remove rule for ' + _cashEsc(r.vendor_no) + '">Remove</button>' : '') + '</td></tr>';
+  });
+  if (edit) h += '<tr><td><label><span class="cash-sr">Vendor number</span><input id="cash-r-v" class="cash-in" type="text" placeholder="Vendor #" style="width:100px;text-align:left"></label></td>'
+    + '<td><label><span class="cash-sr">Rule</span><select id="cash-r-rule" class="cash-in" style="width:140px;text-align:left"><option value="due_date">Due date</option><option value="invoice_plus_days">Invoice + days</option><option value="union_fund">Union fund</option></select></label></td>'
+    + '<td><label><span class="cash-sr">Days</span><input id="cash-r-days" class="cash-in" type="text" style="width:60px"></label></td>'
+    + '<td><label><span class="cash-sr">Note</span><input id="cash-r-note" class="cash-in" type="text" style="min-width:140px;width:100%;text-align:left"></label></td>'
+    + '<td><button type="button" class="btn btn-sm" onclick="cashRuleAdd()">Add</button></td></tr>';
+  h += '</tbody></table></div></section>';
+
+  h += '<section class="cash-box cash-pad cash-wide"><div class="cash-ct">Recurring payments outside AP</div><div class="cash-hint" style="margin-bottom:8px">Loan payments and other drafts that never come through AP. Projected on the draft day each month.</div><div class="cash-scroll"><table class="cash-v"><thead><tr><th scope="col">Item</th><th class="n" scope="col">Monthly</th><th class="n" scope="col">Day</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Active</th><th scope="col"><span class="cash-sr">Actions</span></th></tr></thead><tbody>';
+  (_cash.recur || []).forEach(function(r){
+    var id = _cashEsc(r.id);
+    h += '<tr><td><label><span class="cash-sr">Name</span><input class="cash-in" id="cash-rc-n-' + id + '" type="text" value="' + _cashEsc(r.name) + '" style="min-width:180px;width:100%;text-align:left"' + (edit ? '' : ' disabled') + '></label></td>'
+      + '<td class="n"><label><span class="cash-sr">Monthly amount</span><input class="cash-in" id="cash-rc-a-' + id + '" type="text" value="' + (r.monthly_amount == null ? '' : _cashEsc(Math.round(_cashNum(r.monthly_amount)))) + '" placeholder="[amount]" style="width:100px"' + (edit ? '' : ' disabled') + '></label></td>'
+      + '<td class="n"><label><span class="cash-sr">Day</span><input class="cash-in" id="cash-rc-d-' + id + '" type="text" value="' + _cashEsc(r.day_of_month == null ? '' : r.day_of_month) + '" placeholder="[day]" style="width:56px"' + (edit ? '' : ' disabled') + '></label></td>'
+      + '<td><label><span class="cash-sr">First month</span><input class="cash-in" id="cash-rc-f-' + id + '" type="month" value="' + _cashEsc(String(r.first_month || '').slice(0, 7)) + '"' + (edit ? '' : ' disabled') + '></label></td>'
+      + '<td><label><span class="cash-sr">Last month</span><input class="cash-in" id="cash-rc-l-' + id + '" type="month" value="' + _cashEsc(String(r.last_month || '').slice(0, 7)) + '"' + (edit ? '' : ' disabled') + '></label></td>'
+      + '<td><label><span class="cash-sr">Active</span><input id="cash-rc-x-' + id + '" type="checkbox"' + (r.active ? ' checked' : '') + (edit ? '' : ' disabled') + '></label></td>'
+      + '<td>' + (edit ? '<button type="button" class="btn btn-sm" onclick="cashRecurSave(\'' + id + '\')">Save</button> <button type="button" class="btn btn-sm" onclick="cashRecurDel(\'' + id + '\')">Remove</button>' : '') + '</td></tr>';
+  });
+  h += '</tbody></table></div>' + (edit ? '<div style="margin-top:8px"><button type="button" class="btn btn-sm" onclick="cashRecurAdd()">Add item</button></div>' : '') + '</section>';
+
+  h += '<section class="cash-box cash-pad"><div class="cash-ct">Run-rates</div><div class="cash-hint" style="margin-bottom:8px">Recalculated from Foundation every time the projection runs.</div><table class="cash-v"><thead><tr><th scope="col">Run-rate</th><th class="n" scope="col">Amount</th><th scope="col">Basis</th></tr></thead><tbody>';
+  var rn = { payroll: 'Net payroll / week', fed_tax: 'Federal payroll tax / week', state_tax: 'State payroll tax / deposit', union: 'Union funds / payroll week', ap_new: 'New AP / week', recurring_ap: 'Recurring vouchers / month' };
+  (_cash.rates || []).forEach(function(r){ h += '<tr><td>' + (rn[r.rate_key] || _cashEsc(r.rate_key)) + '</td><td class="n">' + _cashMoney(r.amount) + '</td><td>' + _cashEsc(r.basis) + '</td></tr>'; });
+  h += '</tbody></table></section>';
+
+  var months = []; for (var i = 0; i < 5; i++) { var d = _cashDate(_cashAdd(_cash.review, 7)); d.setDate(1); d.setMonth(d.getMonth() + i); months.push(_cashIso(d)); }
+  var fm = {}; (_cash.factors || []).forEach(function(f){ fm[String(f.month).slice(0, 10)] = f; });
+  h += '<section class="cash-box cash-pad"><div class="cash-ct">Winter factors</div><div class="cash-hint" style="margin-bottom:8px">1.00 = recent run-rate. Scales pay app run-rates, payroll, taxes, union funds and new AP by month.</div><table class="cash-v"><thead><tr><th scope="col">Month</th><th class="n" scope="col">Pay apps</th><th class="n" scope="col">Payroll &amp; fringes</th><th class="n" scope="col">New AP</th></tr></thead><tbody>';
+  months.forEach(function(m){
+    var f = fm[m] || {}, lab = _cashDate(m).toLocaleString('en-US', { month: 'short', year: 'numeric' });
+    h += '<tr><td>' + lab + '</td>' + ['billing', 'payroll', 'new_ap'].map(function(k){
+      return '<td class="n"><label><span class="cash-sr">' + lab + ' ' + k + ' factor</span><input class="cash-in" id="cash-f-' + k + '-' + m + '" type="text" value="' + (f[k] != null ? _cashNum(f[k]).toFixed(2) : '1.00') + '" style="width:64px"' + (edit ? '' : ' disabled') + '></label></td>';
+    }).join('') + '</tr>';
+  });
+  h += '</tbody></table>' + (edit ? '<div style="margin-top:8px"><button type="button" class="btn btn-sm" onclick="cashFactorsSave(' + JSON.stringify(months).replace(/"/g, '&quot;') + ')">Save factors</button></div>' : '') + '</section>';
+  h += '</div>';
+  body.innerHTML = h;
+}
+
+async function cashSaveSettings(){
+  var row = { id: 1, updated_at: new Date().toISOString() }, bad = null;
+  _CASH_SET_FIELDS.forEach(function(sec){ sec[1].forEach(function(f){
+    var el = g('cash-s-' + f[0]); if (!el) return;
+    if (f[2] === 'bool') { row[f[0]] = !!el.checked; return; }
+    if (f[2] === 'text') { row[f[0]] = el.value.trim(); return; }
+    var n = _cashParseAmt(String(el.value).replace('%', ''));
+    if (n === null || isNaN(n)) { bad = f[1]; return; }
+    row[f[0]] = f[2] === 'pct' ? n / 100 : f[2] === 'int' ? Math.round(n) : n;
+  }); });
+  if (bad) { showToast('Check: ' + bad, 'error'); return; }
+  var r = await supabaseClient.from('kmi_cf_settings').update(row).eq('id', 1);
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  showToast('Settings saved');
+  _cash.ar = _cash.ap = _cash.pa = null;
+  await _cashLoad();
+}
+async function cashRuleAdd(){
+  var v = ((g('cash-r-v') || {}).value || '').trim().toUpperCase(), rule = (g('cash-r-rule') || {}).value;
+  var days = _cashParseAmt((g('cash-r-days') || {}).value), note = ((g('cash-r-note') || {}).value || '').trim() || null;
+  if (!v) { showToast('Enter a vendor number', 'error'); return; }
+  if (rule === 'invoice_plus_days' && (days === null || isNaN(days))) { showToast('Enter the number of days', 'error'); return; }
+  var r = await supabaseClient.from('kmi_cf_vendor_rules').upsert({ vendor_no: v, rule: rule, days: rule === 'invoice_plus_days' ? Math.round(days) : null, note: note, updated_at: new Date().toISOString() }, { onConflict: 'vendor_no' });
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  _cash.ap = null; await _cashLoad();
+}
+async function cashRuleDel(v){
+  var r = await supabaseClient.from('kmi_cf_vendor_rules').delete().eq('vendor_no', v);
+  if (r.error) { showToast('Could not remove: ' + r.error.message, 'error'); return; }
+  _cash.ap = null; await _cashLoad();
+}
+async function cashRecurAdd(){
+  var r = await supabaseClient.from('kmi_cf_recurring').insert({ name: 'New item', first_month: _cash.review.slice(0, 7) + '-01', active: true });
+  if (r.error) { showToast('Could not add: ' + r.error.message, 'error'); return; }
+  await _cashLoad();
+}
+async function cashRecurSave(id){
+  var v = function(k){ return (g('cash-rc-' + k + '-' + id) || {}).value; };
+  var amt = _cashParseAmt(v('a')), day = _cashParseAmt(v('d'));
+  if ((amt !== null && isNaN(amt)) || (day !== null && (isNaN(day) || day < 1 || day > 31))) { showToast('Check the amount and day', 'error'); return; }
+  if (!v('f')) { showToast('Pick a first month', 'error'); return; }
+  var row = { name: (v('n') || '').trim() || 'Item', monthly_amount: amt, day_of_month: day === null ? null : Math.round(day),
+              first_month: v('f') + '-01', last_month: v('l') ? v('l') + '-01' : null,
+              active: !!(g('cash-rc-x-' + id) || {}).checked, updated_at: new Date().toISOString() };
+  var r = await supabaseClient.from('kmi_cf_recurring').update(row).eq('id', id);
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  showToast('Saved'); await _cashLoad();
+}
+async function cashRecurDel(id){
+  var r = await supabaseClient.from('kmi_cf_recurring').delete().eq('id', id);
+  if (r.error) { showToast('Could not remove: ' + r.error.message, 'error'); return; }
+  await _cashLoad();
+}
+async function cashFactorsSave(months){
+  var rows = [], bad = false;
+  months.forEach(function(m){
+    var row = { month: m, updated_at: new Date().toISOString() };
+    ['billing', 'payroll', 'new_ap'].forEach(function(k){
+      var n = _cashParseAmt((g('cash-f-' + k + '-' + m) || {}).value);
+      if (n === null || isNaN(n) || n < 0) bad = true; else row[k] = n;
+    });
+    rows.push(row);
+  });
+  if (bad) { showToast('Factors must be numbers like 1.00 or 0.85', 'error'); return; }
+  var r = await supabaseClient.from('kmi_cf_factors').upsert(rows, { onConflict: 'month' });
+  if (r.error) { showToast('Could not save: ' + r.error.message, 'error'); return; }
+  showToast('Factors saved'); _cash.pa = null; await _cashLoad();
+}
+
+// ── Excel export ────────────────────────────────────────────────────────
+async function cashExportXlsx(){
+  if (typeof XLSX === 'undefined' || !_cash.proj) { showToast('Export not available yet', 'error'); return; }
+  try {
+    if (!_cash.ar || _cash.ar.review !== _cash.review) _cash.ar = { review: _cash.review, items: await _cashRpc('kmi_cf_ar_items', { p_review: _cash.review }) };
+    if (!_cash.ap || _cash.ap.review !== _cash.review) _cash.ap = { review: _cash.review, items: await _cashRpc('kmi_cf_ap_items', { p_review: _cash.review }) };
+    if (!_cash.pa || _cash.pa.review !== _cash.review) _cash.pa = { review: _cash.review, items: await _cashRpc('kmi_cf_payapp_items', { p_review: _cash.review }) };
+  } catch (e) { showToast('Could not export: ' + ((e && e.message) || e), 'error'); return; }
+  var P = _cash.proj.P, W = _cash.proj.weeks, D = _cash.proj.dates;
+  var head = ['KMI Construction – 13-Week Cash Flow Projection'], status = _cashFinal() ? 'Final' : _cash.snap ? 'Draft' : 'Not saved';
+  var aoa = [head, ['Review week ending ' + _cashMDY(_cash.review) + ' · ' + status + ' · exported ' + new Date().toLocaleString('en-US')], [],
+             ['Week ending'].concat(W.map(function(w){ return _cashDate(D[w]); }))];
+  _CASH_LINES.forEach(function(L){
+    if (L.sec) { aoa.push([L.sec.toUpperCase()]); return; }
+    aoa.push([L.label].concat(W.map(function(w){ return Math.round(_cashNum((P[L.k] || {})[w]) * 100) / 100; })));
+  });
+  var wb = XLSX.utils.book_new();
+  var ws = XLSX.utils.aoa_to_sheet(aoa, { cellDates: true });
+  ws['!cols'] = [{ wch: 40 }].concat(W.map(function(){ return { wch: 13 }; }));
+  XLSX.utils.book_append_sheet(wb, ws, 'Projection');
+  var ar = [['Customer','Name','Job','Invoice','Invoice date','Current','Retainage','Days to pay','Basis','Expected','Override','Collect week','Retainage date']];
+  _cash.ar.items.forEach(function(i){ ar.push([i.customer_no, i.customer_name, i.job_no, i.invoice_no, i.invoice_date, _cashNum(i.open_current), _cashNum(i.open_retainage), _cashNum(i.days_to_pay), i.dtp_basis, i.expected_date, i.override_date, i.collect_week, i.retainage_date]); });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ar), 'AR Detail');
+  var ap = [['Voucher','Vendor','Invoice','Invoice date','Due date','Open','Rule','Default pay','Override pay','Hold','Pay week']];
+  _cash.ap.items.forEach(function(b){ ap.push([b.voucher_no, b.vendor_no, b.invoice_no, b.invoice_date, b.due_date, _cashNum(b.open_balance), b.rule, b.default_pay_date, b.override_pay_date, b.hold ? 'Y' : '', b.pay_week]); });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ap), 'AP Detail');
+  var pa = [['Job','Customer','Bill month','Run-rate','Factor','Entered','Amount used','Bill date','Retainage %','Net to collect','Days to pay','Collect week']];
+  _cash.pa.items.forEach(function(r){ pa.push([r.job_no, r.customer_name || r.customer_no, r.bill_month, _cashNum(r.run_rate), _cashNum(r.factor), r.entered == null ? '' : _cashNum(r.entered), _cashNum(r.amount), r.bill_date, _cashNum(r.retainage_pct), _cashNum(r.net_to_collect), _cashNum(r.days_to_pay), r.collect_week]); });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pa), 'Pay Apps');
+  XLSX.writeFile(wb, 'KMI_Cash_Flow_' + _cash.review + '.xlsx');
+}
+
 async function renderFinStatements(){
   if (!hasRead('fin-statements')) return;
   if (!_fs.year) _fsDefaultPeriod();
@@ -61457,7 +62537,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-03-WIPB1C';
+var KMI_BUILD = '2026-11-04-2026-11-04-CF1';
 
 var _kmiSessionId = (function(){
   try {
