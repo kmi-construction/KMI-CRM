@@ -2956,6 +2956,13 @@ tr.gc-line:hover td{background:#fafafa}
     #pg-fin-reports .fr-foot{padding:10px 20px 14px;font-size:11.5px;color:#5F6070;border-top:.5px solid #eee;line-height:1.5}
     #pg-fin-reports .fr-empty{padding:48px 24px;text-align:center;color:#555;font-size:13.5px;line-height:1.6}
     #pg-fin-reports .btn:disabled{opacity:.45;cursor:not-allowed}
+    #pg-fin-reports table.fr-t tr.kid td{font-size:11.5px;color:#55566A;background:#FCFCFD;padding-top:5px;padding-bottom:5px}
+    #pg-fin-reports table.fr-t tr.kid td.l{padding-left:40px;min-width:260px}
+    #pg-fin-reports table.fr-t td.l + td.l{min-width:200px}
+    #pg-fin-reports table.fr-t tr.sec td{background:#EEF0F7;color:var(--kmi);font-weight:700;font-size:11.5px;letter-spacing:.4px;padding-top:9px}
+    #pg-fin-reports table.fr-t tr.sub td{background:#F8F9FB;border-top:.5px solid #DADDEA}
+    #pg-fin-reports .fr-tg{border:0;background:none;cursor:pointer;min-width:28px;min-height:28px;margin:-6px 2px -6px -8px;color:var(--kmi);font-size:13px;border-radius:6px}
+    #pg-fin-reports .fr-tg:hover{background:#EEF0F7}
   </style>
   <div class="ph"><div><h1>Financial Reports</h1><div class="sub">Year-end and periodic reports from the WIP, Foundation AR and AP. Any month end; open WIP months print as preliminary.</div><div class="stripe"></div></div>
     <div id="fr-status"></div></div>
@@ -49430,17 +49437,17 @@ async function apChkCommit(){
   }
 }
 
-// ═══ FINANCIAL REPORTS (B3a, B3c) ══════════════════════════════════════════
+// ═══ FINANCIAL REPORTS (B3a, B3c, B3d) ═════════════════════════════════════
 // Accounting > Financial Reports. Admin + Accounting ('fin-reports'); the
 // database functions (kmi_ar_aging_asof, kmi_ap_open_asof, kmi_wip_report)
 // enforce the same. One report model drives the screen, the PDF and Excel.
-var _fr = { period: null, report: 'ar', groupBy: 'class', periods: {}, cache: {}, busy: false, err: '' };
+var _fr = { period: null, report: 'ar', groupBy: 'class', periods: {}, cache: {}, open: {}, busy: false, err: '' };
 var _FR_LIST = [
   { id: 'ar',   title: 'Customer AR · 10% or more', desc: 'Aging by customer; 10%+ bold and shaded', tag: 'Any month' },
   { id: 'cb',   title: 'Customer Breakdown', desc: 'Revenue, cost, GP, % of revenue, backlog', tag: 'WIP months', wip: true },
-  { id: 'arap', title: 'AR / AP on complete jobs', desc: '100% complete jobs with AR or AP balances', tag: 'Any month' },
   { id: 'grp',  title: 'Breakdown by class & team', desc: 'By project class, PM, foreman or estimator; internal', tag: 'WIP months', wip: true },
-  { id: 'sva',  title: 'Year-end audit schedule', desc: 'SVA format, PDF and Excel', tag: 'Next build', soon: true },
+  { id: 'arap', title: 'AR / AP on complete jobs', desc: '100% complete jobs with AR or AP balances', tag: 'Any month' },
+  { id: 'sva',  title: 'Year-end audit schedule', desc: 'SVA job schedule, PDF and Excel', tag: 'December; other WIP months preview', wip: true },
   { id: 'fs',   title: 'Financial statements', desc: 'Opens the Financial Statements page', tag: 'Separate page', link: 'fin-statements' }
 ];
 var _FR_MON = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -49452,6 +49459,7 @@ function _frIsWip(pe){ return pe >= _WIP_FIRST && pe <= _wipLastClosed(); }
 function _frLocked(pe){ var p = _fr.periods[pe]; return !!(p && p.status === 'locked'); }
 function _frPrelim(pe){ return _frIsWip(pe) && !_frLocked(pe); }
 function _frEsc(v){ return escapeHtml(v == null ? '' : v); }
+function _frDiv(a, b){ return Math.abs(_frNum(b)) >= 0.005 ? _frNum(a) / _frNum(b) : null; }
 function _frFmt(v, kind){
   if (v === null || v === undefined || v === '') return '';
   if (kind === 'txt') return String(v);
@@ -49467,7 +49475,7 @@ function _frMonths(){
   while (pe <= last) { out.push(pe); pe = _wipNextMonthEnd(pe); }
   out.reverse();
   var y = Number(_WIP_FIRST.slice(0, 4));
-  ['12-31'].forEach(function(md){ for (var k = 1; k <= 2; k++) { var d = (y - k) + '-' + md; if (out.indexOf(d) < 0) out.push(d); } });
+  for (var k = 1; k <= 2; k++) { var d = (y - k) + '-12-31'; if (out.indexOf(d) < 0) out.push(d); }
   if (_fr.period && out.indexOf(_fr.period) < 0) out.push(_fr.period);
   return out;
 }
@@ -49527,11 +49535,38 @@ async function _frRpc(fn, args){
   if (r.error) throw new Error(fn + ': ' + r.error.message);
   return r.data || [];
 }
+function _frPriorYe(pe){ return (Number(pe.slice(0, 4)) - 1) + '-12-31'; }
 async function _frData(pe, need){
   var c = _fr.cache[pe] || (_fr.cache[pe] = {});
   if (need.ar && !c.ar) c.ar = await _frRpc('kmi_ar_aging_asof', { p_cutoff: pe });
   if (need.ap && !c.ap) c.ap = await _frRpc('kmi_ap_open_asof', { p_cutoff: pe });
   if (need.wip && !c.wip) c.wip = _frIsWip(pe) ? (await _frRpc('kmi_wip_report', { p_period_end: pe })).filter(function(x){ return x.section === 'wip'; }) : [];
+  if (need.py && !c.py) {
+    // prior year-end: the locked December snapshot when there is one, else the imported SVA baseline
+    var py = _frPriorYe(pe), out = { source: '', contracts: {}, sectionGp: {}, backlog: null };
+    var s = await supabaseClient.from('kmi_wip_snapshots').select('job_no,adj_contract,est_cost,backlog,flags,basis_mode,section').eq('period_end', py).eq('section', 'wip');
+    if (!s.error && (s.data || []).length) {
+      out.source = 'locked ' + _frShort(py) + ' WIP';
+      var sec = {};
+      s.data.forEach(function(r){
+        out.contracts[r.job_no] = _frNum(r.adj_contract);
+        var k = _frSvaSection(r), o = sec[k] || (sec[k] = { adj: 0, gp: 0 });
+        o.adj += _frNum(r.adj_contract); o.gp += _frNum(r.adj_contract) - _frNum(r.est_cost);
+      });
+      Object.keys(sec).forEach(function(k){ out.sectionGp[k] = _frDiv(sec[k].gp, sec[k].adj); });
+      out.backlog = s.data.reduce(function(t, r){ return t + _frNum(r.backlog); }, 0);
+    } else {
+      var b = await supabaseClient.from('kmi_wip_ye_baseline').select('kind,key,value').eq('year_end', py);
+      if (b.error) throw new Error('kmi_wip_ye_baseline: ' + b.error.message);
+      if ((b.data || []).length) out.source = 'SVA ' + py.slice(0, 4) + ' schedule (imported)';
+      (b.data || []).forEach(function(r){
+        if (r.kind === 'py_contract') out.contracts[r.key] = _frNum(r.value);
+        else if (r.kind === 'section_gp') out.sectionGp[r.key] = _frNum(r.value);
+        else if (r.kind === 'backlog') out.backlog = _frNum(r.value);
+      });
+    }
+    c.py = out;
+  }
   return c;
 }
 
@@ -49540,11 +49575,11 @@ async function _frLoad(force){
   if (!supabaseClient) { box.innerHTML = '<div class="fr-empty">Not connected.</div>'; return; }
   var pe = _fr.period, id = _fr.report;
   if (force) delete _fr.cache[pe];
-  var need = { ar: id === 'ar' || id === 'arap', ap: id === 'arap', wip: id === 'cb' || id === 'grp' || id === 'arap' };
+  var need = { ar: id === 'ar' || id === 'arap', ap: id === 'arap', wip: id === 'cb' || id === 'grp' || id === 'arap' || id === 'sva', py: id === 'sva' };
   var it = _FR_LIST.filter(function(x){ return x.id === id; })[0];
   if (it.wip && !_frIsWip(pe)) { _frRenderBox(null, it.title + ' is built from the WIP, which starts with ' + _frLong(_WIP_FIRST) + ' in kmi.build. Pick a WIP month.'); return; }
   var c = _fr.cache[pe];
-  if (!c || (need.ar && !c.ar) || (need.ap && !c.ap) || (need.wip && !c.wip)) box.innerHTML = '<div class="fr-empty">Building the report for ' + _frLong(pe) + '…</div>';
+  if (!c || (need.ar && !c.ar) || (need.ap && !c.ap) || (need.wip && !c.wip) || (need.py && !c.py)) box.innerHTML = '<div class="fr-empty">Building the report for ' + _frLong(pe) + '…</div>';
   try {
     var d = await _frData(pe, need);
     if (pe !== _fr.period || id !== _fr.report) return;
@@ -49601,17 +49636,112 @@ function _frGroupOf(job, by){
   names = names.filter(function(n, i){ return names.indexOf(n) === i; });
   return names.length ? names.join(' / ') : G.none;
 }
+function _frJobLabel(r){ return String(r.job_no || '') + (r.job_name ? '  ' + r.job_name : ''); }
+function _frByJob(a, b){ return String(a.job_no).localeCompare(String(b.job_no), 'en', { numeric: true }); }
+
+// ── SVA sections: complete vs in progress, $300,000 adjusted contract split
+var _FR_SVA_SECTIONS = [
+  { id: 'c_big', title: 'COMPLETE JOBS > $300,000' }, { id: 'c_small', title: 'COMPLETE JOBS < $300,000' },
+  { id: 'w_big', title: 'WIP JOBS > $300,000' },      { id: 'w_small', title: 'WIP JOBS < $300,000' }
+];
+function _frSvaSection(r){
+  var done = (Array.isArray(r.flags) ? r.flags : []).indexOf('complete') >= 0 || r.basis_mode === 'ctd';
+  return (done ? 'c_' : 'w_') + (_frNum(r.adj_contract) >= 300000 ? 'big' : 'small');
+}
+// SVA column set (letters are SVA's ALL JOBS columns, kept for the Excel copy)
+var _FR_SVA_COLS = [
+  { x: 'A', l: 'Job #', k: 'txt', w: 40, f: 'job' }, { x: 'B', l: 'Job name', k: 'txt', w: 150, f: 'name' },
+  { x: 'C', l: '% comp. per WIP', k: 'pct', w: 44, f: 'C' }, { x: 'D', l: '% comp.', k: 'pct', w: 44, f: 'D' },
+  { x: 'E', l: 'PY contract', k: 'm0', w: 62, f: 'E' }, { x: 'F', l: 'Base contract', k: 'm0', w: 62, f: 'F' },
+  { x: 'G', l: 'Target fund', k: 'm0', w: 48, f: 'G' }, { x: 'H', l: 'Change orders', k: 'm0', w: 58, f: 'H' },
+  { x: 'I', l: 'Adjusted contract', k: 'm0', w: 64, f: 'I' }, { x: 'J', l: 'Estimated costs', k: 'm0', w: 64, f: 'J' },
+  { x: 'K', l: 'Est. gross profit', k: 'm0', w: 58, f: 'K' }, { x: 'L', l: 'GP %', k: 'pct', w: 38, f: 'L' },
+  { x: 'M', l: 'PY GP %', k: 'pct', w: 38, f: 'M' },
+  { x: 'O', l: 'Costs before 1/1', k: 'm0', w: 62, f: 'O' }, { x: 'P', l: 'Allocated costs', k: 'm0', w: 44, f: 'P' },
+  { x: 'Q', l: 'Total costs before 1/1', k: 'm0', w: 62, f: 'Q' }, { x: 'R', l: 'Revenue earned before 1/1', k: 'm0', w: 62, f: 'R' },
+  { x: 'S', l: 'Gross profit before 1/1', k: 'm0', w: 58, f: 'S' }, { x: 'T', l: 'GP % before 1/1', k: 'pct', w: 38, f: 'T' },
+  { x: 'U', l: 'Earned YTD', k: 'm0', w: 62, f: 'U' }, { x: 'V', l: 'Costs job to date', k: 'm0', w: 62, f: 'V' },
+  { x: 'W', l: 'Costs YTD', k: 'm0', w: 62, f: 'W' }, { x: 'X', l: 'Allocated costs YTD', k: 'm0', w: 44, f: 'X' },
+  { x: 'Y', l: 'Total costs YTD', k: 'm0', w: 62, f: 'Y' }, { x: 'Z', l: 'Profit (loss) YTD', k: 'm0', w: 58, f: 'Z' },
+  { x: 'AA', l: 'CY GP %', k: 'pct', w: 38, f: 'AA' }, { x: 'AB', l: 'Billed to date', k: 'm0', w: 62, f: 'AB' },
+  { x: 'AC', l: 'Under (over)', k: 'm0', w: 58, f: 'AC' }, { x: 'AD', l: 'AR retainage', k: 'm0', w: 54, f: 'AD' },
+  { x: 'AE', l: 'Net', k: 'm0', w: 54, f: 'AE' }, { x: 'AF', l: 'Backlog', k: 'm0', w: 62, f: 'AF' },
+  { x: 'AG', l: 'PTD GP %', k: 'pct', w: 38, f: 'AG' }, { x: 'AI', l: 'PTD GP % excl. allocated', k: 'pct', w: 40, f: 'AI' },
+  { x: 'AJ', l: 'Profit (fade) gain', k: 'm0', w: 58, f: 'AJ' }, { x: 'AK', l: 'Comments', k: 'txt', w: 110, f: 'AK' }
+];
+var _FR_SVA_SCREEN = ['A','B','C','E','I','J','K','L','R','U','V','W','Z','AA','AB','AC','AD','AF','AG','AJ'];
+var _FR_SVA_SUMS = ['E','F','G','H','I','J','K','O','P','Q','R','S','U','V','W','X','Y','Z','AB','AC','AD','AE','AF','AJ'];
+function _frSvaRatios(o){
+  o.L = _frDiv(o.K, o.I); o.T = _frDiv(o.S, o.R); o.AA = _frDiv(o.Z, o.U);
+  o.AG = _frDiv(_frNum(o.Z) + _frNum(o.S), _frNum(o.U) + _frNum(o.R));
+  o.AI = (_frNum(o.U) + _frNum(o.R)) ? 1 - _frNum(o.V) / (_frNum(o.U) + _frNum(o.R)) : null;
+  return o;
+}
+function _frSvaJob(r, py){
+  var o = { job: r.job_no, name: r.job_name || '', C: _frNum(r.pct_complete), E: py.contracts[r.job_no] != null ? py.contracts[r.job_no] : 0,
+    F: _frNum(r.base_contract), G: _frNum(r.target_fund), H: _frNum(r.approved_cos), I: _frNum(r.adj_contract), J: _frNum(r.est_cost),
+    O: _frNum(r.py_cost), P: 0, R: _frNum(r.py_earned), U: _frNum(r.earned_ytd), V: _frNum(r.cost_jtd), W: _frNum(r.cost_ytd), X: 0,
+    AB: _frNum(r.billed_td), AC: _frNum(r.under_over), AD: _frNum(r.retainage), AF: _frNum(r.backlog), AK: r.note || '' };
+  o.D = _frDiv(o.V, o.J); o.K = o.I - o.J; o.Q = o.O + o.P; o.S = o.R - o.Q; o.Y = o.W + o.X; o.Z = o.U - o.Y; o.AE = o.AD + o.AC;
+  _frSvaRatios(o);
+  o.AJ = (o.Q && o.AG !== null && o.AG < 1) ? o.Q / (1 - o.AG) - o.R : 0;
+  o.sec = _frSvaSection(r);
+  return o;
+}
+function _frSvaModel(pe, d){
+  var py = d.py || { contracts: {}, sectionGp: {}, backlog: null, source: '' };
+  var jobs = d.wip.slice().sort(_frByJob).map(function(r){ return _frSvaJob(r, py); });
+  var S = { rows: [], sections: [], total: {} };
+  _FR_SVA_SUMS.forEach(function(f){ S.total[f] = 0; });
+  _FR_SVA_SECTIONS.forEach(function(sec){
+    var js = jobs.filter(function(j){ return j.sec === sec.id; });
+    var sub = { job: '', name: 'Total ' + sec.title.toLowerCase(), M: py.sectionGp[sec.id] != null ? py.sectionGp[sec.id] : null };
+    _FR_SVA_SUMS.forEach(function(f){ sub[f] = js.reduce(function(t, j){ return t + _frNum(j[f]); }, 0); S.total[f] += sub[f]; });
+    _frSvaRatios(sub);
+    sub.under = js.reduce(function(t, j){ return t + Math.max(j.AC, 0); }, 0);
+    sub.over = js.reduce(function(t, j){ return t + Math.min(j.AC, 0); }, 0);
+    S.sections.push({ sec: sec, jobs: js, sub: sub });
+  });
+  _frSvaRatios(S.total);
+  // backlog rollforward
+  var adj = {}, notStarted = 0, newStarted = 0;
+  S.sections.forEach(function(s){ adj[s.sec.id] = s.jobs.filter(function(j){ return j.E; }).reduce(function(t, j){ return t + (j.I - j.E); }, 0); });
+  jobs.filter(function(j){ return !j.E; }).forEach(function(j){ if (Math.abs(j.V) < 0.5) notStarted += j.I; else newStarted += j.I; });
+  var pyB = py.backlog, calc = (pyB || 0) + adj.c_big + adj.c_small + adj.w_big + adj.w_small + notStarted + newStarted - S.total.U;
+  S.roll = [
+    ['Backlog ' + _frLong(_frPriorYe(pe)) + (py.source ? ' (' + py.source + ')' : ''), pyB, null],
+    ['Contract adjustments, complete jobs over $300K', adj.c_big, _frDiv(adj.c_big, pyB)],
+    ['Contract adjustments, complete jobs under $300K', adj.c_small, _frDiv(adj.c_small, pyB)],
+    ['Contract adjustments, WIP jobs over $300K', adj.w_big, _frDiv(adj.w_big, pyB)],
+    ['Contract adjustments, WIP jobs under $300K', adj.w_small, _frDiv(adj.w_small, pyB)],
+    ['New contracts not yet started', notStarted, _frDiv(notStarted, S.total.AF)],
+    ['New contracts during the year', newStarted, _frDiv(newStarted, S.total.AF)],
+    ['Less contract revenue earned', -S.total.U, _frDiv(S.total.U, pyB)],
+    ['Backlog ' + _frLong(pe) + ' (rolled forward)', calc, _frDiv(calc - (pyB || 0), pyB)],
+    ['Backlog ' + _frLong(pe) + ' (schedule total)', S.total.AF, null],
+    ['Difference (rolled forward less schedule total)', calc - S.total.AF, null]
+  ];
+  S.uo = [];
+  S.sections.forEach(function(s){ S.uo.push([s.sec.title + ': under', s.sub.under]); S.uo.push([s.sec.title + ': over', s.sub.over]); });
+  var tu = S.sections.reduce(function(t, s){ return t + s.sub.under; }, 0), to = S.sections.reduce(function(t, s){ return t + s.sub.over; }, 0);
+  S.uo.push(['Total costs and earnings in excess of billings (under)', tu]);
+  S.uo.push(['Total billings in excess of costs and earnings (over)', to]);
+  S.uo.push(['Net under / (over)', tu + to]);
+  S.py = py; S.jobs = jobs;
+  return S;
+}
 
 function _frModel(id, pe, d){
   var prelim = _frPrelim(pe);
-  var M = { id: id, pe: pe, prelim: prelim, rows: [], foot: '' };
+  var M = { id: id, pe: pe, prelim: prelim, rows: [], foot: '', paper: 'letter' };
+  var kid = function(c){ return { kid: true, c: c }; };
   if (id === 'ar') {
     var by = {}, T = { d0: 0, d1: 0, d2: 0, d3: 0, ret: 0, tot: 0 };
     d.ar.forEach(function(r){
       var k = r.customer_name || '(no customer on project)';
-      var o = by[k] || (by[k] = { name: k, d0: 0, d1: 0, d2: 0, d3: 0, ret: 0, tot: 0, jobs: 0 });
+      var o = by[k] || (by[k] = { name: k, d0: 0, d1: 0, d2: 0, d3: 0, ret: 0, tot: 0, jobs: [] });
       o.d0 += _frNum(r.d0_30); o.d1 += _frNum(r.d31_60); o.d2 += _frNum(r.d61_90); o.d3 += _frNum(r.d91_plus);
-      o.ret += _frNum(r.retainage); o.tot += _frNum(r.total_ar); o.jobs++;
+      o.ret += _frNum(r.retainage); o.tot += _frNum(r.total_ar); o.jobs.push(r);
     });
     var list = Object.keys(by).map(function(k){ return by[k]; }).filter(function(o){ return Math.abs(o.tot) >= 0.005 || Math.abs(o.ret) >= 0.005; });
     list.forEach(function(o){ ['d0','d1','d2','d3','ret','tot'].forEach(function(f){ T[f] += o[f]; }); });
@@ -49620,9 +49750,10 @@ function _frModel(id, pe, d){
     list.forEach(function(o){
       var sh = T.tot ? o.tot / T.tot : 0, hi = sh >= 0.1;
       if (hi) { hiN++; hiT += o.tot; }
-      M.rows.push({ hi: hi, c: [o.name, o.jobs, o.d0, o.d1, o.d2, o.d3, o.ret, o.tot, sh] });
+      M.rows.push({ hi: hi, key: 'ar:' + o.name, c: [o.name, o.jobs.length, o.d0, o.d1, o.d2, o.d3, o.ret, o.tot, sh],
+        kids: o.jobs.slice().sort(_frByJob).map(function(r){ return kid([_frJobLabel(r), '', r.d0_30, r.d31_60, r.d61_90, r.d91_plus, r.retainage, r.total_ar, T.tot ? _frNum(r.total_ar) / T.tot : 0]); }) });
     });
-    M.rows.push({ tot: true, c: ['Total AR (' + list.length + ' customers)', list.reduce(function(s, o){ return s + o.jobs; }, 0), T.d0, T.d1, T.d2, T.d3, T.ret, T.tot, T.tot ? 1 : 0] });
+    M.rows.push({ tot: true, c: ['Total AR (' + list.length + ' customers)', list.reduce(function(s, o){ return s + o.jobs.length; }, 0), T.d0, T.d1, T.d2, T.d3, T.ret, T.tot, T.tot ? 1 : 0] });
     M.rows.push({ sub: true, c: ['Customers at 10% or more (' + hiN + ')', '', '', '', '', '', '', hiT, T.tot ? hiT / T.tot : 0] });
     M.title = 'Customer AR Balance · 10% or More';
     M.sub = 'Accounts receivable by customer as of ' + _frLong(pe);
@@ -49630,45 +49761,37 @@ function _frModel(id, pe, d){
               { l: '61–90 days', k: 'm2', w: 82 }, { l: '91+ days', k: 'm2', w: 82 }, { l: 'Retainage', k: 'm2', w: 86 }, { l: 'Customer total', k: 'm2', w: 92 }, { l: '% of total AR', k: 'pct', w: 66 }];
     M.foot = 'Bold and shaded: 10% or more of total AR. Customer is the GC on the kmi.build project. Aged by invoice date; retainage shown separately. Source: Foundation billings, cash and retainage as of the date.';
     M.sheet = 'Customer AR';
-  } else if (id === 'cb') {
-    var cb = {}, ct = { rev: 0, cost: 0, gp: 0, bl: 0 };
-    d.wip.forEach(function(r){
-      var k = _frCustomerOf(r.job_no);
-      var o = cb[k] || (cb[k] = { name: k, jobs: 0, rev: 0, cost: 0, gp: 0, bl: 0 });
-      o.jobs++; o.rev += _frNum(r.earned_ytd); o.cost += _frNum(r.cost_ytd); o.gp += _frNum(r.profit_ytd); o.bl += _frNum(r.backlog);
-    });
-    var cl = Object.keys(cb).map(function(k){ return cb[k]; });
-    cl.forEach(function(o){ ct.rev += o.rev; ct.cost += o.cost; ct.gp += o.gp; ct.bl += o.bl; });
-    cl.sort(function(a, b){ return b.rev - a.rev || b.bl - a.bl; });
-    cl.forEach(function(o){ M.rows.push({ c: [o.name, o.jobs, o.rev, o.cost, o.gp, Math.abs(o.rev) >= 0.5 ? o.gp / o.rev : null, ct.rev ? o.rev / ct.rev : 0, o.bl] }); });
-    M.rows.push({ tot: true, c: ['Total (' + cl.length + ' customers)', d.wip.length, ct.rev, ct.cost, ct.gp, ct.rev ? ct.gp / ct.rev : null, ct.rev ? 1 : 0, ct.bl] });
-    M.title = 'Customer Breakdown';
-    M.sub = 'Current-year performance and backlog by customer · WIP as of ' + _frLong(pe);
-    M.cols = [{ l: 'Customer', k: 'txt', w: 210 }, { l: 'Jobs', k: 'm0', w: 40 }, { l: 'Revenue earned YTD', k: 'm0', w: 100 }, { l: 'Costs YTD', k: 'm0', w: 95 },
-              { l: 'Profit (loss) YTD', k: 'm0', w: 95 }, { l: 'Gross profit %', k: 'pct', w: 70 }, { l: '% of total revenue', k: 'pct', w: 75 }, { l: 'Backlog', k: 'm0', w: 100 }];
-    M.foot = 'From the ' + _frShort(pe) + ' WIP, grouped by the GC on each kmi.build project. Revenue and costs are year to date; backlog is adjusted contract less earned to date.';
-    M.sheet = 'Customer Breakdown';
-  } else if (id === 'grp') {
-    var G = _FR_GROUPS.filter(function(x){ return x.id === _fr.groupBy; })[0] || _FR_GROUPS[0];
+  } else if (id === 'cb' || id === 'grp') {
+    var G = id === 'grp' ? (_FR_GROUPS.filter(function(x){ return x.id === _fr.groupBy; })[0] || _FR_GROUPS[0]) : { id: 'customer', label: 'Customer' };
     var gm = {}, gt = { adj: 0, rev: 0, cost: 0, gp: 0, bl: 0 };
     d.wip.forEach(function(r){
-      var k = _frGroupOf(r.job_no, G.id);
-      var o = gm[k] || (gm[k] = { name: k, jobs: 0, adj: 0, rev: 0, cost: 0, gp: 0, bl: 0 });
-      o.jobs++; o.adj += _frNum(r.adj_contract); o.rev += _frNum(r.earned_ytd); o.cost += _frNum(r.cost_ytd); o.gp += _frNum(r.profit_ytd); o.bl += _frNum(r.backlog);
+      var k = id === 'cb' ? _frCustomerOf(r.job_no) : _frGroupOf(r.job_no, G.id);
+      var o = gm[k] || (gm[k] = { name: k, jobs: [], adj: 0, rev: 0, cost: 0, gp: 0, bl: 0 });
+      o.jobs.push(r); o.adj += _frNum(r.adj_contract); o.rev += _frNum(r.earned_ytd); o.cost += _frNum(r.cost_ytd); o.gp += _frNum(r.profit_ytd); o.bl += _frNum(r.backlog);
     });
     var gl = Object.keys(gm).map(function(k){ return gm[k]; });
     gl.forEach(function(o){ gt.adj += o.adj; gt.rev += o.rev; gt.cost += o.cost; gt.gp += o.gp; gt.bl += o.bl; });
     gl.sort(function(a, b){ var na = a.name.charAt(0) === '(', nb = b.name.charAt(0) === '('; return na !== nb ? (na ? 1 : -1) : (b.rev - a.rev || b.bl - a.bl); });
-    gl.forEach(function(o){ M.rows.push({ c: [o.name, o.jobs, o.adj, o.rev, o.cost, o.gp, Math.abs(o.rev) >= 0.5 ? o.gp / o.rev : null, gt.rev ? o.rev / gt.rev : 0, o.bl] }); });
-    M.rows.push({ tot: true, c: ['Total (' + gl.length + ')', d.wip.length, gt.adj, gt.rev, gt.cost, gt.gp, gt.rev ? gt.gp / gt.rev : null, gt.rev ? 1 : 0, gt.bl] });
-    M.title = 'Project Performance by ' + G.label;
-    M.sub = 'Internal \u00b7 WIP as of ' + _frLong(pe);
-    M.cols = [{ l: G.label, k: 'txt', w: 190 }, { l: 'Jobs', k: 'm0', w: 38 }, { l: 'Adjusted contract', k: 'm0', w: 96 }, { l: 'Revenue earned YTD', k: 'm0', w: 96 },
+    gl.forEach(function(o){
+      M.rows.push({ key: id + ':' + G.id + ':' + o.name, c: [o.name, o.jobs.length, o.adj, o.rev, o.cost, o.gp, _frDiv(o.gp, o.rev), gt.rev ? o.rev / gt.rev : 0, o.bl],
+        kids: o.jobs.slice().sort(_frByJob).map(function(r){ return kid([_frJobLabel(r), '', r.adj_contract, r.earned_ytd, r.cost_ytd, r.profit_ytd, _frDiv(r.profit_ytd, r.earned_ytd), gt.rev ? _frNum(r.earned_ytd) / gt.rev : 0, r.backlog]); }) });
+    });
+    M.rows.push({ tot: true, c: ['Total (' + gl.length + ')', d.wip.length, gt.adj, gt.rev, gt.cost, gt.gp, _frDiv(gt.gp, gt.rev), gt.rev ? 1 : 0, gt.bl] });
+    M.cols = [{ l: G.label, k: 'txt', w: 200 }, { l: 'Jobs', k: 'm0', w: 38 }, { l: 'Adjusted contract', k: 'm0', w: 96 }, { l: 'Revenue earned YTD', k: 'm0', w: 96 },
               { l: 'Costs YTD', k: 'm0', w: 90 }, { l: 'Profit (loss) YTD', k: 'm0', w: 90 }, { l: 'Gross profit %', k: 'pct', w: 64 }, { l: '% of total revenue', k: 'pct', w: 70 }, { l: 'Backlog', k: 'm0', w: 92 }];
-    M.foot = 'From the ' + _frShort(pe) + ' WIP. ' + (G.id === 'class' ? 'Class is the first project type on the kmi.build project.'
-      : G.id === 'estimator' ? 'Estimator is the one on the opportunity the project came from.'
-      : G.label + ' comes from the KMI team on the project; jobs with more than one are shown together.') + ' Phase rows count with their parent job.';
-    M.sheet = 'By ' + G.label;
+    if (id === 'cb') {
+      M.title = 'Customer Breakdown';
+      M.sub = 'Current-year performance and backlog by customer · WIP as of ' + _frLong(pe);
+      M.foot = 'From the ' + _frShort(pe) + ' WIP, grouped by the GC on each kmi.build project. Revenue and costs are year to date; backlog is adjusted contract less earned to date.';
+      M.sheet = 'Customer Breakdown';
+    } else {
+      M.title = 'Project Performance by ' + G.label;
+      M.sub = 'Internal · WIP as of ' + _frLong(pe);
+      M.foot = 'From the ' + _frShort(pe) + ' WIP. ' + (G.id === 'class' ? 'Class is the first project type on the kmi.build project.'
+        : G.id === 'estimator' ? 'Estimator is the one on the opportunity the project came from.'
+        : G.label + ' comes from the KMI team on the project; jobs with more than one are shown together.') + ' Phase rows count with their parent job.';
+      M.sheet = 'By ' + G.label;
+    }
   } else if (id === 'arap') {
     var wipMap = {}; d.wip.forEach(function(r){ wipMap[r.job_no] = r; });
     var hasWip = _frIsWip(pe), jobs = {};
@@ -49695,8 +49818,48 @@ function _frModel(id, pe, d){
                      : 'No kmi.build WIP for this month, so every job with an AR or AP balance is listed, including jobs still in progress.')
       + ' AR includes retainage receivable; AP includes retainage payable. Variance = AR − AP.';
     M.sheet = 'AR AP Balances';
+  } else if (id === 'sva') {
+    var S = _frSvaModel(pe, d), isYe = pe.slice(5) === '12-31';
+    M.sva = S; M.paper = 'tabloid';
+    var cols = _FR_SVA_COLS.filter(function(c){ return _FR_SVA_SCREEN.indexOf(c.x) >= 0; });
+    M.cols = cols.map(function(c){ return { l: c.l, k: c.k, w: c.w, f: c.f }; });
+    var line = function(o){ return cols.map(function(c){ return o[c.f]; }); };
+    S.sections.forEach(function(s){
+      M.rows.push({ sec: true, c: [s.sec.title] });
+      s.jobs.forEach(function(j){ M.rows.push({ c: line(j) }); });
+      var sb = line(s.sub); sb[0] = ''; sb[1] = 'Total · ' + s.jobs.length + ' jobs';
+      M.rows.push({ sub: true, c: sb });
+    });
+    var tl = line(S.total); tl[0] = ''; tl[1] = 'Total all jobs · ' + S.jobs.length;
+    M.rows.push({ tot: true, c: tl });
+    M.blocks = [
+      { title: 'Backlog rollforward', cols: ['', 'Amount', '% of PY backlog'], rows: S.roll.map(function(r){ return [r[0], r[1], r[2]]; }), kinds: ['txt', 'm0', 'pct'] },
+      { title: 'Under / (over) billings', cols: ['', 'Amount'], rows: S.uo, kinds: ['txt', 'm0'] }
+    ];
+    M.title = 'Job Schedule · Year-End Audit (SVA format)';
+    M.sub = (isYe ? 'December 31, ' + pe.slice(0, 4) : 'PREVIEW as of ' + _frLong(pe) + ' (the audit schedule is the locked December)')
+      + (S.py.source ? ' · prior year from ' + S.py.source : ' · no prior-year data for ' + _frPriorYe(pe));
+    M.foot = 'Sections: complete jobs (100% / cost-to-date basis) and jobs in progress, split at $300,000 adjusted contract. Earned YTD, costs and billings from the WIP; PY contract and PY GP % from the prior year-end; '
+      + 'PTD GP % = (profit YTD + gross profit before 1/1) / (earned YTD + earned before 1/1); profit (fade) gain = prior-year revenue recalculated at the project-to-date GP %. '
+      + 'The screen and PDF show the main columns; the Excel copy has all of SVA’s columns with live formulas.';
+    M.sheet = 'ALL JOBS';
   }
   return M;
+}
+
+// ── expand / collapse group rows
+function _frIsOpen(key){ return !!_fr.open[key]; }
+function frToggle(key){ _fr.open[key] = !_fr.open[key]; _frRerender(); }
+function frExpandAll(on){
+  var M = _frCurrentModel(); if (!M) return;
+  M.rows.forEach(function(r){ if (r.kids && r.key) _fr.open[r.key] = !!on; });
+  _frRerender();
+}
+function _frRerender(){ var M = _frCurrentModel(); if (M) _frRenderBox(M); }
+function _frVisibleRows(M){
+  var out = [];
+  M.rows.forEach(function(r){ out.push(r); if (r.kids && r.key && _frIsOpen(r.key)) r.kids.forEach(function(k){ out.push(k); }); });
+  return out;
 }
 
 function _frRenderBox(M, msg){
@@ -49709,72 +49872,104 @@ function _frRenderBox(M, msg){
     + '<button class="btn btn-sm" onclick="frExportXlsx()"' + (M ? '' : ' disabled') + '>Download Excel</button>'
     + '<button class="btn btn-sm" onclick="_frLoad(true)" title="Rebuild from the latest data">Refresh</button></div></div>';
   if (!M) { box.innerHTML = h + '<div class="fr-empty">' + _frEsc(msg || '') + '</div>'; return; }
-  if (M.id === 'grp') h += '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:10px 20px;border-bottom:.5px solid #eee"><span style="font-size:12px;color:#555;margin-right:4px">Group by</span>'
-    + _FR_GROUPS.map(function(x){ return '<button class="fr-pill' + (x.id === _fr.groupBy ? ' on' : '') + '" onclick="frPickGroup(\'' + x.id + '\')" aria-pressed="' + (x.id === _fr.groupBy) + '">' + _frEsc(x.label) + '</button>'; }).join('') + '</div>';
+  var hasKids = M.rows.some(function(r){ return r.kids && r.kids.length; });
+  if (M.id === 'grp' || hasKids) {
+    h += '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:10px 20px;border-bottom:.5px solid #eee">';
+    if (M.id === 'grp') h += '<span style="font-size:12px;color:#555;margin-right:4px">Group by</span>'
+      + _FR_GROUPS.map(function(x){ return '<button class="fr-pill' + (x.id === _fr.groupBy ? ' on' : '') + '" onclick="frPickGroup(\'' + x.id + '\')" aria-pressed="' + (x.id === _fr.groupBy) + '">' + _frEsc(x.label) + '</button>'; }).join('');
+    if (hasKids) h += '<span style="flex:1"></span><button class="btn btn-sm" onclick="frExpandAll(true)">Expand all</button><button class="btn btn-sm" onclick="frExpandAll(false)">Collapse all</button>';
+    h += '</div>';
+  }
   h += '<div class="fr-scroll"><table class="fr-t"><thead><tr>' + M.cols.map(function(c){ return '<th scope="col"' + (c.k === 'txt' ? ' class="l"' : '') + '>' + _frEsc(c.l) + '</th>'; }).join('') + '</tr></thead><tbody>';
   if (M.rows.length <= 1) h += '<tr><td class="l" colspan="' + M.cols.length + '" style="color:#888;padding:24px 12px">Nothing to report for this date.</td></tr>';
-  M.rows.forEach(function(r){
-    h += '<tr class="' + (r.hi ? 'hi' : r.tot ? 'tot' : r.sub ? 'sub' : '') + '">' + M.cols.map(function(c, i){
+  _frVisibleRows(M).forEach(function(r){
+    if (r.sec) { h += '<tr class="sec"><td class="l" colspan="' + M.cols.length + '">' + _frEsc(r.c[0]) + '</td></tr>'; return; }
+    h += '<tr class="' + (r.hi ? 'hi' : r.tot ? 'tot' : r.sub ? 'sub' : r.kid ? 'kid' : '') + '">' + M.cols.map(function(c, i){
       var v = r.c[i], s = _frFmt(v, c.k), neg = c.k !== 'txt' && c.k !== 'pct' && _frNum(v) < 0;
+      if (i === 0 && r.kids && r.kids.length && r.key) {
+        var op = _frIsOpen(r.key), js = JSON.stringify(r.key).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+        return '<td class="l"><button class="fr-tg" onclick="frToggle(' + js + ')" aria-expanded="' + op + '" aria-label="' + (op ? 'Hide' : 'Show') + ' jobs">' + (op ? '▾' : '▸') + '</button>' + _frEsc(s) + '</td>';
+      }
       return '<td' + (c.k === 'txt' ? ' class="l"' : (neg ? ' class="neg"' : '')) + '>' + _frEsc(s) + '</td>';
     }).join('') + '</tr>';
   });
-  h += '</tbody></table></div><div class="fr-foot">' + _frEsc(M.foot) + '</div>';
+  h += '</tbody></table></div>';
+  (M.blocks || []).forEach(function(b){
+    h += '<div style="padding:14px 20px 4px"><div style="font-size:13px;font-weight:700;color:var(--kmi);margin-bottom:6px">' + _frEsc(b.title) + '</div>'
+      + '<table class="fr-t" style="width:auto;min-width:520px"><tbody>' + b.rows.map(function(r){
+        return '<tr>' + r.map(function(v, i){ return '<td' + (b.kinds[i] === 'txt' ? ' class="l"' : (_frNum(v) < 0 && b.kinds[i] !== 'pct' ? ' class="neg"' : '')) + '>' + _frEsc(_frFmt(v, b.kinds[i])) + '</td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody></table></div>';
+  });
+  h += '<div class="fr-foot">' + _frEsc(M.foot) + '</div>';
   box.innerHTML = h;
 }
 
 function _frCurrentModel(){
   var c = _fr.cache[_fr.period];
   if (!c) return null;
-  try { return _frModel(_fr.report, _fr.period, { ar: c.ar || [], ap: c.ap || [], wip: c.wip || [] }); } catch (e) { return null; }
+  try { return _frModel(_fr.report, _fr.period, { ar: c.ar || [], ap: c.ap || [], wip: c.wip || [], py: c.py || null }); } catch (e) { return null; }
 }
 function _frFileBase(M){ return M.sheet.replace(/[^A-Za-z0-9]+/g, '_') + '_' + M.pe + (M.prelim ? '_preliminary' : ''); }
 function _frWho(){ var u = (typeof _currentUser !== 'undefined' && _currentUser) || null; return u ? ((u.firstName || '') + ' ' + (u.lastName || '')).trim() || u.email || '' : ''; }
 
-// ── PDF: letter landscape, repeated header, highlighted 10%+ rows, totals, footnote, page numbers
+// ── PDF: repeated header, section rows, highlighted 10%+ rows, open groups' jobs, totals, blocks, page numbers
 function frExportPdf(){
   var M = _frCurrentModel();
   if (!M) { showToast('Build the report first', 'error'); return; }
   if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return; }
-  var doc = new window.jspdf.jsPDF({ unit: 'pt', format: 'letter', orientation: 'landscape' });
-  var PW = 792, PH = 612, LM = 36, RM = PW - 36, W = RM - LM;
+  var tab = M.paper === 'tabloid';
+  var doc = new window.jspdf.jsPDF({ unit: 'pt', format: tab ? 'tabloid' : 'letter', orientation: 'landscape' });
+  var PW = tab ? 1224 : 792, PH = tab ? 792 : 612, LM = tab ? 28 : 36, RM = PW - LM, W = RM - LM;
   var BLUE = [30, 36, 72], GOLD = [200, 168, 75], GRAY = [100, 100, 110], RED = [138, 59, 30];
   var tw = M.cols.reduce(function(s, c){ return s + c.w; }, 0), sc = W / tw, x = LM;
   var cols = M.cols.map(function(c){ var o = { l: c.l, k: c.k, x: x, w: c.w * sc }; x += o.w; return o; });
-  var FS = 8, RH = 14;
+  var FS = tab ? 6.6 : 8, RH = tab ? 11 : 14;
   function sf(st, sz, c){ doc.setFont('helvetica', st); doc.setFontSize(sz); c = c || [0, 0, 0]; doc.setTextColor(c[0], c[1], c[2]); }
   function fit(t, w){ t = String(t == null ? '' : t); if (doc.getTextWidth(t) <= w) return t; while (t.length > 1 && doc.getTextWidth(t + '…') > w) t = t.slice(0, -1); return t + '…'; }
   var stamp = new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }), who = _frWho();
-  function head(){
+  function head(noCols){
     sf('bold', 13, BLUE); doc.text('KMI Construction LLC', LM, 40);
     sf('bold', 11, [0, 0, 0]); doc.text(M.title, LM, 56);
     sf('normal', 8.5, GRAY); doc.text(M.sub, LM, 68);
     if (M.prelim) { sf('bold', 9, RED); doc.text('PRELIMINARY: WIP month open', RM, 40, { align: 'right' }); }
     doc.setDrawColor(GOLD[0], GOLD[1], GOLD[2]); doc.setLineWidth(1.5); doc.line(LM, 76, RM, 76);
-    var y = 92; sf('bold', 7.2, [60, 60, 60]);
+    if (noCols) return 96;
+    var y = 92; sf('bold', tab ? 6.2 : 7.2, [60, 60, 60]);
     cols.forEach(function(c){
-      var lines = doc.splitTextToSize(c.l, c.w - 6);
-      lines.slice(0, 2).forEach(function(t, i){ if (c.k === 'txt') doc.text(t, c.x + 3, y + i * 8); else doc.text(t, c.x + c.w - 3, y + i * 8, { align: 'right' }); });
+      var lines = doc.splitTextToSize(c.l, c.w - 4);
+      lines.slice(0, 3).forEach(function(t, i){ if (c.k === 'txt') doc.text(t, c.x + 2, y + i * 7.5); else doc.text(t, c.x + c.w - 2, y + i * 7.5, { align: 'right' }); });
     });
-    doc.setDrawColor(150, 150, 150); doc.setLineWidth(0.7); doc.line(LM, y + 12, RM, y + 12);
-    return y + 24;
+    doc.setDrawColor(150, 150, 150); doc.setLineWidth(0.7); doc.line(LM, y + 18, RM, y + 18);
+    return y + 30;
   }
   var y = head(), bottom = PH - 40;
-  M.rows.forEach(function(r){
+  _frVisibleRows(M).forEach(function(r){
     if (y > bottom - RH) { doc.addPage(); y = head(); }
+    if (r.sec) { sf('bold', FS + 0.4, BLUE); doc.text(String(r.c[0]), LM + 2, y + 2); y += RH + 2; return; }
     if (r.hi) { doc.setFillColor(251, 243, 220); doc.rect(LM, y - RH + 3.5, W, RH, 'F'); }
-    if (r.tot) { doc.setFillColor(244, 245, 249); doc.rect(LM, y - RH + 3.5, W, RH, 'F'); doc.setDrawColor(150, 150, 160); doc.setLineWidth(0.6); doc.line(LM, y - RH + 3.5, RM, y - RH + 3.5); }
+    if (r.tot || r.sub) { doc.setFillColor(244, 245, 249); doc.rect(LM, y - RH + 3.5, W, RH, 'F'); doc.setDrawColor(150, 150, 160); doc.setLineWidth(0.6); doc.line(LM, y - RH + 3.5, RM, y - RH + 3.5); }
     var bold = r.hi || r.tot || r.sub;
     cols.forEach(function(c, i){
       var v = r.c[i], s = _frFmt(v, c.k);
-      sf(bold ? 'bold' : 'normal', FS, (c.k !== 'txt' && c.k !== 'pct' && _frNum(v) < 0) ? RED : [0, 0, 0]);
-      if (c.k === 'txt') doc.text(fit(s, c.w - 6), c.x + 3, y); else doc.text(s, c.x + c.w - 3, y, { align: 'right' });
+      sf(bold ? 'bold' : 'normal', r.kid ? FS - 0.6 : FS, (c.k !== 'txt' && c.k !== 'pct' && _frNum(v) < 0) ? RED : (r.kid ? [70, 70, 80] : [0, 0, 0]));
+      var ind = (r.kid && i === 0) ? 10 : 0;
+      if (c.k === 'txt') doc.text(fit(s, c.w - 4 - ind), c.x + 2 + ind, y); else doc.text(s, c.x + c.w - 2, y, { align: 'right' });
     });
-    if (!r.hi && !r.tot) { doc.setDrawColor(235, 235, 235); doc.setLineWidth(0.3); doc.line(LM, y + 3.5, RM, y + 3.5); }
+    if (!r.hi && !r.tot && !r.sub) { doc.setDrawColor(235, 235, 235); doc.setLineWidth(0.3); doc.line(LM, y + 3.5, RM, y + 3.5); }
     y += RH;
   });
+  (M.blocks || []).forEach(function(b){
+    var need = 26 + b.rows.length * (RH + 1);
+    if (y + need > bottom) { doc.addPage(); y = head(true); } else y += 14;
+    sf('bold', 9, BLUE); doc.text(b.title, LM, y); doc.setDrawColor(GOLD[0], GOLD[1], GOLD[2]); doc.setLineWidth(0.6); doc.line(LM, y + 3, LM + 420, y + 3); y += 15;
+    b.rows.forEach(function(r){
+      sf('normal', FS + 0.4, [0, 0, 0]); doc.text(fit(String(r[0]), 300), LM, y);
+      for (var i = 1; i < r.length; i++) { var s = _frFmt(r[i], b.kinds[i]); sf('bold', FS + 0.4, (_frNum(r[i]) < 0 && b.kinds[i] !== 'pct') ? RED : [0, 0, 0]); doc.text(s, LM + 300 + i * 70, y, { align: 'right' }); }
+      y += RH + 1;
+    });
+  });
   var fl = doc.splitTextToSize(M.foot, W);
-  if (y + 10 + fl.length * 10 > bottom) { doc.addPage(); y = head(); }
+  if (y + 10 + fl.length * 10 > bottom) { doc.addPage(); y = head(true); }
   sf('italic', 7.5, GRAY); doc.text(fl, LM, y + 10);
   var np = doc.getNumberOfPages();
   for (var p = 1; p <= np; p++) {
@@ -49785,7 +49980,7 @@ function frExportPdf(){
   doc.save(_frFileBase(M) + '.pdf');
 }
 
-// ── Excel: ExcelJS (loaded on first use) for bold, shading and number formats
+// ── Excel: ExcelJS (loaded on first use) for bold, shading, outlines and number formats
 var _frExcelJsP = null;
 function _frLoadExcelJs(){
   if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
@@ -49799,41 +49994,129 @@ function _frLoadExcelJs(){
   });
   return _frExcelJsP;
 }
-function _frBuildWorkbook(ExcelJS, M){
-  var wb = new ExcelJS.Workbook();
-  wb.creator = 'kmi.build';
-  var ws = wb.addWorksheet(M.sheet, { views: [{ state: 'frozen', ySplit: 5 }], pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
-  var n = M.cols.length, font = { name: 'Arial', size: 10 };
+var _FR_NUMFMT = { m0: '#,##0;(#,##0);"-"', m2: '#,##0.00;(#,##0.00);"-"', pct: '0.0%' };
+function _frXVal(v, k){
+  if (v === '' || v === null || v === undefined) return null;
+  if (k === 'txt') return String(v);
+  return k === 'pct' ? Math.round(_frNum(v) * 1e6) / 1e6 : Math.round(_frNum(v) * 100) / 100;
+}
+function _frXHeader(ws, M, n){
   ws.getCell(1, 1).value = 'KMI Construction LLC'; ws.getCell(1, 1).font = { name: 'Arial', size: 13, bold: true, color: { argb: 'FF1E2448' } };
   ws.getCell(2, 1).value = M.title; ws.getCell(2, 1).font = { name: 'Arial', size: 11, bold: true };
   ws.getCell(3, 1).value = M.sub + (M.prelim ? ' · PRELIMINARY (WIP month open)' : ''); ws.getCell(3, 1).font = { name: 'Arial', size: 9, color: { argb: M.prelim ? 'FF8A3B1E' : 'FF555555' } };
-  var hr = ws.getRow(5);
-  M.cols.forEach(function(c, i){
-    var cell = hr.getCell(i + 1);
-    cell.value = c.l;
+}
+function _frXHeadRow(row, labels, kinds){
+  labels.forEach(function(l, i){
+    var cell = row.getCell(i + 1);
+    cell.value = l;
     cell.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E2448' } };
-    cell.alignment = { horizontal: c.k === 'txt' ? 'left' : 'right', vertical: 'middle', wrapText: true };
+    cell.alignment = { horizontal: kinds[i] === 'txt' ? 'left' : 'right', vertical: 'middle', wrapText: true };
   });
-  hr.height = 28;
-  var fmt = { m0: '#,##0;(#,##0);"-"', m2: '#,##0.00;(#,##0.00);"-"', pct: '0.0%' };
-  M.rows.forEach(function(r, ri){
-    var row = ws.getRow(6 + ri);
+  row.height = 30;
+}
+function _frXFoot(ws, M, r, n){
+  ws.getCell(r, 1).value = M.foot; ws.getCell(r, 1).font = { name: 'Arial', size: 8, italic: true, color: { argb: 'FF555555' } };
+  ws.mergeCells(r, 1, r, Math.min(n, 12)); ws.getCell(r, 1).alignment = { wrapText: true, vertical: 'top' }; ws.getRow(r).height = 42;
+  ws.getCell(r + 1, 1).value = 'Generated ' + new Date().toLocaleString('en-US') + (_frWho() ? ' by ' + _frWho() : '') + ' from kmi.build';
+  ws.getCell(r + 1, 1).font = { name: 'Arial', size: 8, color: { argb: 'FF888888' } };
+}
+function _frBuildWorkbook(ExcelJS, M){
+  if (M.id === 'sva') return _frSvaWorkbook(ExcelJS, M);
+  var wb = new ExcelJS.Workbook();
+  wb.creator = 'kmi.build';
+  var ws = wb.addWorksheet(M.sheet, { views: [{ state: 'frozen', ySplit: 5 }], pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+    properties: { outlineProperties: { summaryBelow: false } } });
+  var n = M.cols.length, font = { name: 'Arial', size: 10 };
+  _frXHeader(ws, M, n);
+  _frXHeadRow(ws.getRow(5), M.cols.map(function(c){ return c.l; }), M.cols.map(function(c){ return c.k; }));
+  var ri = 6;
+  function put(r){
+    var row = ws.getRow(ri++);
     M.cols.forEach(function(c, i){
-      var v = r.c[i], cell = row.getCell(i + 1);
-      cell.value = (v === '' || v === null || v === undefined) ? null : (c.k === 'txt' ? String(v) : (c.k === 'pct' ? Math.round(_frNum(v) * 1e6) / 1e6 : Math.round(_frNum(v) * 100) / 100));
-      if (c.k !== 'txt') { cell.numFmt = fmt[c.k]; cell.alignment = { horizontal: 'right' }; }
-      cell.font = Object.assign({}, font, { bold: !!(r.hi || r.tot || r.sub) });
+      var cell = row.getCell(i + 1);
+      cell.value = _frXVal(r.c[i], c.k);
+      if (c.k !== 'txt') { cell.numFmt = _FR_NUMFMT[c.k]; cell.alignment = { horizontal: 'right' }; }
+      else if (r.kid) cell.alignment = { indent: 2 };
+      cell.font = Object.assign({}, font, { bold: !!(r.hi || r.tot || r.sub), size: r.kid ? 9 : 10, color: r.kid ? { argb: 'FF444455' } : undefined });
       if (r.hi) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFBF3DC' } };
       if (r.tot) { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF4F5F9' } }; cell.border = { top: { style: 'thin', color: { argb: 'FF999999' } } }; }
     });
-  });
-  var fr = 6 + M.rows.length + 1;
-  ws.getCell(fr, 1).value = M.foot; ws.getCell(fr, 1).font = { name: 'Arial', size: 8, italic: true, color: { argb: 'FF555555' } };
-  ws.mergeCells(fr, 1, fr, n); ws.getCell(fr, 1).alignment = { wrapText: true, vertical: 'top' }; ws.getRow(fr).height = 30;
-  ws.getCell(fr + 1, 1).value = 'Generated ' + new Date().toLocaleString('en-US') + (_frWho() ? ' by ' + _frWho() : '') + ' from kmi.build';
-  ws.getCell(fr + 1, 1).font = { name: 'Arial', size: 8, color: { argb: 'FF888888' } };
+    if (r.kid) { row.outlineLevel = 1; row.hidden = true; }
+  }
+  M.rows.forEach(function(r){ put(r); (r.kids || []).forEach(put); });
+  _frXFoot(ws, M, ri + 1, n);
   M.cols.forEach(function(c, i){ ws.getColumn(i + 1).width = Math.max(9, Math.round(c.w / 6.2)); });
+  return wb;
+}
+// SVA ALL JOBS copy: SVA's column letters, inputs as values, derived columns as live formulas
+function _frSvaWorkbook(ExcelJS, M){
+  var S = M.sva, wb = new ExcelJS.Workbook(); wb.creator = 'kmi.build';
+  var ws = wb.addWorksheet('ALL JOBS', { views: [{ state: 'frozen', xSplit: 2, ySplit: 6 }], pageSetup: { orientation: 'landscape', paperSize: 3, fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
+  var C = _FR_SVA_COLS, col = {}; C.forEach(function(c){ col[c.f] = c.x; });
+  _frXHeader(ws, M, 12);
+  ws.getCell('O5').value = 'PRIOR TO JANUARY 1, ' + M.pe.slice(0, 4); ws.getCell('U5').value = 'Current performance';
+  ['O5', 'U5'].forEach(function(a){ ws.getCell(a).font = { name: 'Arial', size: 9, bold: true }; });
+  var hr = ws.getRow(6);
+  C.forEach(function(c){
+    var cell = ws.getCell(c.x + '6'); cell.value = c.l;
+    cell.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E2448' } };
+    cell.alignment = { horizontal: c.k === 'txt' ? 'left' : 'right', vertical: 'middle', wrapText: true };
+    ws.getColumn(c.x).width = Math.max(8, Math.round(c.w / 5.2));
+    if (c.k !== 'txt') ws.getColumn(c.x).numFmt = _FR_NUMFMT[c.k];
+  });
+  hr.height = 40;
+  var F = function(r){ return {
+    D: 'IFERROR(V' + r + '/J' + r + ',0)', K: 'I' + r + '-J' + r, L: 'IFERROR(K' + r + '/I' + r + ',0)',
+    Q: 'O' + r + '+P' + r, S: 'R' + r + '-Q' + r, T: 'IFERROR(S' + r + '/R' + r + ',0)', Y: 'W' + r + '+X' + r, Z: 'U' + r + '-Y' + r,
+    AA: 'IFERROR(Z' + r + '/U' + r + ',0)', AE: 'AD' + r + '+AC' + r, AG: 'IFERROR((Z' + r + '+S' + r + ')/(U' + r + '+R' + r + '),0)',
+    AI: 'IFERROR(1-V' + r + '/(U' + r + '+R' + r + '),0)', AJ: 'IFERROR(IF(Q' + r + '=0,0,Q' + r + '/(1-AG' + r + ')-R' + r + '),0)' }; };
+  var fx = function(f, v, k){ var x = _frXVal(v, k); return { formula: f, result: x == null ? 0 : x }; };
+  var font = { name: 'Arial', size: 9 }, r = 7, subRows = [];
+  function setRow(rr, o, isSub, firstRow, lastRow){
+    var f = F(rr);
+    C.forEach(function(c){
+      var cell = ws.getCell(c.x + rr), v = o[c.f];
+      if (isSub && _FR_SVA_SUMS.indexOf(c.f) >= 0 && c.f !== 'K' && c.f !== 'Q' && c.f !== 'S' && c.f !== 'Y' && c.f !== 'Z' && c.f !== 'AE')
+        cell.value = fx(lastRow >= firstRow ? 'SUM(' + c.x + firstRow + ':' + c.x + lastRow + ')' : '0', v, c.k);
+      else if (f[c.f] && (!isSub || ['L','T','AA','AG','AI','K','Q','S','Y','Z','AE'].indexOf(c.f) >= 0)) cell.value = fx(f[c.f], v, c.k);
+      else cell.value = _frXVal(v, c.k);
+      if (c.k !== 'txt') cell.numFmt = _FR_NUMFMT[c.k];
+      cell.font = Object.assign({}, font, { bold: !!isSub });
+      if (isSub) { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF4F5F9' } }; cell.border = { top: { style: 'thin', color: { argb: 'FF999999' } } }; }
+    });
+    if (isSub) ws.getCell('AJ' + rr).value = fx(lastRow >= firstRow ? 'SUM(AJ' + firstRow + ':AJ' + lastRow + ')' : '0', o.AJ, 'm0');
+  }
+  S.sections.forEach(function(s){
+    ws.getCell('A' + r).value = s.sec.title; ws.getCell('A' + r).font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1E2448' } }; r++;
+    var first = r;
+    s.jobs.forEach(function(j){ setRow(r, j, false); r++; });
+    var o = Object.assign({}, s.sub, { job: '', name: 'Total · ' + s.jobs.length + ' jobs' });
+    setRow(r, o, true, first, r - 1); subRows.push(r); r += 2;
+  });
+  var tot = Object.assign({}, S.total, { job: '', name: 'Total all jobs · ' + S.jobs.length });
+  C.forEach(function(c){
+    var cell = ws.getCell(c.x + r), v = tot[c.f];
+    if (_FR_SVA_SUMS.indexOf(c.f) >= 0) cell.value = fx(subRows.map(function(x){ return c.x + x; }).join('+'), v, c.k);
+    else if (['L','T','AA','AG','AI'].indexOf(c.f) >= 0) cell.value = fx(F(r)[c.f], v, c.k);
+    else cell.value = _frXVal(v, c.k);
+    if (c.k !== 'txt') cell.numFmt = _FR_NUMFMT[c.k];
+    cell.font = Object.assign({}, font, { bold: true }); cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE7E9F3' } };
+    cell.border = { top: { style: 'double', color: { argb: 'FF666666' } } };
+  });
+  r += 3;
+  (M.blocks || []).forEach(function(b){
+    ws.getCell('AC' + r).value = b.title; ws.getCell('AC' + r).font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1E2448' } }; r++;
+    b.rows.forEach(function(row){
+      ws.getCell('AC' + r).value = row[0]; ws.getCell('AC' + r).font = font;
+      ws.getCell('AF' + r).value = _frXVal(row[1], 'm0'); ws.getCell('AF' + r).numFmt = _FR_NUMFMT.m0; ws.getCell('AF' + r).font = Object.assign({}, font, { bold: true });
+      if (row.length > 2) { ws.getCell('AG' + r).value = _frXVal(row[2], 'pct'); ws.getCell('AG' + r).numFmt = _FR_NUMFMT.pct; ws.getCell('AG' + r).font = font; }
+      r++;
+    });
+    r += 2;
+  });
+  _frXFoot(ws, M, r, 12);
   return wb;
 }
 async function frExportXlsx(){
@@ -49847,8 +50130,10 @@ async function frExportXlsx(){
     document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500);
   } catch (e) {
     if (typeof XLSX === 'undefined') { showToast('Excel export failed: ' + e.message, 'error'); return; }
+    var rows = [];
+    M.rows.forEach(function(r){ rows.push(r); (r.kids || []).forEach(function(k){ rows.push(k); }); });
     var aoa = [['KMI Construction LLC'], [M.title], [M.sub], [], M.cols.map(function(c){ return c.l; })]
-      .concat(M.rows.map(function(r){ return M.cols.map(function(c, i){ var v = r.c[i]; return c.k === 'txt' ? (v == null ? '' : String(v)) : (v === '' || v == null ? null : _frNum(v)); }); }))
+      .concat(rows.map(function(r){ return M.cols.map(function(c, i){ var v = r.c[i]; return c.k === 'txt' ? (v == null ? '' : String(v)) : (v === '' || v == null ? null : _frNum(v)); }); }))
       .concat([[], [M.foot]]);
     var wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), M.sheet.slice(0, 31));
     XLSX.writeFile(wb, _frFileBase(M) + '.xlsx');
@@ -63168,7 +63453,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-05-FINREP_B3C';
+var KMI_BUILD = '2026-11-05-FINREP_B3D';
 
 var _kmiSessionId = (function(){
   try {
