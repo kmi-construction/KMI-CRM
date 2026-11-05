@@ -63555,7 +63555,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-05-BOOTFAST4';
+var KMI_BUILD = '2026-11-05-BOOTFAST4A';
 
 var _kmiSessionId = (function(){
   try {
@@ -66686,9 +66686,15 @@ function _bf2StatStart() {
                     role: (typeof _currentUser !== 'undefined' && _currentUser) ? normalizeRole(_currentUser.role) : '',
                     coreMs: null, totalMs: null, tables: [] };
 }
-function _bf2Stat(table, ms, rows, err, stage) {
+function _bf2Stat(table, ms, rows, err, stage, data) {
   if (!_kmiPullStats) return;
+  // BOOTFAST4: approximate size - average of the first 50 rows x row count.
+  var avg = null;
+  if (Array.isArray(data) && data.length) {
+    try { var smp = data.slice(0, 50); avg = Math.round(JSON.stringify(smp).length / smp.length); } catch (e) {}
+  }
   _kmiPullStats.tables.push({ table: table, stage: stage, ms: ms, rows: rows,
+                              avgBytes: avg, kb: (avg === null) ? null : Math.round(avg * rows / 1024),
                               err: err ? String((err && err.message) || err) : '' });
 }
 function _bf2StatSave() {
@@ -66707,7 +66713,7 @@ function _bf2Track(list) {
   return list.map(function(b, i){
     var t0 = Date.now(), name = _bf2TableName(b, i);
     return Promise.resolve(b).then(function(r){
-      _bf2Stat(name, Date.now() - t0, (r && Array.isArray(r.data)) ? r.data.length : 0, r && r.error, 'core');
+      _bf2Stat(name, Date.now() - t0, (r && Array.isArray(r.data)) ? r.data.length : 0, r && r.error, 'core', r && r.data);
       done++;
       if (_bf2Progress) { try { _bf2Progress(done, total); } catch (e) {} }
       return r;
@@ -66734,6 +66740,14 @@ function kmiPullReport() {
   return s;
 }
 
+// BOOTFAST4: "1.4 MB (620 B/row)" from a timing row.
+function _bf4Size(r) {
+  if (!r || r.kb == null || r.avgBytes == null) return '-';
+  var total = r.kb >= 1024 ? (r.kb / 1024).toFixed(1) + ' MB' : r.kb + ' KB';
+  var per = r.avgBytes >= 1024 ? (r.avgBytes / 1024).toFixed(1) + ' KB' : r.avgBytes + ' B';
+  return total + ' (' + per + '/row)';
+}
+
 function kmiRenderPullStats() {
   var el = g('kmi-pullstats-body');
   if (!el) return;
@@ -66748,11 +66762,13 @@ function kmiRenderPullStats() {
           ' &middot; app opened after <strong>' + sec(s.coreMs) + '</strong>' +
           ' &middot; everything loaded after <strong>' + sec(s.totalMs) + '</strong></div>';
   h += '<div style="max-height:320px;overflow:auto"><table><thead><tr><th>Table</th><th>Stage</th>' +
-       '<th style="text-align:right">Time</th><th style="text-align:right">Rows</th><th>Note</th></tr></thead><tbody>';
+       '<th style="text-align:right">Time</th><th style="text-align:right">Rows</th>' +
+       '<th style="text-align:right">Size (approx.)</th><th>Note</th></tr></thead><tbody>';
   rows.forEach(function(r){
     h += '<tr><td>' + esc(r.table) + '</td><td>' + esc(r.stage) + '</td>' +
          '<td style="text-align:right">' + (r.stage === 'skipped' ? '-' : sec(r.ms)) + '</td>' +
          '<td style="text-align:right">' + (r.stage === 'skipped' ? '-' : esc(r.rows)) + '</td>' +
+         '<td style="text-align:right">' + _bf4Size(r) + '</td>' +
          '<td style="color:#A32D2D">' + esc(r.err) + '</td></tr>';
   });
   h += '</tbody></table></div>';
@@ -66764,6 +66780,8 @@ function kmiRenderPullStats() {
 // backfill last (rows it changes stay dirty and push normally).
 async function _bf2Background(bf, skip) {
   var names = ['gl','fv','rentGl','apInv','apLine','apLog','apAlias','dwArea','dwSet','dw','dwRev','dwMark'];
+  // BOOTFAST4: start the background reads now that the core stage is applied.
+  names.forEach(function(n){ if (bf[n] && typeof bf[n].later === 'function') bf[n] = bf[n].later(); });
   var res = {};
   await Promise.all(names.map(function(n){
     return bf[n].then(function(v){ res[n] = { ok: true, v: v }; },
@@ -66863,10 +66881,24 @@ async function _bf2PullImpl() {
     // sequentially; the code below awaits them at the same spots with the
     // same error handling, and maps rows there, so mappers see db exactly as
     // before.
-    var _bfSelAllRaw = async function(table){
+    // BOOTFAST4: paged reads are sorted by the table's key (_BF4_KEYS), so a
+    // row can't be skipped or repeated at a page boundary. The first page
+    // also returns the row count and the rest then load in parallel; rows
+    // are de-duplicated by key in case one shifted pages mid-read. If the
+    // sorted read fails (key column missing), fall back to the original
+    // unsorted, one-page-at-a-time read.
+    var _BF4_KEYS = {
+      fnd_vendors: 'vendor_no', kmi_rental_gl_accounts: 'gl_no',
+      kmi_ap_invoices: 'id', kmi_ap_invoice_lines: 'id', kmi_ap_invoice_log: 'id', kmi_ap_vendor_aliases: 'id',
+      kmi_drawing_areas: 'id', kmi_drawing_sets: 'id', kmi_drawings: 'id',
+      kmi_drawing_revisions: 'id', kmi_drawing_markups: 'id'
+    };
+    var _bfPageLoop = async function(table, key){
       var out = [], from = 0, page = 1000;
       for(;;){
-        var r = await supabaseClient.from(table).select('*').range(from, from + page - 1);
+        var qb = supabaseClient.from(table).select('*');
+        if (key) qb = qb.order(key, { ascending: true });
+        var r = await qb.range(from, from + page - 1);
         if (r && r.error) throw r.error;
         var rows = (r && r.data) || [];
         for (var k = 0; k < rows.length; k++) out.push(rows[k]);
@@ -66875,6 +66907,45 @@ async function _bf2PullImpl() {
         if (from > 500000) break;  // safety stop
       }
       return out;
+    };
+    var _bfSelAllRaw = async function(table){
+      var key = _BF4_KEYS[table], page = 1000;
+      if (!key) return _bfPageLoop(table, null);
+      var first;
+      try {
+        first = await supabaseClient.from(table).select('*', { count: 'exact' })
+                  .order(key, { ascending: true }).range(0, page - 1);
+      } catch (x) { first = { error: x }; }
+      if (!first || first.error) {
+        console.warn('[pull] sorted read of ' + table + ' failed, using unsorted paging:',
+                     first && first.error && (first.error.message || first.error));
+        return _bfPageLoop(table, null);
+      }
+      var out = (first.data || []).slice();
+      if (out.length < page) return out;
+      var total = (typeof first.count === 'number') ? first.count : null;
+      if (total === null) {
+        var restSeq = await _bfPageLoop(table, key);
+        return restSeq;
+      }
+      var reqs = [];
+      for (var from = page; from < total && from <= 500000; from += page) {
+        reqs.push(supabaseClient.from(table).select('*').order(key, { ascending: true }).range(from, from + page - 1));
+      }
+      var rest = await Promise.all(reqs);
+      for (var q = 0; q < rest.length; q++) {
+        if (rest[q] && rest[q].error) throw rest[q].error;
+        var rr = (rest[q] && rest[q].data) || [];
+        for (var k2 = 0; k2 < rr.length; k2++) out.push(rr[k2]);
+      }
+      var seen = {}, dedup = [];
+      for (var d = 0; d < out.length; d++) {
+        var kv = String(out[d] && out[d][key]);
+        if (seen[kv]) continue;
+        seen[kv] = true;
+        dedup.push(out[d]);
+      }
+      return dedup;
     };
     // A rejection is still raised where the promise is awaited; the no-op
     // catch only stops the browser flagging it as unhandled meanwhile.
@@ -66889,23 +66960,28 @@ async function _bf2PullImpl() {
       }
       var t0 = Date.now();
       var p = paged ? _bfSelAllRaw(table) : Promise.resolve(supabaseClient.from(table).select('*'));
-      p.then(function(r){ _bf2Stat(table, Date.now() - t0, paged ? r.length : ((r && r.data) || []).length, paged ? null : (r && r.error), stage); },
+      p.then(function(r){ _bf2Stat(table, Date.now() - t0, paged ? r.length : ((r && r.data) || []).length, paged ? null : (r && r.error), stage, paged ? r : (r && r.data)); },
              function(e){ _bf2Stat(table, Date.now() - t0, 0, e || 'failed', stage); });
       return _bfHold(p);
     };
+    var _bfLater = function(key, table, paged){
+      return { later: function(){ return _bfGet(key, table, paged, 'background'); } };
+    };
     var _bf = {
-      gl:      _bfGet('gl',      'kmi_gl_accounts',          false, 'background'),
-      fv:      _bfGet('fv',      'fnd_vendors',              true,  'background'),
-      rentGl:  _bfGet('rentGl',  'kmi_rental_gl_accounts',   true,  'background'),
-      apInv:   _bfGet('apInv',   'kmi_ap_invoices',          true,  'background'),
-      apLine:  _bfGet('apLine',  'kmi_ap_invoice_lines',     true,  'background'),
-      apLog:   _bfGet('apLog',   'kmi_ap_invoice_log',       true,  'background'),
-      apAlias: _bfGet('apAlias', 'kmi_ap_vendor_aliases',    true,  'background'),
-      dwArea:  _bfGet('dwArea',  'kmi_drawing_areas',        true,  'background'),
-      dwSet:   _bfGet('dwSet',   'kmi_drawing_sets',         true,  'background'),
-      dw:      _bfGet('dw',      'kmi_drawings',             true,  'background'),
-      dwRev:   _bfGet('dwRev',   'kmi_drawing_revisions',    true,  'background'),
-      dwMark:  _bfGet('dwMark',  'kmi_drawing_markups',      true,  'background'),
+      // BOOTFAST4: background reads are started by _bf2Background, after
+      // the core stage is applied, not here.
+      gl:      _bfLater('gl',      'kmi_gl_accounts',          false),
+      fv:      _bfLater('fv',      'fnd_vendors',              true),
+      rentGl:  _bfLater('rentGl',  'kmi_rental_gl_accounts',   true),
+      apInv:   _bfLater('apInv',   'kmi_ap_invoices',          true),
+      apLine:  _bfLater('apLine',  'kmi_ap_invoice_lines',     true),
+      apLog:   _bfLater('apLog',   'kmi_ap_invoice_log',       true),
+      apAlias: _bfLater('apAlias', 'kmi_ap_vendor_aliases',    true),
+      dwArea:  _bfLater('dwArea',  'kmi_drawing_areas',        true),
+      dwSet:   _bfLater('dwSet',   'kmi_drawing_sets',         true),
+      dw:      _bfLater('dw',      'kmi_drawings',             true),
+      dwRev:   _bfLater('dwRev',   'kmi_drawing_revisions',    true),
+      dwMark:  _bfLater('dwMark',  'kmi_drawing_markups',      true),
       pwa:     _bfGet('pwa',     'kmi_prod_week_approvals',  false, 'core'),
       pov:     _bfGet('pov',     'kmi_project_overview',     false, 'view')   // BOOTFAST3: no longer gates the app
     };
