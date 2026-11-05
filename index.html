@@ -49430,16 +49430,16 @@ async function apChkCommit(){
   }
 }
 
-// ═══ FINANCIAL REPORTS (B3a) ═══════════════════════════════════════════════
+// ═══ FINANCIAL REPORTS (B3a, B3c) ══════════════════════════════════════════
 // Accounting > Financial Reports. Admin + Accounting ('fin-reports'); the
 // database functions (kmi_ar_aging_asof, kmi_ap_open_asof, kmi_wip_report)
 // enforce the same. One report model drives the screen, the PDF and Excel.
-var _fr = { period: null, report: 'ar', periods: {}, cache: {}, busy: false, err: '' };
+var _fr = { period: null, report: 'ar', groupBy: 'class', periods: {}, cache: {}, busy: false, err: '' };
 var _FR_LIST = [
   { id: 'ar',   title: 'Customer AR · 10% or more', desc: 'Aging by customer; 10%+ bold and shaded', tag: 'Any month' },
   { id: 'cb',   title: 'Customer Breakdown', desc: 'Revenue, cost, GP, % of revenue, backlog', tag: 'WIP months', wip: true },
   { id: 'arap', title: 'AR / AP on complete jobs', desc: '100% complete jobs with AR or AP balances', tag: 'Any month' },
-  { id: 'cls',  title: 'Breakdown by class', desc: 'Internal, for tax planning', tag: 'Next build', soon: true },
+  { id: 'grp',  title: 'Breakdown by class & team', desc: 'By project class, PM, foreman or estimator; internal', tag: 'WIP months', wip: true },
   { id: 'sva',  title: 'Year-end audit schedule', desc: 'SVA format, PDF and Excel', tag: 'Next build', soon: true },
   { id: 'fs',   title: 'Financial statements', desc: 'Opens the Financial Statements page', tag: 'Separate page', link: 'fin-statements' }
 ];
@@ -49540,7 +49540,7 @@ async function _frLoad(force){
   if (!supabaseClient) { box.innerHTML = '<div class="fr-empty">Not connected.</div>'; return; }
   var pe = _fr.period, id = _fr.report;
   if (force) delete _fr.cache[pe];
-  var need = { ar: id === 'ar' || id === 'arap', ap: id === 'arap', wip: id === 'cb' || id === 'arap' };
+  var need = { ar: id === 'ar' || id === 'arap', ap: id === 'arap', wip: id === 'cb' || id === 'grp' || id === 'arap' };
   var it = _FR_LIST.filter(function(x){ return x.id === id; })[0];
   if (it.wip && !_frIsWip(pe)) { _frRenderBox(null, it.title + ' is built from the WIP, which starts with ' + _frLong(_WIP_FIRST) + ' in kmi.build. Pick a WIP month.'); return; }
   var c = _fr.cache[pe];
@@ -49566,6 +49566,40 @@ function _frCustomerOf(job){
   if (!p) return '(not in kmi.build)';
   var c = p.customerId != null ? (db.customers || []).find(function(x){ return String(x.id) === String(p.customerId); }) : null;
   return c && String(c.name || '').trim() ? String(c.name).trim() : '(no customer on project)';
+}
+var _FR_GROUPS = [
+  { id: 'class', label: 'Project class', none: '(no class on project)' },
+  { id: 'pm', label: 'Project manager', none: '(no PM assigned)' },
+  { id: 'foreman', label: 'Foreman', none: '(no foreman assigned)' },
+  { id: 'estimator', label: 'Estimator', none: '(no estimator on the opportunity)' }
+];
+function frPickGroup(id){ _fr.groupBy = id; _frLoad(false); }
+function _frUserName(id){
+  var u = (db.users || []).find(function(x){ return String(x.id) === String(id); });
+  return u ? ((u.firstName || '') + ' ' + (u.lastName || '')).trim() : '';
+}
+// Read from project details, as set at project setup: class = the project's
+// first project type; PM / foreman from the KMI team roles; estimator from
+// the opportunity the project came from. Several people in a role are joined.
+function _frGroupOf(job, by){
+  var G = _FR_GROUPS.filter(function(x){ return x.id === by; })[0], p = _frProjectOf(job);
+  if (!p) return '(not in kmi.build)';
+  if (by === 'class') {
+    var t = Array.isArray(p.types) && p.types.length ? p.types : (p.type ? [p.type] : []);
+    return t.length && String(t[0]).trim() ? String(t[0]).trim() : G.none;
+  }
+  if (by === 'estimator') {
+    var o = p.opportunityId != null ? (db.opportunities || []).find(function(x){ return String(x.id) === String(p.opportunityId); }) : null;
+    var n = o && o.estimatorId != null ? _frUserName(o.estimatorId) : '';
+    return n || G.none;
+  }
+  var rx = by === 'pm' ? /project manager/i : /foreman/i;
+  var names = (Array.isArray(p.kmiAssignments) ? p.kmiAssignments : []).filter(function(a){
+    var r = String(a.role || '');
+    return rx.test(r) && !(by === 'pm' && /assistant/i.test(r));
+  }).map(function(a){ return _frUserName(a.userId); }).filter(Boolean);
+  names = names.filter(function(n, i){ return names.indexOf(n) === i; });
+  return names.length ? names.join(' / ') : G.none;
 }
 
 function _frModel(id, pe, d){
@@ -49614,6 +49648,27 @@ function _frModel(id, pe, d){
               { l: 'Profit (loss) YTD', k: 'm0', w: 95 }, { l: 'Gross profit %', k: 'pct', w: 70 }, { l: '% of total revenue', k: 'pct', w: 75 }, { l: 'Backlog', k: 'm0', w: 100 }];
     M.foot = 'From the ' + _frShort(pe) + ' WIP, grouped by the GC on each kmi.build project. Revenue and costs are year to date; backlog is adjusted contract less earned to date.';
     M.sheet = 'Customer Breakdown';
+  } else if (id === 'grp') {
+    var G = _FR_GROUPS.filter(function(x){ return x.id === _fr.groupBy; })[0] || _FR_GROUPS[0];
+    var gm = {}, gt = { adj: 0, rev: 0, cost: 0, gp: 0, bl: 0 };
+    d.wip.forEach(function(r){
+      var k = _frGroupOf(r.job_no, G.id);
+      var o = gm[k] || (gm[k] = { name: k, jobs: 0, adj: 0, rev: 0, cost: 0, gp: 0, bl: 0 });
+      o.jobs++; o.adj += _frNum(r.adj_contract); o.rev += _frNum(r.earned_ytd); o.cost += _frNum(r.cost_ytd); o.gp += _frNum(r.profit_ytd); o.bl += _frNum(r.backlog);
+    });
+    var gl = Object.keys(gm).map(function(k){ return gm[k]; });
+    gl.forEach(function(o){ gt.adj += o.adj; gt.rev += o.rev; gt.cost += o.cost; gt.gp += o.gp; gt.bl += o.bl; });
+    gl.sort(function(a, b){ var na = a.name.charAt(0) === '(', nb = b.name.charAt(0) === '('; return na !== nb ? (na ? 1 : -1) : (b.rev - a.rev || b.bl - a.bl); });
+    gl.forEach(function(o){ M.rows.push({ c: [o.name, o.jobs, o.adj, o.rev, o.cost, o.gp, Math.abs(o.rev) >= 0.5 ? o.gp / o.rev : null, gt.rev ? o.rev / gt.rev : 0, o.bl] }); });
+    M.rows.push({ tot: true, c: ['Total (' + gl.length + ')', d.wip.length, gt.adj, gt.rev, gt.cost, gt.gp, gt.rev ? gt.gp / gt.rev : null, gt.rev ? 1 : 0, gt.bl] });
+    M.title = 'Project Performance by ' + G.label;
+    M.sub = 'Internal \u00b7 WIP as of ' + _frLong(pe);
+    M.cols = [{ l: G.label, k: 'txt', w: 190 }, { l: 'Jobs', k: 'm0', w: 38 }, { l: 'Adjusted contract', k: 'm0', w: 96 }, { l: 'Revenue earned YTD', k: 'm0', w: 96 },
+              { l: 'Costs YTD', k: 'm0', w: 90 }, { l: 'Profit (loss) YTD', k: 'm0', w: 90 }, { l: 'Gross profit %', k: 'pct', w: 64 }, { l: '% of total revenue', k: 'pct', w: 70 }, { l: 'Backlog', k: 'm0', w: 92 }];
+    M.foot = 'From the ' + _frShort(pe) + ' WIP. ' + (G.id === 'class' ? 'Class is the first project type on the kmi.build project.'
+      : G.id === 'estimator' ? 'Estimator is the one on the opportunity the project came from.'
+      : G.label + ' comes from the KMI team on the project; jobs with more than one are shown together.') + ' Phase rows count with their parent job.';
+    M.sheet = 'By ' + G.label;
   } else if (id === 'arap') {
     var wipMap = {}; d.wip.forEach(function(r){ wipMap[r.job_no] = r; });
     var hasWip = _frIsWip(pe), jobs = {};
@@ -49621,7 +49676,7 @@ function _frModel(id, pe, d){
     d.ap.forEach(function(r){ var o = jobs[r.job_no] || (jobs[r.job_no] = { job: r.job_no, name: null, ar: 0, ap: 0 }); o.ap += _frNum(r.open_ap); });
     var at = 0, pt = 0;
     var jl = Object.keys(jobs).map(function(k){ return jobs[k]; }).filter(function(o){
-      if (/^\d{4}$/.test(o.job)) return false;
+      if (!/^\d{5}/.test(String(o.job || '').trim())) return false;
       if (Math.abs(o.ar) < 0.005 && Math.abs(o.ap) < 0.005) return false;
       var w = wipMap[o.job];
       return !(hasWip && w && _frNum(w.pct_complete) < 0.9999);
@@ -49654,6 +49709,8 @@ function _frRenderBox(M, msg){
     + '<button class="btn btn-sm" onclick="frExportXlsx()"' + (M ? '' : ' disabled') + '>Download Excel</button>'
     + '<button class="btn btn-sm" onclick="_frLoad(true)" title="Rebuild from the latest data">Refresh</button></div></div>';
   if (!M) { box.innerHTML = h + '<div class="fr-empty">' + _frEsc(msg || '') + '</div>'; return; }
+  if (M.id === 'grp') h += '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:10px 20px;border-bottom:.5px solid #eee"><span style="font-size:12px;color:#555;margin-right:4px">Group by</span>'
+    + _FR_GROUPS.map(function(x){ return '<button class="fr-pill' + (x.id === _fr.groupBy ? ' on' : '') + '" onclick="frPickGroup(\'' + x.id + '\')" aria-pressed="' + (x.id === _fr.groupBy) + '">' + _frEsc(x.label) + '</button>'; }).join('') + '</div>';
   h += '<div class="fr-scroll"><table class="fr-t"><thead><tr>' + M.cols.map(function(c){ return '<th scope="col"' + (c.k === 'txt' ? ' class="l"' : '') + '>' + _frEsc(c.l) + '</th>'; }).join('') + '</tr></thead><tbody>';
   if (M.rows.length <= 1) h += '<tr><td class="l" colspan="' + M.cols.length + '" style="color:#888;padding:24px 12px">Nothing to report for this date.</td></tr>';
   M.rows.forEach(function(r){
@@ -63111,7 +63168,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-05-FINREP_B3A';
+var KMI_BUILD = '2026-11-05-FINREP_B3C';
 
 var _kmiSessionId = (function(){
   try {
