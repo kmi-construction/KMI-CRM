@@ -63555,7 +63555,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-05-BOOTFAST2';
+var KMI_BUILD = '2026-11-05-BOOTFAST3';
 
 var _kmiSessionId = (function(){
   try {
@@ -66907,7 +66907,7 @@ async function _bf2PullImpl() {
       dwRev:   _bfGet('dwRev',   'kmi_drawing_revisions',    true,  'background'),
       dwMark:  _bfGet('dwMark',  'kmi_drawing_markups',      true,  'background'),
       pwa:     _bfGet('pwa',     'kmi_prod_week_approvals',  false, 'core'),
-      pov:     _bfGet('pov',     'kmi_project_overview',     false, 'core')
+      pov:     _bfGet('pov',     'kmi_project_overview',     false, 'view')   // BOOTFAST3: no longer gates the app
     };
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
@@ -66972,7 +66972,7 @@ async function _bf2PullImpl() {
     // which rows this session changed since its last baseline, so the merge
     // at core-ready keeps them. (The production-catalog carry-forward below
     // can still await, but only when those cloud tables are empty.)
-    try { await Promise.all([_bf.pwa, _bf.pov]); } catch (e) {}
+    try { await _bf.pwa; } catch (e) {}   // BOOTFAST3: the overview view is not awaited here
     var _bf2Prev = _bf2Capture(_BF2_CORE_KEYS());
     if (vens && vens.error)  console.warn('kmi_vendors load error (table missing?):', vens.error.message);
     if (vcons && vcons.error) console.warn('kmi_vendor_contacts load error (table missing?):', vcons.error.message);
@@ -67106,21 +67106,8 @@ async function _bf2PullImpl() {
       console.warn('kmi_prod_week_approvals load threw:', e);
       if (!Array.isArray(db.prodWeekApprovals)) db.prodWeekApprovals = [];
     }
-    // Portfolio grid (B1). Separate fetch for the same reason as the
-    // approvals above. Read-only view; failure is non-fatal and leaves the
-    // Projects page on its Directory view with no money columns.
-    try {
-      var povRes = await _bf.pov;   // BOOTFAST1
-      if (povRes && !povRes.error) {
-        db.projectOverview = (povRes.data || []).map(fromSBProjectOverview);
-      } else {
-        if (povRes && povRes.error) console.warn('kmi_project_overview load error:', povRes.error.message);
-        if (!Array.isArray(db.projectOverview)) db.projectOverview = [];
-      }
-    } catch (e) {
-      console.warn('kmi_project_overview load threw:', e);
-      if (!Array.isArray(db.projectOverview)) db.projectOverview = [];
-    }
+    // Portfolio grid (B1): BOOTFAST3 moved this to the end of the pull - see
+    // "Portfolio view lands on its own" below.
     // Production catalog (Prod Catalog Round 1) — dedicated tables with A1
     // carry-forward. These used to live in the kmi_settings JSON blob; the
     // blob is no longer read into db (removed from ALLOWED_SETTING_KEYS), so
@@ -67428,6 +67415,24 @@ async function _bf2PullImpl() {
 
     // BOOTFAST2: BACKGROUND STAGE. The sync lock is still held, so saves made
     // while this runs queue and push when it finishes.
+    // BOOTFAST3: Portfolio view lands on its own. Read-only, not synced, so
+    // it is applied whenever it arrives, without holding the pull or the sync
+    // lock. Failure is non-fatal and leaves the Projects page on its Directory
+    // view with no money columns (B1).
+    _bf.pov.then(function(povRes){
+      if (povRes && !povRes.error) {
+        db.projectOverview = (povRes.data || []).map(fromSBProjectOverview);
+      } else {
+        if (povRes && povRes.error) console.warn('kmi_project_overview load error:', povRes.error.message);
+        if (!Array.isArray(db.projectOverview)) db.projectOverview = [];
+      }
+      try { _bf2StatSave(); kmiRenderPullStats(); } catch (e) {}
+      var pg = document.querySelector('.pg.active');
+      if (pg && pg.id === 'pg-projects') { try { _kmiRerender(); } catch (e) {} }
+    }, function(e){
+      console.warn('kmi_project_overview load threw:', e);
+      if (!Array.isArray(db.projectOverview)) db.projectOverview = [];
+    });
     await _bf2Background(_bf, _bf2Skip);
     saveDB();
     if (_kmiPullStats) { _kmiPullStats.totalMs = Date.now() - _kmiPullStats.t0; _bf2StatSave(); }
