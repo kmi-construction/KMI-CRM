@@ -4118,6 +4118,17 @@ tr.gc-line:hover td{background:#fafafa}
     <div id="sb-test-result" style="margin-top:12px;font-size:13px"></div>
   </div>
 
+  <div class="card"><!-- BOOTFAST2 -->
+    <div class="ch" style="display:flex;align-items:center;gap:10px">
+      <span class="ct">Load timing</span>
+      <button class="btn btn-sm" onclick="kmiRenderPullStats()" style="margin-left:auto">Refresh</button>
+    </div>
+    <div style="font-size:11px;color:#888;margin:-4px 0 10px">
+      The last data load on this device, table by table, slowest first.
+    </div>
+    <div id="kmi-pullstats-body"><div style="color:#888;font-size:12px">Click Refresh to load.</div></div>
+  </div>
+
   <div class="card">
     <div class="ch" style="display:flex;align-items:center;gap:10px">
       <span class="ct">Active sessions</span>
@@ -5025,8 +5036,18 @@ function _kmiClearRecoveryUrl() {
 // matters for field staff. Desktops stay per-tab so a shared office machine
 // does not leave someone signed in.
 function _kmiAuthPersist() {
-  try { return !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches); }
-  catch(e) { return false; }
+  // BOOTFAST2 (4A): tablets keep their sign-in like phones. iPads are wider
+  // than 768px, so the width test alone treated them as shared desktops and
+  // dropped the session whenever Safari closed. iPadOS reports a Mac user
+  // agent, so a Mac user agent with a touch screen is an iPad.
+  try {
+    if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) return true;
+    var ua = navigator.userAgent || '';
+    if (/iPad/.test(ua)) return true;
+    if (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1) return true;
+    if (/Android/.test(ua) && !/Mobile/.test(ua)) return true;
+    return false;
+  } catch(e) { return false; }
 }
 function _kmiAuthOpts() {
   return {
@@ -5211,11 +5232,19 @@ async function kmiAuthFetchUser(userId, email) {
 // M2, came back empty — without this the user would reach a signed-in app with
 // no projects, tickets or invoices until they happened to pull-to-refresh.
 // Non-fatal: a failure here leaves whatever local data exists intact.
-async function kmiAuthPostLoginSync() {
+async function kmiAuthPostLoginSync(opts) {
   if (!supabaseClient || !_kmiAuthSession) return 'skipped';
+  opts = opts || {};
   try {
+    // BOOTFAST2: with untilCore this resolves once the core stage is applied;
+    // the background stage carries on after the app opens.
+    var _work = opts.untilCore
+      ? new Promise(function(resolve){
+          pullFromSupabase({ onCore: resolve, onProgress: opts.onProgress }).then(resolve, resolve);
+        })
+      : pullFromSupabase({ onProgress: opts.onProgress });
     await Promise.race([
-      pullFromSupabase(),
+      _work,
       new Promise(function(_, reject){
         setTimeout(function(){ reject(new Error('pull timeout')); }, kmiPullTimeoutMs());
       })
@@ -5401,7 +5430,20 @@ async function loginAttempt() {
   // empty, so without this the user lands in a signed-in app with no data.
   // pullFromSupabase() re-binds _currentUser to the freshly pulled row.
   if (btn) { btn.disabled = true; btn.textContent = 'Loading your data\u2026'; }
-  var syncRes = await kmiAuthPostLoginSync();
+  // BOOTFAST2 (3A): this device already holds this user's data from an
+  // earlier session. Open the app on it now and refresh in the background;
+  // the refresh merges row by row, so anything edited meanwhile is kept.
+  if (kmiCacheIsFor(u) && !u.mustResetPassword) {
+    _rowBaselineAll(); _tblBaselineAll();   // edits are measured against the cache
+    if (btn) { btn.disabled = false; btn.textContent = btnTxt || 'Sign in'; }
+    enterApp();
+    pullFromSupabase();
+    return;
+  }
+  // BOOTFAST2 (1A, 5A): otherwise wait for the core data only, with progress.
+  var syncRes = await kmiAuthPostLoginSync({ untilCore: true, onProgress: function(done, total){
+    if (btn) btn.textContent = 'Loading your data... ' + done + ' of ' + total;
+  }});
   if (btn) { btn.disabled = false; btn.textContent = btnTxt || 'Sign in'; }
   if (syncRes === 'failed' && !(db.projects || []).length) {
     err.textContent = 'Signed in, but your data didn\u2019t load. Check your connection and try again.';
@@ -63513,7 +63555,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-05-BOOTFAST1';
+var KMI_BUILD = '2026-11-05-BOOTFAST2';
 
 var _kmiSessionId = (function(){
   try {
@@ -66485,7 +66527,326 @@ async function pushToSupabase() {
 }
 
 // ── Pull all data from Supabase ──────────────────────────────────
-async function pullFromSupabase() {
+// -- BOOTFAST2: staged pull, role skips, merge, timing ---------------------
+// pullFromSupabase(opts) runs in two stages. CORE is the main batch (users,
+// projects, opportunities, tickets, CORs, submittals ...). Once it is
+// applied, opts.onCore() fires so sign-in can open the app. BACKGROUND (GL
+// accounts, Foundation vendors, rental GL, AP, drawings) lands afterwards.
+// The sync lock (_syncing) stays held until it does, so a save made in the
+// meantime is queued and pushes when the pull finishes (RD1 requeue).
+//
+// Because the app can now be open while a pull applies, every id-keyed
+// table is MERGED rather than replaced:
+//   row changed by this session since its last baseline -> keep local, and
+//                                                        leave it dirty so
+//                                                        the next push sends it
+//   any other row the server has                       -> take the server copy
+//                                                        IN PLACE (same object,
+//                                                        so open forms keep a
+//                                                        valid reference - DP1)
+//   row only the server has                            -> add it
+//   row only this device has                           -> drop it, unless it is
+//                                                        an unsaved new row
+// With no baseline yet (first pull of a session) nothing counts as changed,
+// so the result is the server's data, exactly as before.
+//
+// Tables a role can never open are skipped: they are emptied locally, which
+// also keeps them out of every push. AP + rental GL need read on AP Invoices,
+// AP Approvals, Check Register or Rental Review; GL accounts need that or
+// Templates; drawings need View Drawings.
+//
+// Each pull records per-table timing: kmiPullReport() in the console, or
+// the "Load timing" card on the Supabase connection page.
+var _BF2_BG_KEYS = ['apInvoices','apInvoiceLines','apInvoiceLog','apVendorAliases',
+                    'drawingAreas','drawingSets','drawings','drawingRevisions','drawingMarkups'];
+var _bf2InFlight    = null;    // promise of the pull in progress
+var _bf2CoreFired   = false;
+var _bf2CoreWaiters = [];
+var _bf2Progress    = null;    // fn(done, total) for the core batch
+var _kmiPullStats   = null;
+var KMI_CACHE_OWNER_KEY = 'kmi_cache_owner';
+
+function _BF2_CORE_KEYS() {
+  return SYNC_TABLES().map(function(e){ return e.k; })
+    .filter(function(k){ return _BF2_BG_KEYS.indexOf(k) < 0; });
+}
+function _bf2Entry(k) {
+  return SYNC_TABLES().filter(function(e){ return e.k === k; })[0] || null;
+}
+
+// Background reads this user's role never needs. Empty set when nobody is
+// signed in yet, so an unknown user loads everything.
+function _bf2SkipSet() {
+  var s = {};
+  if (typeof _currentUser === 'undefined' || !_currentUser) return s;
+  var ap = hasRead('ap-invoices') || hasRead('ap-approvals') ||
+           hasRead('ap-checks')   || hasRead('rental-review');
+  if (!ap) { s.apInv = s.apLine = s.apLog = s.apAlias = s.rentGl = true; }
+  if (!ap && !hasRead('templates')) s.gl = true;
+  if (!hasRead('view-drawings')) { s.dwArea = s.dwSet = s.dw = s.dwRev = s.dwMark = true; }
+  return s;
+}
+
+// True when this device's cached data was loaded for this user.
+function kmiCacheIsFor(u) {
+  try {
+    return !!u && localStorage.getItem(KMI_CACHE_OWNER_KEY) === String(u.id) &&
+           Array.isArray(db.projects) && db.projects.length > 0;
+  } catch (e) { return false; }
+}
+
+// Snapshot each table before the pull replaces it: the current objects by
+// id, and which ids differ from the last baseline (= edited this session).
+function _bf2Capture(keys) {
+  var cap = {};
+  keys.forEach(function(k){
+    var e = _bf2Entry(k), base = _rowHash[k], list = db[k];
+    if (!e || !Array.isArray(list)) return;
+    var c = { list: list, byId: {}, dirty: {} };
+    for (var i = 0; i < list.length; i++) {
+      var o = list[i], row, id, h = null;
+      try { row = e.m(o); } catch (x) { continue; }
+      id = (row && row.id != null && row.id !== '') ? String(row.id) : null;
+      if (id === null) continue;
+      c.byId[id] = o;
+      if (base) {
+        try { h = _rowHash64(JSON.stringify(row)); } catch (x) {}
+        if (h === null || base[id] !== h) c.dirty[id] = true;
+      }
+    }
+    cap[k] = c;
+  });
+  return cap;
+}
+
+// Merge each replaced table back onto the captured objects (rules above).
+// Returns { key: [ids kept local] }.
+function _bf2Merge(cap) {
+  var kept = {};
+  Object.keys(cap).forEach(function(k){
+    var c = cap[k], e = _bf2Entry(k), fresh = db[k];
+    if (!e || !Array.isArray(fresh) || fresh === c.list) return;   // not replaced (load error): leave
+    var out = [], seen = {}, keep = [];
+    for (var i = 0; i < fresh.length; i++) {
+      var n = fresh[i], id = null, row;
+      try { row = e.m(n); id = (row && row.id != null && row.id !== '') ? String(row.id) : null; } catch (x) {}
+      if (id === null) { out.push(n); continue; }
+      seen[id] = true;
+      var p = c.byId[id];
+      if (!p || p === n) { out.push(n); continue; }
+      if (c.dirty[id]) { out.push(p); keep.push(id); continue; }
+      Object.keys(p).forEach(function(key){ if (!(key in n)) delete p[key]; });
+      Object.assign(p, n);
+      out.push(p);
+    }
+    Object.keys(c.dirty).forEach(function(id){
+      if (!seen[id] && c.byId[id]) { out.push(c.byId[id]); keep.push(id); }
+    });
+    db[k] = out;
+    if (keep.length) kept[k] = keep;
+  });
+  return kept;
+}
+
+// Row and table baselines for the given tables. Rows kept local stay dirty.
+function _bf2Baseline(keys, kept) {
+  keys.forEach(function(k){
+    var e = _bf2Entry(k);
+    if (!e) return;
+    try { _rowHash[k] = _rowDiff({ k: k, m: e.m }).hashes; }
+    catch (x) { delete _rowHash[k]; }
+    var ids = (kept && kept[k]) || [];
+    if (ids.length && _rowHash[k]) ids.forEach(function(id){ delete _rowHash[k][id]; });
+    var h = _tblSnapshot(k);
+    if (ids.length || h === null) delete _tblHash[k]; else _tblHash[k] = h;
+  });
+}
+
+// VG1 snapshot that leaves rows kept local on their previous base, so a
+// later version conflict still reports exactly what this session changed.
+function _bf2VgSnap(k, kept) {
+  var keep = (kept && kept[k]) || [];
+  var old = (_vgBase && _vgBase[k]) ? Object.assign({}, _vgBase[k]) : {};
+  _vgSnapAll(k);
+  if (keep.length && _vgBase && _vgBase[k]) keep.forEach(function(id){
+    if (old[id] !== undefined) _vgBase[k][id] = old[id]; else delete _vgBase[k][id];
+  });
+}
+
+function _bf2MapRows(rows, mapper) {
+  var out = [];
+  for (var k = 0; k < (rows || []).length; k++) out.push(mapper(rows[k]));
+  return out;
+}
+
+// -- timing ------------------------------------------------------------------
+function _bf2StatStart() {
+  _kmiPullStats = { at: new Date().toISOString(), t0: Date.now(),
+                    user: (typeof _currentUser !== 'undefined' && _currentUser) ? (_currentUser.firstName + ' ' + _currentUser.lastName) : '',
+                    role: (typeof _currentUser !== 'undefined' && _currentUser) ? normalizeRole(_currentUser.role) : '',
+                    coreMs: null, totalMs: null, tables: [] };
+}
+function _bf2Stat(table, ms, rows, err, stage) {
+  if (!_kmiPullStats) return;
+  _kmiPullStats.tables.push({ table: table, stage: stage, ms: ms, rows: rows,
+                              err: err ? String((err && err.message) || err) : '' });
+}
+function _bf2StatSave() {
+  try { localStorage.setItem('kmi_pull_stats', JSON.stringify(_kmiPullStats)); } catch (e) {}
+}
+function _bf2TableName(b, i) {
+  try { var p = String((b && b.url && b.url.pathname) || ''); if (p) return p.split('/').pop(); } catch (e) {}
+  return 'table ' + (i + 1);
+}
+
+// Wraps the main batch: records each table's time and row count, reports
+// progress. Resolves to exactly what each request resolved to.
+function _bf2Track(list) {
+  var done = 0, total = list.length;
+  if (_bf2Progress) { try { _bf2Progress(0, total); } catch (e) {} }
+  return list.map(function(b, i){
+    var t0 = Date.now(), name = _bf2TableName(b, i);
+    return Promise.resolve(b).then(function(r){
+      _bf2Stat(name, Date.now() - t0, (r && Array.isArray(r.data)) ? r.data.length : 0, r && r.error, 'core');
+      done++;
+      if (_bf2Progress) { try { _bf2Progress(done, total); } catch (e) {} }
+      return r;
+    });
+  });
+}
+
+function _bf2FireCore() {
+  if (_bf2CoreFired) return;
+  _bf2CoreFired = true;
+  var w = _bf2CoreWaiters; _bf2CoreWaiters = [];
+  w.forEach(function(fn){ try { fn(); } catch (e) { console.warn('[pull] onCore handler failed', e); } });
+}
+
+// Console: kmiPullReport() - last load on this device, slowest first.
+function kmiPullReport() {
+  var s = _kmiPullStats;
+  if (!s) { try { s = JSON.parse(localStorage.getItem('kmi_pull_stats') || 'null'); } catch (e) {} }
+  if (!s) { console.info('[pull] no load recorded on this device yet'); return null; }
+  console.info('[pull] ' + s.at + '  ' + (s.user || '') + ' (' + (s.role || '-') + ')  core ' +
+               (s.coreMs == null ? '-' : (s.coreMs / 1000).toFixed(1) + 's') + ', total ' +
+               (s.totalMs == null ? '-' : (s.totalMs / 1000).toFixed(1) + 's'));
+  console.table(s.tables.slice().sort(function(a, b){ return b.ms - a.ms; }));
+  return s;
+}
+
+function kmiRenderPullStats() {
+  var el = g('kmi-pullstats-body');
+  if (!el) return;
+  var s = _kmiPullStats;
+  if (!s) { try { s = JSON.parse(localStorage.getItem('kmi_pull_stats') || 'null'); } catch (e) {} }
+  if (!s) { el.innerHTML = '<div style="color:#888;font-size:12px">No data load recorded on this device yet.</div>'; return; }
+  var esc = function(v){ return String(v == null ? '' : v).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); };
+  var sec = function(ms){ return ms == null ? '-' : (ms / 1000).toFixed(1) + 's'; };
+  var rows = s.tables.slice().sort(function(a, b){ return b.ms - a.ms; });
+  var h = '<div style="font-size:12px;color:#555;margin-bottom:8px">' + esc(new Date(s.at).toLocaleString()) +
+          ' &middot; ' + esc(s.user || '') + (s.role ? ' (' + esc(s.role) + ')' : '') +
+          ' &middot; app opened after <strong>' + sec(s.coreMs) + '</strong>' +
+          ' &middot; everything loaded after <strong>' + sec(s.totalMs) + '</strong></div>';
+  h += '<div style="max-height:320px;overflow:auto"><table><thead><tr><th>Table</th><th>Stage</th>' +
+       '<th style="text-align:right">Time</th><th style="text-align:right">Rows</th><th>Note</th></tr></thead><tbody>';
+  rows.forEach(function(r){
+    h += '<tr><td>' + esc(r.table) + '</td><td>' + esc(r.stage) + '</td>' +
+         '<td style="text-align:right">' + (r.stage === 'skipped' ? '-' : sec(r.ms)) + '</td>' +
+         '<td style="text-align:right">' + (r.stage === 'skipped' ? '-' : esc(r.rows)) + '</td>' +
+         '<td style="color:#A32D2D">' + esc(r.err) + '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  el.innerHTML = h;
+}
+
+// Background stage: wait for every background read, then apply them all
+// without yielding to the UI, merge, baseline, and run the AP credit
+// backfill last (rows it changes stay dirty and push normally).
+async function _bf2Background(bf, skip) {
+  var names = ['gl','fv','rentGl','apInv','apLine','apLog','apAlias','dwArea','dwSet','dw','dwRev','dwMark'];
+  var res = {};
+  await Promise.all(names.map(function(n){
+    return bf[n].then(function(v){ res[n] = { ok: true, v: v }; },
+                      function(e){ res[n] = { ok: false, e: e }; });
+  }));
+
+  var cap = _bf2Capture(_BF2_BG_KEYS);
+
+  // GL accounts (AP Session 1). Never clobber a populated local list with an
+  // empty cloud result (an RLS-blocked or transient empty select).
+  if (skip.gl) {
+    db.glAccounts = [];
+  } else if (res.gl.ok && res.gl.v && !res.gl.v.error) {
+    var glRows = (res.gl.v.data || []).map(fromSBGLAccount);
+    if (glRows.length || !(Array.isArray(db.glAccounts) && db.glAccounts.length)) db.glAccounts = glRows;
+  } else {
+    var ge = res.gl.ok ? (res.gl.v && res.gl.v.error) : res.gl.e;
+    console.warn('kmi_gl_accounts load error (table missing?):', ge && ge.message);
+    if (!Array.isArray(db.glAccounts)) db.glAccounts = [];
+  }
+
+  // Paginated tables. A failed read keeps whatever is local.
+  var take = function(n, key, mapper, warn) {
+    if (skip[n]) { db[key] = []; return; }
+    var r = res[n];
+    if (r.ok) {
+      try { db[key] = _bf2MapRows(r.v, mapper); return; }
+      catch (x) { r = { ok: false, e: x }; }
+    }
+    if (warn) console.warn(warn, r.e && r.e.message);
+    if (!Array.isArray(db[key])) db[key] = [];
+  };
+  take('fv', 'foundationVendors', function(r){ return { id:'fv-' + String(r.vendor_no||'').replace(/[^A-Za-z0-9_-]/g, ''), vendorNo:r.vendor_no||'', name:r.name||'', fullName:[r.name, r.name_2].filter(Boolean).join(' '), city:r.city||'', active:r.record_status!=='D' }; },
+       'kmi_foundation_vendors load error (table missing?):');
+  if (!skip.rentGl && !res.rentGl.ok) {
+    console.warn('kmi_rental_gl_accounts load error (MR1b not run?):', res.rentGl.e && res.rentGl.e.message);
+    db.rentalGlAccounts = [];
+  } else {
+    take('rentGl', 'rentalGlAccounts', function(r){ return { glNo:String(r.gl_no||''), label:r.label||'', rentalType:r.rental_type||'Equipment', active:r.active!==false }; });
+  }
+  take('apInv',   'apInvoices',       fromSBApInvoice,       'kmi_ap_invoices load error (table missing?):');
+  take('apLine',  'apInvoiceLines',   fromSBApLine,          null);
+  take('apLog',   'apInvoiceLog',     fromSBApLog,           null);
+  take('apAlias', 'apVendorAliases',  fromSBApAlias,         null);
+  take('dwArea',  'drawingAreas',     fromSBDrawingArea,     'kmi_drawing_areas load error (table missing?):');
+  take('dwSet',   'drawingSets',      fromSBDrawingSet,      'kmi_drawing_sets load error (table missing?):');
+  take('dw',      'drawings',         fromSBDrawing,         'kmi_drawings load error (table missing?):');
+  take('dwRev',   'drawingRevisions', fromSBDrawingRevision, 'kmi_drawing_revisions load error (table missing?):');
+  take('dwMark',  'drawingMarkups',   fromSBDrawingMarkup,   'kmi_drawing_markups load error (table missing?):');
+
+  var kept = _bf2Merge(cap);
+  _bf2Baseline(_BF2_BG_KEYS, kept);
+
+  // Give any never-evaluated invoice (i.e. everything that arrived by email
+  // through inbound-ap) its credit ruling. No-op once every record is ruled.
+  if (!skip.apInv) {
+    try { await _apBackfillCredits(); }
+    catch (e) { console.warn('credit backfill skipped:', e && e.message); }
+  }
+}
+
+// Entry point. A pull already in progress is joined, not duplicated.
+function pullFromSupabase(opts) {
+  opts = opts || {};
+  if (_bf2InFlight) {
+    if (opts.onCore) {
+      if (_bf2CoreFired) { try { opts.onCore(); } catch (e) {} }
+      else _bf2CoreWaiters.push(opts.onCore);
+    }
+    return _bf2InFlight;
+  }
+  _bf2CoreFired   = false;
+  _bf2CoreWaiters = opts.onCore ? [opts.onCore] : [];
+  _bf2Progress    = opts.onProgress || null;
+  var p = _bf2PullImpl();
+  _bf2InFlight = p;
+  // A pull that ends early (load error, no client) still releases waiters.
+  var fin = function(){ _bf2InFlight = null; _bf2Progress = null; _bf2FireCore(); };
+  p.then(fin, fin);
+  return p;
+}
+
+async function _bf2PullImpl() {
   if (!supabaseClient) { setSyncStatus('offline', 'Not connected'); return; }
   setSyncStatus('syncing', 'Loading\u2026');
   // Hold the sync lock for the whole pull. saveDB() is patched to schedule a
@@ -66493,6 +66854,7 @@ async function pullFromSupabase() {
   // still walking tables would fire that push 1.5s later — reading db.* arrays
   // the pull is concurrently replacing. Cleared in the finally below.
   _syncing = true;
+  _bf2StatStart();   // BOOTFAST2
   try {
     // BOOTFAST1: the follow-up reads further down (GL accounts, the paginated
     // AP / Foundation vendor / drawings tables, week approvals, project
@@ -66514,36 +66876,45 @@ async function pullFromSupabase() {
       }
       return out;
     };
-    // A rejection is still raised where the promise is awaited below; the
-    // no-op catch only stops the browser flagging it as unhandled meanwhile.
+    // A rejection is still raised where the promise is awaited; the no-op
+    // catch only stops the browser flagging it as unhandled meanwhile.
     var _bfHold = function(p){ p.catch(function(){}); return p; };
-    var _bfMap  = function(rows, mapper){
-      var out = [];
-      for (var k = 0; k < rows.length; k++) out.push(mapper(rows[k]));
-      return out;
+    // BOOTFAST2: role skips + per-table timing. A skipped read resolves to
+    // nothing and is never sent.
+    var _bf2Skip = _bf2SkipSet();
+    var _bfGet = function(key, table, paged, stage){
+      if (_bf2Skip[key]) {
+        _bf2Stat(table, 0, 0, null, 'skipped');
+        return Promise.resolve(paged ? [] : { data: [], error: null });
+      }
+      var t0 = Date.now();
+      var p = paged ? _bfSelAllRaw(table) : Promise.resolve(supabaseClient.from(table).select('*'));
+      p.then(function(r){ _bf2Stat(table, Date.now() - t0, paged ? r.length : ((r && r.data) || []).length, paged ? null : (r && r.error), stage); },
+             function(e){ _bf2Stat(table, Date.now() - t0, 0, e || 'failed', stage); });
+      return _bfHold(p);
     };
     var _bf = {
-      gl:      _bfHold(Promise.resolve(supabaseClient.from('kmi_gl_accounts').select('*'))),
-      fv:      _bfHold(_bfSelAllRaw('fnd_vendors')),
-      rentGl:  _bfHold(_bfSelAllRaw('kmi_rental_gl_accounts')),
-      apInv:   _bfHold(_bfSelAllRaw('kmi_ap_invoices')),
-      apLine:  _bfHold(_bfSelAllRaw('kmi_ap_invoice_lines')),
-      apLog:   _bfHold(_bfSelAllRaw('kmi_ap_invoice_log')),
-      apAlias: _bfHold(_bfSelAllRaw('kmi_ap_vendor_aliases')),
-      dwArea:  _bfHold(_bfSelAllRaw('kmi_drawing_areas')),
-      dwSet:   _bfHold(_bfSelAllRaw('kmi_drawing_sets')),
-      dw:      _bfHold(_bfSelAllRaw('kmi_drawings')),
-      dwRev:   _bfHold(_bfSelAllRaw('kmi_drawing_revisions')),
-      dwMark:  _bfHold(_bfSelAllRaw('kmi_drawing_markups')),
-      pwa:     _bfHold(Promise.resolve(supabaseClient.from('kmi_prod_week_approvals').select('*'))),
-      pov:     _bfHold(Promise.resolve(supabaseClient.from('kmi_project_overview').select('*')))
+      gl:      _bfGet('gl',      'kmi_gl_accounts',          false, 'background'),
+      fv:      _bfGet('fv',      'fnd_vendors',              true,  'background'),
+      rentGl:  _bfGet('rentGl',  'kmi_rental_gl_accounts',   true,  'background'),
+      apInv:   _bfGet('apInv',   'kmi_ap_invoices',          true,  'background'),
+      apLine:  _bfGet('apLine',  'kmi_ap_invoice_lines',     true,  'background'),
+      apLog:   _bfGet('apLog',   'kmi_ap_invoice_log',       true,  'background'),
+      apAlias: _bfGet('apAlias', 'kmi_ap_vendor_aliases',    true,  'background'),
+      dwArea:  _bfGet('dwArea',  'kmi_drawing_areas',        true,  'background'),
+      dwSet:   _bfGet('dwSet',   'kmi_drawing_sets',         true,  'background'),
+      dw:      _bfGet('dw',      'kmi_drawings',             true,  'background'),
+      dwRev:   _bfGet('dwRev',   'kmi_drawing_revisions',    true,  'background'),
+      dwMark:  _bfGet('dwMark',  'kmi_drawing_markups',      true,  'background'),
+      pwa:     _bfGet('pwa',     'kmi_prod_week_approvals',  false, 'core'),
+      pov:     _bfGet('pov',     'kmi_project_overview',     false, 'core')
     };
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
          mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
          rfqsRes, rfqRespRes, prodWkRes, prodCatRes, prodItemRes, prodDocTypeRes, prodCategoryRes,
          eqRes, eqMoveRes, eqInvRes, biRes, bivRes,
-         mtgRes, mtgItemRes] = await Promise.all([
+         mtgRes, mtgItemRes] = await Promise.all(_bf2Track([   // BOOTFAST2: timing + progress
       supabaseClient.from('kmi_customers').select('*'),
       supabaseClient.from('kmi_project_managers').select('*'),
       supabaseClient.from('kmi_vendors').select('*'),
@@ -66583,7 +66954,7 @@ async function pullFromSupabase() {
       supabaseClient.from('kmi_bid_invites').select('*'),
       supabaseClient.from('kmi_meetings').select('*'),
       supabaseClient.from('kmi_meeting_action_items').select('*')
-    ]);
+    ]));
 
     if (custs.error || pms.error || users.error || opps.error || props.error || projs.error) {
       var e = (custs.error||pms.error||users.error||opps.error||props.error||projs.error).message;
@@ -66595,6 +66966,14 @@ async function pullFromSupabase() {
     // Supabase projects. If the tables aren't there or returned an error,
     // PRESERVE the local vendor data instead of wiping it (the user may have
     // added vendors locally before running the SQL migration).
+    // BOOTFAST2: wait for the two small reads used further down, so the
+    // replacements from here to core-ready run without yielding to the UI
+    // (awaiting an already-settled promise only takes a microtask). Then note
+    // which rows this session changed since its last baseline, so the merge
+    // at core-ready keeps them. (The production-catalog carry-forward below
+    // can still await, but only when those cloud tables are empty.)
+    try { await Promise.all([_bf.pwa, _bf.pov]); } catch (e) {}
+    var _bf2Prev = _bf2Capture(_BF2_CORE_KEYS());
     if (vens && vens.error)  console.warn('kmi_vendors load error (table missing?):', vens.error.message);
     if (vcons && vcons.error) console.warn('kmi_vendor_contacts load error (table missing?):', vcons.error.message);
 
@@ -66610,68 +66989,9 @@ async function pullFromSupabase() {
     } else if (!Array.isArray(db.vendorContacts)) {
       db.vendorContacts = [];
     } // else: keep local db.vendorContacts as-is
-    // AP Session 1 — GL accounts (separate fetch; non-fatal if table missing).
-    try {
-      var glRes = await _bf.gl;   // BOOTFAST1
-      if (glRes && !glRes.error) {
-        var glRows = (glRes.data || []).map(fromSBGLAccount);
-        // Guard: never clobber a populated local list with an empty cloud
-        // result (an RLS-blocked or transient empty select would wipe it).
-        if (glRows.length || !(Array.isArray(db.glAccounts) && db.glAccounts.length)) db.glAccounts = glRows;
-      } else {
-        if (glRes && glRes.error) console.warn('kmi_gl_accounts load error (table missing?):', glRes.error.message);
-        if (!Array.isArray(db.glAccounts)) db.glAccounts = [];
-      }
-    } catch (e) {
-      console.warn('kmi_gl_accounts load exception:', e);
-      if (!Array.isArray(db.glAccounts)) db.glAccounts = [];
-    }
-    // AP (Option B) — paginated loads. PostgREST caps a select at 1000 rows;
-    // the Foundation master (~1,551) and the AP log will exceed that, so pull
-    // in 1000-row pages with .range() until exhausted.
-    var _selAll = async function(table, mapper){
-      var out = [], from = 0, page = 1000;
-      for(;;){
-        var r = await supabaseClient.from(table).select('*').range(from, from + page - 1);
-        if (r && r.error) throw r.error;
-        var rows = (r && r.data) || [];
-        for (var k = 0; k < rows.length; k++) out.push(mapper(rows[k]));
-        if (rows.length < page) break;
-        from += page;
-        if (from > 500000) break;  // safety stop
-      }
-      return out;
-    };
-    try { db.foundationVendors = _bfMap(await _bf.fv, function(r){ return { id:'fv-' + String(r.vendor_no||'').replace(/[^A-Za-z0-9_-]/g, ''), vendorNo:r.vendor_no||'', name:r.name||'', fullName:[r.name, r.name_2].filter(Boolean).join(' '), city:r.city||'', active:r.record_status!=='D' }; }); }
-    catch (e) { console.warn('kmi_foundation_vendors load error (table missing?):', e && e.message); if (!Array.isArray(db.foundationVendors)) db.foundationVendors = []; }
-    try { db.rentalGlAccounts = _bfMap(await _bf.rentGl, function(r){ return { glNo:String(r.gl_no||''), label:r.label||'', rentalType:r.rental_type||'Equipment', active:r.active!==false }; }); }
-    catch (e) { console.warn('kmi_rental_gl_accounts load error (MR1b not run?):', e && e.message); db.rentalGlAccounts = []; }
-    try { db.apInvoices = _bfMap(await _bf.apInv, fromSBApInvoice); }
-    catch (e) { console.warn('kmi_ap_invoices load error (table missing?):', e && e.message); if (!Array.isArray(db.apInvoices)) db.apInvoices = []; }
-    try { db.apInvoiceLines = _bfMap(await _bf.apLine, fromSBApLine); }
-    catch (e) { if (!Array.isArray(db.apInvoiceLines)) db.apInvoiceLines = []; }
-    try { db.apInvoiceLog = _bfMap(await _bf.apLog, fromSBApLog); }
-    catch (e) { if (!Array.isArray(db.apInvoiceLog)) db.apInvoiceLog = []; }
-    try { db.apVendorAliases = _bfMap(await _bf.apAlias, fromSBApAlias); }
-    catch (e) { if (!Array.isArray(db.apVendorAliases)) db.apVendorAliases = []; }
-    // Give any never-evaluated invoice (i.e. everything that arrived by email
-    // through inbound-ap) its credit ruling. No-op once every record is ruled.
-    try { await _apBackfillCredits(); }
-    catch (e) { console.warn('credit backfill skipped:', e && e.message); }
-    // Drawings (Session 1) — paginated: a large project's revision table will
-    // pass PostgREST's 1000-row select cap. Non-fatal if the tables aren't
-    // there yet; a failed pull preserves whatever is already local rather
-    // than wiping it.
-    try { db.drawingAreas = _bfMap(await _bf.dwArea, fromSBDrawingArea); }
-    catch (e) { console.warn('kmi_drawing_areas load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingAreas)) db.drawingAreas = []; }
-    try { db.drawingSets = _bfMap(await _bf.dwSet, fromSBDrawingSet); }
-    catch (e) { console.warn('kmi_drawing_sets load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingSets)) db.drawingSets = []; }
-    try { db.drawings = _bfMap(await _bf.dw, fromSBDrawing); }
-    catch (e) { console.warn('kmi_drawings load error (table missing?):', e && e.message); if (!Array.isArray(db.drawings)) db.drawings = []; }
-    try { db.drawingRevisions = _bfMap(await _bf.dwRev, fromSBDrawingRevision); }
-    catch (e) { console.warn('kmi_drawing_revisions load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingRevisions)) db.drawingRevisions = []; }
-    try { db.drawingMarkups = _bfMap(await _bf.dwMark, fromSBDrawingMarkup); }
-    catch (e) { console.warn('kmi_drawing_markups load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingMarkups)) db.drawingMarkups = []; }
+    // BOOTFAST2: GL accounts and the paginated Foundation vendor, rental GL,
+    // AP and drawings tables now load in the background stage
+    // (_bf2Background, at the end of this function), after the app opens.
     // Merge pulled users with local state. The cloud is the source of truth
     // for status/mustReset; local values fill only blank cloud columns.
     // PFC1: password hashes are no longer pulled or preserved from the cache.
@@ -67075,13 +67395,9 @@ async function pullFromSupabase() {
       if (crossed.length) console.error('[integrity] crossed opportunity\u2192proposal link(s):', crossed);
     })();
 
-    // Local state now matches cloud — baseline every table so the next
-    // auto-push only carries what this session actually changes from here.
-    _tblBaselineAll();
-    _rowBaselineAll();   // RD1
-    _vgSnapAll('tmTickets'); _vgSnapAll('cors');   // VG1
-    _vgSnapAll('opportunities');   // OGUARD1
-
+    // BOOTFAST2: CORE READY. Merge the core tables back onto the objects the
+    // app may already be showing, baseline them, and let sign-in open the app.
+    var _kmiRerender = function() {
     // Re-render current page
     var activePg = document.querySelector('.pg.active');
     if (activePg) {
@@ -67089,6 +67405,35 @@ async function pullFromSupabase() {
       var fns = {dashboard:renderDash, opportunities:renderOpportunities, customers:renderCusts, pms:renderPMs, vendors:renderVendors, 'vendor-contacts':renderVendorContacts, users:renderUsers, analytics:renderAnalytics, templates:renderTemplates, projects:renderProjects, budget:renderBudget, 'product-library':renderProductLibrary, submittals:renderSubmittalsPage, meetings:renderMeetings, tasks:renderTasks};
       if (fns[pageId]) fns[pageId]();
     }
+    };
+    var _bf2KeptCore = _bf2Merge(_bf2Prev);
+    // The merge can swap user objects: re-bind _currentUser again (see B2 above).
+    if (typeof _currentUser !== 'undefined' && _currentUser) {
+      var _bf2Rb = db.users.find(function(x){ return String(x.id) === String(_currentUser.id); });
+      if (_bf2Rb) _currentUser = _bf2Rb;
+    }
+    _bf2Baseline(_BF2_CORE_KEYS(), _bf2KeptCore);
+    var _bf2Act = _tblSnapshot('activity');
+    if (_bf2Act !== null) _tblHash.activity = _bf2Act;
+    _bf2VgSnap('tmTickets', _bf2KeptCore); _bf2VgSnap('cors', _bf2KeptCore);   // VG1
+    _bf2VgSnap('opportunities', _bf2KeptCore);   // OGUARD1
+    saveDB();
+    if (_kmiPullStats) _kmiPullStats.coreMs = Date.now() - _kmiPullStats.t0;
+    try {
+      if (typeof _currentUser !== 'undefined' && _currentUser) localStorage.setItem(KMI_CACHE_OWNER_KEY, String(_currentUser.id));
+    } catch (e) {}
+    _bf2FireCore();
+    setSyncStatus('syncing', 'Loading remaining data...');
+    try { _kmiRerender(); } catch (e) { console.warn('[pull] re-render after core failed', e); }
+
+    // BOOTFAST2: BACKGROUND STAGE. The sync lock is still held, so saves made
+    // while this runs queue and push when it finishes.
+    await _bf2Background(_bf, _bf2Skip);
+    saveDB();
+    if (_kmiPullStats) { _kmiPullStats.totalMs = Date.now() - _kmiPullStats.t0; _bf2StatSave(); }
+    setSyncStatus('connected', 'Connected ' + String.fromCharCode(8226) + ' Up to date');
+    try { _kmiRerender(); } catch (e) { console.warn('[pull] re-render after background failed', e); }
+    try { kmiRenderPullStats(); } catch (e) {}
   } catch(e) {
     setSyncStatus('error', 'Load failed');
     showSBResult('Error: ' + e.message, false);
@@ -67195,6 +67540,7 @@ function showSBResult(msg, ok) {
 }
 
 function renderSupabaseSetup() {
+  try { kmiRenderPullStats(); } catch (e) {}   // BOOTFAST2
   var creds = getSBCreds();
   if (creds) {
     var urlEl = g('sb-url'), keyEl = g('sb-key');
