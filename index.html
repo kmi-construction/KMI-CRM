@@ -6586,32 +6586,36 @@ async function bootSequence() {
     return;
   }
 
-  // 2. No session. Show login but DISABLE the form until Supabase responds.
+  // 2. No session. Show login while we confirm the server answers.
+  // BOOTFAST1: this used to run a full pullFromSupabase() here, BEFORE
+  // sign-in, with the form disabled until it finished or timed out. Since M2
+  // that pull runs as anon and every table read is refused, so it bought
+  // nothing; the real load is kmiAuthPostLoginSync() after sign-in. Now we
+  // make one small request to confirm the server is reachable and open the
+  // form.
   showLogin();
   setLoginFormState('connecting', 'Connecting to database\u2026');
 
-  // 3. Try Supabase. Returns one of: 'pulled' | 'connected_no_pull' | 'no_creds' | 'init_failed' | 'pull_failed'
-  var outcome = await attemptSupabaseConnect();
+  // 3. Returns one of: 'connected' | 'no_creds' | 'init_failed' | 'unreachable'
+  var outcome = await kmiBootReachable();
 
   // 4. Branch based on outcome AND fresh-device state
-  if (outcome === 'pulled') {
-    // Cloud is the source of truth. If cloud has zero users AND this device
-    // is fresh, seed defaults so the very first install of the system can
-    // bootstrap. Otherwise, never seed.
+  if (outcome === 'connected') {
+    // BOOTFAST1: ensureInitialUsersIfEmpty() is no longer called here. It
+    // seeded stand-in admin accounts whenever the local user list was empty,
+    // which since M2 is every fresh device (anon can't read kmi_users), not
+    // just a brand-new install.
     enforceSeedRoles();
-    if (_wasFreshDevice && db.users.length === 0) {
-      await ensureInitialUsersIfEmpty();
-    }
+    setSyncStatus('offline', 'Sign in to load data');
     setLoginFormState('ready');
     return;
   }
 
-  // Anything that's NOT a successful pull...
+  // Server not reachable (or client could not start)...
   if (_wasFreshDevice) {
     // Fresh device + no cloud answer = block login. No seeding, no fallback.
     var why = (outcome === 'no_creds')      ? 'No Supabase credentials configured for this site.'
             : (outcome === 'init_failed')   ? 'Could not initialize the database client.'
-            : (outcome === 'pull_failed')   ? 'Connected to the database, but could not load data.'
                                             : 'Could not reach the database.';
     setLoginFormState('blocked',
       'Cannot reach database. ' + why + '\n\nThis device has no offline data, so login requires a working connection.');
@@ -6623,7 +6627,63 @@ async function bootSequence() {
   setLoginFormState('offline');
 }
 
+// BOOTFAST1: pre-sign-in check. Starts the client (normally already done by
+// kmiAuthBootstrap) and makes ONE small request to confirm the server
+// answers. No table reads: anon has no table grants since M2. Any HTTP
+// response counts as reachable; only a network failure or the 8s timeout
+// does not. Returns 'connected' | 'no_creds' | 'init_failed' | 'unreachable'.
+async function kmiBootReachable() {
+  var creds = getSBCreds();
+  if ((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) {
+    creds = { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY };
+  }
+  if (!creds || !creds.url || !creds.key) {
+    setSyncStatus('offline', 'Not connected');
+    return 'no_creds';
+  }
+  var cleanUrl = normalizeSBUrl(creds.url);
+  if (cleanUrl !== creds.url) {
+    creds.url = cleanUrl;
+    saveSBCreds(cleanUrl, creds.key);
+  }
+  var waitedMs = 0;
+  while (!window.supabase && waitedMs < 5000) {
+    await new Promise(function(r){ setTimeout(r, 100); });
+    waitedMs += 100;
+  }
+  if (!window.supabase) {
+    setSyncStatus('error', 'Database client unavailable');
+    return 'init_failed';
+  }
+  if (!initSupabase(creds.url, creds.key)) {
+    setSyncStatus('error', 'Connection error \u2014 check Supabase config');
+    return 'init_failed';
+  }
+  var pb = g('btn-push'), pullb = g('btn-pull');
+  if (pb)    pb.style.display    = 'inline-block';
+  if (pullb) pullb.style.display = 'inline-block';
+  setSyncStatus('syncing', 'Connecting\u2026');
+  var ctl   = (typeof AbortController === 'function') ? new AbortController() : null;
+  var timer = setTimeout(function(){ if (ctl) ctl.abort(); }, 8000);
+  try {
+    // Auth health endpoint: tiny, needs only the anon key.
+    await fetch(creds.url + '/auth/v1/health', {
+      headers: { apikey: creds.key },
+      cache:   'no-store',
+      signal:  ctl ? ctl.signal : undefined
+    });
+    return 'connected';
+  } catch (e) {
+    console.warn('[boot] reachability check failed', e);
+    setSyncStatus('error', 'Cannot reach the database');
+    return 'unreachable';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Wrapper that runs autoConnectSupabase and reports a categorized outcome.
+// BOOTFAST1: no longer called at boot (kmiBootReachable replaced it there).
 async function attemptSupabaseConnect() {
   var creds = getSBCreds();
   if ((!creds || !creds.url || !creds.key) && DEFAULT_SB_URL && DEFAULT_SB_KEY) {
@@ -63453,7 +63513,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-05-FINREP_B3D';
+var KMI_BUILD = '2026-11-05-BOOTFAST1';
 
 var _kmiSessionId = (function(){
   try {
@@ -66434,6 +66494,50 @@ async function pullFromSupabase() {
   // the pull is concurrently replacing. Cleared in the finally below.
   _syncing = true;
   try {
+    // BOOTFAST1: the follow-up reads further down (GL accounts, the paginated
+    // AP / Foundation vendor / drawings tables, week approvals, project
+    // overview) used to start one after another, each waiting for the last.
+    // Start them all now, alongside the main batch. Each table still pages
+    // sequentially; the code below awaits them at the same spots with the
+    // same error handling, and maps rows there, so mappers see db exactly as
+    // before.
+    var _bfSelAllRaw = async function(table){
+      var out = [], from = 0, page = 1000;
+      for(;;){
+        var r = await supabaseClient.from(table).select('*').range(from, from + page - 1);
+        if (r && r.error) throw r.error;
+        var rows = (r && r.data) || [];
+        for (var k = 0; k < rows.length; k++) out.push(rows[k]);
+        if (rows.length < page) break;
+        from += page;
+        if (from > 500000) break;  // safety stop
+      }
+      return out;
+    };
+    // A rejection is still raised where the promise is awaited below; the
+    // no-op catch only stops the browser flagging it as unhandled meanwhile.
+    var _bfHold = function(p){ p.catch(function(){}); return p; };
+    var _bfMap  = function(rows, mapper){
+      var out = [];
+      for (var k = 0; k < rows.length; k++) out.push(mapper(rows[k]));
+      return out;
+    };
+    var _bf = {
+      gl:      _bfHold(Promise.resolve(supabaseClient.from('kmi_gl_accounts').select('*'))),
+      fv:      _bfHold(_bfSelAllRaw('fnd_vendors')),
+      rentGl:  _bfHold(_bfSelAllRaw('kmi_rental_gl_accounts')),
+      apInv:   _bfHold(_bfSelAllRaw('kmi_ap_invoices')),
+      apLine:  _bfHold(_bfSelAllRaw('kmi_ap_invoice_lines')),
+      apLog:   _bfHold(_bfSelAllRaw('kmi_ap_invoice_log')),
+      apAlias: _bfHold(_bfSelAllRaw('kmi_ap_vendor_aliases')),
+      dwArea:  _bfHold(_bfSelAllRaw('kmi_drawing_areas')),
+      dwSet:   _bfHold(_bfSelAllRaw('kmi_drawing_sets')),
+      dw:      _bfHold(_bfSelAllRaw('kmi_drawings')),
+      dwRev:   _bfHold(_bfSelAllRaw('kmi_drawing_revisions')),
+      dwMark:  _bfHold(_bfSelAllRaw('kmi_drawing_markups')),
+      pwa:     _bfHold(Promise.resolve(supabaseClient.from('kmi_prod_week_approvals').select('*'))),
+      pov:     _bfHold(Promise.resolve(supabaseClient.from('kmi_project_overview').select('*')))
+    };
     var [custs, pms, vens, vcons, users, opps, props, projs, acts, settings,
          ccodes, cclasses, custFnd, budgetTmpl, projBudgets, tmTix, corsRes,
          mfgsRes, prodsRes, pdocsRes, subsRes, specRes, projParamsRes, posRes, transRes,
@@ -66508,7 +66612,7 @@ async function pullFromSupabase() {
     } // else: keep local db.vendorContacts as-is
     // AP Session 1 — GL accounts (separate fetch; non-fatal if table missing).
     try {
-      var glRes = await supabaseClient.from('kmi_gl_accounts').select('*');
+      var glRes = await _bf.gl;   // BOOTFAST1
       if (glRes && !glRes.error) {
         var glRows = (glRes.data || []).map(fromSBGLAccount);
         // Guard: never clobber a populated local list with an empty cloud
@@ -66538,17 +66642,17 @@ async function pullFromSupabase() {
       }
       return out;
     };
-    try { db.foundationVendors = await _selAll('fnd_vendors', function(r){ return { id:'fv-' + String(r.vendor_no||'').replace(/[^A-Za-z0-9_-]/g, ''), vendorNo:r.vendor_no||'', name:r.name||'', fullName:[r.name, r.name_2].filter(Boolean).join(' '), city:r.city||'', active:r.record_status!=='D' }; }); }
+    try { db.foundationVendors = _bfMap(await _bf.fv, function(r){ return { id:'fv-' + String(r.vendor_no||'').replace(/[^A-Za-z0-9_-]/g, ''), vendorNo:r.vendor_no||'', name:r.name||'', fullName:[r.name, r.name_2].filter(Boolean).join(' '), city:r.city||'', active:r.record_status!=='D' }; }); }
     catch (e) { console.warn('kmi_foundation_vendors load error (table missing?):', e && e.message); if (!Array.isArray(db.foundationVendors)) db.foundationVendors = []; }
-    try { db.rentalGlAccounts = await _selAll('kmi_rental_gl_accounts', function(r){ return { glNo:String(r.gl_no||''), label:r.label||'', rentalType:r.rental_type||'Equipment', active:r.active!==false }; }); }
+    try { db.rentalGlAccounts = _bfMap(await _bf.rentGl, function(r){ return { glNo:String(r.gl_no||''), label:r.label||'', rentalType:r.rental_type||'Equipment', active:r.active!==false }; }); }
     catch (e) { console.warn('kmi_rental_gl_accounts load error (MR1b not run?):', e && e.message); db.rentalGlAccounts = []; }
-    try { db.apInvoices = await _selAll('kmi_ap_invoices', fromSBApInvoice); }
+    try { db.apInvoices = _bfMap(await _bf.apInv, fromSBApInvoice); }
     catch (e) { console.warn('kmi_ap_invoices load error (table missing?):', e && e.message); if (!Array.isArray(db.apInvoices)) db.apInvoices = []; }
-    try { db.apInvoiceLines = await _selAll('kmi_ap_invoice_lines', fromSBApLine); }
+    try { db.apInvoiceLines = _bfMap(await _bf.apLine, fromSBApLine); }
     catch (e) { if (!Array.isArray(db.apInvoiceLines)) db.apInvoiceLines = []; }
-    try { db.apInvoiceLog = await _selAll('kmi_ap_invoice_log', fromSBApLog); }
+    try { db.apInvoiceLog = _bfMap(await _bf.apLog, fromSBApLog); }
     catch (e) { if (!Array.isArray(db.apInvoiceLog)) db.apInvoiceLog = []; }
-    try { db.apVendorAliases = await _selAll('kmi_ap_vendor_aliases', fromSBApAlias); }
+    try { db.apVendorAliases = _bfMap(await _bf.apAlias, fromSBApAlias); }
     catch (e) { if (!Array.isArray(db.apVendorAliases)) db.apVendorAliases = []; }
     // Give any never-evaluated invoice (i.e. everything that arrived by email
     // through inbound-ap) its credit ruling. No-op once every record is ruled.
@@ -66558,15 +66662,15 @@ async function pullFromSupabase() {
     // pass PostgREST's 1000-row select cap. Non-fatal if the tables aren't
     // there yet; a failed pull preserves whatever is already local rather
     // than wiping it.
-    try { db.drawingAreas = await _selAll('kmi_drawing_areas', fromSBDrawingArea); }
+    try { db.drawingAreas = _bfMap(await _bf.dwArea, fromSBDrawingArea); }
     catch (e) { console.warn('kmi_drawing_areas load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingAreas)) db.drawingAreas = []; }
-    try { db.drawingSets = await _selAll('kmi_drawing_sets', fromSBDrawingSet); }
+    try { db.drawingSets = _bfMap(await _bf.dwSet, fromSBDrawingSet); }
     catch (e) { console.warn('kmi_drawing_sets load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingSets)) db.drawingSets = []; }
-    try { db.drawings = await _selAll('kmi_drawings', fromSBDrawing); }
+    try { db.drawings = _bfMap(await _bf.dw, fromSBDrawing); }
     catch (e) { console.warn('kmi_drawings load error (table missing?):', e && e.message); if (!Array.isArray(db.drawings)) db.drawings = []; }
-    try { db.drawingRevisions = await _selAll('kmi_drawing_revisions', fromSBDrawingRevision); }
+    try { db.drawingRevisions = _bfMap(await _bf.dwRev, fromSBDrawingRevision); }
     catch (e) { console.warn('kmi_drawing_revisions load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingRevisions)) db.drawingRevisions = []; }
-    try { db.drawingMarkups = await _selAll('kmi_drawing_markups', fromSBDrawingMarkup); }
+    try { db.drawingMarkups = _bfMap(await _bf.dwMark, fromSBDrawingMarkup); }
     catch (e) { console.warn('kmi_drawing_markups load error (table missing?):', e && e.message); if (!Array.isArray(db.drawingMarkups)) db.drawingMarkups = []; }
     // Merge pulled users with local state. The cloud is the source of truth
     // for status/mustReset; local values fill only blank cloud columns.
@@ -66671,7 +66775,7 @@ async function pullFromSupabase() {
     // kmi_prod_week_approve / _reopen / _mark_distributed \u2014 so it must never be
     // added to pushToSupabase().
     try {
-      var pwaRes = await supabaseClient.from('kmi_prod_week_approvals').select('*');
+      var pwaRes = await _bf.pwa;   // BOOTFAST1
       if (pwaRes && !pwaRes.error) {
         db.prodWeekApprovals = (pwaRes.data || []).map(fromSBProdWeekApproval);
       } else {
@@ -66686,7 +66790,7 @@ async function pullFromSupabase() {
     // approvals above. Read-only view; failure is non-fatal and leaves the
     // Projects page on its Directory view with no money columns.
     try {
-      var povRes = await supabaseClient.from('kmi_project_overview').select('*');
+      var povRes = await _bf.pov;   // BOOTFAST1
       if (povRes && !povRes.error) {
         db.projectOverview = (povRes.data || []).map(fromSBProjectOverview);
       } else {
