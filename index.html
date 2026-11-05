@@ -49473,6 +49473,7 @@ var _WIP_FLAG = {
   tm_cors_in:         ['T&M CORs in', 'info'],
   complete:           ['Marked complete', 'info'],
   no_opening:         ['No opening balance', 'warn'],
+  closed_in_fnd:      ['Closed in Foundation', 'info'],
   not_in_kmi:         ['Not in kmi.build', 'warn']
 };
 function _wipFlagHtml(f, r){
@@ -49564,6 +49565,7 @@ function _wipRenderChrome(){
     var h = '';
     if (pe) h += '<span class="wp-status ' + (locked ? 'wp-st-locked' : 'wp-st-open') + '">' +
       (locked ? (per && per.is_baseline ? 'Baseline (imported)' : 'Locked' + (per && per.locked_at ? ' ' + new Date(per.locked_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '')) : 'Open for forecasts') + '</span>';
+    if (pe && _wipRows()) h += '<button class="btn btn-sm" onclick="wipExportPdf()">Download PDF</button>';
     if (pe && _wipRows()) h += '<button class="btn btn-sm" onclick="wipExportCsv()">Export CSV</button>';
     if (pe && !locked && _wipIsAcct()) h += '<button class="btn btn-p btn-sm" onclick="wipLock()"' + (_wip.busy ? ' disabled' : '') + '>Lock ' + _wipLabel(pe) + '</button>';
     if (pe && locked && _wipIsAdmin() && !(per && per.is_baseline)) h += '<button class="btn btn-sm" onclick="wipReopen()"' + (_wip.busy ? ' disabled' : '') + '>Reopen ' + _wipLabel(pe) + '</button>';
@@ -50170,6 +50172,159 @@ function wipCopyJe(){
   var t = _wip.jeText || '';
   try { navigator.clipboard.writeText(t).then(function(){ showToast('Journal entry copied.', 'success'); }, function(){ prompt('Copy the entry:', t); }); }
   catch (e) { prompt('Copy the entry:', t); }
+}
+
+// ── PDF export (B2a): the monthly WIP on legal landscape ────────────────
+function _wipLongDate(pe){
+  var p = String(pe).split('-').map(Number);
+  var M = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  return M[p[1] - 1] + ' ' + p[2] + ', ' + p[0];
+}
+function wipExportPdf(){
+  if (!window.jspdf || !window.jspdf.jsPDF) { alert('PDF library still loading. Try again in a moment.'); return; }
+  var pe = _wip.period, per = _wip.periods[pe] || null, locked = _wipLocked(pe);
+  var rows = (_wipRows() || []).filter(function(r){ return r.section === 'wip'; })
+    .slice().sort(function(a, b){ return String(a.job_no).localeCompare(String(b.job_no), 'en', { numeric: true }); });
+  if (!rows.length) { alert('No WIP rows for ' + _wipLabel(pe) + '.'); return; }
+
+  var doc = new window.jspdf.jsPDF({ unit: 'pt', format: 'legal', orientation: 'landscape' });
+  var PW = 1008, PH = 612, LM = 18, RM = PW - 18;
+  var BLUE = [42, 47, 92], GOLD = [200, 168, 75], GRAY = [110, 110, 110], BAND = [246, 244, 236], RED = [138, 59, 30];
+  var FS = 6.8, RH = 10.4;
+  function sf(st, sz, c){ doc.setFont('helvetica', st); doc.setFontSize(sz); c = c || [0, 0, 0]; doc.setTextColor(c[0], c[1], c[2]); }
+  function hl(x1, y, x2, w, c){ c = c || [200, 200, 200]; doc.setDrawColor(c[0], c[1], c[2]); doc.setLineWidth(w || 0.4); doc.line(x1, y, x2, y); }
+  function fit(t, w){
+    t = String(t == null ? '' : t);
+    if (doc.getTextWidth(t) <= w) return t;
+    while (t.length > 1 && doc.getTextWidth(t + '…') > w) t = t.slice(0, -1);
+    return t + '…';
+  }
+  var n = _wipNum;
+  function money(v){ if (v === null || v === undefined || v === '') return ''; var x = n(v); if (Math.abs(x) < 0.5) return '-'; var s = Math.round(Math.abs(x)).toLocaleString('en-US'); return x < 0 ? '(' + s + ')' : s; }
+  function pct(v){ if (v === null || v === undefined || v === '') return ''; return (n(v) * 100).toFixed(1) + '%'; }
+
+  // [header line 1, line 2, field, width, kind, group]
+  var C = [
+    ['Job', '#', 'job_no', 36, 'txt', ''],
+    ['Job name', '', 'job_name', 180, 'txt', ''],
+    ['%', 'comp.', 'pct_complete', 32, 'pct', ''],
+    ['Base', 'contract', 'base_contract', 52, 'm', 'Contract'],
+    ['Target', 'fund', 'target_fund', 40, 'm', 'Contract'],
+    ['Change', 'orders', 'approved_cos', 48, 'm', 'Contract'],
+    ['Adjusted', 'contract', 'adj_contract', 54, 'm', 'Contract'],
+    ['Estimated', 'costs', 'est_cost', 54, 'm', 'Contract'],
+    ['Est. gross', 'profit', 'est_gp', 50, 'm', 'Contract'],
+    ['GP', '%', 'est_gp_pct', 32, 'pct', 'Contract'],
+    ['Earned', 'YTD', 'earned_ytd', 52, 'm', 'Current year'],
+    ['Costs', 'to date', 'cost_jtd', 54, 'm', 'Current year'],
+    ['Costs', 'YTD', 'cost_ytd', 52, 'm', 'Current year'],
+    ['Profit', '(loss) YTD', 'profit_ytd', 48, 'm', 'Current year'],
+    ['YTD', 'GP %', 'ytd_gp_pct', 32, 'pct', 'Current year'],
+    ['Billed', 'to date', 'billed_td', 54, 'm', 'Billing'],
+    ['Under', '(over)', 'under_over', 50, 'm', 'Billing'],
+    ['Backlog', '', 'backlog', 54, 'm', 'Billing']
+  ];
+  var x = LM; C.forEach(function(c){ c.x = x; x += c[3]; });
+  var TW = x - LM;
+
+  var T = {};
+  C.forEach(function(c){ if (c[4] === 'm') T[c[2]] = rows.reduce(function(s, r){ return s + n(r[c[2]]); }, 0); });
+  T.pct_complete = T.est_cost ? T.cost_jtd / T.est_cost : 0;
+  T.est_gp_pct = T.adj_contract ? T.est_gp / T.adj_contract : 0;
+  T.ytd_gp_pct = Math.abs(T.earned_ytd) >= 0.5 ? T.profit_ytd / T.earned_ytd : null;
+  T.job_no = ''; T.job_name = 'Totals (' + rows.length + ' jobs)';
+
+  var status = locked ? (per && per.is_baseline ? 'Baseline (imported)' : 'Locked' + (per && per.locked_at ? ' ' + new Date(per.locked_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''))
+                      : 'PRELIMINARY: month open for forecasts';
+  var who = (typeof _currentUser !== 'undefined' && _currentUser) ? (_currentUser.name || _currentUser.full_name || _currentUser.email || '') : '';
+  var stamp = new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+  function pageHead(noTable){
+    sf('bold', 13, BLUE); doc.text('KMI Construction LLC', LM, 30);
+    sf('bold', 11, [0, 0, 0]); doc.text('Work in Progress · ' + _wipLongDate(pe), LM, 45);
+    sf('normal', 8, GRAY); doc.text('Percentage of completion, cost-to-cost', LM, 56);
+    sf('bold', 9, locked ? BLUE : RED); doc.text(status, RM, 30, { align: 'right' });
+    doc.setDrawColor(GOLD[0], GOLD[1], GOLD[2]); doc.setLineWidth(1.5); doc.line(LM, 62, RM, 62);
+    if (noTable) return 80;
+    var y = 74, grp = null, gx = 0;
+    sf('bold', 6.5, GRAY);
+    for (var i = 0; i <= C.length; i++) {
+      var g2 = i < C.length ? C[i][5] : null;
+      if (g2 !== grp) {
+        if (grp) { var gw = C[i - 1].x + C[i - 1][3] - gx; doc.text(grp.toUpperCase(), gx + gw / 2, y, { align: 'center' }); hl(gx + 4, y + 2.5, gx + gw - 4, 0.5, GOLD); }
+        grp = g2; gx = i < C.length ? C[i].x : 0;
+      }
+    }
+    y += 11;
+    sf('bold', 6.6, [60, 60, 60]);
+    C.forEach(function(c){
+      var right = c[4] !== 'txt', tx = right ? c.x + c[3] - 3 : c.x + 2;
+      doc.text(c[0], tx, y, right ? { align: 'right' } : undefined);
+      if (c[1]) doc.text(c[1], tx, y + 7.5, right ? { align: 'right' } : undefined);
+    });
+    hl(LM, y + 11, LM + TW, 0.7, [150, 150, 150]);
+    return y + 19;
+  }
+  function cell(c, r, y, bold){
+    var v = r[c[2]], s = c[4] === 'm' ? money(v) : c[4] === 'pct' ? pct(v) : String(v == null ? '' : v);
+    sf(bold ? 'bold' : 'normal', FS, (c[4] === 'm' && n(v) < -0.5) ? RED : [0, 0, 0]);
+    if (c[4] === 'txt') doc.text(fit(s, c[3] - 4), c.x + 2, y);
+    else doc.text(s, c.x + c[3] - 3, y, { align: 'right' });
+  }
+
+  var y = pageHead(), bottom = PH - 30;
+  rows.forEach(function(r, i){
+    if (y > bottom - RH) { doc.addPage(); y = pageHead(); }
+    if (i % 2 === 1) { doc.setFillColor(BAND[0], BAND[1], BAND[2]); doc.rect(LM, y - RH + 2.6, TW, RH, 'F'); }
+    C.forEach(function(c){ cell(c, r, y, false); });
+    y += RH;
+  });
+  if (y > bottom - 2 * RH) { doc.addPage(); y = pageHead(); }
+  hl(LM, y - RH + 2, LM + TW, 0.9, [90, 90, 90]);
+  C.forEach(function(c){ cell(c, T, y + 1, true); });
+  y += RH + 6;
+
+  // Summary (left) and job notes (right)
+  var under = rows.reduce(function(s, r){ return s + Math.max(n(r.under_over), 0); }, 0);
+  var over = rows.reduce(function(s, r){ return s + Math.min(n(r.under_over), 0); }, 0);
+  var S = [
+    ['Revenue earned YTD', money(T.earned_ytd)],
+    ['Costs YTD', money(T.cost_ytd)],
+    ['Gross profit YTD' + (T.ytd_gp_pct === null ? '' : ' (' + pct(T.ytd_gp_pct) + ')'), money(T.profit_ytd)],
+    ['Costs and earnings in excess of billings (under)', money(under)],
+    ['Billings in excess of costs and earnings (over)', money(over)],
+    ['Net under / (over) billed', money(under + over)],
+    ['Backlog', money(T.backlog)]
+  ];
+  var notes = rows.filter(function(r){ return r.note && String(r.note).trim(); });
+  if (y + 24 + S.length * 11 > bottom) { doc.addPage(); y = pageHead(true); } else { y += 8; }
+  var top = y, SX = LM, SW = 300, NX = LM + 340, NW = RM - NX;
+  sf('bold', 8.5, BLUE); doc.text('Summary', SX, y); hl(SX, y + 3, SX + SW, 0.6, GOLD); y += 14;
+  S.forEach(function(s){ sf('normal', 8, [0, 0, 0]); doc.text(s[0], SX, y); sf('bold', 8, [0, 0, 0]); doc.text(s[1], SX + SW, y, { align: 'right' }); y += 11; });
+  if (notes.length) {
+    var ny = top;
+    sf('bold', 8.5, BLUE); doc.text('Job notes', NX, ny); hl(NX, ny + 3, RM, 0.6, GOLD); ny += 14;
+    notes.forEach(function(r){
+      sf('normal', 7.5, [0, 0, 0]);
+      var lines = doc.splitTextToSize(String(r.note).trim(), NW - 175);
+      if (ny + lines.length * 9.5 > bottom) {
+        doc.addPage(); ny = pageHead(true);
+        sf('bold', 8.5, BLUE); doc.text('Job notes (continued)', NX, ny); hl(NX, ny + 3, RM, 0.6, GOLD); ny += 14;
+      }
+      sf('bold', 7.5, [0, 0, 0]); doc.text(fit(r.job_no + '  ' + (r.job_name || ''), 168), NX, ny);
+      sf('normal', 7.5, [0, 0, 0]); doc.text(lines, NX + 175, ny);
+      ny += lines.length * 9.5 + 2;
+    });
+  }
+
+  var np = doc.getNumberOfPages();
+  for (var p = 1; p <= np; p++) {
+    doc.setPage(p);
+    sf('normal', 6.5, GRAY);
+    doc.text('Generated ' + stamp + (who ? ' by ' + who : '') + ' · kmi.build', LM, PH - 14);
+    doc.text('Page ' + p + ' of ' + np, RM, PH - 14, { align: 'right' });
+  }
+  doc.save('WIP_' + pe + (locked ? '' : '_preliminary') + '.pdf');
 }
 
 // ── CSV export (internal; the formatted Excel exports are B2) ───────────
@@ -62537,7 +62692,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-05-WIPB2A';
+var KMI_BUILD = '2026-11-05-WIPB2B';
 
 var _kmiSessionId = (function(){
   try {
