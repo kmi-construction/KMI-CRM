@@ -21057,12 +21057,22 @@ function renderProjectCorList() {
 // ═══════════════════════════════════════════════════════════════════════
 var QC_CATEGORIES = ['Pre-installation', 'During work', 'Closeout'];
 var QC_RESPONSE_TYPES = [
-  ['default', 'Pass / Fail / N/A'], ['measurement', 'Measurement'], ['text', 'Text'],
+  ['default', 'Answer buttons'], ['measurement', 'Measurement'], ['text', 'Text'],
   ['date', 'Date'], ['photo', 'Photo only'], ['signature', 'Signature']
 ];
 var _qt = { templates: [], versions: [], loaded: false, promise: null, selId: null,
             draft: null, draftVid: null, dirty: false, search: '', showArchived: false };
 var _qtImp = null;
+// QCANS1: Yes / No / N/A is the default; Pass / Fail / N/A stays available per
+// template and per checklist. Stored answers stay pass / fail / na.
+var QC_ANSWER_STYLES = [['yes_no', 'Yes / No / N/A'], ['pass_fail', 'Pass / Fail / N/A']];
+function qcAnswerLabels(style) {
+  return style === 'pass_fail' ? { pass: 'Pass', fail: 'Fail', na: 'N/A' } : { pass: 'Yes', fail: 'No', na: 'N/A' };
+}
+function qtAnsOpts(sel) {
+  sel = sel || 'yes_no';
+  return QC_ANSWER_STYLES.map(function(a){ return '<option value="' + a[0] + '"' + (a[0] === sel ? ' selected' : '') + '>' + a[1] + '</option>'; }).join('');
+}
 
 function qtCanEdit() { return hasFull('qc-templates'); }
 function qtUid() { return _currentUser ? _currentUser.id : null; }
@@ -21226,6 +21236,8 @@ function qtRenderEditor() {
           '<input id="qt-m-spec" class="fs" style="width:100%;box-sizing:border-box;cursor:text" value="' + qtEsc(t.spec_section || '') + '"' + ro + '></div>' +
         '<div style="flex:0 1 160px"><label style="font-size:12px;color:#666;display:block;margin-bottom:4px">Category</label>' +
           '<select id="qt-m-cat" class="fs" style="width:100%"' + ro + '>' + catOpts + '</select></div>' +
+        '<div style="flex:0 1 170px"><label style="font-size:12px;color:#666;display:block;margin-bottom:4px">Answers</label>' +
+          '<select id="qt-m-ans" class="fs" style="width:100%"' + ro + '>' + qtAnsOpts(t.answer_style) + '</select></div>' +
       '</div>' +
       '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px;font-size:13px;color:#555">' +
         '<span>' + verLine + '</span>' +
@@ -21337,7 +21349,7 @@ function qtItemRowHtml(it, i, editing) {
     '<div style="display:flex;flex-direction:column;gap:3px;font-size:12px;color:#444;min-width:150px">' +
       '<label class="qt-chk"><input type="checkbox"' + (it.hold_point ? ' checked' : '') + ' onchange="qtSetItem(' + i + ',\'hold_point\',this.checked)"> Hold point</label>' +
       '<label class="qt-chk"><input type="checkbox"' + (it.photo_required ? ' checked' : '') + ' onchange="qtSetItem(' + i + ',\'photo_required\',this.checked)"> Photo required</label>' +
-      '<label class="qt-chk"><input type="checkbox"' + (it.creates_deficiency ? ' checked' : '') + ' onchange="qtSetItem(' + i + ',\'creates_deficiency\',this.checked)"> Fail creates deficiency</label>' +
+      '<label class="qt-chk"><input type="checkbox"' + (it.creates_deficiency ? ' checked' : '') + ' onchange="qtSetItem(' + i + ',\'creates_deficiency\',this.checked)"> No / Fail creates deficiency</label>' +
     '</div>' +
     '<button class="btn btn-sm" style="color:#A32D2D" title="Remove item" aria-label="Remove item" onclick="qtDelItem(' + i + ')">✕</button>' +
   '</div>';
@@ -21403,7 +21415,7 @@ async function qtSaveMeta() {
   if (!name) { alert('Template name is required.'); return; }
   var upd = { name: name, code: (g('qt-m-code').value || '').trim() || null,
               spec_section: (g('qt-m-spec').value || '').trim() || null,
-              category: g('qt-m-cat').value, updated_by_user_id: qtUid(),
+              category: g('qt-m-cat').value, answer_style: g('qt-m-ans').value, updated_by_user_id: qtUid(),
               base_version_at: t.version_at };
   var r = await supabaseClient.from('kmi_qc_templates').update(upd).eq('id', t.id).select();
   if (r.error) { alert('Could not save: ' + r.error.message); return; }
@@ -21494,6 +21506,7 @@ function qtNewTemplateModal() {
       '<div class="fgr"><label>Code / Doc #</label><input id="qtn-code"></div>' +
       '<div class="fgr"><label>Spec section</label><input id="qtn-spec" placeholder="e.g. 04 20 00"></div>' +
       '<div class="fgr"><label>Category</label><select id="qtn-cat">' + catOpts + '</select></div>' +
+      '<div class="fgr"><label>Answers</label><select id="qtn-ans">' + qtAnsOpts('yes_no') + '</select></div>' +
     '</div>' +
     '<div class="mf">' +
       '<button class="btn" onclick="closeModal()">Cancel</button>' +
@@ -21506,7 +21519,7 @@ async function qtCreateTemplate() {
   if (!name) { alert('Template name is required.'); return; }
   var res = await qtInsertTemplate({
     name: name, code: (g('qtn-code').value || '').trim() || null,
-    spec_section: (g('qtn-spec').value || '').trim() || null, category: g('qtn-cat').value, source: 'kmi'
+    spec_section: (g('qtn-spec').value || '').trim() || null, category: g('qtn-cat').value, answer_style: g('qtn-ans').value, source: 'kmi'
   }, [qtNormItem({ section: 'General' })]);
   if (!res) return;
   closeModal();
@@ -21624,6 +21637,7 @@ function qtParseKmiSheet(ws) {
     else if (/^revision/.test(lab)) meta.revision = val;
     else if (/^spec section/.test(lab)) meta.spec_section = val;
     else if (/^category/.test(lab) && QC_CATEGORIES.indexOf(val) >= 0) meta.category = val;
+    else if (/^answers/.test(lab)) meta.answer_style = /pass/i.test(val) ? 'pass_fail' : 'yes_no';
   }
   var rtMap = { 'default': 'default', 'measurement': 'measurement', 'text': 'text', 'date': 'date', 'photo only': 'photo', 'signature': 'signature' };
   var items = [], skipped = [], yes = function(s){ return /^(y|yes|x|true)$/i.test(String(s).trim()); };
@@ -21705,7 +21719,7 @@ function qtParseGcSheet(ws) {
   if (blankNumbered) skipped.push({ row: null, ref: '', reason: blankNumbered + ' blank numbered rows' });
   if (footer) skipped.push({ row: null, ref: '', reason: footer + ' footer rows (legend, results, follow-up, signature — rebuilt on the PDF)' });
   emptySections.forEach(function(s){ notes.push('"' + s + '" had no items. Project-specific items can be added on each checklist.'); });
-  notes.push('Answer columns ' + respCols.join(' / ') + ' convert to Pass / Fail / N/A.');
+  notes.push('Answer columns ' + respCols.join(' / ') + ' convert to Yes / No / N/A (switch to Pass / Fail / N/A below if you prefer).');
   return { kind: 'gc', meta: meta, items: items, skipped: skipped, notes: notes };
 }
 
@@ -21736,6 +21750,7 @@ function qtImportPreview() {
       '<div class="fgr"><label>Code / Doc #</label><input id="qti-code" value="' + qtEsc([p.meta.code, p.meta.revision ? 'Rev ' + p.meta.revision : ''].filter(Boolean).join(' · ')) + '"></div>' +
       '<div class="fgr"><label>Spec section</label><input id="qti-spec" value="' + qtEsc(p.meta.spec_section || '') + '"></div>' +
       '<div class="fgr"><label>Category</label><select id="qti-cat">' + catOpts + '</select></div>' +
+      '<div class="fgr"><label>Answers</label><select id="qti-ans">' + qtAnsOpts(p.meta.answer_style || 'yes_no') + '</select></div>' +
     '</div>' +
     '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:12px 0">' +
       cfPill('#E4ECF7', '#1D4E89', p.items.length + ' items') +
@@ -21768,7 +21783,7 @@ async function qtImportCommit() {
   if (!items.length) { alert('Select at least one item.'); return; }
   var res = await qtInsertTemplate({
     name: name, code: (g('qti-code').value || '').trim() || null,
-    spec_section: (g('qti-spec').value || '').trim() || null, category: g('qti-cat').value,
+    spec_section: (g('qti-spec').value || '').trim() || null, category: g('qti-cat').value, answer_style: g('qti-ans').value,
     source: 'import', source_file_name: p.fileName || null
   }, items);
   if (!res) return;
@@ -21783,7 +21798,7 @@ function qtDownloadImportTemplate() {
     ['KMI.Build Quality Checklist — Import Template'],
     ['One row per checklist item. Do not rename columns or move the header row (row 11).'],
     ['Template name', ''], ['Template code / Doc #', ''], ['Revision', ''], ['Spec section', ''],
-    ['Category', 'During work'], [], [], [],
+    ['Category', 'During work'], ['Answers', 'Yes / No / N/A'], [], [],
     ['Section', 'Spec Ref', 'Checklist item', 'Hold point (Y)', 'Response type', 'Photo required (Y)', 'Fail creates deficiency (Y)', 'Guidance / acceptance criteria'],
     ['Execution', '3.04', 'Mortar joints fully filled and tooled', '', 'Default', '', 'Y', 'Example row — replace']
   ];
@@ -21793,7 +21808,7 @@ function qtDownloadImportTemplate() {
     ['Header block', 'Template name, code, revision, spec section and category (Pre-installation, During work, Closeout).'],
     ['Item rows', 'One row per item from row 12 down. Rows with a blank "Checklist item" are skipped.'],
     ['Hold point (Y)', 'Must be accepted before work continues. Shown as a yellow HOLD POINT tag. Yellow-filled item cells also import as hold points.'],
-    ['Response type', 'Default = Pass / Fail / N/A. Or Measurement, Text, Date, Photo only, Signature.'],
+    ['Response type', 'Default = the template answer buttons (Answers row: Yes / No / N/A or Pass / Fail / N/A). Or Measurement, Text, Date, Photo only, Signature.'],
     ['Photo required (Y)', 'The item cannot be answered without a photo.'],
     ['Fail creates deficiency (Y)', 'Default Y. A Fail opens a deficiency with an owner and due date.']
   ];
@@ -21982,7 +21997,7 @@ function qcRenderList() {
     var pct = cnt.total ? Math.round(100 * cnt.answered / cnt.total) : 0;
     var bar = '<div style="width:110px;height:7px;border-radius:4px;background:#E7EAEF"><div style="width:' + pct + '%;height:7px;border-radius:4px;background:' +
       (pct === 100 ? '#1E7A46' : '#1D4E89') + '"></div></div><div style="font-size:11px;color:#666;margin-top:3px">' +
-      cnt.answered + ' of ' + cnt.total + (cnt.fail ? ' · <span style="color:#A32D2D;font-weight:600">' + cnt.fail + ' fail</span>' : '') + '</div>';
+      cnt.answered + ' of ' + cnt.total + (cnt.fail ? ' · <span style="color:#A32D2D;font-weight:600">' + cnt.fail + ' ' + qcAnswerLabels(c.answer_style).fail.toLowerCase() + '</span>' : '') + '</div>';
     var src = c.template_id ? ((qtTemplate(c.template_id) || {}).name || 'Template') + ' v' + (c.template_version || '?') :
       (c.source_kind === 'import' ? 'Imported' : 'Blank');
     var due = c.due_date ? ocoFmtDate(c.due_date) : '';
@@ -22068,6 +22083,7 @@ async function qcNewModal() {
       '<div class="fgr"><label>Assigned to</label><select id="qcn-user">' + qcUserOptions(qcDefaultAssignee(_editProjectId), fieldRe) + '</select></div>' +
       '<div class="fgr"><label>Due date</label><input id="qcn-due" type="date"></div>' +
       '<div class="fgr full"><label>Pertinent addenda, RFIs, CNCRs, PCRs</label><input id="qcn-addenda" placeholder="Optional"></div>' +
+      '<div class="fgr"><label>Answers</label><select id="qcn-ans">' + qtAnsOpts('yes_no') + '</select></div>' +
     '</div>' +
     (pubs.length ? '' : '<div style="font-size:12px;color:#8A5A00;margin-top:8px">No published templates yet — publish one under Maintenance › Quality Templates, or start blank.</div>') +
     '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button>' +
@@ -22077,6 +22093,7 @@ async function qcNewModal() {
 function qcNewTplChanged() {
   var t = qtTemplate((g('qcn-tpl') || {}).value), ti = g('qcn-title');
   if (ti && t) ti.value = t.name;
+  var an = g('qcn-ans'); if (an && t) an.value = t.answer_style || 'yes_no';
 }
 
 async function qcCreate() {
@@ -22089,7 +22106,7 @@ async function qcCreate() {
     project_id: Number(_editProjectId), title: title, location: (g('qcn-loc').value || '').trim(),
     header_fields: addenda ? { addenda: addenda } : {},
     source_kind: t ? 'template' : 'blank', template_id: t ? t.id : null, template_version: v ? v.version : null,
-    source_doc_ref: t ? (t.code || null) : null,
+    source_doc_ref: t ? (t.code || null) : null, answer_style: g('qcn-ans').value || 'yes_no',
     assigned_user_id: g('qcn-user').value ? Number(g('qcn-user').value) : null,
     due_date: g('qcn-due').value || null, status: 'not_started',
     created_by_user_id: qcUid(), updated_by_user_id: qcUid()
@@ -22118,7 +22135,7 @@ async function qcCreate() {
 // ── Checklist detail ──────────────────────────────────────────────────
 function qcRenderDetail() {
   var el = g('nprj-quality-section'); if (!el || !_qc.d) return;
-  var D = _qc.d, cl = D.cl, cnt = qcCounts(D.items);
+  var D = _qc.d, cl = D.cl, cnt = qcCounts(D.items), AL = qcAnswerLabels(cl.answer_style);
   var locked = qcLocked(cl), canFill = qcCanFill() && !locked, cust = _qc.customize && qcCanEdit() && !locked;
   var pct = cnt.total ? Math.round(100 * cnt.answered / cnt.total) : 0;
   var tpl = cl.template_id ? qtTemplate(cl.template_id) : null;
@@ -22148,8 +22165,8 @@ function qcRenderDetail() {
     '</div>' +
     '<div class="card" style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;padding:12px 16px">' +
       '<div style="flex:1 1 240px"><div style="height:9px;border-radius:5px;background:#E7EAEF"><div style="width:' + pct + '%;height:9px;border-radius:5px;background:' + (pct === 100 ? '#1E7A46' : '#1D4E89') + '"></div></div></div>' +
-      '<div style="font-size:13px"><b>' + cnt.answered + '</b> of ' + cnt.total + ' answered · <span style="color:#1E6B3E;font-weight:600">' + cnt.pass + ' pass</span> · ' +
-        '<span style="color:#A32D2D;font-weight:600">' + cnt.fail + ' fail</span> · <span style="color:#4A5261">' + cnt.na + ' N/A</span></div>' +
+      '<div style="font-size:13px"><b>' + cnt.answered + '</b> of ' + cnt.total + ' answered · <span style="color:#1E6B3E;font-weight:600">' + cnt.pass + ' ' + AL.pass.toLowerCase() + '</span> · ' +
+        '<span style="color:#A32D2D;font-weight:600">' + cnt.fail + ' ' + AL.fail.toLowerCase() + '</span> · <span style="color:#4A5261">' + cnt.na + ' N/A</span></div>' +
     '</div>' +
     (cust ? '<div class="card" style="background:#F3EEFB;border-color:#DCCFF2;font-size:13px;color:#3F2A6B">Editing items for this project only. Removed items are kept (struck through) so the record stays complete; the KMI template is not changed.</div>' : '') +
     '<div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start">' +
@@ -22184,6 +22201,7 @@ function qcSectionsHtml(D, canFill, cust) {
 }
 
 function qcSeg(it, canFill) {
+  var AL = qcAnswerLabels(_qc.d && _qc.d.cl ? _qc.d.cl.answer_style : 'yes_no');
   var b = function(val, label, on){
     var st = on ? (val === 'pass' ? 'background:#E3F1E8;color:#1E6B3E' : val === 'fail' ? 'background:#B3261E;color:#fff' : 'background:#E7EAEF;color:#2E3644')
                 : 'background:#fff;color:#4A5261';
@@ -22191,7 +22209,7 @@ function qcSeg(it, canFill) {
       (canFill ? 'pointer' : 'default') + ';' + st + '"' + (canFill ? ' onclick="qcAnswer(' + it.id + ',\'' + val + '\')"' : ' disabled') + '>' + label + '</button>';
   };
   return '<div style="display:inline-flex;border:1px solid #C5CBD4;border-radius:8px;overflow:hidden;flex-shrink:0">' +
-    b('pass', 'Pass', it.answer === 'pass').replace('border-left:1px solid #C5CBD4;', '') + b('fail', 'Fail', it.answer === 'fail') + b('na', 'N/A', it.answer === 'na') + '</div>';
+    b('pass', AL.pass, it.answer === 'pass').replace('border-left:1px solid #C5CBD4;', '') + b('fail', AL.fail, it.answer === 'fail') + b('na', AL.na, it.answer === 'na') + '</div>';
 }
 
 function qcItemHtml(D, it, n, canFill, cust) {
@@ -22214,7 +22232,7 @@ function qcItemHtml(D, it, n, canFill, cust) {
       ? 'Tolerance ' + (it.tolerance_min != null ? it.tolerance_min : '—') + ' to ' + (it.tolerance_max != null ? it.tolerance_max : '—') + ' ' + corEsc(it.tolerance_unit || '') : '';
     ctl = '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><input class="fs" style="width:90px;cursor:text" type="number" step="any" aria-label="Measured value" value="' + (it.value_num == null ? '' : it.value_num) + '"' +
       (canFill ? ' onchange="qcMeasure(' + it.id + ',this.value)"' : ' disabled') + '> <span style="font-size:12px;color:#666">' + corEsc(it.tolerance_unit || '') + '</span>' +
-      (it.answer ? qcPill(it.answer === 'pass' ? '#E3F1E8' : it.answer === 'fail' ? '#FBE1DE' : '#E7EAEF', it.answer === 'pass' ? '#1E6B3E' : it.answer === 'fail' ? '#9B1F17' : '#2E3644', it.answer === 'na' ? 'N/A' : it.answer === 'pass' ? 'Pass' : 'Fail') : '') +
+      (it.answer ? qcPill(it.answer === 'pass' ? '#E3F1E8' : it.answer === 'fail' ? '#FBE1DE' : '#E7EAEF', it.answer === 'pass' ? '#1E6B3E' : it.answer === 'fail' ? '#9B1F17' : '#2E3644', it.answer === 'na' ? 'N/A' : qcAnswerLabels(_qc.d.cl.answer_style)[it.answer]) : '') +
       (canFill ? ' <button class="btn btn-sm" onclick="qcAnswer(' + it.id + ',\'na\')">N/A</button>' : '') + '</div>' +
       (tol ? '<div style="font-size:11px;color:#888;margin-top:3px">' + tol + '</div>' : '');
   } else if (it.response_type === 'text' || it.response_type === 'date') {
@@ -22587,6 +22605,7 @@ function qcHeaderModal() {
       '<div class="fgr"><label>Assigned to</label><select id="qch-user">' + qcUserOptions(cl.assigned_user_id, /^(admin|project manager|project coordinator|superintendent|foreman)$/i) + '</select></div>' +
       '<div class="fgr"><label>Due date</label><input id="qch-due" type="date" value="' + (cl.due_date || '') + '"></div>' +
       '<div class="fgr full"><label>Pertinent addenda, RFIs, CNCRs, PCRs</label><input id="qch-addenda" value="' + corEsc(hf.addenda || '') + '"></div>' +
+      '<div class="fgr"><label>Answers</label><select id="qch-ans">' + qtAnsOpts(cl.answer_style) + '</select></div>' +
     '</div>' +
     '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="qcHeaderSave()">Save</button></div>');
 }
@@ -22596,7 +22615,8 @@ async function qcHeaderSave() {
   if (add) hf.addenda = add; else delete hf.addenda;
   var row = await qcUpdate('kmi_qc_checklists', _qc.d.cl, {
     title: t, location: (g('qch-loc').value || '').trim(), header_fields: hf,
-    assigned_user_id: g('qch-user').value ? Number(g('qch-user').value) : null, due_date: g('qch-due').value || null
+    assigned_user_id: g('qch-user').value ? Number(g('qch-user').value) : null, due_date: g('qch-due').value || null,
+    answer_style: g('qch-ans').value || 'yes_no'
   });
   if (!row) return;
   _qc.d.cl = row; closeModal(); qcRenderDetail();
@@ -65248,7 +65268,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-06-QC1b2';
+var KMI_BUILD = '2026-11-06-QCANS1';
 
 var _kmiSessionId = (function(){
   try {
