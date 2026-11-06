@@ -22143,6 +22143,7 @@ function qcRenderDetail() {
         (qcCanEdit() && !locked ? '<button class="btn btn-sm' + (_qc.customize ? ' btn-p' : '') + '" onclick="_qc.customize=!_qc.customize;qcRenderDetail()">' + (_qc.customize ? 'Done editing items' : 'Edit items') + '</button>' : '') +
         (qcCanEdit() && cl.status === 'complete' ? '<button class="btn btn-sm" onclick="qcReopen()">Reopen</button>' : '') +
         (qcCanEdit() && cl.status !== 'void' && cl.status !== 'complete' ? '<button class="btn btn-sm" onclick="qcVoid()">Void</button>' : '') +
+        (qcCanDelete(cl) ? '<button class="btn btn-sm" style="color:#A32D2D" onclick="qcDelete()">Delete</button>' : '') +   // QC1b2
       '</div>' +
     '</div>' +
     '<div class="card" style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;padding:12px 16px">' +
@@ -22539,6 +22540,41 @@ async function qcVoid() {
   var row = await qcUpdate('kmi_qc_checklists', _qc.d.cl, { status: 'void', void_reason: String(why).trim() || null });
   if (!row) return;
   _qc.d.cl = row; qcRenderDetail();
+}
+
+// QC1b2: delete a checklist. Server rule (kmi_qc_delete_checklist): Admin can
+// delete any checklist; PM/PC only one that is not complete and was never
+// distributed. Removes items, photos, deficiencies and distribution/filing
+// rows; photo and PDF files are then removed from storage. A PDF already
+// filed in SharePoint stays there.
+function qcCanDelete(cl) {
+  if (!qcCanEdit() || !cl) return false;
+  if (/^admin$/i.test(qcRole())) return true;
+  return /^(project manager|project coordinator)$/i.test(qcRole()) && cl.status !== 'complete';
+}
+async function qcDelete() {
+  var D = _qc.d; if (!D) return;
+  var cl = D.cl, num = qcNum(cl.qc_number);
+  if (!qcCanDelete(cl)) { alert('Only an Admin can delete a completed checklist. Void it instead.'); return; }
+  var nI = D.items.length, nP = D.photos.length, nD = D.defs.length;
+  var what = nI + ' item' + (nI === 1 ? '' : 's') + ', ' + nP + ' photo' + (nP === 1 ? '' : 's') + ' and ' + nD + ' deficienc' + (nD === 1 ? 'y' : 'ies');
+  if (cl.status === 'complete') {
+    var typed = prompt(num + ' is complete. Deleting it permanently removes ' + what + '. Any PDF already filed in SharePoint stays there.\n\nType ' + num + ' to confirm:');
+    if (typed == null) return;
+    if (String(typed).trim().toUpperCase() !== num) { alert('Not deleted — the number did not match.'); return; }
+  } else if (!confirm('Delete ' + num + ' “' + cl.title + '”?\n\nThis permanently removes ' + what + '. It cannot be undone. (Void keeps the record instead.)')) {
+    return;
+  }
+  var r = await supabaseClient.rpc('kmi_qc_delete_checklist', { p_id: cl.id });
+  if (r.error) { alert('Could not delete: ' + r.error.message); return; }
+  var paths = (r.data && r.data.photo_paths) || [];
+  try {
+    var pdfs = await supabaseClient.storage.from('kmi-quality').list('qc-pdfs/' + cl.id);
+    (pdfs.data || []).forEach(function(f){ if (f && f.name) paths.push('qc-pdfs/' + cl.id + '/' + f.name); });
+    if (paths.length) await supabaseClient.storage.from('kmi-quality').remove(paths);
+  } catch (e) { console.warn('[qc] storage cleanup', e); }
+  showToast(num + ' deleted');
+  qcBack();
 }
 
 function qcHeaderModal() {
@@ -65212,7 +65248,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-06-QC1b';
+var KMI_BUILD = '2026-11-06-QC1b2';
 
 var _kmiSessionId = (function(){
   try {
