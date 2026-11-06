@@ -21903,6 +21903,7 @@ async function qcLoadDetail(id) {
   var df = await supabaseClient.from('kmi_qc_deficiencies').select('*').eq('checklist_id', id).order('def_number');
   if (df.error) throw new Error(df.error.message);
   _qc.d = { cl: c.data, items: it.data || [], photos: ph.data || [], defs: df.data || [] };
+  await qcLoadSendInfo(_qc.d);   // QC1c
   await qcSignPhotos(_qc.d.photos);
   return _qc.d;
 }
@@ -22171,7 +22172,7 @@ function qcRenderDetail() {
     (cust ? '<div class="card" style="background:#F3EEFB;border-color:#DCCFF2;font-size:13px;color:#3F2A6B">Editing items for this project only. Removed items are kept (struck through) so the record stays complete; the KMI template is not changed.</div>' : '') +
     '<div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start">' +
       '<div style="flex:999 1 600px;min-width:0">' + qcSectionsHtml(D, canFill, cust) + '</div>' +
-      '<div style="flex:1 1 280px;min-width:0">' + qcSidePanelHtml(D) + '</div>' +
+      '<div style="flex:1 1 280px;min-width:0">' + qcSidePanelHtml(D) + qcSendPanelHtml(D) + '</div>' +   // QC1c
     '</div>';
   el.innerHTML = html;
 }
@@ -22289,7 +22290,7 @@ function qcSidePanelHtml(D) {
   return '<div class="card"><div style="font-weight:600;margin-bottom:6px">Sign-offs</div>' +
       sig('KMI Superintendent', cl.super_signed_by_user_id, cl.super_signed_at, qcCanSignSuper(), 'super') +
       sig('KMI Project Manager', cl.pm_signed_by_user_id, cl.pm_signed_at, qcCanSignPm(), 'pm') +
-      (cl.status === 'complete' ? '<div style="font-size:12px;color:#1E6B3E;margin-top:8px">Completed ' + ocoFmtDate(cl.completed_on) + '. PDF and distribution arrive with QC1c.</div>' : '') +
+      (cl.status === 'complete' ? '<div style="font-size:12px;color:#1E6B3E;margin-top:8px">Completed ' + ocoFmtDate(cl.completed_on) + '.</div>' : '') +
     '</div>' +
     '<div class="card"><div style="font-weight:600;margin-bottom:6px">Deficiencies from this checklist</div>' +
       (defs.length ? defs.map(function(d){
@@ -22441,6 +22442,7 @@ async function qcEnsureDeficiency(it) {
   }).select();
   if (r.error) { alert('The item is marked Fail, but the deficiency could not be created: ' + r.error.message); return; }
   _qc.d.defs.push(r.data[0]);
+  if (it.hold_point) qcNotifyHoldPoint(it, r.data[0]);   // QC1c
   showToast(qcDefNum(r.data[0].def_number) + ' opened' + (it.hold_point ? ' — hold point failed' : ''), it.hold_point ? 'error' : 'info');
 }
 
@@ -22666,6 +22668,486 @@ async function qcInsertItem(section, text, after) {
   _qc.d.items.sort(function(a, b){ return a.sort_order - b.sort_order; });
   await qcSyncStatus();
   qcRenderDetail();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// QC1c: Quality checklist PDF, distribution, SharePoint filing, hold-point
+// notice. PDF follows the approved KMI layout: logo header, info block,
+// answer summary, items with the app's answer buttons, HOLD POINT tags,
+// results, follow-up actions (deficiencies), Superintendent + PM sign-off,
+// distribution/filing line, photo pages. Distribution emails the PDF from
+// notifications@kmi.build with reply-to the sender (flowType qc_distribution).
+// A complete checklist's PDF is uploaded to kmi-quality/qc-pdfs/<id>/ and
+// handed to the filing queue (kmi_qc_filing_pdf_ready) -> cor-filing files it
+// in "15 - Quality Control". A failed hold point emails the project PM(s).
+// ═══════════════════════════════════════════════════════════════════════
+
+// WinAnsi-safe text for jsPDF's built-in Helvetica.
+function qcPdfTxt(s) {
+  return String(s == null ? '' : s)
+    .replace(/[‘’‚′]/g, "'").replace(/[“”„″]/g, '"')
+    .replace(/…/g, '...').replace(/[‐‑‒]/g, '-').replace(/ /g, ' ')
+    .replace(/[^\x09\x0A\x0D\x20-\x7E -ÿ–—•€]/g, '?');
+}
+function qcCleanName(s) {
+  return String(s == null ? '' : s).replace(/\s*&\s*/g, ' and ').replace(/#/g, '')
+    .replace(/["*:<>?\/\\|%~{}\u0000-\u001f]/g, '-').replace(/\s+/g, ' ').trim()
+    .replace(/^[\s.\-]+/, '').replace(/[\s.\-]+$/, '');
+}
+function qcWordCut(s, max) {
+  if (s.length <= max) return s;
+  var cut = s.slice(0, max + 1), sp = cut.lastIndexOf(' ');
+  return qcCleanName(sp > 20 ? cut.slice(0, sp) : s.slice(0, max));
+}
+// Mirrors qcFileName() in the cor-filing Edge Function.
+function qcPdfFileName(cl) {
+  var t = qcWordCut(qcCleanName(cl.file_title || cl.title || ''), 60);
+  var loc = qcWordCut(qcCleanName(cl.location || ''), 50);
+  var d = /^\d{4}-\d{2}-\d{2}/.test(String(cl.completed_on || '')) ? String(cl.completed_on).slice(0, 10) : qcToday();
+  return [qcNum(cl.qc_number), t, loc, d].filter(Boolean).join(' - ') + '.pdf';
+}
+function qcHex(h) { h = h.replace('#', ''); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
+
+async function qcPhotoData(path) {
+  try {
+    await qcSignPhotos([{ storage_path: path }]);
+    var u = _qc.urls[path]; if (!u) return null;
+    var blob = await (await fetch(u)).blob();
+    var url = URL.createObjectURL(blob);
+    var img = await new Promise(function(res, rej){ var im = new Image(); im.onload = function(){ res(im); }; im.onerror = rej; im.src = url; });
+    var max = 1200, s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    var cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(img.naturalWidth * s)); cv.height = Math.max(1, Math.round(img.naturalHeight * s));
+    var cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(img, 0, 0, cv.width, cv.height);
+    URL.revokeObjectURL(url);
+    return { data: cv.toDataURL('image/jpeg', 0.8), w: cv.width, h: cv.height };
+  } catch (e) { console.warn('[qc] photo for PDF', path, e); return null; }
+}
+
+async function qcBuildPdf(D, opts) {
+  opts = opts || {};
+  if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('PDF library did not load. Refresh and try again.');
+  var doc = new window.jspdf.jsPDF({ unit: 'pt', format: 'letter' });
+  var PW = 612, PH = 792, LM = 36, RM = 36, W = PW - LM - RM, BOT = PH - 40;
+  var cl = D.cl, AL = qcAnswerLabels(cl.answer_style), p = getProj(cl.project_id) || getProj(Number(cl.project_id)) || {};
+  var items = qcActive(D.items).slice().sort(function(a, b){ return a.sort_order - b.sort_order; });
+  var cnt = qcCounts(D.items), T = qcPdfTxt;
+  var navy = qcHex('#1A2433'), grey = qcHex('#5B6474'), line = qcHex('#C5CBD4');
+  var fill = function(h){ var c = qcHex(h); doc.setFillColor(c[0], c[1], c[2]); };
+  var ink = function(h){ var c = qcHex(h); doc.setTextColor(c[0], c[1], c[2]); };
+  var stroke = function(h){ var c = qcHex(h); doc.setDrawColor(c[0], c[1], c[2]); };
+  var font = function(sz, bold){ doc.setFont('helvetica', bold ? 'bold' : 'normal'); doc.setFontSize(sz); };
+  var y = 36;
+
+  function header(sub) {
+    var lh = 34;
+    if (typeof KMI_LOGO_IMG === 'string' && KMI_LOGO_IMG) { try { doc.addImage(KMI_LOGO_IMG, 'JPEG', LM, y, Math.round(lh * 2.21), lh); } catch (e) {} }
+    var tx = LM + Math.round(lh * 2.21) + 10;
+    font(12, true); ink('#1A1F2B'); doc.text('KMI CONSTRUCTION LLC', tx, y + 16);
+    font(7.5); ink('#4A5261'); doc.text(T(sub || '2880 S. 171st St., New Berlin, WI 53151  ·  262-548-0632'), tx, y + 28);
+    font(11.5, true); ink('#1A1F2B'); doc.text(sub ? 'Photos' : 'Quality Control Checklist', PW - RM, y + 16, { align: 'right' });
+    font(8); ink('#4A5261'); doc.text(qcNum(cl.qc_number), PW - RM, y + 28, { align: 'right' });
+    y += lh + 6;
+    doc.setLineWidth(2); doc.setDrawColor(navy[0], navy[1], navy[2]); doc.line(LM, y, PW - RM, y);
+    y += 10;
+  }
+  function ensure(h, onBreak) {
+    if (y + h <= BOT) return;
+    doc.addPage(); y = 36;
+    font(8); ink('#5B6474');
+    doc.text(T(qcNum(cl.qc_number) + ' · ' + cl.title + ' (continued)'), LM, y + 8); y += 18;
+    if (onBreak) onBreak();
+  }
+
+  header();
+  if (cl.status !== 'complete') {
+    fill('#FCEFD9'); doc.rect(LM, y, W, 18, 'F'); font(8.5, true); ink('#7A4A00');
+    doc.text(cl.status === 'void' ? 'VOID - this checklist was voided' : 'DRAFT - not complete or not yet signed off', LM + 8, y + 12); y += 24;
+  }
+
+  // Info block
+  var asg = (db.users || []).find(function(u){ return String(u.id) === String(cl.assigned_user_id); }) || {};
+  var hf = cl.header_fields || {};
+  var tpl = cl.template_id && typeof qtTemplate === 'function' ? qtTemplate(cl.template_id) : null;
+  var info = [
+    ['Project', ((p.number || '') + ' – ' + (p.name || '')).replace(/^ – /, ''), 'Date completed', cl.completed_on ? cl.completed_on : '—'],
+    ['Checklist', cl.title, 'Contractor', 'KMI Construction LLC'],
+    ['Location / area', cl.location || '—', 'Reviewer', (qcUserName(cl.assigned_user_id) || '—') + (asg.role ? ', ' + asg.role : '')]
+  ];
+  var c1 = 78, c2 = W / 2 - c1, c3 = 78, c4 = W / 2 - c3;
+  stroke('#C5CBD4'); doc.setLineWidth(0.6);
+  info.forEach(function(r){
+    font(8.5); var l2 = doc.splitTextToSize(T(r[1]), c2 - 10), l4 = doc.splitTextToSize(T(r[3]), c4 - 10);
+    var h = Math.max(l2.length, l4.length) * 10.5 + 8;
+    fill('#F1F3F6'); doc.rect(LM, y, c1, h, 'F'); doc.rect(LM + c1 + c2, y, c3, h, 'F');
+    doc.rect(LM, y, c1, h); doc.rect(LM + c1, y, c2, h); doc.rect(LM + c1 + c2, y, c3, h); doc.rect(LM + c1 + c2 + c3, y, c4, h);
+    font(7.5, true); ink('#1A1F2B'); doc.text(r[0], LM + 5, y + 11); doc.text(r[2], LM + c1 + c2 + 5, y + 11);
+    font(8.5); doc.text(l2, LM + c1 + 5, y + 11); doc.text(l4, LM + c1 + c2 + c3 + 5, y + 11);
+    y += h;
+  });
+  font(8.5); var la = doc.splitTextToSize(T(hf.addenda || '—'), W - 120 - 10); var ha = Math.max(la.length * 10.5 + 8, 28);
+  fill('#F1F3F6'); doc.rect(LM, y, 120, ha, 'F'); doc.rect(LM, y, 120, ha); doc.rect(LM + 120, y, W - 120, ha);
+  font(7.5, true); doc.text('Pertinent addenda, RFIs, CNCRs, PCRs', LM + 5, y + 11, { maxWidth: 112 });
+  font(8.5); doc.text(la, LM + 125, y + 11); y += ha + 10;
+
+  // Summary chips
+  var chip = function(x, label, bg, fg){
+    font(8, true); var w = doc.getTextWidth(label) + 14;
+    fill(bg); stroke('#C5CBD4'); doc.roundedRect(x, y, w, 15, 3, 3, 'FD'); ink(fg); doc.text(label, x + 7, y + 10.5); return x + w + 6;
+  };
+  var cx = LM;
+  cx = chip(cx, cnt.pass + ' ' + AL.pass, '#E3F1E8', '#1E6B3E');
+  cx = chip(cx, cnt.fail + ' ' + AL.fail, '#B3261E', '#FFFFFF');
+  cx = chip(cx, cnt.na + ' ' + AL.na, '#E7EAEF', '#2E3644');
+  font(7.5); ink('#5B6474');
+  var srcTxt = tpl ? 'Template: ' + tpl.name + ' v' + (cl.template_version || '') + (cl.source_doc_ref ? ' · ' + cl.source_doc_ref : '')
+    : (cl.source_kind === 'import' ? 'Imported from ' + (cl.source_file_name || 'Excel') : '');
+  doc.text(T(srcTxt), PW - RM, y + 10.5, { align: 'right', maxWidth: W - (cx - LM) - 10 });
+  y += 24;
+
+  // Items table
+  var cN = 40, cR = 128, cI = W - cN - cR;
+  function tableHead() {
+    fill('#1A2433'); doc.rect(LM, y, W, 16, 'F'); font(7.5, true); ink('#FFFFFF');
+    doc.text('#', LM + 5, y + 11); doc.text('ITEM / OBSERVATION', LM + cN + 5, y + 11); doc.text('RESULT', PW - RM - 5, y + 11, { align: 'right' });
+    y += 16;
+  }
+  function seg(xr, yc, ans) {
+    var labs = [['pass', AL.pass], ['fail', AL.fail], ['na', AL.na]], bw = 37, bh = 14, x0 = xr - bw * 3;
+    labs.forEach(function(l, i){
+      var on = ans === l[0], x = x0 + i * bw;
+      if (on) { fill(l[0] === 'pass' ? '#E3F1E8' : l[0] === 'fail' ? '#B3261E' : '#E7EAEF'); doc.rect(x, yc - bh / 2, bw, bh, 'F'); }
+      font(7, true); ink(on ? (l[0] === 'pass' ? '#1E6B3E' : l[0] === 'fail' ? '#FFFFFF' : '#2E3644') : '#8A93A2');
+      doc.text(l[1], x + bw / 2, yc + 2.5, { align: 'center' });
+      if (i) { stroke('#C5CBD4'); doc.setLineWidth(0.6); doc.line(x, yc - bh / 2, x, yc + bh / 2); }
+    });
+    stroke('#C5CBD4'); doc.setLineWidth(0.6); doc.roundedRect(x0, yc - bh / 2, bw * 3, bh, 3, 3, 'S');
+  }
+  tableHead();
+  var lastSec = null, n = 0;
+  items.forEach(function(it){
+    if (it.section !== lastSec) {
+      lastSec = it.section;
+      var secCount = items.filter(function(x){ return x.section === it.section; }).length;
+      ensure(18 + 26, tableHead);
+      fill('#F1F3F6'); doc.rect(LM, y, W, 17, 'F'); stroke('#C5CBD4'); doc.setLineWidth(0.6); doc.line(LM, y, PW - RM, y);
+      font(8.5, true); ink('#1A1F2B'); doc.text(T(it.section || 'Checklist'), LM + 5, y + 12);
+      font(7.5); ink('#5B6474'); doc.text(secCount + ' item' + (secCount === 1 ? '' : 's'), PW - RM - 5, y + 12, { align: 'right' });
+      y += 17;
+    }
+    n++;
+    font(8.5); var tl = doc.splitTextToSize(T(it.item_text), cI - 10);
+    var extra = [];
+    if (it.response_type === 'measurement' && it.value_num != null) extra.push('Measured: ' + it.value_num + ' ' + (it.tolerance_unit || ''));
+    if (it.response_type === 'text' && it.value_text) extra.push(it.value_text);
+    if (it.response_type === 'date' && it.value_date) extra.push('Date: ' + it.value_date);
+    if (it.response_type === 'signature' && it.value_text) extra.push('Signed: ' + it.value_text);
+    if (it.note) extra.push(it.note);
+    var phN = D.photos.filter(function(ph){ return String(ph.item_id) === String(it.id) && !ph.deficiency_id; }).length;
+    if (phN && opts.photos !== false) extra.push(phN + ' photo' + (phN === 1 ? '' : 's') + ' (see photo pages)');
+    font(7.5); var el = extra.length ? doc.splitTextToSize(T(extra.join(' — ')), cI - 10) : [];
+    font(8.5);
+    var tagW = it.hold_point ? 52 : 0, lastW = doc.getTextWidth(tl[tl.length - 1] || '');
+    var tagInline = it.hold_point && lastW + 6 + tagW <= cI - 10;
+    var h = Math.max(24, 8 + tl.length * 10.5 + (it.hold_point && !tagInline ? 11 : 0) + el.length * 9.5 + 4);
+    ensure(h, tableHead);
+    if (it.answer === 'fail') { fill('#FDF3F2'); doc.rect(LM, y, W, h, 'F'); }
+    stroke('#E1E5EA'); doc.setLineWidth(0.6); doc.line(LM, y + h, PW - RM, y + h);
+    font(8.5, true); ink('#1A1F2B'); doc.text(String(n), LM + 5, y + 12);
+    font(7); ink('#5B6474'); doc.text(T(it.spec_ref || ''), LM + 5, y + 21, { maxWidth: cN - 6 });
+    font(8.5); ink('#1A1F2B'); doc.text(tl, LM + cN + 5, y + 12);
+    var ty = y + 12 + (tl.length - 1) * 10.5;
+    if (it.hold_point) {
+      var tx = tagInline ? LM + cN + 5 + lastW + 6 : LM + cN + 5; if (!tagInline) ty += 11;
+      fill('#FFF59E'); doc.roundedRect(tx, ty - 7.5, tagW, 10, 4, 4, 'F'); font(6, true); ink('#4D4400'); doc.text('HOLD POINT', tx + tagW / 2, ty, { align: 'center' });
+    }
+    if (el.length) { font(7.5); ink('#5B6474'); doc.text(el, LM + cN + 5, ty + 10); }
+    seg(PW - RM - 5, y + h / 2, it.answer);
+    y += h;
+  });
+  y += 6;
+  ensure(30);
+  font(7); ink('#5B6474');
+  doc.text(T('N/A = not applicable, or not yet reviewed (timing or prior acceptance)  ·  HOLD POINT = must be accepted before work continues  ·  A ' +
+    AL.fail + ' opens a deficiency, listed under Follow-up actions.'), LM, y + 6, { maxWidth: W });
+  y += 22;
+
+  // Results
+  var holds = items.filter(function(i){ return i.hold_point; }), holdsOk = holds.filter(function(i){ return i.answer === 'pass' || i.answer === 'na'; }).length;
+  ensure(64);
+  font(9.5, true); ink('#1A1F2B'); doc.text('CHECKLIST RESULTS', LM, y + 8); y += 14;
+  var resTxt, resCol;
+  if (cl.status === 'complete') { resTxt = cl.result === 'failed' ? 'FAILED — ' + cnt.fail + ' item' + (cnt.fail === 1 ? '' : 's') : 'PASSED'; resCol = cl.result === 'failed' ? '#B3261E' : '#1E6B3E'; }
+  else { resTxt = 'NOT COMPLETE — ' + cnt.answered + ' of ' + cnt.total + ' answered'; resCol = '#7A4A00'; }
+  stroke('#C5CBD4'); doc.setLineWidth(0.6); doc.rect(LM, y, W, 22);
+  font(10.5, true); ink(resCol); doc.text(T(resTxt), LM + 8, y + 15);
+  font(8.5); ink('#1A1F2B');
+  doc.text(T(cnt.total + ' items · ' + cnt.pass + ' ' + AL.pass + ' · ' + cnt.fail + ' ' + AL.fail + ' · ' + cnt.na + ' N/A' +
+    (holds.length ? ' · ' + holdsOk + ' of ' + holds.length + ' hold points accepted' : '')), PW - RM - 8, y + 15, { align: 'right' });
+  y += 34;
+
+  // Follow-up actions
+  var defs = D.defs.filter(function(d){ return d.status !== 'void'; });
+  var fc = [22, W - 22 - 70 - 92 - 62 - 76, 70, 92, 62, 76];
+  ensure(40);
+  font(9.5, true); ink('#1A1F2B'); doc.text('FOLLOW-UP ACTIONS', LM, y + 8); y += 14;
+  var fx = function(i){ var x = LM; for (var k = 0; k < i; k++) x += fc[k]; return x; };
+  fill('#F1F3F6'); doc.rect(LM, y, W, 15, 'F'); stroke('#C5CBD4'); doc.rect(LM, y, W, 15);
+  font(7.5, true); ['#', 'Corrective action', 'Ref', 'Responsible', 'Due', 'Date completed'].forEach(function(h, i){ doc.text(h, fx(i) + 4, y + 10.5); });
+  y += 15;
+  if (!defs.length) { font(8.5); ink('#5B6474'); doc.rect(LM, y, W, 18); doc.text('None.', LM + 4, y + 12); y += 18; }
+  defs.forEach(function(d, i){
+    var it = D.items.filter(function(x){ return String(x.id) === String(d.item_id); })[0];
+    font(8.5); var dl = doc.splitTextToSize(T(d.title + (d.description ? ' — ' + d.description : '') + (d.close_note ? ' (closed: ' + d.close_note + ')' : '')), fc[1] - 8);
+    var h = Math.max(18, dl.length * 10.5 + 8);
+    ensure(h); stroke('#C5CBD4'); doc.rect(LM, y, W, h); ink('#1A1F2B');
+    doc.text(String(i + 1), fx(0) + 4, y + 12); doc.text(dl, fx(1) + 4, y + 12);
+    doc.text(T((it ? (it.spec_ref ? it.spec_ref + ' · ' : '') : '') + qcDefNum(d.def_number)), fx(2) + 4, y + 12, { maxWidth: fc[2] - 6 });
+    doc.text(T(qcUserName(d.responsible_user_id) || d.responsible_name || '—'), fx(3) + 4, y + 12, { maxWidth: fc[3] - 6 });
+    doc.text(d.due_date || '—', fx(4) + 4, y + 12);
+    if (d.status === 'closed') doc.text(String(d.closed_at || '').slice(0, 10), fx(5) + 4, y + 12);
+    else { ink('#B3261E'); doc.text('Open', fx(5) + 4, y + 12); }
+    y += h;
+  });
+  y += 14;
+
+  // Sign-off
+  ensure(86);
+  font(9.5, true); ink('#1A1F2B'); doc.text('SIGN-OFF', LM, y + 8); y += 14;
+  [['KMI Superintendent', cl.super_signed_by_user_id, cl.super_signed_at, cl.super_signature],
+   ['KMI Project Manager', cl.pm_signed_by_user_id, cl.pm_signed_at, cl.pm_signature]].forEach(function(s, i){
+    var x = LM + i * (W / 2), bw = W / 2;
+    stroke('#C5CBD4'); doc.rect(x, y, bw, 62);
+    font(8); ink('#5B6474'); doc.text(s[0], x + 8, y + 12);
+    if (s[2]) {
+      var img = s[3] && s[3].image && s[3].image.data;
+      if (img) { try { doc.addImage(img, img.indexOf('image/png') > 0 ? 'PNG' : 'JPEG', x + 8, y + 16, 110, 28, undefined, 'FAST'); } catch (e) { img = null; } }
+      if (!img) { doc.setFont('times', 'italic'); doc.setFontSize(15); ink('#1D4E89'); doc.text(T(qcUserName(s[1]) || (s[3] && s[3].name) || ''), x + 8, y + 36); }
+      font(8.5, true); ink('#1A1F2B'); doc.text(T(qcUserName(s[1]) || (s[3] && s[3].name) || ''), x + 8, y + 50);
+      font(7.5); ink('#5B6474'); doc.text('Signed electronically ' + qcFmtTs(s[2]), x + 8, y + 58);
+    } else { font(8.5); ink('#7A4A00'); doc.text('Not signed', x + 8, y + 36); }
+  });
+  y += 72;
+  if (opts.distLine) { ensure(24); font(7.5); ink('#5B6474'); var dlz = doc.splitTextToSize(T(opts.distLine), W); doc.text(dlz, LM, y + 6); y += dlz.length * 9 + 6; }
+
+  // Photo pages
+  if (opts.photos !== false) {
+    var phs = D.photos.slice();
+    if (phs.length) {
+      var data = [];
+      for (var k = 0; k < phs.length; k++) { if (opts.onProgress) opts.onProgress('Adding photos ' + (k + 1) + ' of ' + phs.length + '…'); data.push(await qcPhotoData(phs[k].storage_path)); }
+      var idxOf = {}; var nn = 0; items.forEach(function(it){ nn++; idxOf[it.id] = nn; });
+      var per = 0, gx = (W - 14) / 2, gh = 250;
+      phs.forEach(function(ph, k){
+        if (per % 4 === 0) { doc.addPage(); y = 36; header(qcNum(cl.qc_number) + ' · ' + cl.title + (cl.location ? ' · ' + cl.location : '')); }
+        var col = per % 2, row = Math.floor((per % 4) / 2), x = LM + col * (gx + 14), yy = y + row * (gh + 48);
+        var d = data[k];
+        fill('#EEF0F3'); doc.rect(x, yy, gx, gh, 'F');
+        if (d) { var sc = Math.min(gx / d.w, gh / d.h), iw = d.w * sc, ih = d.h * sc; try { doc.addImage(d.data, 'JPEG', x + (gx - iw) / 2, yy + (gh - ih) / 2, iw, ih, undefined, 'FAST'); } catch (e) {} }
+        else { font(8); ink('#5B6474'); doc.text('Photo unavailable', x + gx / 2, yy + gh / 2, { align: 'center' }); }
+        var it = D.items.filter(function(i){ return String(i.id) === String(ph.item_id); })[0];
+        var df = ph.deficiency_id ? D.defs.filter(function(dd){ return String(dd.id) === String(ph.deficiency_id); })[0] : null;
+        var cap = it ? ('Item ' + (idxOf[it.id] || '') + (it.spec_ref ? ' (' + it.spec_ref + ')' : '') + ' · ' + it.item_text)
+                     : (df ? 'Re-inspection · ' + qcDefNum(df.def_number) + ' · ' + df.title : 'Photo');
+        font(8, true); ink('#1A1F2B'); doc.text(doc.splitTextToSize(T(cap), gx).slice(0, 2), x, yy + gh + 11);
+        font(7.5); ink('#5B6474'); doc.text(T((qcUserName(ph.uploaded_by_user_id) || '') + ' · ' + qcFmtTs(ph.taken_at || ph.created_at)), x, yy + gh + 32);
+        per++;
+      });
+    }
+  }
+
+  // Footer on every page
+  var pages = doc.getNumberOfPages();
+  for (var pg = 1; pg <= pages; pg++) {
+    doc.setPage(pg); font(7); ink('#6B7482');
+    doc.text(T(qcNum(cl.qc_number) + ' · ' + (p.number || '') + ' ' + (p.name || '') + ' · Generated by KMI.Build'), LM, PH - 20);
+    doc.text('Page ' + pg + ' of ' + pages, PW - RM, PH - 20, { align: 'right' });
+  }
+  return doc;
+}
+
+async function qcPreviewPdf() {
+  if (!_qc.d) return;
+  var w = window.open('', '_blank');
+  try {
+    showToast('Building PDF…', 'info');
+    var doc = await qcBuildPdf(_qc.d, {});
+    var url = URL.createObjectURL(doc.output('blob'));
+    if (w) w.location.href = url; else window.open(url, '_blank');
+  } catch (e) { if (w) w.close(); alert('Could not build the PDF: ' + (e.message || e)); }
+}
+
+// ── Filing + distribution info on the checklist ───────────────────────
+async function qcLoadSendInfo(D) {
+  D.filing = null; D.sends = [];
+  try {
+    var f = await supabaseClient.from('kmi_qc_filing').select('*').eq('checklist_id', D.cl.id).maybeSingle();
+    D.filing = f.data || null;
+    var s = await supabaseClient.from('kmi_qc_distribution').select('*').eq('checklist_id', D.cl.id).order('sent_at', { ascending: false });
+    D.sends = s.data || [];
+  } catch (e) { console.warn('[qc] send info', e); }
+}
+
+function qcSendPanelHtml(D) {
+  var f = D.filing, html = '<div class="card"><div style="font-weight:600;margin-bottom:6px">PDF &amp; distribution</div>';
+  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"><button class="btn btn-sm" onclick="qcPreviewPdf()">Preview PDF</button>' +
+    (qcCanEdit() && D.cl.status !== 'void' ? '<button class="btn btn-p btn-sm" onclick="qcDistributeModal()">Distribute…</button>' : '') + '</div>';
+  if (f) {
+    var st = f.state === 'filed' ? qcPill('#E3F1E8', '#1E6B3E', 'Filed') : f.state === 'failed' ? qcPill('#FBE1DE', '#9B1F17', 'Filing failed')
+      : qcPill('#E4ECF7', '#1D4E89', f.state === 'waiting_pdf' ? 'Waiting for PDF' : 'Filing…');
+    html += '<div style="font-size:12px;padding:6px 0;border-top:1px solid #f0f0f0">SharePoint ' + st +
+      (f.sp_web_url ? ' <a href="' + corEsc(f.sp_web_url) + '" target="_blank" rel="noopener">open</a>' : '') +
+      (f.sp_file_name ? '<div style="color:#666;margin-top:2px">15 - Quality Control / ' + corEsc(f.sp_file_name) + '</div>' : '') +
+      (f.last_error ? '<div style="color:#A32D2D;margin-top:2px">' + corEsc(f.last_error) + '</div>' : '') +
+      (f.state === 'failed' && qcCanEdit() ? ' <a href="#" onclick="event.preventDefault();qcRetryFiling()">retry</a>' : '') + '</div>';
+  } else if (D.cl.status === 'complete') {
+    html += '<div style="font-size:12px;color:#666;padding:6px 0;border-top:1px solid #f0f0f0">Not filed yet — the PDF files to SharePoint when you distribute.</div>';
+  }
+  (D.sends || []).slice(0, 5).forEach(function(s){
+    var names = (s.recipients || []).map(function(r){ return r.name || r.email; }).join(', ');
+    html += '<div style="font-size:12px;padding:6px 0;border-top:1px solid #f0f0f0">' + qcFmtTs(s.sent_at) + ' · ' + corEsc(qcUserName(s.sent_by_user_id)) +
+      (s.email_status === 'sent' ? '' : ' ' + qcPill('#FBE1DE', '#9B1F17', 'email failed')) +
+      '<div style="color:#666;margin-top:2px">' + corEsc(names) + '</div></div>';
+  });
+  return html + '</div>';
+}
+
+async function qcRetryFiling() {
+  var r = await supabaseClient.rpc('kmi_filing_retry', { p_kind: 'qc', p_id: _qc.d.cl.id });
+  if (r.error) { alert('Could not retry: ' + r.error.message); return; }
+  showToast('Filing queued'); await qcLoadSendInfo(_qc.d); qcRenderDetail();
+}
+
+// ── Distribute ────────────────────────────────────────────────────────
+function qcProjectTeam(pid) {
+  var p = getProj(pid) || getProj(Number(pid)) || {}, seen = {}, out = [];
+  (p.kmiAssignments || []).forEach(function(a){
+    var u = (db.users || []).find(function(x){ return String(x.id) === String(a.userId); });
+    if (!u || !u.email || seen[u.email.toLowerCase()] || u.status === 'inactive') return;
+    seen[u.email.toLowerCase()] = 1;
+    out.push({ id: u.id, name: qcUserName(u.id) || u.email, email: u.email, role: a.role || u.role || '' });
+  });
+  return out;
+}
+
+function qcDistributeModal() {
+  if (!requireFull('edit-quality', 'distribute quality checklists')) return;
+  var D = _qc.d, cl = D.cl, p = getProj(cl.project_id) || getProj(Number(cl.project_id)) || {};
+  var team = qcProjectTeam(cl.project_id), ext = (typeof _corResolveProjectContacts === 'function') ? _corResolveProjectContacts(p) : [];
+  var asg = cl.assigned_user_id;
+  var rowHtml = function(r, cls, checked){
+    return '<label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;cursor:pointer;text-transform:none;letter-spacing:0;color:#1a1a1a;font-weight:400">' +
+      '<input type="checkbox" class="' + cls + '" style="width:auto" data-email="' + corEsc(r.email) + '" data-name="' + corEsc(r.name) + '"' + (checked ? ' checked' : '') + '>' +
+      '<span><strong>' + corEsc(r.name) + '</strong>' + (r.role ? ' — ' + corEsc(r.role) : '') + ' &lt;' + corEsc(r.email) + '&gt;</span></label>';
+  };
+  var me = _currentUser || {};
+  var subj = (p.name || 'Project') + ' - ' + qcNum(cl.qc_number) + ' ' + cl.title + (cl.location ? ' (' + cl.location + ')' : '');
+  var res = cl.status === 'complete' ? (cl.result === 'failed' ? 'FAILED' : 'PASSED') : 'in progress';
+  var body = ['Hello,', '', 'Attached is KMI Construction’s quality control checklist ' + qcNum(cl.qc_number) + ' — ' + cl.title +
+    (cl.location ? ', ' + cl.location : '') + ' — for ' + (p.name || 'the project') + '.', '', 'Result: ' + res + '.', '',
+    'Please let me know if you have any questions.', '', 'Best regards,', qcUserName(me.id) || '', me.email || '', '', 'KMI Construction', '2880 S. 171st Street, New Berlin, WI 53151'].join('\n');
+  showModal(
+    '<button class="xbtn" onclick="closeModal()" aria-label="Close">×</button>' +
+    '<div class="mt">Distribute ' + qcNum(cl.qc_number) + ' · ' + corEsc(cl.title) + '</div>' +
+    '<div class="msb">The PDF is attached. Sent from notifications@kmi.build with replies going to you.' +
+      (cl.status === 'complete' ? ' It is also filed to SharePoint › 15 - Quality Control.' : ' <b>This checklist is not complete</b> — the PDF is marked DRAFT and is not filed.') + '</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>Internal — KMI team</label><div style="border:0.5px solid #ddd;border-radius:6px;padding:8px 10px;background:#fafafa">' +
+        (team.length ? team.map(function(r){ return rowHtml(r, 'qcd-rcpt', String(r.id) === String(asg) || /coordinator/i.test(r.role)); }).join('') : '<span style="font-size:12px;color:#888">No KMI users assigned to this project.</span>') + '</div></div>' +
+      '<div class="fgr full"><label>External — project contacts</label><div style="border:0.5px solid #ddd;border-radius:6px;padding:8px 10px;background:#fafafa">' +
+        (ext.length ? ext.map(function(r){ return rowHtml(r, 'qcd-rcpt', false); }).join('') : '<span style="font-size:12px;color:#888">No customer contacts with email on this project.</span>') + '</div></div>' +
+      '<div class="fgr full"><label>Others (comma-separated emails)</label><input id="qcd-extra" placeholder="name@company.com"></div>' +
+      '<div class="fgr full"><label>Subject</label><input id="qcd-subj" value="' + corEsc(subj) + '"></div>' +
+      '<div class="fgr full"><label>Message</label><textarea id="qcd-body" rows="8">' + corEsc(body) + '</textarea></div>' +
+      '<div class="fgr full"><label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:#1a1a1a;font-weight:400"><input type="checkbox" id="qcd-photos" style="width:auto" checked> Include photo pages (' + D.photos.length + ' photo' + (D.photos.length === 1 ? '' : 's') + ')</label></div>' +
+    '</div>' +
+    '<div id="qcd-err" style="color:#A32D2D;font-size:12px;min-height:16px"></div>' +
+    '<div class="mf"><button class="btn" id="qcd-cancel" onclick="closeModal()">Cancel</button><button class="btn btn-p" id="qcd-send" onclick="qcDistributeSend()">Send</button></div>');
+}
+
+async function qcDistributeSend() {
+  var D = _qc.d, cl = D.cl, err = g('qcd-err'), btn = g('qcd-send'), cancel = g('qcd-cancel');
+  var rc = [], seen = {};
+  Array.prototype.forEach.call(document.querySelectorAll('.qcd-rcpt:checked'), function(el){
+    var e = String(el.getAttribute('data-email') || '').trim(); if (!e || seen[e.toLowerCase()]) return;
+    seen[e.toLowerCase()] = 1; rc.push({ name: el.getAttribute('data-name') || e, email: e, internal: /@kmi-construction\.com$/i.test(e) });
+  });
+  String(g('qcd-extra').value || '').split(/[,;\s]+/).forEach(function(e){
+    e = e.trim(); if (!e) return;
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { rc.bad = (rc.bad || []).concat(e); return; }
+    if (seen[e.toLowerCase()]) return; seen[e.toLowerCase()] = 1; rc.push({ name: e, email: e, internal: /@kmi-construction\.com$/i.test(e) });
+  });
+  if (rc.bad) { err.textContent = 'Not a valid email: ' + rc.bad.join(', '); return; }
+  if (!rc.length) { err.textContent = 'Pick at least one recipient.'; return; }
+  var subj = (g('qcd-subj').value || '').trim(); if (!subj) { err.textContent = 'Subject is required.'; return; }
+  var bodyTxt = g('qcd-body').value || '', photos = g('qcd-photos').checked;
+  btn.disabled = true; cancel.disabled = true; err.textContent = '';
+  var fname = qcPdfFileName(cl), complete = cl.status === 'complete';
+  var distLine = 'Distributed ' + qcToday() + ' to: ' + rc.map(function(r){ return r.name; }).join(', ') +
+    (complete ? ' · Filed: 15 - Quality Control / ' + fname : '');
+  try {
+    btn.textContent = 'Building PDF…';
+    var doc = await qcBuildPdf(D, { photos: photos, distLine: distLine, onProgress: function(t){ btn.textContent = t; } });
+    var blob = doc.output('blob');
+    var b64 = doc.output('datauristring').split(',')[1];
+    var pdfPath = null;
+    if (complete) {
+      btn.textContent = 'Saving PDF…';
+      pdfPath = 'qc-pdfs/' + cl.id + '/' + qcNum(cl.qc_number) + '.pdf';
+      var up = await supabaseClient.storage.from('kmi-quality').upload(pdfPath, blob, { contentType: 'application/pdf', upsert: true });
+      if (up.error) throw new Error('PDF upload failed: ' + up.error.message);
+    }
+    btn.textContent = 'Sending…';
+    var me = _currentUser || {};
+    var payload = { to: rc[0].email, subject: subj, text: bodyTxt, flowType: 'qc_distribution',
+      fromName: 'KMI Construction', sentBy: me.id || null, sentByEmail: me.email || '',
+      relatedEntityType: 'qc_checklist', relatedEntityId: String(cl.id),
+      attachments: [{ filename: fname, content: b64 }] };
+    if (me.email) payload.replyTo = me.email;
+    if (rc.length > 1) payload.cc = rc.slice(1).map(function(r){ return r.email; });
+    var result = await sendEmail(payload);
+    var ins = await supabaseClient.from('kmi_qc_distribution').insert({
+      checklist_id: cl.id, sent_by_user_id: me.id || null, recipients: rc.map(function(r){ return { name: r.name, email: r.email, internal: r.internal }; }),
+      message: bodyTxt, include_photos: photos, include_deficiencies: true, pdf_path: pdfPath,
+      email_status: result.success ? 'sent' : 'failed', email_error: result.success ? null : (result.error || 'unknown')
+    });
+    if (ins.error) console.warn('[qc] distribution log', ins.error.message);
+    if (!result.success) throw new Error('Email failed: ' + (result.error || 'unknown error') + (complete ? ' (PDF saved; it was not filed).' : ''));
+    if (complete && pdfPath) {
+      var fr = await supabaseClient.rpc('kmi_qc_filing_pdf_ready', { p_checklist_id: cl.id, p_pdf_path: pdfPath });
+      if (fr.error) showToast('Sent, but filing could not be queued: ' + fr.error.message, 'error');
+    }
+    closeModal();
+    showToast(qcNum(cl.qc_number) + ' sent to ' + rc.length + ' recipient' + (rc.length === 1 ? '' : 's') + (result.testMode ? ' (email test mode)' : ''));
+    await qcLoadSendInfo(D); qcRenderDetail();
+  } catch (e) {
+    err.textContent = e.message || String(e);
+    btn.disabled = false; cancel.disabled = false; btn.textContent = 'Send';
+  }
+}
+
+// ── Hold-point failure notice ─────────────────────────────────────────
+async function qcNotifyHoldPoint(it, def) {
+  try {
+    var cl = _qc.d.cl, p = getProj(cl.project_id) || getProj(Number(cl.project_id)) || {};
+    var pms = qcProjectTeam(cl.project_id).filter(function(r){ return /project manager|^pm$/i.test(r.role); });
+    if (!pms.length) { showToast('Hold point failed — no PM is assigned to this project to notify.', 'error'); return; }
+    var me = _currentUser || {}, AL = qcAnswerLabels(cl.answer_style);
+    var text = ['A hold point was marked ' + AL.fail + ' on ' + (p.number || '') + ' ' + (p.name || '') + '.', '',
+      'Checklist: ' + qcNum(cl.qc_number) + ' — ' + cl.title + (cl.location ? ' (' + cl.location + ')' : ''),
+      'Item: ' + (it.spec_ref ? it.spec_ref + ' — ' : '') + it.item_text,
+      'Marked by: ' + (qcUserName(me.id) || me.email || '') + ', ' + new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }),
+      it.note ? 'Note: ' + it.note : '',
+      'Deficiency: ' + qcDefNum(def.def_number) + ' — ' + (qcUserName(def.responsible_user_id) || 'unassigned') + (def.due_date ? ', due ' + def.due_date : ''),
+      '', 'Work is not blocked by the app. Review before the work is covered.', '', 'Open the project in KMI.Build › Quality.'].filter(function(l){ return l !== null; }).join('\n');
+    var ccs = pms.slice(1).map(function(x){ return x.email; });
+    var r = await sendEmail({ to: pms[0].email, cc: ccs.length ? ccs : undefined,
+      subject: 'Hold point failed — ' + (p.name || 'Project') + ' ' + qcNum(cl.qc_number) + ' ' + cl.title,
+      text: text, flowType: 'qc_hold_point', sentBy: me.id || null, sentByEmail: me.email || '',
+      relatedEntityType: 'qc_checklist', relatedEntityId: String(cl.id) });
+    if (r.success) showToast('Hold point failed — ' + pms.map(function(x){ return x.name; }).join(', ') + ' notified', 'error');
+    else showToast('Hold point failed — PM email did not send: ' + (r.error || ''), 'error');
+  } catch (e) { console.warn('[qc] hold point notice', e); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -65268,7 +65750,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-06-QCANS1';
+var KMI_BUILD = '2026-11-06-QC1c';
 
 var _kmiSessionId = (function(){
   try {
