@@ -1725,6 +1725,7 @@ tr.gc-line:hover td{background:#fafafa}
     <div class="sb-group-items">
       <div class="ni" onclick="nav('users')"><span class="nico">◑</span>Users</div>
       <div class="ni" onclick="nav('templates')"><span class="nico">◫</span>Templates</div>
+      <div class="ni" onclick="nav('qc-templates')"><span class="nico">✓</span>Quality Templates</div><!-- QC1a -->
       <div class="ni" onclick="nav('product-library')"><span class="nico">▣</span>Product Library</div>
       <div class="ni" onclick="nav('email-log')"><span class="nico">&#9993;</span>Email log</div>
       <div class="ni" onclick="nav('email-settings')"><span class="nico">&#9881;</span>Email settings</div>
@@ -3042,6 +3043,14 @@ tr.gc-line:hover td{background:#fafafa}
   <div id="wp-banner"></div>
   <div id="wp-tabs" style="display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid #e5e5e5;margin-bottom:14px"></div>
   <div id="wp-body"></div>
+</div>
+
+<!-- QC1a: QUALITY TEMPLATES -->
+<div class="pg" id="pg-qc-templates">
+  <style>#pg-qc-templates label.qt-chk{display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;font-weight:400;color:#444;cursor:pointer;margin:0}#pg-qc-templates label.qt-chk input{width:auto;margin:0}</style>
+  <div class="ph"><div><h1>Quality Templates</h1><div class="sub">Standard KMI quality control checklists. New project checklists copy the published version.</div><div class="stripe"></div></div><div id="qt-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div></div>
+  <input type="file" id="qt-file" accept=".xlsx,.xls" style="display:none" onchange="qtImportFile(this)">
+  <div id="qt-body"></div>
 </div>
 
 <!-- AP CHECK REGISTER -->
@@ -4638,6 +4647,14 @@ var PERMISSIONS = {
   // Cash flow (CF1): Admin + Accounting. RLS (kmi_fs_can_read) is the real
   // gate; Reopen of a final week is Admin-only (snapshot policy).
   'cash-flow': ['full','none','none','full','none','none','none'],
+  // QC1a Quality module. Order: Admin, PM, PC, Accounting, Superintendent,
+  // Foreman, Shop. RLS (kmi_qc_can_access, allowlist) is the real gate and
+  // Shop has no access. Publishing a template version is Admin-only
+  // server-side (kmi_qc_publish_version); these rows only shape the UI.
+  'qc-templates': ['full','read','read','none','none','none','none'],
+  'view-quality': ['full','full','full','read','full','full','none'],
+  'edit-quality': ['full','full','full','none','none','none','none'],
+  'fill-quality': ['full','full','full','none','full','full','none'],
   // WIP report (B1): Admin, PM and Accounting view; RLS limits PMs to their
   // own jobs. Accounting/Admin lock and manage contract items; Admin reopens.
   'view-wip':   ['full','full','none','full','none','none','none'],
@@ -4837,6 +4854,7 @@ var PAGE_ACTION_MAP = {
   'rental-review':  'rental-review',
   'fin-statements': 'fin-statements',
   'cash-flow':      'cash-flow',
+  'qc-templates':   'qc-templates',   // QC1a
   'wip':            'view-wip',
   'fin-reports':    'fin-reports',
   'budget':         'view_project_budget',
@@ -6923,6 +6941,7 @@ function nav(page) {
     'rental-review':  renderRentalReview,
     'fin-statements': renderFinStatements,
     'cash-flow':      renderCashFlow,
+    'qc-templates':   renderQcTemplates,   // QC1a
     'wip':            renderWip,
     'fin-reports':    renderFinReports,
     projects:         renderProjects,
@@ -20960,6 +20979,767 @@ function renderProjectCorList() {
 
   el.innerHTML = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' + head +
     '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// QC1a: Quality templates (Maintenance > Quality Templates).
+// Library of standard KMI quality checklists. A template has numbered
+// versions in kmi_qc_template_versions; each version's items live in its
+// items jsonb and freeze once published (server trigger). Projects copy the
+// published version when a checklist is created (QC1b). Publishing goes
+// through kmi_qc_publish_version (Admin only, enforced server-side).
+// Import from Excel reads the KMI import template or a GC-style checklist
+// (Spec Ref | Item | Y | N | N/R | Comments); yellow-filled items become
+// hold points. Every checklist answers Pass / Fail / N/A.
+// ═══════════════════════════════════════════════════════════════════════
+var QC_CATEGORIES = ['Pre-installation', 'During work', 'Closeout'];
+var QC_RESPONSE_TYPES = [
+  ['default', 'Pass / Fail / N/A'], ['measurement', 'Measurement'], ['text', 'Text'],
+  ['date', 'Date'], ['photo', 'Photo only'], ['signature', 'Signature']
+];
+var _qt = { templates: [], versions: [], loaded: false, promise: null, selId: null,
+            draft: null, draftVid: null, dirty: false, search: '', showArchived: false };
+var _qtImp = null;
+
+function qtCanEdit() { return hasFull('qc-templates'); }
+function qtUid() { return _currentUser ? _currentUser.id : null; }
+function qtEsc(s) { return corEsc(s); }
+function qtKey() { return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+function qtNormItem(it) {
+  it = it || {};
+  var rt = String(it.response_type || 'default');
+  if (!QC_RESPONSE_TYPES.some(function(r){ return r[0] === rt; })) rt = 'default';
+  return {
+    key: it.key || qtKey(),
+    section: String(it.section || ''),
+    spec_ref: String(it.spec_ref || ''),
+    text: String(it.text || ''),
+    guidance: String(it.guidance || ''),
+    hold_point: !!it.hold_point,
+    response_type: rt,
+    tolerance_min: (it.tolerance_min === '' || it.tolerance_min == null) ? null : Number(it.tolerance_min),
+    tolerance_max: (it.tolerance_max === '' || it.tolerance_max == null) ? null : Number(it.tolerance_max),
+    tolerance_unit: it.tolerance_unit ? String(it.tolerance_unit) : null,
+    photo_required: !!it.photo_required,
+    creates_deficiency: it.creates_deficiency !== false
+  };
+}
+
+// ── Data ──────────────────────────────────────────────────────────────
+async function qtLoad(force) {
+  if (_qt.loaded && !force) return;
+  if (_qt.promise && !force) return _qt.promise;
+  _qt.promise = (async function(){
+    if (!supabaseClient) throw new Error('Quality templates need the cloud connection.');
+    var t = await supabaseClient.from('kmi_qc_templates').select('*').order('name');
+    if (t.error) throw new Error(t.error.message);
+    var v = await supabaseClient.from('kmi_qc_template_versions').select('*').order('version');
+    if (v.error) throw new Error(v.error.message);
+    _qt.templates = t.data || [];
+    _qt.versions = v.data || [];
+    _qt.loaded = true;
+  })();
+  try { await _qt.promise; } finally { _qt.promise = null; }
+}
+
+function qtTemplate(id) {
+  return _qt.templates.filter(function(t){ return String(t.id) === String(id); })[0] || null;
+}
+function qtVersionsOf(tid) {
+  return _qt.versions.filter(function(v){ return String(v.template_id) === String(tid); })
+                     .sort(function(a, b){ return a.version - b.version; });
+}
+function qtPublished(t) {
+  if (!t) return null;
+  return qtVersionsOf(t.id).filter(function(v){ return v.status === 'published'; }).pop() || null;
+}
+function qtDraftOf(t) {
+  if (!t) return null;
+  return qtVersionsOf(t.id).filter(function(v){ return v.status === 'draft'; }).pop() || null;
+}
+function qtHoldCount(items) {
+  return (items || []).filter(function(i){ return i.hold_point; }).length;
+}
+
+// ── Page ──────────────────────────────────────────────────────────────
+async function renderQcTemplates() {
+  var body = g('qt-body'), act = g('qt-actions');
+  if (!body) return;
+  if (act) {
+    act.innerHTML = qtCanEdit()
+      ? '<button class="btn" onclick="qtDownloadImportTemplate()">↓ Import template (.xlsx)</button>' +
+        '<button class="btn" onclick="qtImportPick()">↑ Import from Excel</button>' +
+        '<button class="btn btn-p" onclick="qtNewTemplateModal()">+ New template</button>'
+      : '';
+  }
+  if (!_qt.loaded) body.innerHTML = '<div class="card" style="color:#888">Loading quality templates…</div>';
+  try { await qtLoad(); }
+  catch (e) { body.innerHTML = '<div class="card" style="color:#A32D2D">' + qtEsc(e.message || e) + '</div>'; return; }
+  if (_qt.selId && !qtTemplate(_qt.selId)) _qt.selId = null;
+  if (!_qt.selId) {
+    var first = _qt.templates.filter(function(t){ return t.status !== 'archived'; })[0];
+    if (first) qtSelect(first.id, true);
+  }
+  body.innerHTML =
+    '<div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start">' +
+      '<div class="card" style="flex:1 1 280px;max-width:340px;padding:0;overflow:hidden" id="qt-list"></div>' +
+      '<div style="flex:999 1 560px;min-width:0" id="qt-editor"></div>' +
+    '</div>';
+  qtRenderList();
+  qtRenderEditor();
+}
+
+function qtRenderList() {
+  var el = g('qt-list'); if (!el) return;
+  var q = _qt.search.trim().toLowerCase();
+  var rows = _qt.templates.filter(function(t){
+    if (t.status === 'archived' && !_qt.showArchived) return false;
+    if (!q) return true;
+    return [t.name, t.code, t.spec_section].join(' ').toLowerCase().indexOf(q) >= 0;
+  });
+  var html = '<div style="padding:12px 14px;border-bottom:1px solid #eee">' +
+    '<input id="qt-search" class="fs" style="width:100%;box-sizing:border-box;cursor:text" placeholder="Search templates…" value="' + qtEsc(_qt.search) + '" oninput="_qt.search=this.value;qtRenderList();var s=g(\'qt-search\');if(s){s.focus();s.setSelectionRange(s.value.length,s.value.length);}">' +
+    '<label class="qt-chk" style="margin-top:8px"><input type="checkbox"' + (_qt.showArchived ? ' checked' : '') + ' onchange="_qt.showArchived=this.checked;qtRenderList()"> Show archived</label></div>';
+  if (!rows.length) {
+    html += '<div style="padding:14px;font-size:13px;color:#888">' +
+      (_qt.templates.length ? 'No templates match.' : 'No templates yet. Use Import from Excel or + New template.') + '</div>';
+  }
+  QC_CATEGORIES.concat(['Other']).forEach(function(cat){
+    var inCat = rows.filter(function(t){
+      return cat === 'Other' ? QC_CATEGORIES.indexOf(t.category) < 0 : t.category === cat;
+    });
+    if (!inCat.length) return;
+    html += '<div style="padding:7px 14px;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:.04em;background:#f7f8fa;border-top:1px solid #eee">' + qtEsc(cat) + '</div>';
+    inCat.forEach(function(t){
+      var pub = qtPublished(t), dr = qtDraftOf(t);
+      var n = pub ? (pub.items || []).length : (dr ? (dr.items || []).length : 0);
+      var tags = [];
+      if (pub) tags.push('v' + pub.version + ' · ' + n + ' items');
+      if (dr) tags.push('<span style="color:#8A5A00">draft v' + dr.version + '</span>');
+      if (t.status === 'archived') tags.push('<span style="color:#A32D2D">archived</span>');
+      var sel = String(t.id) === String(_qt.selId);
+      html += '<div onclick="qtSelect(' + t.id + ')" style="cursor:pointer;padding:10px 14px;border-top:1px solid #eee;font-size:13px;' +
+        (sel ? 'background:#E4ECF7;border-left:3px solid var(--kmi);font-weight:600' : '') + '">' + qtEsc(t.name) +
+        '<div style="font-size:11px;color:#666;font-weight:400;margin-top:2px">' + (tags.join(' · ') || 'empty') + '</div></div>';
+    });
+  });
+  el.innerHTML = html;
+}
+
+function qtSelect(id, silent) {
+  if (_qt.dirty && String(id) !== String(_qt.selId) &&
+      !confirm('You have unsaved changes to this draft. Discard them?')) return;
+  _qt.selId = id;
+  var t = qtTemplate(id), dr = qtDraftOf(t), pub = qtPublished(t);
+  var src = dr || pub;
+  _qt.draft = src ? (src.items || []).map(qtNormItem) : [];
+  _qt.draftVid = dr ? dr.id : null;
+  _qt.dirty = false;
+  if (!silent) { qtRenderList(); qtRenderEditor(); }
+}
+
+function qtRenderEditor() {
+  var el = g('qt-editor'); if (!el) return;
+  var t = qtTemplate(_qt.selId);
+  if (!t) { el.innerHTML = '<div class="card" style="color:#888">Select a template.</div>'; return; }
+  var can = qtCanEdit();
+  var pub = qtPublished(t), dr = qtDraftOf(t);
+  var editing = can && !!dr;
+  var ro = can ? '' : ' disabled';
+  var catOpts = QC_CATEGORIES.map(function(c){
+    return '<option' + (c === t.category ? ' selected' : '') + '>' + qtEsc(c) + '</option>';
+  }).join('');
+  var verLine = (pub ? 'Published v' + pub.version + (pub.published_at ? ' · ' + ocoFmtDate(pub.published_at) : '') : 'Not published yet') +
+    (dr ? ' · <strong style="color:#8A5A00">Draft v' + dr.version + ' open</strong>' : '');
+  var html =
+    '<div class="card">' +
+      '<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">' +
+        '<div style="flex:1 1 260px"><label style="font-size:12px;color:#666;display:block;margin-bottom:4px">Template name</label>' +
+          '<input id="qt-m-name" class="fs" style="width:100%;box-sizing:border-box;cursor:text;font-weight:600" value="' + qtEsc(t.name) + '"' + ro + '></div>' +
+        '<div style="flex:0 1 170px"><label style="font-size:12px;color:#666;display:block;margin-bottom:4px">Code / Doc #</label>' +
+          '<input id="qt-m-code" class="fs" style="width:100%;box-sizing:border-box;cursor:text" value="' + qtEsc(t.code || '') + '"' + ro + '></div>' +
+        '<div style="flex:0 1 170px"><label style="font-size:12px;color:#666;display:block;margin-bottom:4px">Spec section</label>' +
+          '<input id="qt-m-spec" class="fs" style="width:100%;box-sizing:border-box;cursor:text" value="' + qtEsc(t.spec_section || '') + '"' + ro + '></div>' +
+        '<div style="flex:0 1 160px"><label style="font-size:12px;color:#666;display:block;margin-bottom:4px">Category</label>' +
+          '<select id="qt-m-cat" class="fs" style="width:100%"' + ro + '>' + catOpts + '</select></div>' +
+      '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px;font-size:13px;color:#555">' +
+        '<span>' + verLine + '</span>' +
+        (t.source === 'import' && t.source_file_name ? '<span style="color:#888">· imported from ' + qtEsc(t.source_file_name) + '</span>' : '') +
+        '<span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">' +
+          (can ? '<button class="btn btn-sm" onclick="qtSaveMeta()">Save details</button>' : '') +
+          (can && t.status !== 'archived' ? '<button class="btn btn-sm" onclick="qtArchive(true)">Archive</button>' : '') +
+          (can && t.status === 'archived' ? '<button class="btn btn-sm" onclick="qtArchive(false)">Restore</button>' : '') +
+        '</span>' +
+      '</div>' +
+    '</div>';
+
+  if (can && !dr && pub) {
+    html += '<div class="card" style="background:#F7F9FC;display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:13px">' +
+      '<span>v' + pub.version + ' is published and locked. Checklists already created keep their own copy.</span>' +
+      '<button class="btn btn-p btn-sm" style="margin-left:auto" onclick="qtStartNewVersion()">Edit as new version (v' + (pub.version + 1) + ')</button></div>';
+  }
+  if (editing && pub) {
+    html += '<div class="card" style="background:#FFF8E8;border-color:#F1DDB0;font-size:13px;color:#5A3A00">' +
+      'Publishing v' + dr.version + ' affects <b>new</b> checklists only. Checklists built from v' + pub.version + ' keep their own copy.</div>';
+  }
+
+  html += qtItemsHtml(_qt.draft, editing);
+
+  if (editing) {
+    html += '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:flex-end;margin-bottom:16px">' +
+      '<span id="qt-dirty" style="font-size:12px;color:#8A5A00;margin-right:auto">' + (_qt.dirty ? 'Unsaved changes' : '') + '</span>' +
+      (pub ? '<button class="btn" onclick="qtDiscardDraft()">Discard changes</button>' : '') +
+      '<button class="btn" onclick="qtSaveDraft()">Save draft</button>' +
+      '<button class="btn btn-p" onclick="qtPublish()">Publish v' + dr.version + '</button></div>';
+  }
+  el.innerHTML = html;
+}
+
+function qtSections(items) {
+  var out = [];
+  (items || []).forEach(function(it, idx){
+    var last = out[out.length - 1];
+    if (!last || last.name !== it.section) out.push(last = { name: it.section, idx: [] });
+    last.idx.push(idx);
+  });
+  return out;
+}
+
+function qtItemsHtml(items, editing) {
+  var secs = qtSections(items);
+  var html = '';
+  if (!secs.length) {
+    html += '<div class="card" style="color:#888;font-size:13px">No items yet.' +
+      (editing ? ' <button class="btn btn-sm" onclick="qtAddSection()">+ Add section</button>' : '') + '</div>';
+    return html;
+  }
+  secs.forEach(function(s, si){
+    html += '<div class="card" style="padding:0;overflow:hidden">' +
+      '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f7f8fa;border-bottom:1px solid #eee">';
+    if (editing) {
+      html += '<input class="fs" style="flex:1 1 auto;cursor:text;font-weight:600" value="' + qtEsc(s.name) + '" placeholder="Section name" ' +
+        'onchange="qtRenameSection(' + s.idx[0] + ',this.value)">';
+    } else {
+      html += '<strong style="font-size:14px;flex:1 1 auto">' + qtEsc(s.name || '(no section)') + '</strong>';
+    }
+    html += '<span style="font-size:12px;color:#666">' + s.idx.length + ' item' + (s.idx.length === 1 ? '' : 's') + '</span></div>';
+    s.idx.forEach(function(i){ html += qtItemRowHtml(items[i], i, editing); });
+    if (editing) {
+      html += '<div style="padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button class="btn btn-sm" onclick="qtAddItem(' + s.idx[s.idx.length - 1] + ')">+ Add item</button>' +
+        (si === secs.length - 1 ? '<button class="btn btn-sm" onclick="qtAddSection()">+ Add section</button>' : '') + '</div>';
+    }
+    html += '</div>';
+  });
+  return html;
+}
+
+function qtItemRowHtml(it, i, editing) {
+  var holdTag = '<span style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;background:#FFF59E;color:#4D4400;font-size:10px;font-weight:700;letter-spacing:.04em">HOLD POINT</span>';
+  if (!editing) {
+    var rtLabel = (QC_RESPONSE_TYPES.filter(function(r){ return r[0] === it.response_type; })[0] || QC_RESPONSE_TYPES[0])[1];
+    var flags = [];
+    if (it.response_type !== 'default') flags.push(rtLabel);
+    if (it.photo_required) flags.push('photo required');
+    if (!it.creates_deficiency) flags.push('no deficiency on fail');
+    return '<div style="display:flex;gap:12px;padding:9px 14px;border-top:1px solid #f0f0f0;font-size:13px">' +
+      '<span style="width:56px;flex:0 0 56px;color:#666">' + qtEsc(it.spec_ref) + '</span>' +
+      '<div style="flex:1 1 auto">' + qtEsc(it.text) + (it.hold_point ? holdTag : '') +
+        (it.guidance ? '<div style="font-size:12px;color:#666;margin-top:2px">' + qtEsc(it.guidance) + '</div>' : '') +
+        (flags.length ? '<div style="font-size:11px;color:#888;margin-top:2px">' + qtEsc(flags.join(' · ')) + '</div>' : '') +
+      '</div></div>';
+  }
+  var rtOpts = QC_RESPONSE_TYPES.map(function(r){
+    return '<option value="' + r[0] + '"' + (r[0] === it.response_type ? ' selected' : '') + '>' + r[1] + '</option>';
+  }).join('');
+  var tol = it.response_type === 'measurement'
+    ? '<div style="display:flex;gap:6px;align-items:center;font-size:12px;color:#666;margin-top:6px">Tolerance ' +
+        '<input class="fs" style="width:70px;cursor:text" placeholder="min" value="' + (it.tolerance_min == null ? '' : it.tolerance_min) + '" onchange="qtSetItem(' + i + ',\'tolerance_min\',this.value)"> to ' +
+        '<input class="fs" style="width:70px;cursor:text" placeholder="max" value="' + (it.tolerance_max == null ? '' : it.tolerance_max) + '" onchange="qtSetItem(' + i + ',\'tolerance_max\',this.value)"> ' +
+        '<input class="fs" style="width:70px;cursor:text" placeholder="unit" value="' + qtEsc(it.tolerance_unit || '') + '" onchange="qtSetItem(' + i + ',\'tolerance_unit\',this.value)"></div>'
+    : '';
+  return '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;padding:9px 14px;border-top:1px solid #f0f0f0;' + (it.hold_point ? 'background:#FFFDE6' : '') + '">' +
+    '<div style="display:flex;flex-direction:column;gap:2px">' +
+      '<button class="btn btn-sm" style="padding:0 6px;font-size:10px" title="Move up" aria-label="Move up" onclick="qtMoveItem(' + i + ',-1)">▲</button>' +
+      '<button class="btn btn-sm" style="padding:0 6px;font-size:10px" title="Move down" aria-label="Move down" onclick="qtMoveItem(' + i + ',1)">▼</button></div>' +
+    '<input class="fs" style="width:70px;cursor:text" placeholder="Ref" value="' + qtEsc(it.spec_ref) + '" oninput="qtSetItem(' + i + ',\'spec_ref\',this.value,true)">' +
+    '<div style="flex:1 1 300px;min-width:200px">' +
+      '<input class="fs" style="width:100%;box-sizing:border-box;cursor:text" placeholder="Checklist item" value="' + qtEsc(it.text) + '" oninput="qtSetItem(' + i + ',\'text\',this.value,true)">' +
+      '<input class="fs" style="width:100%;box-sizing:border-box;cursor:text;margin-top:6px;font-size:12px;color:#555" placeholder="Guidance / acceptance criteria (optional)" value="' + qtEsc(it.guidance) + '" oninput="qtSetItem(' + i + ',\'guidance\',this.value,true)">' +
+      tol +
+    '</div>' +
+    '<select class="fs" style="width:150px" aria-label="Response type" onchange="qtSetItem(' + i + ',\'response_type\',this.value)">' + rtOpts + '</select>' +
+    '<div style="display:flex;flex-direction:column;gap:3px;font-size:12px;color:#444;min-width:150px">' +
+      '<label class="qt-chk"><input type="checkbox"' + (it.hold_point ? ' checked' : '') + ' onchange="qtSetItem(' + i + ',\'hold_point\',this.checked)"> Hold point</label>' +
+      '<label class="qt-chk"><input type="checkbox"' + (it.photo_required ? ' checked' : '') + ' onchange="qtSetItem(' + i + ',\'photo_required\',this.checked)"> Photo required</label>' +
+      '<label class="qt-chk"><input type="checkbox"' + (it.creates_deficiency ? ' checked' : '') + ' onchange="qtSetItem(' + i + ',\'creates_deficiency\',this.checked)"> Fail creates deficiency</label>' +
+    '</div>' +
+    '<button class="btn btn-sm" style="color:#A32D2D" title="Remove item" aria-label="Remove item" onclick="qtDelItem(' + i + ')">✕</button>' +
+  '</div>';
+}
+
+// ── Item editing (draft only) ─────────────────────────────────────────
+function qtMarkDirty() {
+  _qt.dirty = true;
+  var d = g('qt-dirty'); if (d) d.textContent = 'Unsaved changes';
+}
+function qtSetItem(i, field, val, noRender) {
+  var it = _qt.draft[i]; if (!it) return;
+  if (field === 'tolerance_min' || field === 'tolerance_max') {
+    val = String(val).trim() === '' ? null : Number(val);
+    if (val !== null && isNaN(val)) { alert('Enter a number.'); qtRenderEditor(); return; }
+  }
+  if (field === 'tolerance_unit') val = String(val).trim() || null;
+  it[field] = val;
+  qtMarkDirty();
+  if (!noRender) qtRenderEditor();
+}
+function qtMoveItem(i, dir) {
+  var j = i + dir, a = _qt.draft;
+  if (j < 0 || j >= a.length) return;
+  var tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+  if (a[i].section !== a[j].section) { var s = a[i].section; a[i].section = a[j].section; a[j].section = s; }
+  qtMarkDirty(); qtRenderEditor();
+}
+function qtDelItem(i) {
+  var it = _qt.draft[i]; if (!it) return;
+  if (it.text && !confirm('Remove "' + it.text + '"?')) return;
+  _qt.draft.splice(i, 1);
+  qtMarkDirty(); qtRenderEditor();
+}
+function qtAddItem(afterIdx) {
+  var ref = _qt.draft[afterIdx];
+  _qt.draft.splice(afterIdx + 1, 0, qtNormItem({ section: ref ? ref.section : '' }));
+  qtMarkDirty(); qtRenderEditor();
+}
+function qtAddSection() {
+  var name = prompt('Section name', 'New section');
+  if (name == null) return;
+  _qt.draft.push(qtNormItem({ section: String(name).trim() }));
+  qtMarkDirty(); qtRenderEditor();
+}
+function qtRenameSection(firstIdx, name) {
+  var a = _qt.draft, old = a[firstIdx] ? a[firstIdx].section : null;
+  if (old === null) return;
+  for (var i = firstIdx; i < a.length && a[i].section === old; i++) a[i].section = String(name).trim();
+  qtMarkDirty(); qtRenderEditor();
+}
+
+// ── Saves ─────────────────────────────────────────────────────────────
+function qtCleanItems(items) {
+  return (items || []).map(qtNormItem).filter(function(it){ return it.text.trim() !== ''; })
+    .map(function(it){ it.text = it.text.trim(); it.spec_ref = it.spec_ref.trim(); it.section = it.section.trim(); return it; });
+}
+
+async function qtSaveMeta() {
+  if (!requireFull('qc-templates', 'edit quality templates')) return;
+  var t = qtTemplate(_qt.selId); if (!t) return;
+  var name = (g('qt-m-name').value || '').trim();
+  if (!name) { alert('Template name is required.'); return; }
+  var upd = { name: name, code: (g('qt-m-code').value || '').trim() || null,
+              spec_section: (g('qt-m-spec').value || '').trim() || null,
+              category: g('qt-m-cat').value, updated_by_user_id: qtUid(),
+              base_version_at: t.version_at };
+  var r = await supabaseClient.from('kmi_qc_templates').update(upd).eq('id', t.id).select();
+  if (r.error) { alert('Could not save: ' + r.error.message); return; }
+  if (!r.data || !r.data.length) {
+    alert('Someone else changed this template since you opened it. Reloading the latest version.');
+    await qtLoad(true); qtRenderList(); qtRenderEditor(); return;
+  }
+  _qt.templates = _qt.templates.map(function(x){ return String(x.id) === String(t.id) ? r.data[0] : x; });
+  showToast('Template details saved');
+  qtRenderList(); qtRenderEditor();
+}
+
+async function qtArchive(on) {
+  if (!requireFull('qc-templates', 'archive quality templates')) return;
+  var t = qtTemplate(_qt.selId); if (!t) return;
+  if (on && !confirm('Archive "' + t.name + '"? It will no longer be offered for new checklists.')) return;
+  var r = await supabaseClient.from('kmi_qc_templates')
+    .update({ status: on ? 'archived' : 'active', updated_by_user_id: qtUid(), base_version_at: t.version_at })
+    .eq('id', t.id).select();
+  if (r.error) { alert('Could not update: ' + r.error.message); return; }
+  await qtLoad(true); qtRenderList(); qtRenderEditor();
+}
+
+async function qtStartNewVersion() {
+  if (!requireFull('qc-templates', 'edit quality templates')) return;
+  var t = qtTemplate(_qt.selId), pub = qtPublished(t); if (!t) return;
+  var next = qtVersionsOf(t.id).reduce(function(m, v){ return Math.max(m, v.version); }, 0) + 1;
+  var r = await supabaseClient.from('kmi_qc_template_versions').insert({
+    template_id: t.id, version: next, status: 'draft',
+    items: pub ? (pub.items || []) : [], required_signoffs: pub ? pub.required_signoffs : ['superintendent', 'pm'],
+    created_by_user_id: qtUid()
+  }).select();
+  if (r.error) { alert('Could not start a new version: ' + r.error.message); return; }
+  _qt.versions.push(r.data[0]);
+  _qt.dirty = false;
+  qtSelect(t.id);
+}
+
+async function qtSaveDraft(quiet) {
+  if (!requireFull('qc-templates', 'edit quality templates')) return false;
+  if (!_qt.draftVid) return false;
+  var items = qtCleanItems(_qt.draft);
+  var r = await supabaseClient.from('kmi_qc_template_versions')
+    .update({ items: items }).eq('id', _qt.draftVid).eq('status', 'draft').select();
+  if (r.error) { alert('Could not save draft: ' + r.error.message); return false; }
+  if (!r.data || !r.data.length) { alert('This draft was published or removed by someone else. Reloading.'); await qtLoad(true); qtSelect(_qt.selId); return false; }
+  _qt.versions = _qt.versions.map(function(v){ return String(v.id) === String(_qt.draftVid) ? r.data[0] : v; });
+  _qt.draft = items.map(qtNormItem);
+  _qt.dirty = false;
+  if (!quiet) showToast('Draft saved');
+  qtRenderList(); qtRenderEditor();
+  return true;
+}
+
+function qtDiscardDraft() {
+  var t = qtTemplate(_qt.selId), pub = qtPublished(t);
+  if (!pub) return;
+  if (!confirm('Reset this draft to the published v' + pub.version + ' items?')) return;
+  _qt.draft = (pub.items || []).map(qtNormItem);
+  qtMarkDirty(); qtRenderEditor();
+}
+
+async function qtPublish() {
+  if (!requireFull('qc-templates', 'publish quality templates')) return;
+  var t = qtTemplate(_qt.selId), dr = qtDraftOf(t); if (!t || !dr) return;
+  var items = qtCleanItems(_qt.draft);
+  if (!items.length) { alert('Add at least one item before publishing.'); return; }
+  if (!confirm('Publish v' + dr.version + ' of "' + t.name + '" (' + items.length + ' items, ' + qtHoldCount(items) +
+               ' hold points)? New checklists will use this version.')) return;
+  if (!(await qtSaveDraft(true))) return;
+  var r = await supabaseClient.rpc('kmi_qc_publish_version', { p_version_id: dr.id });
+  if (r.error) { alert('Could not publish: ' + r.error.message); return; }
+  showToast('Published v' + r.data);
+  await qtLoad(true);
+  _qt.dirty = false;
+  qtSelect(t.id);
+}
+
+// ── New template ──────────────────────────────────────────────────────
+function qtNewTemplateModal() {
+  if (!requireFull('qc-templates', 'create quality templates')) return;
+  var catOpts = QC_CATEGORIES.map(function(c){ return '<option' + (c === 'During work' ? ' selected' : '') + '>' + c + '</option>'; }).join('');
+  showModal(
+    '<button class="xbtn" onclick="closeModal()" aria-label="Close">\u00d7</button><div class="mt">New quality template</div>' +
+    '<div class="msb">Starts as draft v1. Add items, then Publish.</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>Template name *</label><input id="qtn-name" placeholder="e.g. Thru-Wall Flashing"></div>' +
+      '<div class="fgr"><label>Code / Doc #</label><input id="qtn-code"></div>' +
+      '<div class="fgr"><label>Spec section</label><input id="qtn-spec" placeholder="e.g. 04 20 00"></div>' +
+      '<div class="fgr"><label>Category</label><select id="qtn-cat">' + catOpts + '</select></div>' +
+    '</div>' +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" onclick="qtCreateTemplate()">Create draft</button></div>');
+  setTimeout(function(){ var n = g('qtn-name'); if (n) n.focus(); }, 30);
+}
+
+async function qtCreateTemplate() {
+  var name = (g('qtn-name').value || '').trim();
+  if (!name) { alert('Template name is required.'); return; }
+  var res = await qtInsertTemplate({
+    name: name, code: (g('qtn-code').value || '').trim() || null,
+    spec_section: (g('qtn-spec').value || '').trim() || null, category: g('qtn-cat').value, source: 'kmi'
+  }, [qtNormItem({ section: 'General' })]);
+  if (!res) return;
+  closeModal();
+  showToast('Template created as draft v1');
+}
+
+async function qtInsertTemplate(row, items) {
+  row.created_by_user_id = qtUid(); row.updated_by_user_id = qtUid();
+  var t = await supabaseClient.from('kmi_qc_templates').insert(row).select();
+  if (t.error) { alert('Could not create template: ' + t.error.message); return null; }
+  var tmpl = t.data[0];
+  var v = await supabaseClient.from('kmi_qc_template_versions').insert({
+    template_id: tmpl.id, version: 1, status: 'draft', items: qtCleanItems(items).length ? qtCleanItems(items) : (items || []).map(qtNormItem),
+    created_by_user_id: qtUid()
+  }).select();
+  if (v.error) { alert('Template created, but its first version failed: ' + v.error.message); }
+  await qtLoad(true);
+  _qt.dirty = false;
+  qtSelect(tmpl.id);
+  return tmpl;
+}
+
+// ── Import from Excel ─────────────────────────────────────────────────
+function qtImportPick() {
+  if (!requireFull('qc-templates', 'import quality templates')) return;
+  var f = g('qt-file'); if (!f) return;
+  f.value = '';
+  f.click();
+}
+
+function qtImportFile(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+  if (typeof XLSX === 'undefined') { alert('The Excel reader did not load. Refresh and try again.'); return; }
+  var rd = new FileReader();
+  rd.onload = function(ev){
+    try {
+      var wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array', cellStyles: true });
+      var parsed = qtParseWorkbook(wb, file.name);
+      if (!parsed.items.length) { alert('No checklist items were found in ' + file.name + '.'); return; }
+      _qtImp = parsed;
+      qtImportPreview();
+    } catch (e) {
+      console.error('[qt] import', e);
+      alert('Could not read ' + file.name + ': ' + (e.message || e));
+    }
+  };
+  rd.readAsArrayBuffer(file);
+}
+
+function qtCellText(ws, r, c) {
+  var cell = ws[XLSX.utils.encode_cell({ r: r, c: c })];
+  if (!cell || cell.v == null) return '';
+  return String(cell.w != null ? cell.w : cell.v).replace(/\s+/g, ' ').trim();
+}
+function qtCellYellow(ws, r, c) {
+  var cell = ws[XLSX.utils.encode_cell({ r: r, c: c })];
+  var s = cell && cell.s;
+  if (!s) return false;
+  var rgb = String((s.fgColor && s.fgColor.rgb) || (s.bgColor && s.bgColor.rgb) || '').toUpperCase();
+  return /FFFF00$/.test(rgb) || /FFFF99$/.test(rgb) || /FFEB9C$/.test(rgb);
+}
+function qtSpecFromDivision(s) {
+  var m = /(\d{2})\s?(\d{2})\s?(\d{2})/.exec(String(s || ''));
+  return m ? (m[1] + ' ' + m[2] + ' ' + m[3]) : '';
+}
+function qtTitleCase(s) {
+  return String(s || '').toLowerCase().replace(/\b[a-z]/g, function(c){ return c.toUpperCase(); });
+}
+
+function qtParseWorkbook(wb, fileName) {
+  var names = wb.SheetNames || [];
+  for (var i = 0; i < names.length; i++) {
+    var ws = wb.Sheets[names[i]];
+    var k = qtParseKmiSheet(ws);
+    if (k) { k.fileName = fileName; k.sheet = names[i]; return k; }
+  }
+  for (var j = 0; j < names.length; j++) {
+    var g2 = qtParseGcSheet(wb.Sheets[names[j]]);
+    if (g2 && g2.items.length) {
+      g2.fileName = fileName; g2.sheet = names[j];
+      if (names.length > 1) g2.notes.push('Only sheet "' + names[j] + '" was imported; ' + (names.length - 1) + ' other sheet' + (names.length > 2 ? 's were' : ' was') + ' ignored.');
+      return g2;
+    }
+  }
+  return { kind: 'none', meta: {}, items: [], skipped: [], notes: [], fileName: fileName };
+}
+
+function qtParseKmiSheet(ws) {
+  if (!ws || !ws['!ref']) return null;
+  var rg = XLSX.utils.decode_range(ws['!ref']);
+  var hdr = -1, cols = {};
+  for (var r = rg.s.r; r <= Math.min(rg.e.r, 30) && hdr < 0; r++) {
+    for (var c = rg.s.c; c <= rg.e.c; c++) {
+      if (/^checklist item$/i.test(qtCellText(ws, r, c))) { hdr = r; break; }
+    }
+  }
+  if (hdr < 0) return null;
+  for (var c2 = rg.s.c; c2 <= rg.e.c; c2++) {
+    var h = qtCellText(ws, hdr, c2).toLowerCase();
+    if (/^section/.test(h)) cols.section = c2;
+    else if (/^spec ref/.test(h)) cols.ref = c2;
+    else if (/^checklist item/.test(h)) cols.text = c2;
+    else if (/^hold point/.test(h)) cols.hold = c2;
+    else if (/^response type/.test(h)) cols.rt = c2;
+    else if (/^photo required/.test(h)) cols.photo = c2;
+    else if (/creates deficiency/.test(h)) cols.def = c2;
+    else if (/^guidance/.test(h)) cols.guid = c2;
+  }
+  var meta = { category: 'During work' };
+  for (var m = rg.s.r; m < hdr; m++) {
+    var lab = qtCellText(ws, m, rg.s.c).toLowerCase(), val = qtCellText(ws, m, rg.s.c + 1);
+    if (/^template name/.test(lab)) meta.name = val;
+    else if (/^template code|^doc/.test(lab)) meta.code = val;
+    else if (/^revision/.test(lab)) meta.revision = val;
+    else if (/^spec section/.test(lab)) meta.spec_section = val;
+    else if (/^category/.test(lab) && QC_CATEGORIES.indexOf(val) >= 0) meta.category = val;
+  }
+  var rtMap = { 'default': 'default', 'measurement': 'measurement', 'text': 'text', 'date': 'date', 'photo only': 'photo', 'signature': 'signature' };
+  var items = [], skipped = [], yes = function(s){ return /^(y|yes|x|true)$/i.test(String(s).trim()); };
+  for (var r2 = hdr + 1; r2 <= rg.e.r; r2++) {
+    var text = cols.text != null ? qtCellText(ws, r2, cols.text) : '';
+    var ref = cols.ref != null ? qtCellText(ws, r2, cols.ref) : '';
+    if (!text) { if (ref) skipped.push({ row: r2 + 1, ref: ref, reason: 'no item text' }); continue; }
+    var hold = cols.hold != null ? yes(qtCellText(ws, r2, cols.hold)) : false;
+    if (!hold && cols.text != null) hold = qtCellYellow(ws, r2, cols.text);
+    var defCell = cols.def != null ? qtCellText(ws, r2, cols.def) : '';
+    items.push(qtNormItem({
+      section: cols.section != null ? qtCellText(ws, r2, cols.section) : '',
+      spec_ref: ref, text: text, hold_point: hold,
+      response_type: rtMap[(cols.rt != null ? qtCellText(ws, r2, cols.rt) : 'default').toLowerCase()] || 'default',
+      photo_required: cols.photo != null ? yes(qtCellText(ws, r2, cols.photo)) : false,
+      creates_deficiency: defCell === '' ? true : yes(defCell),
+      guidance: cols.guid != null ? qtCellText(ws, r2, cols.guid) : ''
+    }));
+  }
+  return { kind: 'kmi', meta: meta, items: items, skipped: skipped, notes: [] };
+}
+
+function qtParseGcSheet(ws) {
+  if (!ws || !ws['!ref']) return null;
+  var rg = XLSX.utils.decode_range(ws['!ref']);
+  var hdr = -1, cItem = -1, cRef = -1, respCols = [];
+  for (var r = rg.s.r; r <= Math.min(rg.e.r, 40) && hdr < 0; r++) {
+    var item = -1, ref = -1, resp = [];
+    for (var c = rg.s.c; c <= rg.e.c; c++) {
+      var t = qtCellText(ws, r, c);
+      if (item < 0 && /item|description|requirement|check/i.test(t) && t.length < 40) item = c;
+      else if (ref < 0 && /spec|ref|section|^#$|^no\.?$/i.test(t) && t.length < 25) ref = c;
+      else if (/^(y|n|n\/?r|n\/?a|yes|no|pass|fail)$/i.test(t)) resp.push(t);
+    }
+    if (item >= 0 && resp.length >= 2) { hdr = r; cItem = item; cRef = ref >= 0 ? ref : rg.s.c; respCols = resp; }
+  }
+  if (hdr < 0) return null;
+
+  var meta = { category: 'During work' }, division = '', title = '';
+  for (var m = rg.s.r; m < hdr; m++) {
+    for (var mc = rg.s.c; mc <= rg.e.c; mc++) {
+      var tx = qtCellText(ws, m, mc);
+      if (!tx) continue;
+      if (!division && /^division\s/i.test(tx)) division = tx;
+      if (!title && m === rg.s.r && mc === rg.s.c) title = tx;
+      var below = qtCellText(ws, m + 1, mc);
+      if (/^document\s*#/i.test(tx)) meta.code = tx.replace(/^document\s*#\s*:?\s*/i, '') || below;
+      if (/^revision\s*#?/i.test(tx)) meta.revision = tx.replace(/^revision\s*#?\s*:?\s*/i, '') || below;
+      if (meta.revision) meta.revision = String(meta.revision).replace(/^(\d+)\.0+$/, '$1');
+    }
+  }
+  var divName = division ? qtTitleCase(division.replace(/^division\s+[\d\s]+-?\s*/i, '').trim()) : '';
+  meta.spec_section = qtSpecFromDivision(division);
+  meta.name = divName ? (divName + (/cqc|quality control/i.test(title) ? ' CQC' : ' Checklist') +
+                         (meta.spec_section ? ' (' + meta.spec_section + ')' : '')) : (title || 'Imported checklist');
+  var section = divName || 'Checklist';
+  var footerRe = /=\s*acceptable|checklist results|^signature|critical hold point|describe follow-up|submit a qor/i;
+  var items = [], skipped = [], notes = [], emptySections = [], footer = 0, inFooter = false, blankNumbered = 0;
+  var secCount = 0;
+  for (var r2 = hdr + 1; r2 <= rg.e.r; r2++) {
+    var rowTxt = [];
+    for (var cc = rg.s.c; cc <= rg.e.c; cc++) { var v = qtCellText(ws, r2, cc); if (v) rowTxt.push(v); }
+    if (!rowTxt.length) continue;
+    if (inFooter || rowTxt.some(function(x){ return footerRe.test(x); })) { inFooter = true; footer++; continue; }
+    var ref2 = qtCellText(ws, r2, cRef), text2 = qtCellText(ws, r2, cItem);
+    if (!text2) {
+      if (/:$/.test(ref2) || (ref2.length > 12 && !/^\d+(\.\d+)*[a-z.]*$/i.test(ref2))) {
+        if (secCount === 0 && items.length) emptySections.push(section);
+        section = ref2.replace(/:$/, '').trim(); secCount = 0;
+      } else if (/^\d+$/.test(ref2)) blankNumbered++;
+      else skipped.push({ row: r2 + 1, ref: ref2, reason: 'no item text' });
+      continue;
+    }
+    items.push(qtNormItem({ section: section, spec_ref: /^\d+$/.test(ref2) && section !== divName ? '' : ref2,
+                            text: text2, hold_point: qtCellYellow(ws, r2, cItem) }));
+    secCount++;
+  }
+  if (secCount === 0 && section !== (divName || 'Checklist')) emptySections.push(section);
+  if (blankNumbered) skipped.push({ row: null, ref: '', reason: blankNumbered + ' blank numbered rows' });
+  if (footer) skipped.push({ row: null, ref: '', reason: footer + ' footer rows (legend, results, follow-up, signature — rebuilt on the PDF)' });
+  emptySections.forEach(function(s){ notes.push('"' + s + '" had no items. Project-specific items can be added on each checklist.'); });
+  notes.push('Answer columns ' + respCols.join(' / ') + ' convert to Pass / Fail / N/A.');
+  return { kind: 'gc', meta: meta, items: items, skipped: skipped, notes: notes };
+}
+
+function qtImportPreview() {
+  var p = _qtImp; if (!p) return;
+  var holds = qtHoldCount(p.items);
+  var secs = qtSections(p.items).length;
+  var skippedRows = p.skipped.reduce(function(n, s){
+    var m = /^(\d+) /.exec(s.reason); return n + (s.row ? 1 : (m ? Number(m[1]) : 0));
+  }, 0);
+  var catOpts = QC_CATEGORIES.map(function(c){ return '<option' + (c === p.meta.category ? ' selected' : '') + '>' + c + '</option>'; }).join('');
+  var rows = p.items.map(function(it, i){
+    return '<tr' + (it.hold_point ? ' style="background:#FFFDE6"' : '') + '>' +
+      '<td style="padding:5px 8px"><input type="checkbox" checked id="qti-use-' + i + '" aria-label="Use item"></td>' +
+      '<td style="padding:5px 8px;color:#666;white-space:nowrap">' + qtEsc(it.spec_ref) + '</td>' +
+      '<td style="padding:5px 8px"><div style="font-size:11px;color:#888">' + qtEsc(it.section) + '</div>' + qtEsc(it.text) + '</td>' +
+      '<td style="padding:5px 8px;text-align:center"><input type="checkbox" id="qti-hold-' + i + '"' + (it.hold_point ? ' checked' : '') + ' aria-label="Hold point"></td></tr>';
+  }).join('');
+  var skipList = p.skipped.map(function(s){
+    return '<li>' + (s.row ? 'Row ' + s.row + (s.ref ? ' (' + qtEsc(s.ref) + ')' : '') + ': ' : '') + qtEsc(s.reason) + '</li>';
+  }).join('');
+  showModal(
+    '<button class="xbtn" onclick="closeModal();_qtImp=null" aria-label="Close">\u00d7</button><div class="mt">Import checklist from Excel</div>' +
+    '<div class="msb">' + qtEsc(p.fileName) + (p.sheet ? ' · ' + qtEsc(p.sheet) : '') + ' · ' +
+      (p.kind === 'kmi' ? 'KMI import template' : 'recognized as a GC checklist form') + '</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>Template name *</label><input id="qti-name" value="' + qtEsc(p.meta.name || '') + '"></div>' +
+      '<div class="fgr"><label>Code / Doc #</label><input id="qti-code" value="' + qtEsc([p.meta.code, p.meta.revision ? 'Rev ' + p.meta.revision : ''].filter(Boolean).join(' · ')) + '"></div>' +
+      '<div class="fgr"><label>Spec section</label><input id="qti-spec" value="' + qtEsc(p.meta.spec_section || '') + '"></div>' +
+      '<div class="fgr"><label>Category</label><select id="qti-cat">' + catOpts + '</select></div>' +
+    '</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:12px 0">' +
+      cfPill('#E4ECF7', '#1D4E89', p.items.length + ' items') +
+      cfPill('#FFF59E', '#4D4400', holds + ' hold point' + (holds === 1 ? '' : 's')) +
+      cfPill('#EEF0F3', '#4A5261', secs + ' section' + (secs === 1 ? '' : 's')) +
+      (skippedRows ? cfPill('#EEF0F3', '#4A5261', skippedRows + ' rows skipped') : '') +
+    '</div>' +
+    '<div style="max-height:46vh;overflow:auto;border:1px solid #e5e5e5;border-radius:8px">' +
+      '<table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr style="background:#f5f5f5">' +
+      '<th style="padding:6px 8px;text-align:left">Use</th><th style="padding:6px 8px;text-align:left">Ref</th>' +
+      '<th style="padding:6px 8px;text-align:left">Item</th><th style="padding:6px 8px">Hold point</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    (skipList || p.notes.length ? '<details style="margin-top:10px;font-size:12px;color:#555"><summary style="cursor:pointer">Skipped rows and notes</summary><ul style="margin:6px 0 0;padding-left:18px;line-height:1.6">' +
+      skipList + p.notes.map(function(n){ return '<li>' + qtEsc(n) + '</li>'; }).join('') + '</ul></details>' : '') +
+    '<div class="mf">' +
+      '<button class="btn" onclick="closeModal();_qtImp=null">Cancel</button>' +
+      '<button class="btn btn-p" onclick="qtImportCommit()">Create draft template</button></div>');
+}
+
+async function qtImportCommit() {
+  var p = _qtImp; if (!p) return;
+  var name = (g('qti-name').value || '').trim();
+  if (!name) { alert('Template name is required.'); return; }
+  var items = [];
+  p.items.forEach(function(it, i){
+    var use = g('qti-use-' + i), hold = g('qti-hold-' + i);
+    if (use && !use.checked) return;
+    var c = qtNormItem(it); c.hold_point = !!(hold && hold.checked);
+    items.push(c);
+  });
+  if (!items.length) { alert('Select at least one item.'); return; }
+  var res = await qtInsertTemplate({
+    name: name, code: (g('qti-code').value || '').trim() || null,
+    spec_section: (g('qti-spec').value || '').trim() || null, category: g('qti-cat').value,
+    source: 'import', source_file_name: p.fileName || null
+  }, items);
+  if (!res) return;
+  _qtImp = null;
+  closeModal();
+  showToast('Imported ' + items.length + ' items as draft v1. Review, then Publish.');
+}
+
+function qtDownloadImportTemplate() {
+  if (typeof XLSX === 'undefined') { alert('The Excel writer did not load. Refresh and try again.'); return; }
+  var tpl = [
+    ['KMI.Build Quality Checklist — Import Template'],
+    ['One row per checklist item. Do not rename columns or move the header row (row 11).'],
+    ['Template name', ''], ['Template code / Doc #', ''], ['Revision', ''], ['Spec section', ''],
+    ['Category', 'During work'], [], [], [],
+    ['Section', 'Spec Ref', 'Checklist item', 'Hold point (Y)', 'Response type', 'Photo required (Y)', 'Fail creates deficiency (Y)', 'Guidance / acceptance criteria'],
+    ['Execution', '3.04', 'Mortar joints fully filled and tooled', '', 'Default', '', 'Y', 'Example row — replace']
+  ];
+  var ins = [
+    ['How to use this import template'], [],
+    ['Where it goes', 'KMI.Build > Quality Templates > Import from Excel. The file becomes a DRAFT template you review before publishing.'],
+    ['Header block', 'Template name, code, revision, spec section and category (Pre-installation, During work, Closeout).'],
+    ['Item rows', 'One row per item from row 12 down. Rows with a blank "Checklist item" are skipped.'],
+    ['Hold point (Y)', 'Must be accepted before work continues. Shown as a yellow HOLD POINT tag. Yellow-filled item cells also import as hold points.'],
+    ['Response type', 'Default = Pass / Fail / N/A. Or Measurement, Text, Date, Photo only, Signature.'],
+    ['Photo required (Y)', 'The item cannot be answered without a photo.'],
+    ['Fail creates deficiency (Y)', 'Default Y. A Fail opens a deficiency with an owner and due date.']
+  ];
+  var wb = XLSX.utils.book_new();
+  var w1 = XLSX.utils.aoa_to_sheet(ins); w1['!cols'] = [{ wch: 26 }, { wch: 100 }];
+  var w2 = XLSX.utils.aoa_to_sheet(tpl); w2['!cols'] = [{ wch: 28 }, { wch: 10 }, { wch: 52 }, { wch: 13 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 44 }];
+  XLSX.utils.book_append_sheet(wb, w1, 'Instructions');
+  XLSX.utils.book_append_sheet(wb, w2, 'Template');
+  XLSX.writeFile(wb, 'KMI_Quality_Checklist_Import_Template.xlsx');
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -63555,7 +64335,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-05-BOOTFAST4A';
+var KMI_BUILD = '2026-11-06-QC1a';
 
 var _kmiSessionId = (function(){
   try {
