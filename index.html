@@ -3922,25 +3922,8 @@ tr.gc-line:hover td{background:#fafafa}
       <div class="fgr"><label>Package name</label><input id="esb-pkg" list="esb-pkg-list" placeholder="e.g. CMU Test Reports"><datalist id="esb-pkg-list"></datalist></div>
       <div class="fgr full"><label>Item name *</label><input id="esb-name" placeholder="e.g. County Materials CMU Block Data &amp; Test Reports"></div>
       <div class="fgr full"><label>Description</label><textarea id="esb-desc" rows="2" placeholder="Anything specific about this item"></textarea></div>
-
-      <div class="fgr full">
-        <label>Source</label>
-        <div style="display:flex;gap:18px;align-items:center;padding:6px 0">
-          <label style="font-size:12px;color:#444;display:flex;align-items:center;gap:6px;cursor:pointer">
-            <input type="radio" name="esb-src" value="library" id="esb-src-lib" onchange="onSubmittalSrcChange()"> Pick from product library
-          </label>
-          <label style="font-size:12px;color:#444;display:flex;align-items:center;gap:6px;cursor:pointer">
-            <input type="radio" name="esb-src" value="custom" id="esb-src-cus" onchange="onSubmittalSrcChange()"> Custom item (shop drawing, sample, RFI)
-          </label>
-        </div>
-      </div>
-      <div class="fgr full" id="esb-prod-wrap">
-        <label>Products</label>
-        <div id="esb-prod-list" style="margin-bottom:8px"></div>
-        <select id="esb-prod-add" onchange="onAddSubmittalProduct(this)">
-          <option value="">+ Add a product…</option>
-        </select>
-      </div>
+      <!-- SUBMIX1: Source radios removed. Products, uploaded files and listed
+           items all live in their own cards below, on every submittal. -->
 
       <div class="fgr"><label>Due date</label><input id="esb-due" type="date"></div>
       <div class="fgr"><label>Sent date</label><input id="esb-sent" type="date"></div>
@@ -3957,12 +3940,18 @@ tr.gc-line:hover td{background:#fafafa}
     </div>
   </div>
 
-  <!-- Document preview — only meaningful for library-linked submittals.
-       Read-only in Round 2A; Round 3 turns this into the compile manifest. -->
+  <!-- SUBMIX1: Products card - library picker plus per-product document
+       selection. Shown on every submittal; products are optional. -->
   <div class="card" id="esb-docs-card" style="display:none">
     <div class="ch">
-      <span class="ct">Documents that will go in the package</span>
-      <span style="font-size:11px;color:#888;font-weight:400">Live preview — pulled from the linked product's library entry</span>
+      <span class="ct">Products &middot; Product Data</span>
+      <span style="font-size:11px;color:#888;font-weight:400">From the product library. Check the docs to include in the package.</span>
+    </div>
+    <div class="fgr full" id="esb-prod-wrap" style="margin-bottom:12px">
+      <div id="esb-prod-list" style="margin-bottom:8px"></div>
+      <select id="esb-prod-add" onchange="onAddSubmittalProduct(this)">
+        <option value="">+ Add a product…</option>
+      </select>
     </div>
     <div id="esb-docs-section"></div>
   </div>
@@ -3971,8 +3960,8 @@ tr.gc-line:hover td{background:#fafafa}
        upload to the kmi-project-files bucket at submittals/<submittalId>/ -->
   <div class="card" id="esb-custom-docs-card" style="display:none">
     <div class="ch">
-      <span class="ct">Custom documents</span>
-      <span style="font-size:11px;color:#888;font-weight:400">Shop drawings, samples, RFI responses — files attached directly to this submittal</span>
+      <span class="ct">Uploaded files</span>
+      <span style="font-size:11px;color:#888;font-weight:400">Shop drawings, cut sheets, letters, RFI responses — files attached directly to this submittal</span>
     </div>
     <div id="esb-custom-docs-section"></div>
   </div>
@@ -12740,18 +12729,7 @@ function renderSubmittals() {
   tbody.innerHTML = rows.map(function(r){
     // Round 6: build product cell from the productIds array
     var pids = (Array.isArray(r.productIds) && r.productIds.length) ? r.productIds : (r.productId ? [r.productId] : []);
-    var prodCell;
-    if (r.isCustom) {
-      prodCell = '<span style="color:#888;font-style:italic">Custom item</span>';
-    } else if (!pids.length) {
-      prodCell = '<span style="color:#A32D2D">Missing product</span>';
-    } else {
-      var firstP = getProduct(pids[0]);
-      var firstName = firstP ? firstP.name : ('#' + pids[0]);
-      prodCell = subEsc(firstName) + (pids.length > 1
-        ? ' <span style="color:#888;font-size:11px">(+' + (pids.length - 1) + ' more)</span>'
-        : '');
-    }
+    var prodCell = _subProductCellHtml(r, pids, 'Custom item', ' more');
     var dueCell = r.dueDate || '—';
     if (_isOverdue(r.dueDate) && (r.status || 'draft') !== 'closed') {
       dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
@@ -12797,8 +12775,7 @@ function getSubSortValue(s, col) {
     case 'package':  return s.packageName || '';
     case 'product':  {
       var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
-      if (s.isCustom) return 'zzz_custom';
-      if (!pids.length) return '';
+      if (!pids.length) return (_subHasAttachments(s) ? 'zzz_custom' : '');
       var p0 = getProduct(pids[0]);
       return p0 ? (p0.name || '') : '';
     }
@@ -12852,6 +12829,34 @@ function initNewSubmittal() {
   _editingSubmittalDocSelection = null;
   _editingSubmittalFormValues = {};
   nav('edit-submittal');
+}
+
+// SUBMIX1: true when a submittal has uploaded files or listed items.
+function _subHasAttachments(s) {
+  return !!(s && ((Array.isArray(s.customDocuments) && s.customDocuments.length) ||
+                  (Array.isArray(s.lineItems) && s.lineItems.length)));
+}
+
+// SUBMIX1: Product column cell, shared by the global list and the
+// project tab. Products first ("Name (+N) - N files"); "Custom" when there
+// are no products but something is attached; "Missing product" only when
+// nothing is attached at all.
+function _subProductCellHtml(s, pids, customLabel, moreWord) {
+  var nFiles = (s && Array.isArray(s.customDocuments)) ? s.customDocuments.length : 0;
+  if (pids && pids.length) {
+    var firstP = getProduct(pids[0]);
+    var firstName = firstP ? firstP.name : ('#' + pids[0]);
+    var extra = [];
+    if (pids.length > 1) extra.push('(+' + (pids.length - 1) + (moreWord || '') + ')');
+    if (nFiles) extra.push(nFiles + ' file' + (nFiles === 1 ? '' : 's'));
+    return subEsc(firstName) + (extra.length
+      ? ' <span style="color:#888;font-size:11px">' + subEsc(extra.join(' · ')) + '</span>'
+      : '');
+  }
+  if (_subHasAttachments(s)) {
+    return '<span style="color:#888;font-style:italic">' + subEsc(customLabel) + '</span>';
+  }
+  return '<span style="color:#A32D2D">Missing product</span>';
 }
 
 function editSubmittal(id) {
@@ -13136,18 +13141,14 @@ function renderEditSubmittalPage() {
   _set('esb-rnotes', r && r.responseNotes);
   _set('esb-notes',  r && r.notes);
 
-  // Source radio
-  var srcLib = g('esb-src-lib');
-  var srcCus = g('esb-src-cus');
-  if (srcLib) srcLib.checked = (_subSrcMode === 'library');
-  if (srcCus) srcCus.checked = (_subSrcMode === 'custom');
-  onSubmittalSrcChange();
+  // SUBMIX1: no Source radios - the product picker is always available.
+  var _prodWrapEl = g('esb-prod-wrap');
+  if (_prodWrapEl) _prodWrapEl.style.display = '';
 
   // Disable all inputs for read-only roles
   if (!canEdit) {
     ['esb-proj','esb-status','esb-response','esb-csi','esb-kno','esb-cno','esb-pkg','esb-name','esb-desc',
-     'esb-prod-add','esb-due','esb-sent','esb-resp','esb-rnotes','esb-notes',
-     'esb-src-lib','esb-src-cus'].forEach(function(id){
+     'esb-prod-add','esb-due','esb-sent','esb-resp','esb-rnotes','esb-notes'].forEach(function(id){
       var el = g(id); if (el) el.disabled = true;
     });
     var saveBtn = g('esb-save-btn'); if (saveBtn) saveBtn.style.display = 'none';
@@ -13174,18 +13175,11 @@ function renderEditSubmittalPage() {
   renderSubmittalRevisionBanner();
 }
 
+// SUBMIX1: the Source radios are gone. Kept as a shim so any stray
+// caller still re-renders the cards; it no longer clears products.
 function onSubmittalSrcChange() {
-  var srcLib = g('esb-src-lib');
-  var srcCus = g('esb-src-cus');
-  var mode = (srcCus && srcCus.checked) ? 'custom' : 'library';
-  _subSrcMode = mode;
   var prodWrap = g('esb-prod-wrap');
-  if (prodWrap) prodWrap.style.display = (mode === 'library') ? '' : 'none';
-  // If switching to custom, clear any picked products
-  if (mode === 'custom') {
-    _editingSubmittalProductIds = [];
-    renderSubmittalProductsList(null);
-  }
+  if (prodWrap) prodWrap.style.display = '';
   renderSubmittalDocsPreview();
   renderSubmittalCustomDocs();
 }
@@ -13208,14 +13202,14 @@ function renderSubmittalDocsPreview() {
   var sec  = g('esb-docs-section');
   if (!card || !sec) return;
 
-  // Show only when we're library-linked AND at least one product is picked
+  // SUBMIX1: always shown - the product picker lives in this card. With
+  // nothing picked, show a hint instead of the doc list.
   var picked = (_editingSubmittalProductIds || []).slice();
-  if (_subSrcMode !== 'library' || !picked.length) {
-    card.style.display = 'none';
-    sec.innerHTML = '';
+  card.style.display = '';
+  if (!picked.length) {
+    sec.innerHTML = '<div style="font-size:12px;color:#888">No products picked. That\'s fine when the package is uploaded files or listed items only.</div>';
     return;
   }
-  card.style.display = '';
 
   var canEdit = canAccess('edit-submittals') === 'full';
 
@@ -13644,16 +13638,13 @@ async function saveSubmittal() {
   if (!requireFull('edit-submittals', 'save submittals')) return;
   var projId = (g('esb-proj').value || '').trim();
   var name   = (g('esb-name').value || '').trim();
-  if (!projId) { alert('Please pick a project.'); return; }
-  if (!name)   { alert('Please enter an item name.'); return; }
+  if (!projId) { showToast('Pick a project before saving.', 'error'); return; }
+  if (!name)   { showToast('Enter an item name before saving.', 'error'); return; }
 
-  var srcCus = g('esb-src-cus');
-  var isCustom = !!(srcCus && srcCus.checked);
-  // Round 6: pull from the picker state, not a single dropdown
-  var productIds = isCustom ? [] : (_editingSubmittalProductIds || []).slice();
-  if (!isCustom && !productIds.length) {
-    if (!confirm('No products picked from the library. Save anyway?\n\nIf this is a shop drawing or sample, switch to "Custom item" instead.')) return;
-  }
+  // SUBMIX1: products, uploaded files and listed items can all coexist.
+  // is_custom is derived: true only when no library products are picked.
+  var productIds = (_editingSubmittalProductIds || []).slice();
+  var isCustom = !productIds.length;
 
   var status   = (g('esb-status').value   || 'draft').trim();
   var response = (g('esb-response').value || '').trim();
@@ -13699,11 +13690,9 @@ async function saveSubmittal() {
     // checkbox or product, _editingSubmittalDocSelection stays null
     // and we save it as null (legacy auto-all). The moment they
     // touch anything, it materializes into an explicit array.
-    selectedDocIds:      isCustom
-                           ? null   // custom items don't use library selection
-                           : (Array.isArray(_editingSubmittalDocSelection)
-                                ? _editingSubmittalDocSelection.slice()
-                                : null),
+    selectedDocIds:      Array.isArray(_editingSubmittalDocSelection)
+                           ? _editingSubmittalDocSelection.slice()
+                           : null,   // SUBMIX1: null = legacy auto-all
     isCustom:            isCustom,
     status:              status,
     response:            response,
@@ -13713,9 +13702,7 @@ async function saveSubmittal() {
     responseNotes:       (g('esb-rnotes').value || '').trim(),
     notes:               (g('esb-notes').value  || '').trim(),
     // Form-fill Round 3 — persist per-submittal form answers
-    formValues:          isCustom
-                           ? {}   // custom items have no form schema
-                           : JSON.parse(JSON.stringify(_editingSubmittalFormValues || {})),
+    formValues:          JSON.parse(JSON.stringify(_editingSubmittalFormValues || {})),
     updatedAt:           nowIso,
     updatedByUserId:     _currentUser ? _currentUser.id : null
   };
@@ -13743,11 +13730,13 @@ async function saveSubmittal() {
   }
   saveDB();
 
+  var _syncErr = '';
   if (supabaseClient && record) {
     try {
       var resp = await supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(record));
-      if (resp && resp.error) console.warn('submittal push warning:', resp.error.message);
+      if (resp && resp.error) { _syncErr = resp.error.message || String(resp.error); console.warn('submittal push warning:', _syncErr); }
     } catch (e) {
+      _syncErr = (e && e.message) ? e.message : String(e);
       console.warn('submittal push threw:', e);
     }
   }
@@ -13755,6 +13744,15 @@ async function saveSubmittal() {
   // Re-render the page so the title/delete-button/dates update in place,
   // and the auto-filled dates (sent/response) become visible.
   renderEditSubmittalPage();
+
+  // SUBMIX1: confirm the save (same toast as the rest of the app).
+  if (_syncErr) {
+    showToast('Saved locally but cloud sync FAILED: ' + _syncErr + '. Save again to retry.', 'error');
+  } else if (isNew) {
+    showToast('Submittal created — you can upload files now', 'success');
+  } else {
+    showToast('Submittal saved', 'success');
+  }
 
   // Round 3: revision prompt. Trigger when the response was just newly
   // set to a verdict that typically requires a follow-up submittal AND
@@ -14181,14 +14179,15 @@ function renderSubmittalCustomDocs() {
   var sec  = g('esb-custom-docs-section');
   if (!card || !sec) return;
 
-  // Only show this card for custom items that have been saved at least once
+  // SUBMIX1: shown on every submittal. Uploads need a saved record (the
+  // storage path uses the submittal id), so unsaved ones show a hint.
   var r = _editSubmittalId ? getSubmittal(_editSubmittalId) : null;
-  if (!r || !r.isCustom) {
-    card.style.display = 'none';
-    sec.innerHTML = '';
+  card.style.display = '';
+  if (!r) {
+    sec.innerHTML = '<div style="padding:14px;color:#888;font-size:12px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
+      'Save the submittal once to upload files.</div>';
     return;
   }
-  card.style.display = '';
 
   var docs = Array.isArray(r.customDocuments) ? r.customDocuments : [];
   var canEdit = canAccess('edit-submittals') === 'full';
@@ -14196,8 +14195,8 @@ function renderSubmittalCustomDocs() {
   var html = '';
   if (canEdit) {
     html += '<div style="font-size:12px;color:#888;margin-bottom:10px">' +
-      'Files upload to <code>kmi-project-files</code> under this project, in a <code>submittals/</code> subfolder. ' +
-      'Round 3 will compile these into the package alongside the transmittal cover.' +
+      'Uploaded files compile into the package after the Product Data. ' +
+      'Description is optional — left blank, the cover uses the item name.' +
     '</div>' +
     '<div style="margin-bottom:14px"><label class="btn btn-p btn-sm" style="cursor:pointer;display:inline-block">' +
       '↑ Upload file' +
@@ -14208,23 +14207,36 @@ function renderSubmittalCustomDocs() {
 
   if (!docs.length) {
     html += '<div style="padding:14px;color:#aaa;font-size:13px;text-align:center;border:0.5px dashed #ddd;border-radius:6px">' +
-      'No custom documents attached yet.</div>';
+      'No files uploaded yet.</div>';
     sec.innerHTML = html;
     return;
   }
 
-  html += '<table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
-    '<th style="padding:6px 8px;text-align:left">Filename</th>' +
-    '<th style="padding:6px 8px;text-align:left;width:140px">Uploaded</th>' +
+  var _itemNm = String(r.itemName || '').trim();
+  html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px"><thead style="background:#fafafa"><tr>' +
+    '<th style="padding:6px 8px;text-align:left">File</th>' +
+    '<th style="padding:6px 8px;text-align:left;min-width:180px">Description on cover</th>' +
+    '<th style="padding:6px 8px;text-align:left;width:150px">Format</th>' +
     '<th style="padding:6px 8px;text-align:right;width:80px">Size</th>' +
     '<th style="padding:6px 8px;text-align:right;width:140px"></th>' +
     '</tr></thead><tbody>';
   docs.forEach(function(d){
     var when = d.uploadedAt ? d.uploadedAt.slice(0,10) : '';
+    var sid  = subEsc(d.id);
+    var fmt  = _subCustomDocFormat(d);
     html += '<tr>' +
-      '<td style="padding:6px 8px;word-break:break-all">' + subEsc(d.fileName || '—') + '</td>' +
-      '<td style="padding:6px 8px;font-size:11px">' + subEsc(when) +
-        (d.uploadedByName ? '<div style="font-size:10px;color:#aaa">by ' + subEsc(d.uploadedByName) + '</div>' : '') +
+      '<td style="padding:6px 8px;word-break:break-all">' + subEsc(d.fileName || '—') +
+        '<div style="font-size:10px;color:#aaa">' + subEsc(when) + (d.uploadedByName ? ' by ' + subEsc(d.uploadedByName) : '') + '</div>' +
+      '</td>' +
+      '<td style="padding:6px 8px">' +
+        (canEdit
+          ? '<input value="' + subEsc(d.description || '') + '" placeholder="' + subEsc(_itemNm) + '" onchange="editSubmittalCustomDoc(\'' + sid + '\',\'description\',this.value)">'
+          : subEsc(d.description || _itemNm)) +
+      '</td>' +
+      '<td style="padding:6px 8px">' +
+        (canEdit
+          ? '<select onchange="editSubmittalCustomDoc(\'' + sid + '\',\'documentType\',this.value)">' + _subCustomDocFormatOptions(fmt) + '</select>'
+          : subEsc(fmt)) +
       '</td>' +
       '<td style="padding:6px 8px;text-align:right;font-family:monospace;color:#888">' + _fmtFileSize(d.fileSize) + '</td>' +
       '<td style="padding:6px 8px;text-align:right">' +
@@ -14233,8 +14245,53 @@ function renderSubmittalCustomDocs() {
       '</td>' +
     '</tr>';
   });
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
   sec.innerHTML = html;
+}
+
+// SUBMIX1: Format vocabulary for uploaded files - same values the compile
+// uses for the transmittal Format column.
+var SUBMITTAL_UPLOAD_FORMATS = ['Documents', 'Drawings', 'Product Data', 'Samples', 'Test Reports', 'Letters', 'Specifications', 'Photos', 'RFI Response'];
+
+function _subCustomDocFormat(d) {
+  return (d && d.documentType) || _guessCompileFormat(d && d.fileName) || 'Documents';
+}
+
+function _subCustomDocFormatOptions(current) {
+  var list = SUBMITTAL_UPLOAD_FORMATS.slice();
+  if (current && list.indexOf(current) < 0) list.push(current);
+  return list.map(function(f){
+    return '<option value="' + subEsc(f) + '"' + (f === current ? ' selected' : '') + '>' + subEsc(f) + '</option>';
+  }).join('');
+}
+
+// SUBMIX1: inline edit of an uploaded file's cover description / format.
+// Targeted upsert on kmi_submittals only, like the listed items.
+async function editSubmittalCustomDoc(docId, field, val) {
+  if (!requireFull('edit-submittals', 'edit uploaded files')) return;
+  if (!_editSubmittalId) return;
+  var r = getSubmittal(_editSubmittalId); if (!r) return;
+  var d = (r.customDocuments || []).find(function(x){ return String(x.id) === String(docId); });
+  if (!d) return;
+  if (field === 'description') {
+    d.description = String(val || '').trim();
+  } else if (field === 'documentType') {
+    d.documentType = String(val || '');
+  } else {
+    return;
+  }
+  r.updatedAt = new Date().toISOString();
+  r.updatedByUserId = _currentUser ? _currentUser.id : null;
+  saveDB();
+  if (supabaseClient) {
+    try {
+      var resp = await supabaseClient.from('kmi_submittals').upsert(toSBSubmittal(r));
+      if (resp && resp.error) showToast('Saved locally but cloud sync FAILED: ' + resp.error.message, 'error');
+    } catch (e) {
+      showToast('Saved locally but cloud sync FAILED: ' + ((e && e.message) ? e.message : String(e)), 'error');
+    }
+  }
+  renderSubmittalCustomDocs();
 }
 
 async function onSubmittalCustomDocSelected(ev) {
@@ -15517,12 +15574,16 @@ async function _fillPdfForSubmittal(arrayBuffer, formSchema, formValues, docId, 
 function _gatherCompileDocsForSubmittal(s) {
   var out = [];
   if (!s) return out;
-  if (s.isCustom) {
+  // SUBMIX1: a submittal can carry both. Product Data first (picker
+  // order), then uploaded files. Listed items come last on the cover via
+  // _gatherLineItemsForSubmittal.
+  _gatherLibraryDocsForSubmittal(s, out);
+  {
     (s.customDocuments || []).forEach(function(d){
       // Round 7: Format = derived from filename when no explicit type.
       // Custom docs are typically shop drawings or RFI responses, so the
       // default "Documents" matches Procore's generic categorization.
-      var fmt = d.documentType || _guessCompileFormat(d.fileName) || 'Documents';
+      var fmt = _subCustomDocFormat(d);
       out.push({
         bucket:      PROJECT_FILES_BUCKET,
         doc:         d,
@@ -15534,13 +15595,20 @@ function _gatherCompileDocsForSubmittal(s) {
         // back to the submittal item name. (Was reading s.title, which
         // is not a field on the record — every custom row fell through
         // to the raw filename.)
-        productName: String(s.itemName || '').trim(),
+        // SUBMIX1: per-file description when given, else the item name.
+        productName: String(d.description || '').trim() || String(s.itemName || '').trim(),
         // Custom docs have no "issue date" concept — use upload date so
         // the items table has something meaningful in the Date column.
         dateStr:     _formatProcoreDate(d.uploadedAt) || _formatProcoreDate(new Date().toISOString())
       });
     });
-  } else {
+  }
+  return out;
+}
+
+// SUBMIX1: library Product Data for a submittal, appended to `out`.
+function _gatherLibraryDocsForSubmittal(s, out) {
+  {
     var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
     // Round 9: per-submittal doc selection. null/undefined on the
     // record means legacy auto-all (include every doc); an explicit
@@ -16627,18 +16695,7 @@ function _psbRowsHtml(projectId) {
   }
   return rows.map(function(s){
     var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
-    var prodCell;
-    if (s.isCustom) {
-      prodCell = '<span style="color:#888;font-style:italic">Custom</span>';
-    } else if (!pids.length) {
-      prodCell = '<span style="color:#A32D2D">Missing product</span>';
-    } else {
-      var firstP = getProduct(pids[0]);
-      var firstName = firstP ? firstP.name : ('#' + pids[0]);
-      prodCell = subEsc(firstName) + (pids.length > 1
-        ? ' <span style="color:#888;font-size:11px">(+' + (pids.length - 1) + ')</span>'
-        : '');
-    }
+    var prodCell = _subProductCellHtml(s, pids, 'Custom', '');
     var dueCell = s.dueDate || '—';
     if (_isOverdue(s.dueDate) && (s.status || 'draft') !== 'closed') {
       dueCell = '<span style="color:#A32D2D;font-weight:600">' + subEsc(dueCell) + '</span>';
@@ -64335,7 +64392,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-06-QC1a';
+var KMI_BUILD = '2026-11-06-SUBMIX1';
 
 var _kmiSessionId = (function(){
   try {
