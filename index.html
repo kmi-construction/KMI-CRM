@@ -587,10 +587,11 @@ input.carried:focus{background:#fff;border-color:var(--kmi)}
   /* Layout: hide desktop sidebar, give content room for fixed chrome */
   .sb{display:none}
   body{overflow:hidden}
-  .app{display:block;height:100vh}
+  .app{display:block;height:100vh;height:100dvh}   /* QC1d3: iOS visible height */
   .main{
     padding:64px 12px 80px 12px;
     height:100vh;
+    height:100dvh;   /* QC1d3: 100vh runs under the iOS toolbar, hiding the bottom of every page */
     -webkit-overflow-scrolling:touch
   }
 
@@ -608,6 +609,11 @@ input.carried:focus{background:#fff;border-color:var(--kmi)}
   /* Inputs — 16px to prevent iOS auto-zoom on focus,
    * bigger touch targets via taller padding */
   input,select,textarea{font-size:16px;padding:10px 12px}
+  /* QC1d3: iOS zooms the page in on any field under 16px and leaves it zoomed */
+  #login-overlay input,input:not([type=checkbox]):not([type=radio]):not([type=file]),select,textarea{font-size:16px !important}
+  /* QC1d3: mobile Quality action bar pinned above the tab bar */
+  .qcm-fixbar{position:fixed;left:0;right:0;bottom:calc(64px + env(safe-area-inset-bottom, 0px));z-index:85;display:flex;gap:8px;padding:10px 12px;background:rgba(244,245,248,.97);border-top:1px solid #e3e6eb}
+  .qcm-fixpad{height:86px}
   label{font-size:11px}
   textarea{min-height:84px}
   .btn{padding:9px 14px;font-size:14px;min-height:40px;line-height:1.2}
@@ -23225,7 +23231,7 @@ function qcmRenderList() {
   cls.sort(openFirst);
   var openDefs = L.defs.filter(function(d){ return d.status === 'open'; });
   var html = '';
-  if (qcmCanCreate()) html += '<button type="button" onclick="qcmNewForm()" style="font:inherit;font-size:16px;font-weight:600;width:100%;min-height:52px;border-radius:12px;border:1px solid #1D4E89;background:#1D4E89;color:#fff;margin-bottom:12px;cursor:pointer">+ New inspection</button>';   // QC1d2
+  if (qcmCanCreate()) html += '<div class="qcm-fixbar"><button type="button" onclick="qcmNewForm()" style="font:inherit;font-size:16px;font-weight:600;width:100%;min-height:52px;border-radius:12px;border:1px solid #1D4E89;background:#1D4E89;color:#fff;cursor:pointer">+ New inspection</button></div>';   // QC1d2/QC1d3: pinned above the tab bar
   if (!cls.length) {
     html += '<div class="mob-list-empty">No quality checklists on this project yet.' + (qcmCanCreate() ? ' Tap + New inspection to start one.' : '') + '</div>';
   }
@@ -23259,6 +23265,7 @@ function qcmRenderList() {
       '</div>';
     });
   }
+  if (qcmCanCreate()) html += '<div class="qcm-fixpad"></div>';
   body.innerHTML = html;
 }
 
@@ -23280,6 +23287,7 @@ async function renderMobileQcChecklist() {
     _qcm.idx = first >= 0 ? first : items.length;
   }
   qcmRenderChecklist();
+  qcmTop();
 }
 
 function qcmItems() {
@@ -23371,7 +23379,7 @@ function qcmItemHtml(D, items, idx, AL) {
       (def.due_date ? ' · due ' + ocoFmtDate(def.due_date) : '') +
       (def.status === 'open' && qcCanFill() ? '<button class="btn" style="margin-top:8px;width:100%;min-height:44px" onclick="qcDefCloseModal(' + def.id + ')">Close with re-inspection photo</button>' : '') + '</div>';
   }
-  html += '<div style="display:flex;gap:8px;margin-top:14px">' +
+  html += '<div class="qcm-fixpad"></div><div class="qcm-fixbar">' +
     qcmBigBtn('‹ Prev', 'qcmGo(-1)', idx === 0 ? 'background:#f3f4f6;color:#aaa' : '') +
     qcmBigBtn(idx === items.length - 1 ? 'Finish ›' : 'Next ›', 'qcmGo(1)', 'background:#1D4E89;color:#fff;border-color:#1D4E89') + '</div>';
   return html;
@@ -23414,16 +23422,17 @@ function qcmSummaryHtml(D, items, cnt, AL) {
   html += '<div style="background:#fff;border:1px solid #e3e6eb;border-radius:12px;padding:6px 16px;margin-top:10px">' +
     sig('KMI Superintendent', cl.super_signed_at, cl.super_signed_by_user_id, qcCanSignSuper(), 'super') +
     sig('KMI Project Manager', cl.pm_signed_at, cl.pm_signed_by_user_id, qcCanSignPm(), 'pm') + '</div>' +
-    '<div style="display:flex;gap:8px;margin-top:14px">' + qcmBigBtn('‹ Back to items', 'qcmGo(-1)') +
+    '<div class="qcm-fixpad"></div><div class="qcm-fixbar">' + qcmBigBtn('‹ Back to items', 'qcmGo(-1)') +
       qcmBigBtn('Done', 'qcmDone()', 'background:#1D4E89;color:#fff;border-color:#1D4E89') + '</div>';
   return html;
 }
 
+function qcmTop() { var m = document.querySelector('.main'); if (m) m.scrollTop = 0; window.scrollTo(0, 0); }   // QC1d3: .main is the scroller
 function qcmGo(dir) {
   var n = qcmItems().length;
   _qcm.idx = Math.max(0, Math.min(n, _qcm.idx + dir));
   qcmRenderChecklist();
-  window.scrollTo(0, 0);
+  qcmTop();
 }
 function qcmDone() { _qc.open = null; _qc.d = null; nav('m-quality'); }
 
@@ -23438,7 +23447,7 @@ async function qcmAnswer(id, val) {
   if (next < 0) next = items.findIndex(function(x){ return !x.answer; });
   setTimeout(function(){
     _qcm.idx = next >= 0 ? next : items.length;
-    qcmRenderChecklist(); window.scrollTo(0, 0);
+    qcmRenderChecklist(); qcmTop();
   }, 350);
 }
 function qcmMeasure(id, raw) { qcMeasure(id, raw); }
@@ -23490,7 +23499,7 @@ async function qcmNewForm() {
       '</div>' +
     '</div>';
   qcmNewTplChanged();
-  window.scrollTo(0, 0);
+  qcmTop();
 }
 
 function qcmNewTplChanged() {
@@ -66204,7 +66213,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-07-QC1d2';
+var KMI_BUILD = '2026-11-07-QC1d3';
 
 var _kmiSessionId = (function(){
   try {
