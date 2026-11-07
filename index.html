@@ -975,10 +975,10 @@ input.carried:focus{background:#fff;border-color:var(--kmi)}
     font-size:12px;color:rgba(255,255,255,.78);line-height:1.55
   }
   .mob-proj-hero-actions{
-    display:flex;gap:8px;margin-top:12px
+    display:flex;flex-wrap:wrap;gap:8px;margin-top:12px   /* QC1d2: wrap so 4 buttons fit in portrait */
   }
   .mob-proj-hero-actions .btn{
-    flex:1;background:rgba(255,255,255,.14);
+    flex:1 1 calc(50% - 4px);min-width:0;white-space:normal;background:rgba(255,255,255,.14);
     color:#fff;border:0.5px solid rgba(255,255,255,.25)
   }
   .mob-proj-hero-actions .btn:active{background:rgba(255,255,255,.22)}
@@ -23225,8 +23225,9 @@ function qcmRenderList() {
   cls.sort(openFirst);
   var openDefs = L.defs.filter(function(d){ return d.status === 'open'; });
   var html = '';
+  if (qcmCanCreate()) html += '<button type="button" onclick="qcmNewForm()" style="font:inherit;font-size:16px;font-weight:600;width:100%;min-height:52px;border-radius:12px;border:1px solid #1D4E89;background:#1D4E89;color:#fff;margin-bottom:12px;cursor:pointer">+ New inspection</button>';   // QC1d2
   if (!cls.length) {
-    html += '<div class="mob-list-empty">No quality checklists on this project yet. A PM creates them on the desktop.</div>';
+    html += '<div class="mob-list-empty">No quality checklists on this project yet.' + (qcmCanCreate() ? ' Tap + New inspection to start one.' : '') + '</div>';
   }
   cls.forEach(function(c){
     var cnt = qcCounts(byCl[c.id] || []), pct = cnt.total ? Math.round(100 * cnt.answered / cnt.total) : 0;
@@ -23441,6 +23442,93 @@ async function qcmAnswer(id, val) {
   }, 350);
 }
 function qcmMeasure(id, raw) { qcMeasure(id, raw); }
+
+// QC1d2: start an inspection from the phone. Superintendents and Foremen
+// (fill-quality) plus PM/PC/Admin can create a checklist from a published
+// KMI template on the mobile Quality page. Customizing items, importing GC
+// forms, distributing and deleting stay on the desktop with the PM.
+function qcmCanCreate() { return qcCanFill() || qcCanEdit(); }
+
+function qcmFieldInput(label, inner) {
+  return '<label style="display:block;margin-top:12px;font-size:12px;font-weight:600;color:#555;text-transform:none;letter-spacing:0">' + label + inner + '</label>';
+}
+
+async function qcmNewForm() {
+  var body = g('m-qc-body'); if (!body) return;
+  if (!qcmCanCreate()) { showToast('Your role cannot start inspections.', 'error'); return; }
+  body.innerHTML = '<div class="mob-list-empty">Loading templates…</div>';
+  try { await qtLoad(true); } catch (e) { body.innerHTML = '<div class="mob-list-empty" style="color:#A32D2D">' + _mobEsc(e.message || e) + '</div>'; return; }
+  var pubs = _qt.templates.filter(function(t){ return t.status !== 'archived' && qtPublished(t); })
+    .sort(function(a, b){ return String(a.name).localeCompare(String(b.name)); });
+  if (!pubs.length) {
+    body.innerHTML = '<div class="mob-list-empty">No published inspection templates yet. Ask the office to publish one under Quality Templates.</div>' +
+      '<button class="btn" style="width:100%;min-height:48px;margin-top:10px" onclick="qcmRenderList()">‹ Back</button>';
+    return;
+  }
+  var p = getProj(_mobileSelectedProjectId) || {}, me = qcUid();
+  var team = (p.kmiAssignments || []).map(function(a){ return a.userId; });
+  if (team.map(String).indexOf(String(me)) < 0) team.unshift(me);
+  var users = team.map(function(id){ return (db.users || []).find(function(u){ return String(u.id) === String(id); }); })
+    .filter(function(u){ return u && u.status !== 'inactive' && /^(admin|project manager|project coordinator|superintendent|foreman)$/i.test(String(normalizeRole(u.role) || '')); });
+  var inp = 'width:100%;box-sizing:border-box;margin-top:5px;font:inherit;font-size:16px;font-weight:400;padding:12px;border:1px solid #C5CBD4;border-radius:10px;background:#fff;color:#1a1a1a';
+  body.innerHTML =
+    '<div style="background:#fff;border:1px solid #e3e6eb;border-radius:12px;padding:16px">' +
+      '<div style="font-size:17px;font-weight:700">New inspection</div>' +
+      '<div style="font-size:13px;color:#666;margin-top:2px">' + _mobEsc((p.number || '') + ' ' + (p.name || '')) + '</div>' +
+      qcmFieldInput('Inspection template *', '<select id="qcmn-tpl" style="' + inp + '" onchange="qcmNewTplChanged()">' +
+        pubs.map(function(t){ var v = qtPublished(t); return '<option value="' + t.id + '">' + _mobEsc(t.name) + ' (' + (v.items || []).length + ' items)</option>'; }).join('') + '</select>') +
+      qcmFieldInput('Title *', '<input id="qcmn-title" style="' + inp + '">') +
+      qcmFieldInput('Location / area', '<input id="qcmn-loc" style="' + inp + '" placeholder="e.g. North elevation, Level 2 sills">') +
+      qcmFieldInput('Assigned to', '<select id="qcmn-user" style="' + inp + '">' + users.map(function(u){
+        return '<option value="' + u.id + '"' + (String(u.id) === String(me) ? ' selected' : '') + '>' + _mobEsc(qcUserName(u.id) || u.email) + (String(u.id) === String(me) ? ' (me)' : '') + '</option>'; }).join('') + '</select>') +
+      qcmFieldInput('Due date', '<input id="qcmn-due" type="date" style="' + inp + '">') +
+      qcmFieldInput('Pertinent addenda, RFIs (optional)', '<input id="qcmn-addenda" style="' + inp + '">') +
+      '<div id="qcmn-err" style="color:#A32D2D;font-size:13px;min-height:18px;margin-top:8px"></div>' +
+      '<div style="display:flex;gap:8px;margin-top:6px">' +
+        qcmBigBtn('Cancel', 'qcmRenderList()') +
+        '<button type="button" id="qcmn-go" onclick="qcmCreate()" style="font:inherit;font-size:16px;font-weight:600;flex:1 1 0;min-height:54px;border-radius:12px;border:1px solid #1D4E89;background:#1D4E89;color:#fff;cursor:pointer">Start inspection</button>' +
+      '</div>' +
+    '</div>';
+  qcmNewTplChanged();
+  window.scrollTo(0, 0);
+}
+
+function qcmNewTplChanged() {
+  var t = qtTemplate((g('qcmn-tpl') || {}).value), ti = g('qcmn-title');
+  if (ti && t) ti.value = t.name;
+}
+
+async function qcmCreate() {
+  var err = g('qcmn-err'), btn = g('qcmn-go');
+  var t = qtTemplate(g('qcmn-tpl').value), v = t ? qtPublished(t) : null;
+  var title = (g('qcmn-title').value || '').trim();
+  if (!t || !v) { err.textContent = 'Pick a template.'; return; }
+  if (!title) { err.textContent = 'Title is required.'; return; }
+  btn.disabled = true; btn.textContent = 'Starting…'; err.textContent = '';
+  var add = (g('qcmn-addenda').value || '').trim();
+  var c = await supabaseClient.from('kmi_qc_checklists').insert({
+    project_id: Number(_mobileSelectedProjectId), title: title, location: (g('qcmn-loc').value || '').trim(),
+    header_fields: add ? { addenda: add } : {}, source_kind: 'template', template_id: t.id, template_version: v.version,
+    source_doc_ref: t.code || null, answer_style: t.answer_style || 'yes_no',
+    assigned_user_id: g('qcmn-user').value ? Number(g('qcmn-user').value) : qcUid(), due_date: g('qcmn-due').value || null,
+    status: 'not_started', created_by_user_id: qcUid(), updated_by_user_id: qcUid()
+  }).select();
+  if (c.error) { err.textContent = 'Could not start: ' + c.error.message; btn.disabled = false; btn.textContent = 'Start inspection'; return; }
+  var cl = c.data[0];
+  var items = (v.items || []).filter(function(i){ return String(i.text || '').trim(); }).map(function(i, idx){
+    var n = qtNormItem(i);
+    return { checklist_id: cl.id, sort_order: (idx + 1) * 10, section: n.section || '', spec_ref: n.spec_ref || '', item_text: n.text,
+             guidance: n.guidance || '', hold_point: !!n.hold_point, response_type: n.response_type || 'default',
+             tolerance_min: n.tolerance_min, tolerance_max: n.tolerance_max, tolerance_unit: n.tolerance_unit,
+             photo_required: !!n.photo_required, creates_deficiency: n.creates_deficiency !== false, template_item_key: n.key || null, project_added: false };
+  });
+  if (items.length) {
+    var ir = await supabaseClient.from('kmi_qc_checklist_items').insert(items);
+    if (ir.error) { err.textContent = 'Inspection created, but its items failed to copy: ' + ir.error.message; btn.disabled = false; btn.textContent = 'Start inspection'; return; }
+  }
+  showToast(qcNum(cl.qc_number) + ' started');
+  qcmOpen(cl.id);
+}
 
 // ── Import a GC-required form onto one project (PM/PC, desktop) ────────
 var _qcImp = null;
@@ -66116,7 +66204,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-07-QC1d';
+var KMI_BUILD = '2026-11-07-QC1d2';
 
 var _kmiSessionId = (function(){
   try {
