@@ -1853,6 +1853,24 @@ tr.gc-line:hover td{background:#fafafa}
   <div id="m-weekly-body"></div>
 </div>
 
+<!-- QC1d: Mobile Quality - a project's checklists + open deficiencies -->
+<div class="pg mob-only" id="pg-m-quality">
+  <div class="ph" style="margin-bottom:10px">
+    <div><h1 id="m-qc-heading" style="font-size:17px">Quality</h1></div>
+    <button class="btn btn-sm" onclick="nav('m-project-detail')">← Back</button>
+  </div>
+  <div id="m-qc-body"></div>
+</div>
+
+<!-- QC1d: Mobile Quality - one checklist, one item per screen -->
+<div class="pg mob-only" id="pg-m-qc-checklist">
+  <div class="ph" style="margin-bottom:10px">
+    <div><h1 id="m-qcc-heading" style="font-size:17px">Checklist</h1></div>
+    <button class="btn btn-sm" onclick="nav('m-quality')">← Back</button>
+  </div>
+  <div id="m-qcc-body"></div>
+</div>
+
 <!-- Mobile: "open on desktop" stub for pages without a mobile version -->
 <div class="pg mob-only" id="pg-m-desktop-only">
   <div class="ph"><div><h1 id="m-do-heading">Open on desktop</h1></div></div>
@@ -4850,6 +4868,8 @@ var PAGE_ACTION_MAP = {
   'fin-statements': 'fin-statements',
   'cash-flow':      'cash-flow',
   'qc-templates':   'qc-templates',   // QC1a
+  'm-quality':      'view-quality',   // QC1d
+  'm-qc-checklist': 'view-quality',   // QC1d
   'wip':            'view-wip',
   'fin-reports':    'fin-reports',
   'budget':         'view_project_budget',
@@ -6966,6 +6986,8 @@ function nav(page) {
     'm-submittal-detail': renderMobileSubmittalDetail,
     'm-procurement':      renderMobileProcurement,
     'm-weekly':           renderMobileWeekly,
+    'm-quality':          renderMobileQuality,       // QC1d
+    'm-qc-checklist':     renderMobileQcChecklist,   // QC1d
     'm-desktop-only':     function(){}
   };
   if (fns[page]) fns[page]();
@@ -8249,7 +8271,7 @@ var _mobileAllowedPages = {
   // Existing pages with mobile-friendly UX (via responsive CSS):
   'tm-tickets': 1, 'new-tm-ticket': 1,
   // Mobile-only pages (also tagged with .mob-only):
-  'm-projects': 1, 'm-project-detail': 1, 'm-submittals': 1, 'm-submittal-detail': 1, 'm-procurement': 1, 'm-weekly': 1, 'm-desktop-only': 1,
+  'm-projects': 1, 'm-project-detail': 1, 'm-submittals': 1, 'm-submittal-detail': 1, 'm-procurement': 1, 'm-weekly': 1, 'm-desktop-only': 1, 'm-quality': 1, 'm-qc-checklist': 1,
   // Auxiliary pages a user may legitimately reach on mobile:
   'supabase-setup': 1
 };
@@ -8257,7 +8279,7 @@ var _mobileTabForPage = {
   'tm-tickets': 'tm-tickets', 'new-tm-ticket': 'tm-tickets',
   'm-submittals': 'm-submittals',
   'm-submittal-detail': 'm-submittals',
-  'm-projects': 'm-projects', 'm-project-detail': 'm-projects', 'm-procurement': 'm-projects', 'm-weekly': 'm-projects'
+  'm-projects': 'm-projects', 'm-project-detail': 'm-projects', 'm-procurement': 'm-projects', 'm-weekly': 'm-projects', 'm-quality': 'm-projects', 'm-qc-checklist': 'm-projects'
 };
 var _mobileSelectedProjectId = null;        // remembers project for detail page
 var _mobileSubmittalProjectFilter = null;   // when set, filters m-submittals list
@@ -8335,6 +8357,8 @@ function mobSetHeaderTitle(page) {
     'm-submittal-detail': 'Submittal',
     'm-procurement':    'Procurement',
     'm-weekly':         'Daily Production',
+    'm-quality':        'Quality',
+    'm-qc-checklist':   'Checklist',
     'm-desktop-only':   'Desktop only',
     'supabase-setup':   'Supabase'
   };
@@ -8581,6 +8605,7 @@ function renderMobileProjectDetail() {
         '<button class="btn" onclick="mobOpenSubmittalsForProject(' + p.id + ')">▤ Submittals (' + subCt + ')</button>' +
         '<button class="btn" onclick="mobOpenProcurementForProject(' + p.id + ')">📋 Procurement (' + procCt + ')</button>' +
         '<button class="btn" onclick="mobOpenWeeklyForProject(' + p.id + ')">📊 Daily production</button>' +
+        (hasRead('view-quality') ? '<button class="btn" onclick="mobOpenQualityForProject(' + p.id + ')">✓ Quality</button>' : '') +   // QC1d
       '</div>' +
     '</div>' +
     '<div class="mob-section-hdr">KMI Team <span class="mob-section-hdr-count">' + kmi.length + '</span></div>' +
@@ -9612,7 +9637,7 @@ var _ptr = {
   active: false,    // false until user actually moves their finger down
   refreshing: false,
   threshold: 70,    // px needed to commit to a refresh
-  pages: { 'tm-tickets':1, 'm-projects':1, 'm-submittals':1, 'm-project-detail':1 }
+  pages: { 'tm-tickets':1, 'm-projects':1, 'm-submittals':1, 'm-project-detail':1, 'm-quality':1 }
 };
 
 function _ptrCurrentPageId() {
@@ -9695,6 +9720,7 @@ async function _ptrOnTouchEnd() {
     else if (pageId === 'm-submittals'  && typeof renderMobileSubmittals === 'function') renderMobileSubmittals();
     else if (pageId === 'm-project-detail' && typeof renderMobileProjectDetail === 'function') renderMobileProjectDetail();
     else if (pageId === 'm-procurement' && typeof renderMobileProcurement === 'function') renderMobileProcurement();
+    else if (pageId === 'm-quality' && typeof renderMobileQuality === 'function') renderMobileQuality();   // QC1d
     // Always refresh the badge after a pull
     updateOverdueBadge();
   } catch (e) {
@@ -21940,6 +21966,7 @@ function qcReplace(arr, row) {
 
 // ── Tab entry ─────────────────────────────────────────────────────────
 async function renderProjectQuality() {
+  _qc.mobile = false;   // QC1d
   var el = g('nprj-quality-section'); if (!el) return;
   var pid = _editProjectId;
   if (!pid) { el.innerHTML = '<div class="card" style="color:#888">Save the project first.</div>'; return; }
@@ -21960,6 +21987,7 @@ async function renderProjectQuality() {
 }
 
 function qcRenderList() {
+  if (_qc.mobile) { qcmRenderList(); return; }   // QC1d
   var el = g('nprj-quality-section'); if (!el || !_qc.list) return;
   var L = _qc.list, byCl = {};
   L.items.forEach(function(i){ (byCl[i.checklist_id] = byCl[i.checklist_id] || []).push(i); });
@@ -21983,6 +22011,7 @@ function qcRenderList() {
       '</div>' +
       '<span style="margin-left:auto;display:flex;gap:8px">' +
         '<button class="btn btn-sm" onclick="renderProjectQuality()">↻ Refresh</button>' +
+        (qcCanEdit() ? '<button class="btn" onclick="qcImportPick()">↑ Import GC form</button>' : '') +   // QC1d
         (qcCanEdit() ? '<button class="btn btn-p" onclick="qcNewModal()">+ New checklist</button>' : '') +
       '</span></div>';
 
@@ -22135,6 +22164,7 @@ async function qcCreate() {
 
 // ── Checklist detail ──────────────────────────────────────────────────
 function qcRenderDetail() {
+  if (_qc.mobile) { qcmRenderChecklist(); return; }   // QC1d
   var el = g('nprj-quality-section'); if (!el || !_qc.d) return;
   var D = _qc.d, cl = D.cl, cnt = qcCounts(D.items), AL = qcAnswerLabels(cl.answer_style);
   var locked = qcLocked(cl), canFill = qcCanFill() && !locked, cust = _qc.customize && qcCanEdit() && !locked;
@@ -23148,6 +23178,342 @@ async function qcNotifyHoldPoint(it, def) {
     if (r.success) showToast('Hold point failed — ' + pms.map(function(x){ return x.name; }).join(', ') + ' notified', 'error');
     else showToast('Hold point failed — PM email did not send: ' + (r.error || ''), 'error');
   } catch (e) { console.warn('[qc] hold point notice', e); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// QC1d: Quality on mobile (field view) + import a GC form onto a project.
+// Mobile pages: m-quality (a project's checklists + open deficiencies) and
+// m-qc-checklist (one item per screen, big answer buttons, photo + note,
+// Prev / Next, an all-items list and a sign-off summary). They reuse the
+// QC1b data layer: qcLoadList / qcLoadDetail / qcAnswer / qcPhotoPick /
+// qcNote / qcSign / deficiencies. While a mobile page is showing,
+// _qc.mobile is true and qcRenderList / qcRenderDetail hand off to the
+// mobile renderers, so every QC1b write re-renders the right screen.
+// Online only in v1 (offline is on the roadmap).
+// ═══════════════════════════════════════════════════════════════════════
+var _qcm = { idx: 0, view: 'item', loading: false };
+
+function mobOpenQualityForProject(projectId) {
+  _mobileSelectedProjectId = projectId;
+  nav('m-quality');
+}
+
+async function renderMobileQuality() {
+  var body = g('m-qc-body'); if (!body) return;
+  if (!_mobileSelectedProjectId) { nav('m-projects'); return; }
+  var p = getProj(_mobileSelectedProjectId);
+  if (!p || (typeof _canAccessProject === 'function' && !_canAccessProject(p))) { nav('m-projects'); return; }
+  _qc.mobile = true; _qc.open = null; _qc.d = null;
+  if (String(_qc.pid) !== String(p.id)) { _qc.pid = p.id; _qc.list = null; }
+  var hdr = g('m-qc-heading'); if (hdr) hdr.textContent = 'Quality — ' + (p.number || '');
+  if (!_qc.list || _qc.listPid !== String(p.id)) body.innerHTML = '<div class="mob-list-empty">Loading checklists…</div>';
+  try { await qtLoad(); } catch (e) {}
+  try { await qcLoadList(p.id); } catch (e) { body.innerHTML = '<div class="mob-list-empty" style="color:#A32D2D">' + _mobEsc(e.message || e) + '</div>'; return; }
+  qcmRenderList();
+}
+
+function qcmRenderList() {
+  var body = g('m-qc-body'); if (!body || !_qc.list) return;
+  var L = _qc.list, byCl = {}, me = String(qcUid());
+  L.items.forEach(function(i){ (byCl[i.checklist_id] = byCl[i.checklist_id] || []).push(i); });
+  var cls = L.checklists.filter(function(c){ return c.status !== 'void'; });
+  var openFirst = function(a, b){
+    var ra = a.status === 'complete' ? 2 : (String(a.assigned_user_id) === me ? 0 : 1);
+    var rb = b.status === 'complete' ? 2 : (String(b.assigned_user_id) === me ? 0 : 1);
+    return ra - rb || (a.qc_number - b.qc_number);
+  };
+  cls.sort(openFirst);
+  var openDefs = L.defs.filter(function(d){ return d.status === 'open'; });
+  var html = '';
+  if (!cls.length) {
+    html += '<div class="mob-list-empty">No quality checklists on this project yet. A PM creates them on the desktop.</div>';
+  }
+  cls.forEach(function(c){
+    var cnt = qcCounts(byCl[c.id] || []), pct = cnt.total ? Math.round(100 * cnt.answered / cnt.total) : 0;
+    var mine = String(c.assigned_user_id) === me;
+    var late = c.due_date && c.due_date < qcToday() && c.status !== 'complete';
+    html += '<div onclick="qcmOpen(' + c.id + ')" style="background:#fff;border:1px solid #e3e6eb;border-radius:12px;padding:14px;margin-bottom:10px;cursor:pointer">' +
+      '<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">' +
+        '<div style="min-width:0"><div style="font-size:12px;color:#666">' + qcNum(c.qc_number) + (mine ? ' · <b style="color:#1D4E89">assigned to you</b>' : '') + '</div>' +
+          '<div style="font-size:16px;font-weight:600;margin-top:2px">' + _mobEsc(c.title) + '</div>' +
+          (c.location ? '<div style="font-size:13px;color:#555;margin-top:2px">' + _mobEsc(c.location) + '</div>' : '') + '</div>' +
+        qcStatusPill(c.status) + '</div>' +
+      '<div style="height:7px;border-radius:4px;background:#E7EAEF;margin-top:10px"><div style="width:' + pct + '%;height:7px;border-radius:4px;background:' + (pct === 100 ? '#1E7A46' : '#1D4E89') + '"></div></div>' +
+      '<div style="display:flex;justify-content:space-between;font-size:12px;color:#666;margin-top:5px"><span>' + cnt.answered + ' of ' + cnt.total +
+        (cnt.fail ? ' · <b style="color:#A32D2D">' + cnt.fail + ' ' + qcAnswerLabels(c.answer_style).fail.toLowerCase() + '</b>' : '') + '</span>' +
+        (c.due_date ? '<span' + (late ? ' style="color:#A32D2D;font-weight:600"' : '') + '>due ' + ocoFmtDate(c.due_date) + '</span>' : '') + '</div>' +
+    '</div>';
+  });
+  if (openDefs.length) {
+    html += '<div class="mob-section-hdr">Open deficiencies <span class="mob-section-hdr-count">' + openDefs.length + '</span></div>';
+    openDefs.forEach(function(d){
+      var c = L.checklists.filter(function(x){ return String(x.id) === String(d.checklist_id); })[0];
+      var late = d.due_date && d.due_date < qcToday();
+      html += '<div style="background:#fff;border:1px solid #F0C9C5;border-radius:12px;padding:12px 14px;margin-bottom:10px">' +
+        '<div style="font-size:12px;color:#9B1F17;font-weight:600">' + qcDefNum(d.def_number) + (c ? ' · ' + qcNum(c.qc_number) : '') + '</div>' +
+        '<div style="font-size:15px;font-weight:600;margin-top:2px">' + _mobEsc(d.title) + '</div>' +
+        '<div style="font-size:12px;color:#666;margin-top:3px">' + _mobEsc(qcUserName(d.responsible_user_id) || d.responsible_name || 'Unassigned') +
+          (d.due_date ? ' · <span' + (late ? ' style="color:#A32D2D;font-weight:600"' : '') + '>due ' + ocoFmtDate(d.due_date) + '</span>' : '') + '</div>' +
+        (qcCanFill() ? '<button class="btn" style="margin-top:10px;width:100%;min-height:44px" onclick="qcDefCloseModal(' + d.id + ')">Close with re-inspection photo</button>' : '') +
+      '</div>';
+    });
+  }
+  body.innerHTML = html;
+}
+
+function qcmOpen(id) {
+  _qc.open = id; _qc.d = null; _qcm.idx = -1; _qcm.view = 'item';
+  nav('m-qc-checklist');
+}
+
+async function renderMobileQcChecklist() {
+  var body = g('m-qcc-body'); if (!body) return;
+  if (!_qc.open) { nav(_mobileSelectedProjectId ? 'm-quality' : 'm-projects'); return; }
+  _qc.mobile = true;
+  if (!_qc.d || String(_qc.d.cl.id) !== String(_qc.open)) {
+    body.innerHTML = '<div class="mob-list-empty">Loading checklist…</div>';
+    try { await qcLoadDetail(_qc.open); } catch (e) { body.innerHTML = '<div class="mob-list-empty" style="color:#A32D2D">' + _mobEsc(e.message || e) + '</div>'; return; }
+  }
+  if (_qcm.idx < 0) {
+    var items = qcmItems(), first = items.findIndex(function(i){ return !i.answer; });
+    _qcm.idx = first >= 0 ? first : items.length;
+  }
+  qcmRenderChecklist();
+}
+
+function qcmItems() {
+  return qcActive(_qc.d ? _qc.d.items : []).slice().sort(function(a, b){ return a.sort_order - b.sort_order; });
+}
+
+function qcmBigBtn(label, onclick, style) {
+  return '<button type="button"' + (onclick ? ' onclick="' + onclick + '"' : ' disabled') + ' style="font:inherit;font-size:16px;font-weight:600;flex:1 1 0;min-height:54px;border-radius:12px;border:1px solid #C5CBD4;cursor:pointer;' + (style || 'background:#fff;color:#1a1a1a') + '">' + label + '</button>';
+}
+
+function qcmRenderChecklist() {
+  var body = g('m-qcc-body'); if (!body || !_qc.d) return;
+  var D = _qc.d, cl = D.cl, items = qcmItems(), cnt = qcCounts(D.items), AL = qcAnswerLabels(cl.answer_style);
+  var hdr = g('m-qcc-heading'); if (hdr) hdr.textContent = qcNum(cl.qc_number);
+  if (_qcm.idx > items.length) _qcm.idx = items.length;
+  var pct = cnt.total ? Math.round(100 * cnt.answered / cnt.total) : 0;
+  var top = '<div style="background:#1A2433;color:#fff;border-radius:12px;padding:14px;margin-bottom:12px">' +
+    '<div style="font-size:12px;color:#C9D1DC">' + _mobEsc((getProj(cl.project_id) || {}).number || '') + ' · ' + qcNum(cl.qc_number) + (cl.location ? ' · ' + _mobEsc(cl.location) : '') + '</div>' +
+    '<div style="font-size:17px;font-weight:700;margin-top:2px">' + _mobEsc(cl.title) + '</div>' +
+    '<div style="height:6px;border-radius:3px;background:#3A475A;margin-top:10px"><div style="width:' + pct + '%;height:6px;border-radius:3px;background:#7FB0F0"></div></div>' +
+    '<div style="display:flex;justify-content:space-between;font-size:12px;color:#C9D1DC;margin-top:6px"><span>' + cnt.answered + ' of ' + cnt.total + ' answered</span>' +
+      '<span>' + cnt.pass + ' ' + AL.pass.toLowerCase() + ' · ' + cnt.fail + ' ' + AL.fail.toLowerCase() + ' · ' + cnt.na + ' N/A</span></div>' +
+    '<div style="display:flex;gap:8px;margin-top:10px">' +
+      '<button class="btn btn-sm" style="flex:1;background:' + (_qcm.view === 'item' ? '#fff;color:#1A2433' : 'transparent;color:#fff;border-color:#5A677A') + '" onclick="_qcm.view=\'item\';qcmRenderChecklist()">One at a time</button>' +
+      '<button class="btn btn-sm" style="flex:1;background:' + (_qcm.view === 'list' ? '#fff;color:#1A2433' : 'transparent;color:#fff;border-color:#5A677A') + '" onclick="_qcm.view=\'list\';qcmRenderChecklist()">All items</button>' +
+    '</div></div>';
+  if (cl.status === 'void') { body.innerHTML = top + '<div class="mob-list-empty">This checklist was voided.</div>'; return; }
+  if (_qcm.view === 'list') { body.innerHTML = top + qcmListHtml(items, AL); return; }
+  if (_qcm.idx >= items.length) { body.innerHTML = top + qcmSummaryHtml(D, items, cnt, AL); return; }
+  body.innerHTML = top + qcmItemHtml(D, items, _qcm.idx, AL);
+}
+
+function qcmItemHtml(D, items, idx, AL) {
+  var it = items[idx], cl = D.cl, canFill = qcCanFill() && !qcLocked(cl);
+  var photos = D.photos.filter(function(p){ return String(p.item_id) === String(it.id) && !p.deficiency_id; });
+  var def = D.defs.filter(function(d){ return String(d.item_id) === String(it.id) && d.status !== 'void'; }).pop();
+  var secPos = items.filter(function(x){ return x.section === it.section; }), sIdx = secPos.indexOf(it) + 1;
+  var html = '<div style="font-size:12px;color:#666;margin:0 2px 8px">Item ' + (idx + 1) + ' of ' + items.length +
+    (it.section ? ' · ' + _mobEsc(it.section) + ' (' + sIdx + ' of ' + secPos.length + ')' : '') + '</div>' +
+    '<div style="background:#fff;border:1px solid #e3e6eb;border-radius:12px;padding:16px;' + (it.answer === 'fail' ? 'border-color:#F0C9C5;background:#FFFBFA' : '') + '">' +
+      (it.hold_point ? '<div style="margin-bottom:8px">' + qcHoldTag().replace('margin-left:6px;', '') + '</div>' : '') +
+      '<div style="font-size:18px;font-weight:600;line-height:1.35">' + _mobEsc(it.item_text) + '</div>' +
+      (it.spec_ref ? '<div style="font-size:13px;color:#666;margin-top:4px">' + _mobEsc(it.spec_ref) + '</div>' : '') +
+      (it.guidance ? '<div style="font-size:13px;color:#444;margin-top:8px;background:#F7F9FC;border-radius:8px;padding:8px 10px">' + _mobEsc(it.guidance) + '</div>' : '') +
+      (it.photo_required && !photos.length ? '<div style="font-size:13px;color:#8A5A00;margin-top:8px">Photo required before answering.</div>' : '');
+  var on = function(v){ return it.answer === v; };
+  if (it.response_type === 'measurement') {
+    html += '<div style="display:flex;gap:8px;align-items:center;margin-top:14px"><input type="number" inputmode="decimal" step="any" aria-label="Measured value" value="' + (it.value_num == null ? '' : it.value_num) + '"' +
+      (canFill ? ' onchange="qcmMeasure(' + it.id + ',this.value)"' : ' disabled') + ' style="flex:1;font-size:18px;padding:12px;border:1px solid #C5CBD4;border-radius:10px">' +
+      '<span style="font-size:14px;color:#666">' + _mobEsc(it.tolerance_unit || '') + '</span></div>' +
+      ((it.tolerance_min != null || it.tolerance_max != null) ? '<div style="font-size:12px;color:#888;margin-top:4px">Tolerance ' + (it.tolerance_min != null ? it.tolerance_min : '—') + ' to ' + (it.tolerance_max != null ? it.tolerance_max : '—') + '</div>' : '') +
+      (it.answer ? '<div style="margin-top:8px">' + qcPill(on('pass') ? '#E3F1E8' : on('fail') ? '#FBE1DE' : '#E7EAEF', on('pass') ? '#1E6B3E' : on('fail') ? '#9B1F17' : '#2E3644', on('na') ? 'N/A' : AL[it.answer]) + '</div>' : '');
+    if (canFill) html += '<div style="display:flex;gap:8px;margin-top:10px">' + qcmBigBtn('N/A', 'qcmAnswer(' + it.id + ',\'na\')', on('na') ? 'background:#E7EAEF;color:#2E3644' : '') + '</div>';
+  } else if (it.response_type === 'text' || it.response_type === 'date') {
+    html += '<input type="' + (it.response_type === 'date' ? 'date' : 'text') + '" aria-label="Value" value="' + _mobEsc(it.response_type === 'date' ? (it.value_date || '') : (it.value_text || '')) + '"' +
+      (canFill ? ' onchange="qcValue(' + it.id + ',this.value)"' : ' disabled') + ' style="width:100%;box-sizing:border-box;margin-top:14px;font-size:16px;padding:12px;border:1px solid #C5CBD4;border-radius:10px">';
+  } else if (it.response_type === 'signature') {
+    html += it.value_text ? '<div style="margin-top:14px;font-size:15px">Signed: <b>' + _mobEsc(it.value_text) + '</b></div>'
+      : (canFill ? '<div style="display:flex;margin-top:14px">' + qcmBigBtn('Sign', 'qcValue(' + it.id + ',\'__sign__\')', 'background:#1D4E89;color:#fff;border-color:#1D4E89') + '</div>' : '');
+  } else if (it.response_type === 'photo') {
+    html += '<div style="margin-top:14px;font-size:14px;color:' + (it.answer ? '#1E6B3E' : '#888') + '">' + (it.answer ? 'Photo taken ✓' : 'Take a photo to complete this item.') + '</div>';
+  } else {
+    html += '<div style="display:flex;gap:8px;margin-top:16px">' +
+      qcmBigBtn(AL.pass, canFill ? 'qcmAnswer(' + it.id + ',\'pass\')' : '', on('pass') ? 'background:#1E7A46;color:#fff;border-color:#1E7A46' : '') +
+      qcmBigBtn(AL.fail, canFill ? 'qcmAnswer(' + it.id + ',\'fail\')' : '', on('fail') ? 'background:#B3261E;color:#fff;border-color:#B3261E' : '') +
+      qcmBigBtn(AL.na, canFill ? 'qcmAnswer(' + it.id + ',\'na\')' : '', on('na') ? 'background:#4A5261;color:#fff;border-color:#4A5261' : '') + '</div>';
+  }
+  var thumbs = photos.map(function(ph){
+    var u = _qc.urls[ph.storage_path];
+    return u ? '<a href="' + _mobEsc(u) + '" target="_blank" rel="noopener"><img src="' + _mobEsc(u) + '" alt="Photo" style="width:76px;height:58px;object-fit:cover;border-radius:6px;border:1px solid #ddd"></a>'
+             : '<span style="display:inline-block;width:76px;height:58px;border-radius:6px;background:#E7EAEF"></span>';
+  }).join('');
+  html += (thumbs ? '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">' + thumbs + '</div>' : '');
+  if (canFill) {
+    html += '<div style="display:flex;gap:8px;margin-top:12px">' +
+      '<label style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;min-height:50px;border:1px solid #C5CBD4;border-radius:12px;font-size:15px;font-weight:600;color:#1a1a1a;text-transform:none;letter-spacing:0;cursor:pointer;background:#fff">' +
+        '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"></path><circle cx="12" cy="13" r="3.5"></circle></svg>Photo' +
+        '<input type="file" accept="image/*" capture="environment" style="display:none" onchange="qcPhotoPick(' + it.id + ',this)"></label>' +
+    '</div>' +
+    '<textarea rows="2" placeholder="Note / observation" aria-label="Note" onchange="qcNote(' + it.id + ',this.value)" style="width:100%;box-sizing:border-box;margin-top:10px;font:inherit;font-size:15px;padding:10px;border:1px solid #C5CBD4;border-radius:10px">' + _mobEsc(it.note || '') + '</textarea>';
+  } else if (it.note) {
+    html += '<div style="font-size:14px;color:#444;margin-top:10px">' + _mobEsc(it.note) + '</div>';
+  }
+  if (it.answered_at) html += '<div style="font-size:12px;color:#888;margin-top:8px">' + _mobEsc(qcUserName(it.answered_by_user_id)) + ' · ' + qcFmtTs(it.answered_at) + '</div>';
+  html += '</div>';
+  if (def) {
+    html += '<div style="background:' + (def.status === 'open' ? '#FDF3F2' : '#EEF7F1') + ';border:1px solid ' + (def.status === 'open' ? '#F0C9C5' : '#CFE6D6') + ';border-radius:12px;padding:12px 14px;margin-top:10px;font-size:14px">' +
+      '<b>' + qcDefNum(def.def_number) + '</b> · ' + (def.status === 'open' ? 'open' : 'closed') + ' · ' + _mobEsc(qcUserName(def.responsible_user_id) || def.responsible_name || 'unassigned') +
+      (def.due_date ? ' · due ' + ocoFmtDate(def.due_date) : '') +
+      (def.status === 'open' && qcCanFill() ? '<button class="btn" style="margin-top:8px;width:100%;min-height:44px" onclick="qcDefCloseModal(' + def.id + ')">Close with re-inspection photo</button>' : '') + '</div>';
+  }
+  html += '<div style="display:flex;gap:8px;margin-top:14px">' +
+    qcmBigBtn('‹ Prev', 'qcmGo(-1)', idx === 0 ? 'background:#f3f4f6;color:#aaa' : '') +
+    qcmBigBtn(idx === items.length - 1 ? 'Finish ›' : 'Next ›', 'qcmGo(1)', 'background:#1D4E89;color:#fff;border-color:#1D4E89') + '</div>';
+  return html;
+}
+
+function qcmListHtml(items, AL) {
+  var html = '', last = null;
+  items.forEach(function(it, i){
+    if (it.section !== last) { last = it.section; html += '<div class="mob-section-hdr">' + _mobEsc(it.section || 'Checklist') + '</div>'; }
+    var chip = it.answer ? qcPill(it.answer === 'pass' ? '#E3F1E8' : it.answer === 'fail' ? '#FBE1DE' : '#E7EAEF',
+                                  it.answer === 'pass' ? '#1E6B3E' : it.answer === 'fail' ? '#9B1F17' : '#2E3644', AL[it.answer]) : qcPill('#FFF4DE', '#7A4A00', 'Open');
+    html += '<div onclick="_qcm.idx=' + i + ';_qcm.view=\'item\';qcmRenderChecklist()" style="display:flex;gap:10px;align-items:center;background:#fff;border:1px solid #e3e6eb;border-radius:10px;padding:11px 12px;margin-bottom:6px;cursor:pointer">' +
+      '<span style="font-size:12px;color:#666;width:22px">' + (i + 1) + '</span>' +
+      '<span style="flex:1;font-size:14px">' + _mobEsc(it.item_text) + (it.hold_point ? qcHoldTag() : '') + '</span>' + chip + '</div>';
+  });
+  html += '<button class="btn" style="width:100%;min-height:48px;margin-top:8px" onclick="_qcm.idx=' + items.length + ';_qcm.view=\'item\';qcmRenderChecklist()">Go to sign-off ›</button>';
+  return html;
+}
+
+function qcmSummaryHtml(D, items, cnt, AL) {
+  var cl = D.cl, open = items.filter(function(i){ return !i.answer; }), all = !open.length && cnt.total > 0;
+  var defs = D.defs.filter(function(d){ return d.status === 'open'; });
+  var html = '<div style="background:#fff;border:1px solid #e3e6eb;border-radius:12px;padding:16px">' +
+    '<div style="font-size:17px;font-weight:700">' + (cl.status === 'complete' ? 'Complete — ' + (cl.result === 'failed' ? 'FAILED' : 'PASSED') : all ? 'All items answered' : open.length + ' item' + (open.length === 1 ? '' : 's') + ' still open') + '</div>' +
+    '<div style="font-size:14px;color:#555;margin-top:4px">' + cnt.pass + ' ' + AL.pass + ' · ' + cnt.fail + ' ' + AL.fail + ' · ' + cnt.na + ' N/A</div>';
+  if (open.length) {
+    html += '<div style="margin-top:10px">' + open.slice(0, 8).map(function(it){
+      var i = items.indexOf(it);
+      return '<div onclick="_qcm.idx=' + i + ';qcmRenderChecklist()" style="padding:9px 0;border-top:1px solid #f0f0f0;font-size:14px;cursor:pointer;color:#1D4E89">' + (i + 1) + '. ' + _mobEsc(it.item_text) + '</div>';
+    }).join('') + (open.length > 8 ? '<div style="font-size:12px;color:#888;padding-top:6px">+ ' + (open.length - 8) + ' more</div>' : '') + '</div>';
+  }
+  html += '</div>';
+  if (defs.length) html += '<div style="background:#FDF3F2;border:1px solid #F0C9C5;border-radius:12px;padding:12px 14px;margin-top:10px;font-size:14px"><b>' + defs.length + ' open deficienc' + (defs.length === 1 ? 'y' : 'ies') + '</b> on this checklist.</div>';
+  var sig = function(label, at, uid, can, which){
+    var right = at ? qcPill('#E3F1E8', '#1E6B3E', 'Signed')
+      : (can && all && !qcLocked(cl) ? qcmBigBtn('Sign', 'qcSign(\'' + which + '\')', 'background:#1D4E89;color:#fff;border-color:#1D4E89;flex:0 0 110px;min-height:46px') : qcPill('#EEF0F3', '#4A5261', all ? 'Pending' : 'After all items'));
+    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 0;border-top:1px solid #f0f0f0">' +
+      '<div><div style="font-size:15px;font-weight:600">' + label + '</div><div style="font-size:12px;color:#666">' + (at ? _mobEsc(qcUserName(uid)) + ' · ' + qcFmtTs(at) : '—') + '</div></div>' + right + '</div>';
+  };
+  html += '<div style="background:#fff;border:1px solid #e3e6eb;border-radius:12px;padding:6px 16px;margin-top:10px">' +
+    sig('KMI Superintendent', cl.super_signed_at, cl.super_signed_by_user_id, qcCanSignSuper(), 'super') +
+    sig('KMI Project Manager', cl.pm_signed_at, cl.pm_signed_by_user_id, qcCanSignPm(), 'pm') + '</div>' +
+    '<div style="display:flex;gap:8px;margin-top:14px">' + qcmBigBtn('‹ Back to items', 'qcmGo(-1)') +
+      qcmBigBtn('Done', 'qcmDone()', 'background:#1D4E89;color:#fff;border-color:#1D4E89') + '</div>';
+  return html;
+}
+
+function qcmGo(dir) {
+  var n = qcmItems().length;
+  _qcm.idx = Math.max(0, Math.min(n, _qcm.idx + dir));
+  qcmRenderChecklist();
+  window.scrollTo(0, 0);
+}
+function qcmDone() { _qc.open = null; _qc.d = null; nav('m-quality'); }
+
+async function qcmAnswer(id, val) {
+  var before = qcItem(id);
+  var was = before ? before.answer : null;
+  await qcAnswer(id, val);
+  var it = qcItem(id);
+  if (!it || !it.answer || it.answer === was || it.answer === 'fail') return;
+  var items = qcmItems(), cur = items.findIndex(function(x){ return String(x.id) === String(id); });
+  var next = items.findIndex(function(x, i){ return i > cur && !x.answer; });
+  if (next < 0) next = items.findIndex(function(x){ return !x.answer; });
+  setTimeout(function(){
+    _qcm.idx = next >= 0 ? next : items.length;
+    qcmRenderChecklist(); window.scrollTo(0, 0);
+  }, 350);
+}
+function qcmMeasure(id, raw) { qcMeasure(id, raw); }
+
+// ── Import a GC-required form onto one project (PM/PC, desktop) ────────
+var _qcImp = null;
+function qcImportPick() {
+  if (!requireFull('edit-quality', 'import checklists')) return;
+  var f = g('qc-imp-file');
+  if (!f) { f = document.createElement('input'); f.type = 'file'; f.id = 'qc-imp-file'; f.accept = '.xlsx,.xls'; f.style.display = 'none';
+            f.onchange = function(){ qcImportFile(f); }; document.body.appendChild(f); }
+  f.value = ''; f.click();
+}
+function qcImportFile(input) {
+  var file = input && input.files && input.files[0]; if (!file) return;
+  if (typeof XLSX === 'undefined') { alert('The Excel reader did not load. Refresh and try again.'); return; }
+  var rd = new FileReader();
+  rd.onload = function(ev){
+    try {
+      var p = qtParseWorkbook(XLSX.read(new Uint8Array(ev.target.result), { type: 'array', cellStyles: true }), file.name);
+      if (!p.items.length) { alert('No checklist items were found in ' + file.name + '.'); return; }
+      _qcImp = p; qcImportPreview();
+    } catch (e) { alert('Could not read ' + file.name + ': ' + (e.message || e)); }
+  };
+  rd.readAsArrayBuffer(file);
+}
+function qcImportPreview() {
+  var p = _qcImp; if (!p) return;
+  var fieldRe = /^(admin|project manager|project coordinator|superintendent|foreman)$/i;
+  var holds = qtHoldCount(p.items);
+  var rows = p.items.map(function(it, i){
+    return '<tr' + (it.hold_point ? ' style="background:#FFFDE6"' : '') + '><td style="padding:5px 8px"><input type="checkbox" checked id="qci-use-' + i + '" aria-label="Use item" style="width:auto"></td>' +
+      '<td style="padding:5px 8px;color:#666;white-space:nowrap">' + corEsc(it.spec_ref) + '</td><td style="padding:5px 8px">' + corEsc(it.text) + '</td>' +
+      '<td style="padding:5px 8px;text-align:center"><input type="checkbox" id="qci-hold-' + i + '" style="width:auto"' + (it.hold_point ? ' checked' : '') + ' aria-label="Hold point"></td></tr>';
+  }).join('');
+  showModal('<button class="xbtn" onclick="closeModal();_qcImp=null" aria-label="Close">×</button>' +
+    '<div class="mt">Import a GC checklist onto this project</div>' +
+    '<div class="msb">' + corEsc(p.fileName) + ' · ' + p.items.length + ' items · ' + holds + ' hold point' + (holds === 1 ? '' : 's') + '. Creates a checklist for this project only; the KMI template library is not changed.</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>Checklist title *</label><input id="qci-title" value="' + corEsc(p.meta.name || '') + '"></div>' +
+      '<div class="fgr full"><label>Location / area</label><input id="qci-loc"></div>' +
+      '<div class="fgr"><label>Assigned to</label><select id="qci-user">' + qcUserOptions(qcDefaultAssignee(_editProjectId), fieldRe) + '</select></div>' +
+      '<div class="fgr"><label>Due date</label><input id="qci-due" type="date"></div>' +
+      '<div class="fgr"><label>Answers</label><select id="qci-ans2">' + qtAnsOpts(p.meta.answer_style || 'yes_no') + '</select></div>' +
+      '<div class="fgr"><label>Doc # / revision</label><input id="qci-ref" value="' + corEsc([p.meta.code, p.meta.revision ? 'Rev ' + p.meta.revision : ''].filter(Boolean).join(' · ')) + '"></div>' +
+    '</div>' +
+    '<div style="max-height:38vh;overflow:auto;border:1px solid #e5e5e5;border-radius:8px;margin-top:10px"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr style="background:#f5f5f5">' +
+      '<th style="padding:6px 8px;text-align:left">Use</th><th style="padding:6px 8px;text-align:left">Ref</th><th style="padding:6px 8px;text-align:left">Item</th><th style="padding:6px 8px">Hold point</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<div class="mf"><button class="btn" onclick="closeModal();_qcImp=null">Cancel</button><button class="btn btn-p" id="qci-go" onclick="qcImportCommit()">Create checklist</button></div>');
+}
+async function qcImportCommit() {
+  var p = _qcImp; if (!p) return;
+  var title = (g('qci-title').value || '').trim(); if (!title) { alert('Checklist title is required.'); return; }
+  var picked = [];
+  p.items.forEach(function(it, i){ var u = g('qci-use-' + i); if (u && !u.checked) return; var c = qtNormItem(it); c.hold_point = !!(g('qci-hold-' + i) || {}).checked; picked.push(c); });
+  if (!picked.length) { alert('Select at least one item.'); return; }
+  var btn = g('qci-go'); if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+  var c = await supabaseClient.from('kmi_qc_checklists').insert({
+    project_id: Number(_editProjectId), title: title, location: (g('qci-loc').value || '').trim(), header_fields: {},
+    source_kind: 'import', source_file_name: p.fileName || null, source_doc_ref: (g('qci-ref').value || '').trim() || null,
+    answer_style: g('qci-ans2').value || 'yes_no',
+    assigned_user_id: g('qci-user').value ? Number(g('qci-user').value) : null, due_date: g('qci-due').value || null,
+    status: 'not_started', created_by_user_id: qcUid(), updated_by_user_id: qcUid()
+  }).select();
+  if (c.error) { alert('Could not create checklist: ' + c.error.message); if (btn) { btn.disabled = false; btn.textContent = 'Create checklist'; } return; }
+  var cl = c.data[0];
+  var ir = await supabaseClient.from('kmi_qc_checklist_items').insert(picked.map(function(n, idx){
+    return { checklist_id: cl.id, sort_order: (idx + 1) * 10, section: n.section || '', spec_ref: n.spec_ref || '', item_text: n.text,
+             guidance: n.guidance || '', hold_point: !!n.hold_point, response_type: n.response_type || 'default',
+             tolerance_min: n.tolerance_min, tolerance_max: n.tolerance_max, tolerance_unit: n.tolerance_unit,
+             photo_required: !!n.photo_required, creates_deficiency: n.creates_deficiency !== false, template_item_key: n.key || null, project_added: false };
+  }));
+  if (ir.error) alert('Checklist created, but its items failed to save: ' + ir.error.message);
+  _qcImp = null; closeModal();
+  showToast(qcNum(cl.qc_number) + ' created from ' + (p.fileName || 'Excel'));
+  qcOpen(cl.id);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -65750,7 +66116,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-06-QC1c';
+var KMI_BUILD = '2026-11-07-QC1d';
 
 var _kmiSessionId = (function(){
   try {
