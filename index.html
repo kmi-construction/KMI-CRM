@@ -612,7 +612,9 @@ input.carried:focus{background:#fff;border-color:var(--kmi)}
   /* QC1d3: iOS zooms the page in on any field under 16px and leaves it zoomed */
   #login-overlay input,input:not([type=checkbox]):not([type=radio]):not([type=file]),select,textarea{font-size:16px !important}
   /* QC1d3: mobile Quality action bar pinned above the tab bar */
-  .qcm-fixbar{position:fixed;left:0;right:0;bottom:calc(64px + env(safe-area-inset-bottom, 0px));z-index:85;display:flex;gap:8px;padding:10px 12px;background:rgba(244,245,248,.97);border-top:1px solid #e3e6eb}
+  /* QC1d4: the bar lives on <body> (like the tab bar); fixed elements inside the scrolling .main get clipped by Safari */
+  #qcm-bar{position:fixed;left:0;right:0;bottom:calc(64px + env(safe-area-inset-bottom, 0px));z-index:95;display:none;gap:8px;padding:10px 12px;background:#F4F5F8;border-top:1px solid #e3e6eb;box-sizing:border-box}
+  #qcm-bar.on{display:flex}
   .qcm-fixpad{height:86px}
   label{font-size:11px}
   textarea{min-height:84px}
@@ -8334,6 +8336,7 @@ nav = function(page) {
     }
   }
   _origNav(page);
+  if (typeof qcmSyncBar === 'function') qcmSyncBar(page);   // QC1d4
   // After nav, update the bottom tab highlight if mobile.
   // (The mobile pages' renderers are wired into the fns dispatch map
   // inside _origNav, so we don't need to call them again here.)
@@ -22298,7 +22301,7 @@ function qcItemHtml(D, it, n, canFill, cust) {
           (it.photo_required ? ' <span style="font-size:11px;color:#8A5A00">· photo required</span>' : '') + '</div>' +
         (it.guidance ? '<div style="font-size:12px;color:#666;margin-top:2px">' + corEsc(it.guidance) + '</div>' : '') +
         '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px">' + thumbs +
-          (canFill ? '<label class="btn btn-sm" style="cursor:pointer;text-transform:none;letter-spacing:0;font-weight:500;color:#1a1a1a">+ Photo<input type="file" accept="image/*" capture="environment" style="display:none" onchange="qcPhotoPick(' + it.id + ',this)"></label>' : '') +
+          (canFill ? '<label class="btn btn-sm" style="cursor:pointer;text-transform:none;letter-spacing:0;font-weight:500;color:#1a1a1a">+ Photo<input type="file" accept="image/*" multiple style="display:none" onchange="qcPhotoPick(' + it.id + ',this)"></label>' : '') +
           '<input class="fs" style="flex:1 1 200px;min-width:160px;cursor:text;font-size:12px" placeholder="Note / observation" value="' + corEsc(it.note || '') + '"' +
             (canFill ? ' onchange="qcNote(' + it.id + ',this.value)"' : ' disabled') + '>' +
         '</div>' +
@@ -22452,17 +22455,23 @@ async function qcUploadPhoto(file, checklistId, itemId, defId) {
   return r.data[0];
 }
 
+// QC1d4: camera or photo library (no capture attribute), several at once.
 async function qcPhotoPick(itemId, input) {
-  var file = input.files && input.files[0]; if (!file) return;
+  var files = Array.prototype.slice.call((input && input.files) || []); if (!files.length) return;
   var it = qcItem(itemId); if (!it) return;
-  showToast('Uploading photo…', 'info');
-  try {
-    var ph = await qcUploadPhoto(file, _qc.d.cl.id, itemId, null);
-    _qc.d.photos.push(ph);
-    await qcSignPhotos([ph]);
-    if (it.response_type === 'photo' && !it.answer) { await qcSaveAnswer(it, { answer: 'pass' }); return; }
-    qcRenderDetail();
-  } catch (e) { alert('Photo upload failed: ' + (e.message || e)); }
+  var added = [], failed = 0;
+  for (var i = 0; i < files.length; i++) {
+    showToast('Uploading photo' + (files.length > 1 ? ' ' + (i + 1) + ' of ' + files.length : '') + '…', 'info');
+    try {
+      var ph = await qcUploadPhoto(files[i], _qc.d.cl.id, itemId, null);
+      _qc.d.photos.push(ph); added.push(ph);
+    } catch (e) { failed++; console.warn('[qc] photo upload', e); }
+  }
+  if (input) input.value = '';
+  if (added.length) await qcSignPhotos(added);
+  if (failed) alert(failed + ' photo' + (failed === 1 ? '' : 's') + ' failed to upload. Check the connection and try again.');
+  if (added.length && it.response_type === 'photo' && !it.answer) { await qcSaveAnswer(it, { answer: 'pass' }); return; }
+  qcRenderDetail();
 }
 
 // ── Deficiencies ──────────────────────────────────────────────────────
@@ -22532,7 +22541,7 @@ function qcDefCloseModal(id) {
     '<div class="mt">Close ' + qcDefNum(d.def_number) + '</div>' +
     '<div class="msb">' + corEsc(d.title) + '</div>' +
     '<div class="fg">' +
-      '<div class="fgr full"><label>Re-inspection photo *</label><input id="qcc-photo" type="file" accept="image/*" capture="environment"></div>' +
+      '<div class="fgr full"><label>Re-inspection photo *</label><input id="qcc-photo" type="file" accept="image/*"></div>' +
       '<div class="fgr full"><label>Close-out note</label><input id="qcc-note" placeholder="What was done to correct it"></div>' +
     '</div>' +
     '<div class="mf"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-p" id="qcc-go" onclick="qcDefClose(' + d.id + ')">Close deficiency</button></div>');
@@ -23231,7 +23240,7 @@ function qcmRenderList() {
   cls.sort(openFirst);
   var openDefs = L.defs.filter(function(d){ return d.status === 'open'; });
   var html = '';
-  if (qcmCanCreate()) html += '<div class="qcm-fixbar"><button type="button" onclick="qcmNewForm()" style="font:inherit;font-size:16px;font-weight:600;width:100%;min-height:52px;border-radius:12px;border:1px solid #1D4E89;background:#1D4E89;color:#fff;cursor:pointer">+ New inspection</button></div>';   // QC1d2/QC1d3: pinned above the tab bar
+  qcmBar(qcmCanCreate() ? '<button type="button" onclick="qcmNewForm()" style="font:inherit;font-size:16px;font-weight:600;width:100%;min-height:52px;border-radius:12px;border:1px solid #1D4E89;background:#1D4E89;color:#fff;cursor:pointer">+ New inspection</button>' : '');   // QC1d4: body-level bar
   if (!cls.length) {
     html += '<div class="mob-list-empty">No quality checklists on this project yet.' + (qcmCanCreate() ? ' Tap + New inspection to start one.' : '') + '</div>';
   }
@@ -23302,6 +23311,7 @@ function qcmRenderChecklist() {
   var body = g('m-qcc-body'); if (!body || !_qc.d) return;
   var D = _qc.d, cl = D.cl, items = qcmItems(), cnt = qcCounts(D.items), AL = qcAnswerLabels(cl.answer_style);
   var hdr = g('m-qcc-heading'); if (hdr) hdr.textContent = qcNum(cl.qc_number);
+  qcmBar('');   // item / sign-off screens set their own buttons below
   if (_qcm.idx > items.length) _qcm.idx = items.length;
   var pct = cnt.total ? Math.round(100 * cnt.answered / cnt.total) : 0;
   var top = '<div style="background:#1A2433;color:#fff;border-radius:12px;padding:14px;margin-bottom:12px">' +
@@ -23365,7 +23375,7 @@ function qcmItemHtml(D, items, idx, AL) {
     html += '<div style="display:flex;gap:8px;margin-top:12px">' +
       '<label style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;min-height:50px;border:1px solid #C5CBD4;border-radius:12px;font-size:15px;font-weight:600;color:#1a1a1a;text-transform:none;letter-spacing:0;cursor:pointer;background:#fff">' +
         '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"></path><circle cx="12" cy="13" r="3.5"></circle></svg>Photo' +
-        '<input type="file" accept="image/*" capture="environment" style="display:none" onchange="qcPhotoPick(' + it.id + ',this)"></label>' +
+        '<input type="file" accept="image/*" multiple style="display:none" onchange="qcPhotoPick(' + it.id + ',this)"></label>' +
     '</div>' +
     '<textarea rows="2" placeholder="Note / observation" aria-label="Note" onchange="qcNote(' + it.id + ',this.value)" style="width:100%;box-sizing:border-box;margin-top:10px;font:inherit;font-size:15px;padding:10px;border:1px solid #C5CBD4;border-radius:10px">' + _mobEsc(it.note || '') + '</textarea>';
   } else if (it.note) {
@@ -23379,9 +23389,9 @@ function qcmItemHtml(D, items, idx, AL) {
       (def.due_date ? ' · due ' + ocoFmtDate(def.due_date) : '') +
       (def.status === 'open' && qcCanFill() ? '<button class="btn" style="margin-top:8px;width:100%;min-height:44px" onclick="qcDefCloseModal(' + def.id + ')">Close with re-inspection photo</button>' : '') + '</div>';
   }
-  html += '<div class="qcm-fixpad"></div><div class="qcm-fixbar">' +
-    qcmBigBtn('‹ Prev', 'qcmGo(-1)', idx === 0 ? 'background:#f3f4f6;color:#aaa' : '') +
-    qcmBigBtn(idx === items.length - 1 ? 'Finish ›' : 'Next ›', 'qcmGo(1)', 'background:#1D4E89;color:#fff;border-color:#1D4E89') + '</div>';
+  html += '<div class="qcm-fixpad"></div>';
+  qcmBar(qcmBigBtn('‹ Prev', 'qcmGo(-1)', idx === 0 ? 'background:#f3f4f6;color:#aaa' : '') +
+    qcmBigBtn(idx === items.length - 1 ? 'Finish ›' : 'Next ›', 'qcmGo(1)', 'background:#1D4E89;color:#fff;border-color:#1D4E89'));
   return html;
 }
 
@@ -23422,11 +23432,25 @@ function qcmSummaryHtml(D, items, cnt, AL) {
   html += '<div style="background:#fff;border:1px solid #e3e6eb;border-radius:12px;padding:6px 16px;margin-top:10px">' +
     sig('KMI Superintendent', cl.super_signed_at, cl.super_signed_by_user_id, qcCanSignSuper(), 'super') +
     sig('KMI Project Manager', cl.pm_signed_at, cl.pm_signed_by_user_id, qcCanSignPm(), 'pm') + '</div>' +
-    '<div class="qcm-fixpad"></div><div class="qcm-fixbar">' + qcmBigBtn('‹ Back to items', 'qcmGo(-1)') +
-      qcmBigBtn('Done', 'qcmDone()', 'background:#1D4E89;color:#fff;border-color:#1D4E89') + '</div>';
+    '<div class="qcm-fixpad"></div>';
+  qcmBar(qcmBigBtn('‹ Back to items', 'qcmGo(-1)') +
+      qcmBigBtn('Done', 'qcmDone()', 'background:#1D4E89;color:#fff;border-color:#1D4E89'));
   return html;
 }
 
+// QC1d4: one action bar on <body>, shown only on the mobile Quality pages.
+function qcmBar(html) {
+  var bar = g('qcm-bar');
+  if (!bar) { bar = document.createElement('div'); bar.id = 'qcm-bar'; document.body.appendChild(bar); }
+  bar.innerHTML = html || '';
+  var pg = document.querySelector('.pg.active');
+  var onQc = pg && (pg.id === 'pg-m-quality' || pg.id === 'pg-m-qc-checklist');
+  bar.classList.toggle('on', !!html && !!onQc && _isMobile);
+}
+function qcmSyncBar(page) {
+  var bar = g('qcm-bar');
+  if (bar && page !== 'm-quality' && page !== 'm-qc-checklist') bar.classList.remove('on');
+}
 function qcmTop() { var m = document.querySelector('.main'); if (m) m.scrollTop = 0; window.scrollTo(0, 0); }   // QC1d3: .main is the scroller
 function qcmGo(dir) {
   var n = qcmItems().length;
@@ -23464,6 +23488,7 @@ function qcmFieldInput(label, inner) {
 
 async function qcmNewForm() {
   var body = g('m-qc-body'); if (!body) return;
+  qcmBar('');
   if (!qcmCanCreate()) { showToast('Your role cannot start inspections.', 'error'); return; }
   body.innerHTML = '<div class="mob-list-empty">Loading templates…</div>';
   try { await qtLoad(true); } catch (e) { body.innerHTML = '<div class="mob-list-empty" style="color:#A32D2D">' + _mobEsc(e.message || e) + '</div>'; return; }
@@ -66213,7 +66238,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-07-QC1d3';
+var KMI_BUILD = '2026-11-08-QC1d4';
 
 var _kmiSessionId = (function(){
   try {
