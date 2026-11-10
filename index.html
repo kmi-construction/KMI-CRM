@@ -13788,6 +13788,8 @@ async function saveSubmittal() {
     }
   }
 
+  if (record && !_syncErr) { sdfInvalidate(record.projectId); sdfKick(record.projectId); }   // SDFILE1
+
   // Re-render the page so the title/delete-button/dates update in place,
   // and the auto-filled dates (sent/response) become visible.
   renderEditSubmittalPage();
@@ -16011,6 +16013,7 @@ function showSubmittalPackageCompile(submittalId) {
       '<div style="font-size:11px;color:#888;margin-top:6px">Each row here becomes a row in the Transmittal Items table on the cover. Rows tagged <em>no file</em> are listed only — nothing is appended to the PDF for them.</div>' +
     '</div>' +
 
+    '<div id="cmp-sp-dest"></div>' +   // SDFILE1
     '<div id="cmp-status" style="margin-top:10px;font-size:12px;color:#888;min-height:18px"></div>' +
     '<div class="mf">' +
       '<button class="btn" onclick="closeModal()">Cancel</button>' +
@@ -16019,6 +16022,7 @@ function showSubmittalPackageCompile(submittalId) {
 
   showModal(html);
   _compileSubmittalIds = pkgItems.map(function(s){ return s.id; });
+  sdfCompileDestFill(pkgItems);   // SDFILE1
 }
 
 // Re-fill the To block when the user picks a different project contact
@@ -16595,6 +16599,8 @@ async function compileSubmittalPackage() {
       console.warn('Transmittal persist failed:', _transErr);
     }
 
+    sdfFileCompiled(outBytes, fname, includedIds, anchor, (_transRow && _transRow.id) ? _transRow.id : Date.now());   // SDFILE1
+
     if (status) {
       var msg = '<span style="color:#3B6D11">Generated ' + docItems.length + ' transmittal item(s), ' + totalAppendedPages + ' attached page(s)</span>';
       if (rasterizedCount) {
@@ -16685,6 +16691,7 @@ function renderProjectSubmittalsBlock(projectId) {
       '<select id="psb-pkg" onchange="psbApplyFilters()" style="font-size:12px">' + pkgOptions + '</select>' +
       '<select id="psb-sent" onchange="psbApplyFilters()" style="font-size:12px">' + _psbOpt(['','sent','not'], ['Sent: any','Sent','Not sent'], _psbFilter.sent) + '</select>' +
       '<select id="psb-due" onchange="psbApplyFilters()" style="font-size:12px">' + _psbOpt(['','overdue','nodate'], ['Due: any','Overdue','No date'], _psbFilter.due) + '</select>' +
+      '<select id="psb-sp" onchange="psbApplyFilters()" style="font-size:12px" title="Filter by SharePoint filing">' + _psbOpt(['','notfiled','failed'], ['Filing: all','Not compiled','Failed'], _psbFilter.sp || '') + '</select>' +   // SDFILE1
     '</div>';
 
   var filteredCount = _psbFilteredSorted(projectId).length;
@@ -16693,10 +16700,10 @@ function renderProjectSubmittalsBlock(projectId) {
   setTimeout(updatePsbSortIndicators, 0);
 
   return '<div class="card" style="padding:0;overflow:hidden">' +
-    '<div class="ch" style="padding:10px 12px"><span class="ct">Submittals <span id="psb-count">(' + filteredCount + ')</span></span>' +
+    '<div class="ch" style="padding:10px 12px"><span class="ct">Submittals <span id="psb-count">(' + filteredCount + ')</span> <span id="psb-sp-sum" style="font-size:11px;color:#888;font-weight:400;text-transform:none;letter-spacing:0">' + sdfSubSummaryHtml(projectId) + '</span></span>' +   /* SDFILE1 */
       '<span style="display:flex;gap:6px">' + importBtn + addBtn + '</span></div>' +
     filterBar +
-    '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;min-width:820px"><thead><tr>' +
+    '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;min-width:980px"><thead><tr>' +
       '<th class="sortable" onclick="sortPsb(\'status\')" style="padding:6px 8px;text-align:left;width:80px">Status</th>' +
       '<th class="sortable" onclick="sortPsb(\'response\')" style="padding:6px 8px;text-align:left;width:120px">Response</th>' +
       '<th class="sortable" onclick="sortPsb(\'kmiNo\')" style="padding:6px 8px;text-align:left;width:100px">KMI #</th>' +
@@ -16707,6 +16714,7 @@ function renderProjectSubmittalsBlock(projectId) {
       '<th class="sortable" onclick="sortPsb(\'due\')" style="padding:6px 8px;text-align:left;width:85px">Due</th>' +
       '<th class="sortable" onclick="sortPsb(\'sent\')" style="padding:6px 8px;text-align:left;width:95px">Sent</th>' +
       '<th class="sortable" onclick="sortPsb(\'returned\')" style="padding:6px 8px;text-align:left;width:85px">Returned</th>' +
+      '<th style="padding:6px 8px;text-align:left;width:170px">SharePoint</th>' +   // SDFILE1
       '<th style="padding:6px 8px;text-align:left;width:70px">Actions</th>' +
     '</tr></thead><tbody id="psb-tbody">' + _psbRowsHtml(projectId) + '</tbody></table></div>' +
   '</div>';
@@ -16723,6 +16731,10 @@ function _psbFilteredSorted(projectId) {
     if (f.sent === 'not' && s.sentDate) return false;
     if (f.due === 'overdue' && !(_isOverdue(s.dueDate) && (s.status || 'draft') !== 'closed')) return false;
     if (f.due === 'nodate' && s.dueDate) return false;
+    if (f.sp) {   // SDFILE1
+      var spk = sdfSubKind(s, sdfData(projectId));
+      if (f.sp === 'notfiled' ? spk !== 'notcompiled' : spk !== 'failed') return false;
+    }
     if (f.q) {
       var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
       var prodNames = pids.map(function(pid){ var pp = getProduct(pid); return pp ? pp.name : ''; }).join(' ');
@@ -16737,8 +16749,9 @@ function _psbFilteredSorted(projectId) {
 function _psbRowsHtml(projectId) {
   var rows = _psbFilteredSorted(projectId);
   var canEdit = canAccess('edit-submittals') === 'full';
+  var sdd = sdfData(projectId);   // SDFILE1
   if (!rows.length) {
-    return '<tr><td colspan="11" style="text-align:center;padding:20px;color:#aaa;font-size:12px">No submittals match the current filters.</td></tr>';
+    return '<tr><td colspan="12" style="text-align:center;padding:20px;color:#aaa;font-size:12px">No submittals match the current filters.</td></tr>';
   }
   return rows.map(function(s){
     var pids = (Array.isArray(s.productIds) && s.productIds.length) ? s.productIds : (s.productId ? [s.productId] : []);
@@ -16771,6 +16784,7 @@ function _psbRowsHtml(projectId) {
       '<td style="padding:5px 8px;font-size:12px">' + dueCell + '</td>' +
       '<td style="padding:5px 8px">' + sentCell + '</td>' +
       '<td style="padding:5px 8px;font-size:12px">' + returnedCell + '</td>' +
+      '<td style="padding:5px 8px;white-space:nowrap" onclick="event.stopPropagation()">' + sdfSubCellHtml(s, sdd) + '</td>' +   // SDFILE1
       '<td style="padding:5px 8px" onclick="event.stopPropagation()">' +
         '<button class="btn btn-sm" style="font-size:10px;padding:2px 6px" onclick="subEditForProject(' + s.id + ', ' + projectId + ')">' + (canEdit ? '✎' : 'View') + '</button>' + compileBtn +
       '</td>' +
@@ -16784,6 +16798,7 @@ function psbRefresh() {
   tb.innerHTML = _psbRowsHtml(_psbProjectId);
   var cnt = g('psb-count');
   if (cnt) cnt.textContent = '(' + _psbFilteredSorted(_psbProjectId).length + ')';
+  var spSum = g('psb-sp-sum'); if (spSum) spSum.innerHTML = sdfSubSummaryHtml(_psbProjectId);   // SDFILE1
   updatePsbSortIndicators();
 }
 
@@ -16793,6 +16808,7 @@ function psbApplyFilters() {
   _psbFilter.pkg    = (g('psb-pkg')    || {}).value || '';
   _psbFilter.sent   = (g('psb-sent')   || {}).value || '';
   _psbFilter.due    = (g('psb-due')    || {}).value || '';
+  _psbFilter.sp     = (g('psb-sp')     || {}).value || '';   // SDFILE1
   psbRefresh();
 }
 
@@ -23737,6 +23753,406 @@ async function ocoRefreshCors(ids) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// SDFILE1: SharePoint filing of submittal packages, stamped responses and
+// purchase orders. The cor-filing worker files them from kmi_doc_filing:
+//   trn = a compiled package (one file per compile, moved by response)
+//   sub = a submittal's stamped response files
+//   po  = a PO or subcontract (one file per issued revision)
+// The browser saves each PDF and calls kmi_doc_filing_pdf_ready; database
+// triggers re-queue on status / response changes.
+// ═══════════════════════════════════════════════════════════════════════
+var _sdfCache = {};       // pid -> { data:{trn:[], sub:{}, po:{}}, at, loading }
+var _sdfBusy = {};        // 'po:<id>' -> true while its PDF renders/uploads
+var _sdfPoFilter = '';    // PO list SharePoint filter
+var _sdfPoQuote = null;   // { poKey, path, name } from Extract from quote
+var SDF_SHOP_FORMATS = ['drawings', 'shop drawing', 'shop drawings'];
+var SDF_TOP = { sub: '04 - Submittals', shop: '05 - Shop Drawings', po: '06 - Material Quotes-PO\'s', subk: '07 - Subcontractor' };
+var SDF_STAGE = {
+  sub:  { for_approval: '04-For Approval', revise: '05-Revise & Resubmit', approved: '06-Approved Submittals' },
+  shop: { for_approval: '01-For Approval', revise: '02-Revise and Resubmit', approved: '03-Approved Shop Drawings' }
+};
+
+function sdfEmpty() { return { trn: [], sub: {}, po: {} }; }
+
+function sdfData(pid) {
+  var k = String(pid || '');
+  var ent = _sdfCache[k];
+  if (!ent || (!ent.loading && Date.now() - (ent.at || 0) > 60000)) sdfLoad(pid);
+  ent = _sdfCache[k];
+  return (ent && ent.data) ? ent.data : sdfEmpty();
+}
+
+async function sdfLoad(pid) {
+  var k = String(pid || '');
+  if (!k || !supabaseClient) return;
+  var ent = _sdfCache[k] || (_sdfCache[k] = {});
+  if (ent.loading) return;
+  ent.loading = true;
+  try {
+    var r = await supabaseClient.from('kmi_doc_filing')
+      .select('kind,ref_id,ref_ids,state,last_error,attempts,pdf_path,pdf_rev,folder_kind,folder_override,quote_path,sp_item_id,sp_web_url,sp_location,sp_file_name,sp_files')
+      .eq('project_id', Number(pid));
+    if (r.error) throw r.error;
+    var d = sdfEmpty();
+    (r.data || []).forEach(function(x){
+      if (x.kind === 'trn') { if (x.state !== 'superseded') d.trn.push(x); }
+      else if (x.kind === 'sub') d.sub[String(x.ref_id)] = x;
+      else if (x.kind === 'po') d.po[String(x.ref_id)] = x;
+    });
+    d.trn.sort(function(a, b){ return Number(b.ref_id) - Number(a.ref_id); });
+    var changed = JSON.stringify(d) !== JSON.stringify(ent.data || null);
+    ent.data = d;
+    ent.at = Date.now();
+    if (changed && String(_editProjectId) === k) sdfRerender();
+  } catch (e) {
+    console.warn('[sdfile] load', e && e.message ? e.message : e);
+    ent.at = Date.now();
+  } finally {
+    ent.loading = false;
+  }
+}
+
+function sdfInvalidate(pid) {
+  var ent = _sdfCache[String(pid || '')];
+  if (ent) ent.at = 0;
+}
+
+function sdfRerender() {
+  try { if (g('psb-tbody')) psbRefresh(); } catch (e) { console.warn('[sdfile] psb', e); }
+  try { if (g('nprj-po-list-section')) renderProjectPoList(); } catch (e) { console.warn('[sdfile] po list', e); }
+  try {
+    var pg = g('pg-new-po');
+    var po = (pg && pg.classList.contains('active')) ? _poCurrent() : null;
+    if (po) _poRenderStatusCard(po);
+  } catch (e) { console.warn('[sdfile] po card', e); }
+}
+
+// Wake the worker now (cron also sweeps every minute), then re-read status.
+function sdfKick(pid) {
+  if (!supabaseClient) return;
+  try {
+    var p = supabaseClient.functions.invoke('cor-filing', { body: {} });
+    if (p && p.catch) p.catch(function(e){ console.warn('[sdfile] kick', e); });
+  } catch (e) { console.warn('[sdfile] kick', e); }
+  [6000, 20000, 45000].forEach(function(ms){
+    setTimeout(function(){
+      sdfInvalidate(pid);
+      if (String(_editProjectId) === String(pid)) sdfLoad(pid);
+    }, ms);
+  });
+}
+
+function sdfIsBad(r) { return !!r && (r.state === 'failed' || (r.state === 'queued' && !!r.last_error)); }
+
+function sdfIsSent(s) {
+  var st = (s && s.status) || 'draft';
+  return !!(s && s.sentDate) || st === 'open' || st === 'sent' || st === 'closed';
+}
+
+// Shop drawing when any file on the package is typed Drawings (uploads) or
+// Shop Drawing (Product Library); otherwise a submittal.
+function sdfSubsFolderKind(subs) {
+  var shop = (subs || []).some(function(s){
+    return _gatherCompileDocsForSubmittal(s).some(function(e){
+      return SDF_SHOP_FORMATS.indexOf(String(e.format || '').trim().toLowerCase()) >= 0;
+    });
+  });
+  return shop ? 'shop' : 'sub';
+}
+
+function sdfLatestTrn(d, sid) {
+  var id = String(sid);
+  for (var i = 0; i < d.trn.length; i++) {
+    var ids = (d.trn[i].ref_ids || []).map(String);
+    if (ids.indexOf(id) >= 0) return d.trn[i];
+  }
+  return null;
+}
+
+// 'filed' | 'filing' | 'held' | 'failed' | 'notcompiled' | 'na'
+function sdfSubKind(s, d) {
+  if (!s) return 'na';
+  var t = sdfLatestTrn(d, s.id);
+  var r = d.sub[String(s.id)];
+  if (sdfIsBad(t) || sdfIsBad(r)) return 'failed';
+  if (!t) return sdfIsSent(s) ? 'notcompiled' : 'na';
+  if (t.state === 'held') return 'held';
+  if (t.state === 'queued' || t.state === 'filing' || t.state === 'waiting_pdf') return 'filing';
+  if (r && (r.state === 'queued' || r.state === 'filing')) return 'filing';
+  if (t.state === 'filed' && t.sp_item_id) return 'filed';
+  return 'na';
+}
+
+function sdfSubCellHtml(s, d) {
+  var k = sdfSubKind(s, d);
+  var t = sdfLatestTrn(d, s.id);
+  var r = d.sub[String(s.id)];
+  var canAct = canAccess('edit-submittals') === 'full';
+  if (k === 'filed') {
+    var fk = t.folder_kind === 'shop' ? 'shop' : 'sub';
+    var loc = (SDF_STAGE[fk] || {})[t.sp_location] || 'Filed';
+    var label = (fk === 'shop' ? 'Shop Dwgs · ' : '') + loc;
+    var blue = t.sp_location === 'for_approval';
+    var tip = t.sp_file_name || '';
+    var nResp = (r && r.sp_files) ? Object.keys(r.sp_files).length : 0;
+    if (nResp) tip += ' + ' + nResp + ' response file' + (nResp === 1 ? '' : 's');
+    return cfLinkWrap(t.sp_web_url, cfPill(blue ? '#E6F1FB' : '#EAF3DE', blue ? '#0C447C' : '#27500A', '📁 ' + subEsc(label), tip));
+  }
+  if (k === 'filing') return cfPill('#F1EFE8', '#5F5E5A', 'Filing…');
+  if (k === 'held') return '<span style="font-size:11px;color:#999" title="Files when the submittal is set to Open">Compiled</span>';
+  if (k === 'failed') {
+    var x = sdfIsBad(t) ? t : r;
+    return cfPill('#FCEBEB', '#791F1F', '⚠ Failed', (x && x.last_error) || '') +
+      (canAct ? cfBtn('Retry', 'sdfRetry(\'' + x.kind + '\',' + Number(x.ref_id) + ')') : '');
+  }
+  if (k === 'notcompiled') {
+    return '<span style="font-size:11px;color:#999">Not compiled</span>' +
+      (canAct ? cfBtn('Compile', 'showSubmittalPackageCompile(' + Number(s.id) + ')') : '');
+  }
+  return '<span style="color:#bbb">—</span>';
+}
+
+function sdfSubSummaryHtml(pid) {
+  if (!pid) return '';
+  var d = sdfData(pid), nNot = 0, nFail = 0;
+  (db.submittals || []).forEach(function(s){
+    if (String(s.projectId) !== String(pid)) return;
+    var k = sdfSubKind(s, d);
+    if (k === 'notcompiled') nNot++; else if (k === 'failed') nFail++;
+  });
+  var parts = [];
+  if (nNot) parts.push(nNot + ' not compiled');
+  if (nFail) parts.push('<span style="color:#A32D2D">' + nFail + ' failed</span>');
+  return parts.length ? '· SharePoint: ' + parts.join(' · ') : '';
+}
+
+function sdfCompileFileName(s) {
+  function safe(x) { return String(x || '').replace(/[\\\/:*?"<>|\x00-\x1f]/g, '').replace(/\s+/g, ' ').trim(); }
+  var no = s ? safe(s.kmiSubmittalNo) : '', nm = s ? safe(s.itemName || s.packageName) : '';
+  if (no && nm) return no + ' - ' + nm + '.pdf';
+  return (no || nm || 'Submittal') + '.pdf';
+}
+
+function sdfCompileDestFill(subs) {
+  var el = g('cmp-sp-dest'); if (!el) return;
+  subs = (subs || []).filter(Boolean);
+  if (!subs.length) { el.innerHTML = ''; return; }
+  var k = sdfSubsFolderKind(subs);
+  var sent = subs.some(sdfIsSent);
+  el.innerHTML = '<div style="margin-top:12px;background:#F5F5F3;border-radius:7px;padding:9px 12px;font-size:12px;line-height:1.6">' +
+    '📁 Files to <strong>' + subEsc(SDF_TOP[k] + ' / ' + SDF_STAGE[k].for_approval) + '</strong> as <code>' + subEsc(sdfCompileFileName(subs[0])) + '</code><br>' +
+    '<span style="color:#888">' + (sent ? 'Already sent, so it files right after this compile.' : 'Files when the submittal is set to Open.') +
+    (k === 'shop' ? ' Shop Drawings because a file on it is typed Drawings.' : '') + '</span></div>';
+}
+
+// After a compile: save the merged PDF and queue it.
+async function sdfFileCompiled(bytes, fname, ids, anchorSub, transId) {
+  if (!supabaseClient || !anchorSub || !bytes) return;
+  var pid = anchorSub.projectId;
+  var subs = (ids || []).map(function(id){ return getSubmittal(id); }).filter(Boolean);
+  try {
+    var path = 'submittal-pdfs/' + transId + '/' + Date.now() + '.pdf';
+    var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+      .upload(path, new Blob([bytes], { type: 'application/pdf' }), { contentType: 'application/pdf', upsert: false });
+    if (up && up.error) throw new Error(up.error.message);
+    var rr = await supabaseClient.rpc('kmi_doc_filing_pdf_ready', {
+      p_kind: 'trn', p_ref_id: Number(transId), p_project_id: Number(pid), p_pdf_path: path,
+      p_file_name: fname, p_folder_kind: sdfSubsFolderKind(subs),
+      p_ref_ids: (ids || []).map(Number), p_rev: null
+    });
+    if (rr && rr.error) throw new Error(rr.error.message);
+  } catch (e) {
+    console.warn('[sdfile] compile', e);
+    showToast('PDF generated, but it did not reach SharePoint (' + (e.message || e) + '). Compile again to retry.', 'error');
+  }
+  sdfInvalidate(pid);
+  sdfKick(pid);
+}
+
+async function sdfRetry(kind, id) {
+  if (!supabaseClient) return;
+  var r = await supabaseClient.rpc('kmi_doc_filing_retry', { p_kind: kind, p_ref_id: Number(id) });
+  if (r && r.error) { alert('Could not retry: ' + r.error.message); return; }
+  var pid = _editProjectId;
+  var ent = _sdfCache[String(pid)];
+  if (ent && ent.data) {
+    var row = kind === 'trn' ? ent.data.trn.find(function(x){ return String(x.ref_id) === String(id); })
+            : (kind === 'sub' ? ent.data.sub : ent.data.po)[String(id)];
+    if (row) { row.state = 'queued'; row.last_error = null; }
+  }
+  sdfRerender();
+  sdfKick(pid);
+}
+
+// ── Purchase orders ───────────────────────────────────────────────────
+function sdfPoRev(po) { return (po && po.revisionNumber && po.revisionNumber > 1) ? po.revisionNumber : 1; }
+
+function sdfPoFolderKind(po, r) {
+  if (r && (r.folder_override === 'po' || r.folder_override === 'sub')) return r.folder_override;
+  var v = (db.vendors || []).find(function(x){ return x.id === po.vendorId; });
+  return (v && /subcontract/i.test(v.vendorType || '')) ? 'sub' : 'po';
+}
+
+// 'filed' | 'filing' | 'failed' | 'notfiled' | 'na'
+function sdfPoKind(po, d) {
+  var r = d.po[String(po.id)];
+  if (sdfIsBad(r)) return 'failed';
+  if (_sdfBusy['po:' + po.id]) return 'filing';
+  if (r && (r.state === 'queued' || r.state === 'filing')) return 'filing';
+  var files = (r && r.sp_files) || {};
+  var st = _poStatusOf(po);
+  if (st === 'Issued' || st === 'Open' || st === 'Closed') return files[String(sdfPoRev(po))] ? 'filed' : 'notfiled';
+  return Object.keys(files).length ? 'filed' : 'na';
+}
+
+function sdfPoCellHtml(po, d) {
+  var k = sdfPoKind(po, d);
+  var r = d.po[String(po.id)];
+  var canAct = hasFull('edit-purchase-orders');
+  if (k === 'filed') {
+    var fk = sdfPoFolderKind(po, r);
+    var files = (r && r.sp_files) || {};
+    var revs = Object.keys(files).filter(function(x){ return x !== 'quote'; }).length;
+    var voided = _poStatusOf(po) === 'Void';
+    var label = (fk === 'sub' ? '07 - Subcontractor' : '06 - Material Quotes-PO\'s') +
+      (revs > 1 ? ' · ' + revs + ' revs' : '') + (files.quote ? ' · + quote' : '') + (voided ? ' · VOID' : '');
+    var tip = Object.keys(files).map(function(x){ return files[x] && files[x].name; }).filter(Boolean).join('\n');
+    return cfLinkWrap(r.sp_web_url, cfPill(voided ? '#FAEEDA' : '#EAF3DE', voided ? '#633806' : '#27500A', '📁 ' + _poEsc(label), tip));
+  }
+  if (k === 'filing') return cfPill('#F1EFE8', '#5F5E5A', 'Filing…');
+  if (k === 'failed') {
+    return cfPill('#FCEBEB', '#791F1F', '⚠ Failed', (r && r.last_error) || '') +
+      (canAct ? cfBtn('Retry', 'sdfRetry(\'po\',' + Number(po.id) + ')') : '');
+  }
+  if (k === 'notfiled') {
+    return '<span style="font-size:11px;color:#999">Not filed</span>' +
+      (canAct ? cfBtn('File now', 'sdfPoFileNow(' + Number(po.id) + ')') : '');
+  }
+  return '<span style="color:#bbb">—</span>';
+}
+
+function sdfPoBarHtml(pid) {
+  var d = sdfData(pid), nNot = 0, nFail = 0;
+  (db.purchaseOrders || []).forEach(function(po){
+    if (String(po.projectId) !== String(pid)) return;
+    var k = sdfPoKind(po, d);
+    if (k === 'notfiled') nNot++; else if (k === 'failed') nFail++;
+  });
+  var parts = [];
+  if (nNot) parts.push(nNot + ' not filed');
+  if (nFail) parts.push('<span style="color:#A32D2D">' + nFail + ' failed</span>');
+  function opt(v, l) { return '<option value="' + v + '"' + (_sdfPoFilter === v ? ' selected' : '') + '>' + l + '</option>'; }
+  return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;color:#888">' +
+    '<span>' + (parts.length ? 'SharePoint: ' + parts.join(' · ') : '') + '</span>' +
+    '<select class="fs" style="margin-left:auto;font-size:12px" onchange="_sdfPoFilter=this.value;renderProjectPoList()" title="Filter by SharePoint filing">' +
+      opt('', 'Filing: all') + opt('notfiled', 'Not filed') + opt('failed', 'Failed') + '</select></div>';
+}
+
+function sdfPoStatusLine(po) {
+  if (!po || !po.id) return '';
+  var d = sdfData(po.projectId), r = d.po[String(po.id)];
+  var fk = sdfPoFolderKind(po, r);
+  var dest = fk === 'sub' ? SDF_TOP.subk : SDF_TOP.po;
+  var canAct = hasFull('edit-purchase-orders');
+  var html = '<div style="margin-top:8px;padding-top:8px;border-top:0.5px solid #eee"><strong>SharePoint:</strong> ' +
+    sdfPoCellHtml(po, d) + ' <span style="color:#888">Files to ' + _poEsc(dest) + '.</span>';
+  if (canAct) {
+    var other = fk === 'sub' ? 'po' : 'sub';
+    var otherLabel = other === 'sub' ? SDF_TOP.subk : SDF_TOP.po;
+    html += ' <a href="#" onclick="event.preventDefault();sdfPoSetFolder(' + Number(po.id) + ',\'' + other + '\')">File to ' + _poEsc(otherLabel) + ' instead</a>';
+    if (r && r.folder_override) html += ' · <a href="#" onclick="event.preventDefault();sdfPoSetFolder(' + Number(po.id) + ',null)">Use the vendor type</a>';
+  }
+  return html + '</div>';
+}
+
+async function sdfPoSetFolder(id, folder) {
+  var po = (db.purchaseOrders || []).find(function(x){ return String(x.id) === String(id); });
+  if (!po || !supabaseClient) return;
+  var r = await supabaseClient.rpc('kmi_doc_filing_set_folder', { p_po_id: Number(id), p_project_id: Number(po.projectId), p_folder: folder });
+  if (r && r.error) { alert('Could not change the folder: ' + r.error.message); return; }
+  showToast(folder ? 'PO will file to ' + (folder === 'sub' ? SDF_TOP.subk : SDF_TOP.po) + '.' : 'PO folder follows the vendor type again.', 'success');
+  sdfInvalidate(po.projectId);
+  await sdfLoad(po.projectId);
+  sdfRerender();
+  sdfKick(po.projectId);
+}
+
+async function sdfPoRender(po) {
+  var doc = _poRenderPDF(po, { returnDoc: true });
+  if (!doc) throw new Error('The PO PDF could not be built.');
+  var path = 'po-pdfs/' + po.id + '/' + Date.now() + '.pdf';
+  var up = await supabaseClient.storage.from(PROJECT_FILES_BUCKET)
+    .upload(path, doc.output('blob'), { contentType: 'application/pdf', upsert: false });
+  if (up && up.error) throw new Error(up.error.message);
+  var rr = await supabaseClient.rpc('kmi_doc_filing_pdf_ready', {
+    p_kind: 'po', p_ref_id: Number(po.id), p_project_id: Number(po.projectId), p_pdf_path: path,
+    p_file_name: null, p_folder_kind: null, p_ref_ids: null, p_rev: sdfPoRev(po)
+  });
+  if (rr && rr.error) throw new Error(rr.error.message);
+}
+
+// Called after every PO status change made in this browser.
+async function sdfPoAfterTransition(po) {
+  if (!po || !supabaseClient) return;
+  var st = _poStatusOf(po);
+  var key = 'po:' + po.id;
+  if ((st === 'Issued' || st === 'Open' || st === 'Closed') && !_sdfBusy[key]) {
+    var rev = sdfPoRev(po), need = true;
+    try {
+      var q = await supabaseClient.from('kmi_doc_filing').select('pdf_rev,pdf_path,sp_files')
+        .eq('kind', 'po').eq('ref_id', Number(po.id)).maybeSingle();
+      var row = q && q.data;
+      if (row && ((row.sp_files && row.sp_files[String(rev)]) || (row.pdf_path && Number(row.pdf_rev) === rev))) need = false;
+    } catch (e) { console.warn('[sdfile] po check', e); }
+    if (need) {
+      _sdfBusy[key] = true;
+      try { await sdfPoRender(po); }
+      catch (e) {
+        console.warn('[sdfile] po render', e);
+        showToast('PO saved, but its PDF did not reach SharePoint (' + (e.message || e) + '). Use File now on the PO\'s & Subs tab.', 'error');
+      } finally { delete _sdfBusy[key]; }
+    }
+  }
+  sdfInvalidate(po.projectId);
+  sdfKick(po.projectId);
+}
+
+async function sdfPoFileNow(id) {
+  var po = (db.purchaseOrders || []).find(function(x){ return String(x.id) === String(id); });
+  var key = 'po:' + id;
+  if (!po || _sdfBusy[key]) return;
+  _sdfBusy[key] = true;
+  sdfRerender();
+  try {
+    await sdfPoRender(po);
+    showToast('PO ' + (po.number || po.id) + ' sent to SharePoint.', 'success');
+  } catch (e) {
+    alert('Could not file this PO: ' + (e.message || e));
+  } finally {
+    delete _sdfBusy[key];
+    sdfInvalidate(po.projectId);
+    sdfRerender();
+    sdfKick(po.projectId);
+  }
+}
+
+// The quote a PO was extracted from is filed next to the PO.
+async function sdfPoSaveQuote(id) {
+  var q = _sdfPoQuote;
+  if (!q || !id || !supabaseClient) return;
+  if (q.poKey !== 'new' && q.poKey !== String(id)) return;
+  var po = (db.purchaseOrders || []).find(function(x){ return String(x.id) === String(id); });
+  if (!po) return;
+  _sdfPoQuote = null;
+  try {
+    var r = await supabaseClient.rpc('kmi_doc_filing_set_quote', { p_po_id: Number(id), p_project_id: Number(po.projectId), p_path: q.path, p_name: q.name || null });
+    if (r && r.error) throw new Error(r.error.message);
+    sdfInvalidate(po.projectId);
+    sdfKick(po.projectId);
+  } catch (e) { console.warn('[sdfile] quote', e); }
+}
+
 // CFILE1: SharePoint filing of CORs and owner CO's. The cor-filing Edge
 // Function moves files between 01-Pending, 02-Change Orders/<CO> and
 // 03-Rejected. The browser renders each COR's PDF (the same file the
@@ -38774,16 +39190,19 @@ function renderProjectPoList() {
     el.innerHTML = '<div style="text-align:center;color:#888;padding:20px;font-size:13px">No POs on this project yet.</div>';
     return;
   }
-  var html = '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' +
+  var html = sdfPoBarHtml(pid) + '<table style="width:100%;font-size:13px"><thead><tr style="background:#f5f5f5">' +   // SDFILE1
     '<th style="padding:8px 10px;text-align:left">PO #</th>' +
     '<th style="padding:8px 10px;text-align:left">Date</th>' +
     '<th style="padding:8px 10px;text-align:left">Vendor</th>' +
     '<th style="padding:8px 10px;text-align:left">Lines</th>' +
     '<th style="padding:8px 10px;text-align:right">Total</th>' +
     '<th style="padding:8px 10px;text-align:left">Status</th>' +
+    '<th style="padding:8px 10px;text-align:left">SharePoint</th>' +   // SDFILE1
     '<th style="padding:8px 10px;text-align:right">Actions</th>' +
     '</tr></thead><tbody>';
+  var sdd = sdfData(pid);   // SDFILE1
   rows.forEach(function(po){
+    if (_sdfPoFilter && sdfPoKind(po, sdd) !== _sdfPoFilter) return;   // SDFILE1
     var v = (db.vendors || []).find(function(x){ return x.id === po.vendorId; });
     var vendorName = v ? v.name : '<span style="color:#aaa">— no vendor —</span>';
     var totals = _poComputeTotals(po);
@@ -38797,6 +39216,7 @@ function renderProjectPoList() {
       '<td style="padding:8px 10px">' + _poStatusBadgeHtml(_poStatusOf(po)) +
         (po.revisionNumber && po.revisionNumber > 1 ? ' <span style="color:#888;font-size:11px;margin-left:4px">Rev ' + po.revisionNumber + '</span>' : '') +
         '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap">' + sdfPoCellHtml(po, sdd) + '</td>' +   // SDFILE1
       '<td style="padding:8px 10px;text-align:right;white-space:nowrap">' +
         '<button class="btn btn-sm" onclick="poEditById(' + po.id + ')">Edit</button> ' +
         '<button class="btn btn-sm" onclick="poGeneratePDFById(' + po.id + ')">PDF</button> ' +
@@ -38813,6 +39233,7 @@ function poNew() {
   if (!requireFull('add-purchase-orders', 'create POs')) return;
   if (!_editProjectId) { alert('Save the project first before adding POs.'); return; }
   _editPoId = null;
+  _sdfPoQuote = null;   // SDFILE1
   _newPoProjectId = _editProjectId;
   // Switch to the new-po page
   setActivePage('projects');
@@ -39022,6 +39443,7 @@ function _poRenderStatusCard(po) {
     lines.push('<div><strong>Last revised:</strong> ' + _poEsc(_poFmtTs(po.revisedAt)) +
       (po.revisedByUserId ? ' by ' + _poEsc(_poUserName(po.revisedByUserId)) : '') + '</div>');
   }
+  lines.push(sdfPoStatusLine(po));   // SDFILE1
   body.innerHTML = lines.join('');
 }
 
@@ -39388,6 +39810,7 @@ function poSave() {
   // pick up any normalization (id, status, etc).
   var savedPo = (db.purchaseOrders || []).find(function(x){ return x.id === _editPoId; });
   _poInitForm(savedPo || null);
+  sdfPoSaveQuote(_editPoId);   // SDFILE1
   showToast('PO saved.', 'success');
 }
 
@@ -39461,6 +39884,7 @@ async function poRunExtract(attId) {
   var p = _poGetProj(); if (!p) return;
   var att = (p.attachments || []).find(function(a){ return String(a.id) === String(attId); });
   if (!att) { alert('Attachment not found.'); return; }
+  _sdfPoQuote = { poKey: _editPoId ? String(_editPoId) : 'new', path: att.path, name: att.name };   // SDFILE1
   // Show progress in the modal
   showModal('<div class="mt">Extracting line items\u2026</div>' +
     '<div class="msb">Reading <strong>' + _poEsc(att.name) + '</strong> and asking Claude to extract line items. This usually takes 10\u201330 seconds.</div>' +
@@ -39653,6 +40077,7 @@ async function _poPersistTransition(po) {
       if (res && res.error) console.warn('PO transition sync error:', res.error.message);
     }
   } catch (e) { console.warn('PO transition sync exception:', e); }
+  sdfPoAfterTransition(po);   // SDFILE1
 }
 
 // Helper: re-render the form after a transition. _poInitForm rebuilds the
@@ -66252,7 +66677,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-10-QC1d5';
+var KMI_BUILD = '2026-11-10-sdfile1';
 
 var _kmiSessionId = (function(){
   try {
