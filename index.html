@@ -615,6 +615,12 @@ input.carried:focus{background:#fff;border-color:var(--kmi)}
   /* QC1d4: the bar lives on <body> (like the tab bar); fixed elements inside the scrolling .main get clipped by Safari */
   #qcm-bar{position:fixed;left:0;right:0;bottom:calc(64px + env(safe-area-inset-bottom, 0px));z-index:95;display:none;gap:8px;padding:10px 12px;background:#F4F5F8;border-top:1px solid #e3e6eb;box-sizing:border-box}
   #qcm-bar.on{display:flex}
+  /* QC1d5: inside Quality the tab bar is hidden and the action bar takes its place.
+     iOS mis-places taps on fixed bars after scrolling: Next was landing on Projects. */
+  body.qcm-focus .mob-tabs{display:none !important}
+  body.qcm-focus #qcm-bar{bottom:0;padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px))}
+  .main{overscroll-behavior-y:contain}
+  button,.btn,.mob-tab,label{touch-action:manipulation}
   .qcm-fixpad{height:86px}
   label{font-size:11px}
   textarea{min-height:84px}
@@ -9646,7 +9652,7 @@ var _ptr = {
   active: false,    // false until user actually moves their finger down
   refreshing: false,
   threshold: 70,    // px needed to commit to a refresh
-  pages: { 'tm-tickets':1, 'm-projects':1, 'm-submittals':1, 'm-project-detail':1, 'm-quality':1 }
+  pages: { 'tm-tickets':1, 'm-projects':1, 'm-submittals':1, 'm-project-detail':1 }   // QC1d5: Quality reloads on open; pull-to-refresh fought scrolling there
 };
 
 function _ptrCurrentPageId() {
@@ -23224,10 +23230,12 @@ async function renderMobileQuality() {
   if (!_qc.list || _qc.listPid !== String(p.id)) body.innerHTML = '<div class="mob-list-empty">Loading checklists…</div>';
   try { await qtLoad(); } catch (e) {}
   try { await qcLoadList(p.id); } catch (e) { body.innerHTML = '<div class="mob-list-empty" style="color:#A32D2D">' + _mobEsc(e.message || e) + '</div>'; return; }
+  if (!qcmOnPage('m-quality')) return;   // QC1d5: user moved on while it loaded
   qcmRenderList();
 }
 
 function qcmRenderList() {
+  if (!qcmOnPage('m-quality')) return;   // QC1d5
   var body = g('m-qc-body'); if (!body || !_qc.list) return;
   var L = _qc.list, byCl = {}, me = String(qcUid());
   L.items.forEach(function(i){ (byCl[i.checklist_id] = byCl[i.checklist_id] || []).push(i); });
@@ -23308,6 +23316,7 @@ function qcmBigBtn(label, onclick, style) {
 }
 
 function qcmRenderChecklist() {
+  if (!qcmOnPage('m-qc-checklist')) return;   // QC1d5
   var body = g('m-qcc-body'); if (!body || !_qc.d) return;
   var D = _qc.d, cl = D.cl, items = qcmItems(), cnt = qcCounts(D.items), AL = qcAnswerLabels(cl.answer_style);
   var hdr = g('m-qcc-heading'); if (hdr) hdr.textContent = qcNum(cl.qc_number);
@@ -23450,9 +23459,12 @@ function qcmBar(html) {
 function qcmSyncBar(page) {
   var bar = g('qcm-bar');
   if (bar && page !== 'm-quality' && page !== 'm-qc-checklist') bar.classList.remove('on');
+  document.body.classList.toggle('qcm-focus', !!_isMobile && (page === 'm-quality' || page === 'm-qc-checklist'));   // QC1d5
 }
+function qcmOnPage(p) { var a = document.querySelector('.pg.active'); return !!a && a.id === 'pg-' + p; }   // QC1d5
 function qcmTop() { var m = document.querySelector('.main'); if (m) m.scrollTop = 0; window.scrollTo(0, 0); }   // QC1d3: .main is the scroller
 function qcmGo(dir) {
+  if (_qcm.t) { clearTimeout(_qcm.t); _qcm.t = null; }   // QC1d5: Next right after an answer moves one item, not two
   var n = qcmItems().length;
   _qcm.idx = Math.max(0, Math.min(n, _qcm.idx + dir));
   qcmRenderChecklist();
@@ -23469,7 +23481,9 @@ async function qcmAnswer(id, val) {
   var items = qcmItems(), cur = items.findIndex(function(x){ return String(x.id) === String(id); });
   var next = items.findIndex(function(x, i){ return i > cur && !x.answer; });
   if (next < 0) next = items.findIndex(function(x){ return !x.answer; });
-  setTimeout(function(){
+  if (_qcm.t) clearTimeout(_qcm.t);
+  _qcm.t = setTimeout(function(){
+    _qcm.t = null;
     _qcm.idx = next >= 0 ? next : items.length;
     qcmRenderChecklist(); qcmTop();
   }, 350);
@@ -66238,7 +66252,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-08-QC1d4';
+var KMI_BUILD = '2026-11-10-QC1d5';
 
 var _kmiSessionId = (function(){
   try {
