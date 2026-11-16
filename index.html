@@ -45997,7 +45997,7 @@ function _bprBuildIdMap(oldList, newList) {
   (newList || []).forEach(function(b){
     var cm = (b.classCode || '') + '|' + (b.materialCode || '');
     byFull[String(b.sourcePath || '') + '|' + cm] = b;
-    (byCM[cm] = byCM[cm] || []).push(b);
+    if (!b.sourceManual) (byCM[cm] = byCM[cm] || []).push(b);   // BPRAPPEND1
   });
   var map = {};
   (oldList || []).forEach(function(o){
@@ -46044,20 +46044,326 @@ function _bprStaleInfo(p) {
   if (!p || !Array.isArray(p.bprMaterials) || !p.bprMaterials.length) return null;
   var info = _bprLatestBudgetPdf(p.id);
   if (!info || !info.pdfs || !info.pdfs.length) return null;
-  var have = {}, tagged = false;
-  p.bprMaterials.forEach(function(b){ if (b.sourcePath) { tagged = true; have[String(b.sourcePath)] = true; } });
+  // BPRAPPEND1: appended reports (sourceManual) don't count; only budget PDFs
+  // missing from the list flag it. Untagged rows cover the first budget PDF.
+  var have = {}, tagged = false, untagged = false;
+  p.bprMaterials.forEach(function(b){
+    if (b.sourceManual) return;
+    if (b.sourcePath) { tagged = true; have[String(b.sourcePath)] = true; } else untagged = true;
+  });
   var want = info.pdfs.map(function(x){ return String(x.path); });
   if (!tagged) return want.length >= 2 ? info : null;
-  var same = want.length === Object.keys(have).length && want.every(function(w){ return have[w]; });
-  return same ? null : info;
+  if (untagged) have[want[0]] = true;
+  var missing = want.some(function(w){ return !have[w]; });
+  return missing ? info : null;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// BPRAPPEND1 — reports on a BPR list (append / label / rename / remove)
+// ═══════════════════════════════════════════════════════════════════
+// A "report" (source) is one PDF's rows on p.bprMaterials, keyed by
+// sourcePath: a kmi-budget-pdfs path for budget PDFs, "manual:<id>" for a
+// report appended through the upload modal (sourceManual = true), or ''
+// for a list imported before source tagging. Appending never touches the
+// budget; Refresh from budget keeps appended reports.
+var _bprUploadMode = '';        // '' | 'replace' | 'append' — upload modal, list present
+var _bprUploadReUpload = false;
+var _bprPendingAppend = null;   // { projectId, parsed, fileName, unlabeledKeys }
+var _bprPendingRemove = null;   // { projectId, key, label }
+var _prodBprSrcFilter = '';     // estimate picker "Show": '' = all, else source key
+
+function _bprSourceKey(b) { return (b && b.sourcePath) ? String(b.sourcePath) : ''; }
+
+// Distinct reports on a BPR list, in list order.
+function _bprSources(list) {
+  var out = [], byKey = {};
+  (list || []).forEach(function(b){
+    var k = _bprSourceKey(b);
+    var s = byKey[k];
+    if (!s) {
+      s = byKey[k] = { key: k, label: '', name: b.sourceName || null, manual: !!b.sourceManual,
+                       addedAt: b.sourceAddedAt || null, rows: 0, idx: out.length };
+      out.push(s);
+    }
+    if (!s.label && b.sourceLabel) s.label = String(b.sourceLabel);
+    s.rows++;
+  });
+  return out;
+}
+// Re-number sourceIdx / sourceCount after reports are added or removed.
+function _bprReindexSources(list) {
+  var srcs = _bprSources(list), idx = {};
+  srcs.forEach(function(s, i){ idx[s.key] = i; });
+  (list || []).forEach(function(b){ b.sourceIdx = idx[_bprSourceKey(b)]; b.sourceCount = srcs.length; });
+  return srcs;
+}
+function _bprSourceLabelOf(s) { return s.label || ('BPR ' + (s.idx + 1)); }
+function _bprRowLabel(b) {
+  if (!b) return '';
+  return b.sourceLabel ? String(b.sourceLabel) : ('BPR ' + ((Number(b.sourceIdx) || 0) + 1));
+}
+// "BP-02" from "BP_02_Estimate_02.15.25.pdf", "COR 12" from "COR-012 ...", else the file name.
+function _bprGuessLabel(fileName) {
+  var n = String(fileName || '').replace(/\.pdf$/i, '');
+  var m = n.match(/(?:^|[^A-Za-z])BP[\s_#.-]*0*(\d{1,3})/i);
+  if (m) return 'BP-' + (m[1].length < 2 ? '0' + m[1] : m[1]);
+  m = n.match(/(?:^|[^A-Za-z])COR[\s_#.-]*0*(\d{1,5})/i);
+  if (m) return 'COR ' + m[1];
+  n = n.replace(/_+/g, ' ').trim();
+  return n.length > 24 ? n.slice(0, 24).trim() : (n || 'Added BPR');
+}
+function _bprShortDate(iso) {
+  var d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d.getTime())) return '';
+  return (d.getMonth() + 1) + '/' + d.getDate() + '/' + String(d.getFullYear()).slice(2);
+}
+function _bprCanEditList() { return (typeof hasFull !== 'function') || hasFull('edit_project_budget'); }
 
 function _bprSrcBadge(b) {
   if (!b || !(Number(b.sourceCount) > 1)) return '';
   var i = Number(b.sourceIdx) || 0;
-  var t = 'PDF ' + (i + 1) + (b.sourceName ? ': ' + b.sourceName : (i === 0 ? ' (original)' : ''));
+  var lbl = _bprRowLabel(b);
+  var t = lbl + (b.sourceName ? ': ' + b.sourceName : (i === 0 ? ' (original)' : '')) + (b.sourceManual ? ' · appended' : '');
   return ' <span title="' + _procEsc(t) + '" style="display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;font-size:9px;font-weight:600;vertical-align:middle;background:' +
-    (i === 0 ? '#EEF0F3;color:#666' : '#F8F6E6;color:#9A7A2E') + '">BPR ' + (i + 1) + '</span>';
+    (i === 0 ? '#EEF0F3;color:#555' : '#F8F6E6;color:#7A5F1F') + '">' + _procEsc(lbl) + '</span>';
+}
+
+// Group source note: "BP-02" or "combines BP-01 + BP-02" ('' on a one-report list).
+function _bprGroupSrcNote(rows) {
+  var labs = [], seen = {};
+  (rows || []).forEach(function(b){
+    if (!b || !(Number(b.sourceCount) > 1)) return;
+    var l = _bprRowLabel(b);
+    if (!seen[l]) { seen[l] = 1; labs.push(l); }
+  });
+  if (!labs.length) return '';
+  return labs.length > 1 ? ('combines ' + labs.join(' + ')) : labs[0];
+}
+
+// Estimate-line name prefix: lines built only from an added report (not the
+// first one) get "<label> – ". Mixed-report groups keep their own label.
+function _prodBprApplyPrefix(rows, name) {
+  var idx = {}, lab = '';
+  (rows || []).forEach(function(b){
+    if (b && Number(b.sourceCount) > 1) { idx[Number(b.sourceIdx) || 0] = 1; lab = _bprRowLabel(b); }
+  });
+  var ks = Object.keys(idx);
+  name = String(name || '');
+  if (ks.length !== 1 || ks[0] === '0' || !lab) return name;
+  if (name.toLowerCase().indexOf(lab.toLowerCase()) === 0) return name;
+  return lab + ' – ' + name;
+}
+function _prodBprShown(b) { return !_prodBprSrcFilter || _bprSourceKey(b) === _prodBprSrcFilter; }
+
+// Reports bar shown in both pickers once a list has 2+ reports.
+function _bprReportsBarHtml(p) {
+  var srcs = _bprSources(p && p.bprMaterials);
+  if (srcs.length < 2) return '';
+  var canEdit = _bprCanEditList();
+  var chips = srcs.map(function(s, i){
+    var sub = s.manual ? ('appended' + (s.addedAt ? ' ' + _bprShortDate(s.addedAt) : '')) : (i === 0 ? 'original' : 'from budget');
+    return '<span style="display:inline-flex;align-items:center;gap:8px;background:#fff;border:0.5px solid #ddd;border-radius:6px;padding:4px 10px;font-size:12px">' +
+      '<span style="padding:0 6px;border-radius:3px;font-size:10px;font-weight:700;background:' + (i === 0 ? '#EEF0F3;color:#555' : '#F8F6E6;color:#7A5F1F') + '">' + _procEsc(_bprSourceLabelOf(s)) + '</span>' +
+      '<span style="color:#444">' + (s.name ? _procEsc(s.name) + ' · ' : '') + _procEsc(sub) + ' · ' + s.rows + ' row' + (s.rows === 1 ? '' : 's') + '</span>' +
+      (canEdit ? '<button type="button" onclick="bprRenameSource(' + i + ')" style="font-size:11px;background:none;border:none;color:#1F5A8A;cursor:pointer;padding:0">rename</button>' : '') +
+      ((canEdit && s.manual) ? '<button type="button" onclick="bprRemoveSource(' + i + ')" style="font-size:11px;background:none;border:none;color:#A32D2D;cursor:pointer;padding:0">remove</button>' : '') +
+    '</span>';
+  }).join('');
+  return '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fafafa;border-radius:7px;padding:8px 10px;margin-bottom:10px">' +
+    '<span style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:#888">Reports</span>' + chips + '</div>';
+}
+
+function _bprReopenPicker(preserveState) {
+  if (typeof _bprPickerDest !== 'undefined' && _bprPickerDest === 'prod') prodOpenBprPicker(preserveState);
+  else procOpenBprPicker(preserveState);
+}
+
+function bprRenameSource(i) {
+  var p = getProj(_editProjectId); if (!p) return;
+  if (!_bprCanEditList()) { alert('Renaming reports needs budget edit access.'); return; }
+  var srcs = _bprSources(p.bprMaterials), s = srcs[i]; if (!s) return;
+  var v = prompt('Label for this report (shows on badges and as the estimate-line prefix):', _bprSourceLabelOf(s));
+  if (v === null) return;
+  v = String(v).trim().slice(0, 24);
+  if (!v) { alert('A report needs a label.'); return; }
+  if (srcs.some(function(o, j){ return j !== i && _bprSourceLabelOf(o).toLowerCase() === v.toLowerCase(); })) {
+    alert('Another report on this list already uses "' + v + '".'); return;
+  }
+  (p.bprMaterials || []).forEach(function(b){ if (_bprSourceKey(b) === s.key) b.sourceLabel = v; });
+  saveDB();
+  _bprReopenPicker(true);
+}
+
+function bprRemoveSource(i) {
+  var p = getProj(_editProjectId); if (!p) return;
+  if (!_bprCanEditList()) { alert('Removing reports needs budget edit access.'); return; }
+  var srcs = _bprSources(p.bprMaterials), s = srcs[i];
+  if (!s || !s.manual) return;
+  var lbl = _bprSourceLabelOf(s);
+  var map = {};
+  (p.bprMaterials || []).forEach(function(b){ map[String(b.id)] = (_bprSourceKey(b) === s.key) ? null : String(b.id); });
+  var r = _bprRemap(p, map, false);
+  var linesHit = 0;
+  var est = p.prodEstimate;
+  if (est && Array.isArray(est.lines)) est.lines.forEach(function(l){
+    if (Array.isArray(l.bprRef) && l.bprRef.some(function(id){ return map[String(id)] === null; })) linesHit++;
+  });
+  var before = srcs.map(_bprSourceLabelOf), after = srcs.filter(function(o){ return o.key !== s.key; }).map(_bprSourceLabelOf);
+  _bprPendingRemove = { projectId: String(p.id), key: s.key, label: lbl };
+  function row(label, val, bad) {
+    return '<div style="display:flex;justify-content:space-between;gap:16px"><span>' + label + '</span><strong' +
+      (bad ? ' style="color:#A32D2D"' : '') + '>' + val + '</strong></div>';
+  }
+  showModal(
+    '<button class="xbtn" onclick="_bprPendingRemove=null;_bprReopenPicker(true)">&#215;</button>' +
+    '<div class="mt">Remove ' + _procEsc(lbl) + ' from the BPR list?</div>' +
+    '<div class="msb">' + (s.name ? _procEsc(s.name) + '. ' : '') + 'Nothing has changed yet.</div>' +
+    '<div class="sb3" style="font-size:13px;line-height:1.9;margin-bottom:12px">' +
+      row('Reports on the list', _procEsc(before.join(' + ')) + ' &rarr; ' + _procEsc(after.join(' + '))) +
+      row('Estimate lines from ' + _procEsc(lbl), linesHit ? (linesHit + ' kept, link removed') : 'None') +
+      row('Procurement assignments to ' + _procEsc(lbl) + ' rows', r.orphaned ? (r.orphaned + ' orphaned') : 'None', r.orphaned > 0) +
+      row('Other reports’ rows and links', 'Unchanged') +
+    '</div>' +
+    ((r.orphaned || linesHit) ? '<div style="font-size:12px;color:#A32D2D;margin-bottom:10px">Orphaned assignments stay visible but stop reconciling. To drop the ' + _procEsc(lbl) + ' estimate lines too, delete them on the estimate screen.</div>' : '') +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="_bprPendingRemove=null;_bprReopenPicker(true)">Cancel</button>' +
+      '<button class="btn" style="background:#A32D2D;border-color:#A32D2D;color:#fff;font-weight:600" onclick="bprConfirmRemoveSource()">Remove ' + _procEsc(lbl) + '</button>' +
+    '</div>'
+  );
+}
+function bprConfirmRemoveSource() {
+  var pend = _bprPendingRemove;
+  _bprPendingRemove = null;
+  if (!pend || String(pend.projectId) !== String(_editProjectId)) {
+    closeModal(); alert('The project changed since the remove was prepared. Try again from the picker.'); return;
+  }
+  var p = getProj(_editProjectId); if (!p) { closeModal(); return; }
+  var map = {};
+  (p.bprMaterials || []).forEach(function(b){ map[String(b.id)] = (_bprSourceKey(b) === pend.key) ? null : String(b.id); });
+  _bprRemap(p, map, true);
+  p.bprMaterials = (p.bprMaterials || []).filter(function(b){ return _bprSourceKey(b) !== pend.key; });
+  _bprReindexSources(p.bprMaterials);
+  if (_prodBprSrcFilter === pend.key) _prodBprSrcFilter = '';
+  saveDB();
+  closeModal();
+  if (typeof showToast === 'function') showToast('Removed ' + pend.label + ' from the BPR list.', 'success');
+  _bprReopenPicker(false);
+}
+
+// ── Append: label + confirm step ────────────────────────────────────
+function _bprShowAppendConfirm(p, parsed, fileName) {
+  var srcs = _bprSources(p.bprMaterials);
+  var newLbl = _bprGuessLabel(fileName);
+  var unlabeled = srcs.filter(function(s){ return !s.label; });
+  var dup = !!fileName && srcs.some(function(s){ return s.name && String(s.name).toLowerCase() === String(fileName).toLowerCase(); });
+  var have = {};
+  (p.bprMaterials || []).forEach(function(b){ have[(b.classCode || '') + '|' + (b.materialCode || '')] = 1; });
+  var shared = [], seen = {};
+  parsed.forEach(function(b){
+    var k = (b.classCode || '') + '|' + (b.materialCode || '');
+    if (b.materialCode && have[k] && !seen[k]) { seen[k] = 1; shared.push((b.classCode || '') + ' ' + b.materialCode); }
+  });
+  _bprPendingAppend = { projectId: String(p.id), parsed: parsed, fileName: fileName || null,
+                        unlabeledKeys: unlabeled.map(function(s){ return s.key; }) };
+
+  var inp = 'padding:8px 12px;border:0.5px solid #ccc;border-radius:7px;font-size:13px;font-family:inherit;width:100%;box-sizing:border-box';
+  var oldInputs = unlabeled.map(function(s, j){
+    var guess = s.name ? _bprGuessLabel(s.name)
+      : ((srcs.length === 1 && /^BP-\d+$/.test(newLbl)) ? 'BP-01' : ('BPR ' + (s.idx + 1)));
+    return '<div class="fgr"><label for="bpr-app-old-' + j + '">Label for ' + (srcs.length === 1 ? 'the report already on the list' : _procEsc(s.name || ('report ' + (s.idx + 1)))) + '</label>' +
+      '<input id="bpr-app-old-' + j + '" type="text" maxlength="24" value="' + _procEsc(guess) + '" style="' + inp + '">' +
+      (j === 0 ? '<div style="font-size:11px;color:#888">Asked once — this list was imported before reports had labels.</div>' : '') + '</div>';
+  }).join('');
+  function row(label, val) {
+    return '<div style="display:flex;justify-content:space-between;gap:16px"><span>' + label + '</span><strong>' + val + '</strong></div>';
+  }
+  var nLaid = parsed.filter(function(b){ return Number(b.layRate) > 0; }).length;
+  showModal(
+    '<button class="xbtn" onclick="_bprPendingAppend=null;closeModal()">&#215;</button>' +
+    '<div class="mt">Append Bid Price Report</div>' +
+    '<div class="msb">Parsed <strong style="color:#1a1a1a">' + _procEsc(fileName || 'PDF') + '</strong> — ' + parsed.length + ' material' + (parsed.length === 1 ? '' : 's') +
+      ' (' + nLaid + ' laid). Nothing has changed yet.</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:14px">' +
+      oldInputs +
+      '<div class="fgr"><label for="bpr-app-new">Label for this report</label>' +
+        '<input id="bpr-app-new" type="text" maxlength="24" value="' + _procEsc(newLbl) + '" style="' + inp + ';border:1px solid #1E2448">' +
+        '<div style="font-size:11px;color:#888">Pre-filled from the file name. Shows on badges and as the estimate-line prefix.</div></div>' +
+    '</div>' +
+    '<div class="sb3" style="font-size:13px;line-height:1.9">' +
+      row('Reports on the list', srcs.length + ' &rarr; ' + (srcs.length + 1)) +
+      row('Existing BPR rows', 'Unchanged') +
+      row('Estimate line links', 'Unchanged') +
+      row('Procurement assignments', 'Unchanged') +
+      row('Budget', 'Not touched') +
+    '</div>' +
+    (shared.length ?
+      '<div style="background:#EEF0F8;border-radius:7px;padding:10px 14px;font-size:12px;color:#2A3260;line-height:1.55;margin-bottom:12px">' +
+        '<strong>Same material codes as the list already has, kept as separate rows:</strong> ' +
+        _procEsc(shared.slice(0, 12).join(' · ')) + (shared.length > 12 ? ' · +' + (shared.length - 12) + ' more' : '') +
+        '. They aren’t combined unless you group them in the picker.</div>' : '') +
+    (dup ? '<div class="sb3" style="background:#FFF8E1;color:#7A5F1F;font-size:12px"><strong>Heads up:</strong> a report from a file named ' +
+        _procEsc(fileName) + ' is already on the list. Append it again anyway?</div>' : '') +
+    '<div id="bpr-upload-status" style="font-size:12px;color:#666;margin:8px 0"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="_bprPendingAppend=null;closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" id="bpr-append-btn" onclick="bprConfirmAppend()">' + (dup ? 'Append anyway' : 'Append and open picker') + '</button>' +
+    '</div>'
+  );
+}
+
+function bprConfirmAppend() {
+  var pend = _bprPendingAppend;
+  var statusEl = g('bpr-upload-status');
+  function fail(msg) { if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">' + _procEsc(msg) + '</span>'; }
+  if (!pend || String(pend.projectId) !== String(_editProjectId)) {
+    _bprPendingAppend = null; closeModal();
+    alert('The project changed since the append was prepared. Upload the PDF again.'); return;
+  }
+  var p = getProj(_editProjectId); if (!p) { _bprPendingAppend = null; closeModal(); return; }
+  var newEl = g('bpr-app-new');
+  var newLbl = String(newEl ? newEl.value : '').trim().slice(0, 24);
+  var oldLbls = pend.unlabeledKeys.map(function(k, j){ var el = g('bpr-app-old-' + j); return String(el ? el.value : '').trim().slice(0, 24); });
+  if (!newLbl || oldLbls.some(function(x){ return !x; })) { fail('Every report needs a label.'); return; }
+  var used = {}, clash = '';
+  _bprSources(p.bprMaterials).forEach(function(s){ if (s.label) used[s.label.toLowerCase()] = 1; });
+  oldLbls.concat([newLbl]).forEach(function(l){ var k = l.toLowerCase(); if (used[k] && !clash) clash = l; used[k] = 1; });
+  if (clash) { fail('Two reports can’t share the label "' + clash + '".'); return; }
+
+  _bprPendingAppend = null;
+  var btn = g('bpr-append-btn'); if (btn) btn.disabled = true;
+  var relabel = {};
+  pend.unlabeledKeys.forEach(function(k, j){ relabel[k] = oldLbls[j]; });
+  (p.bprMaterials || []).forEach(function(b){
+    var k = _bprSourceKey(b);
+    if (Object.prototype.hasOwnProperty.call(relabel, k)) b.sourceLabel = relabel[k];
+  });
+  var key = 'manual:' + _bprNewId();
+  var now = new Date().toISOString();
+  pend.parsed.forEach(function(b){
+    b.sourcePath = key; b.sourceName = pend.fileName; b.sourceLabel = newLbl;
+    b.sourceManual = true; b.sourceAddedAt = now;
+  });
+  p.bprMaterials = (p.bprMaterials || []).concat(pend.parsed);
+  _bprReindexSources(p.bprMaterials);
+  saveDB();
+  if (statusEl) statusEl.innerHTML = '<span style="color:#1E6B36">' + _procEsc('Appended ' + pend.parsed.length + ' material' + (pend.parsed.length === 1 ? '' : 's') + ' as ' + newLbl + '.') + '</span>';
+
+  // Open the picker with only the new report's rows pre-selected.
+  setTimeout(function(){
+    closeModal();
+    var isNew = {};
+    pend.parsed.forEach(function(b){ isNew[String(b.id)] = true; });
+    if (typeof _bprPickerDest !== 'undefined' && _bprPickerDest === 'prod') {
+      prodOpenBprPicker();
+      Object.keys(_prodBprSel).forEach(function(id){ if (!isNew[id]) _prodBprSel[id] = false; });
+      _prodBprSrcFilter = key;
+      prodOpenBprPicker(true);
+    } else {
+      procOpenBprPicker();
+      Object.keys(_bprPickerSelections).forEach(function(id){ if (!isNew[String(id)]) _bprPickerSelections[id] = false; });
+      procOpenBprPicker(true);
+    }
+  }, 700);
 }
 
 function bprShowStaleNotice(p, info) {
@@ -46211,7 +46517,17 @@ async function procUseBudgetBpr() {
       }
       parsed = parsed.concat(rows);
     }
-    for (var ci = 0; ci < parsed.length; ci++) parsed[ci].sourceCount = nPdf;
+    // BPRAPPEND1: carry report labels forward and keep appended reports.
+    var pKeep = getProj(_editProjectId);
+    var oldRows = (pKeep && Array.isArray(pKeep.bprMaterials)) ? pKeep.bprMaterials : [];
+    var oldLbl = {};
+    oldRows.forEach(function(b){ if (!b.sourceManual && b.sourceLabel) oldLbl[_bprSourceKey(b) || '\u0000untagged'] = b.sourceLabel; });
+    parsed.forEach(function(b){
+      var l = oldLbl[String(b.sourcePath)] || (b.sourceIdx === 0 ? oldLbl['\u0000untagged'] : null);
+      if (l) b.sourceLabel = l;
+    });
+    parsed = parsed.concat(oldRows.filter(function(b){ return b.sourceManual; }));
+    _bprReindexSources(parsed);
 
     var pCur = getProj(_editProjectId);
     if (pCur && Array.isArray(pCur.bprMaterials) && pCur.bprMaterials.length) {
@@ -46245,35 +46561,70 @@ function procOpenBprFlow() {
   }
 }
 
-function procOpenBprUploadModal(reUpload) {
+function procOpenBprUploadModal(reUpload, keepMode) {
+  // BPRAPPEND1: with a list already present, choose Replace or Append first.
+  if (!keepMode) _bprUploadMode = '';
+  _bprUploadReUpload = !!reUpload;
+  var pCur = _editProjectId ? getProj(_editProjectId) : null;
+  var srcs = _bprSources(pCur && pCur.bprMaterials);
+  var hasList = srcs.length > 0;
+  var mode = hasList ? _bprUploadMode : 'replace';
+
   // If the Budget module already stored a BPR for this project, offer it as
   // the default — no re-upload needed. Manual upload stays as the fallback.
   var budgetPdf = _editProjectId ? _bprLatestBudgetPdf(_editProjectId) : null;
-  var useBudgetBlock = budgetPdf ?
+  var useBudgetBlock = (budgetPdf && mode !== 'append') ?
     '<div class="sb3" style="background:#EEF5EE;border:0.5px solid #C2D6C2;margin-bottom:14px">' +
-      '<div style="font-size:13px;color:#1E6B36;margin-bottom:10px">A BPR is already on file from <strong>Budget v' + budgetPdf.version + '</strong> — use it directly, no re-upload required.</div>' +
-      '<button class="btn btn-p" id="bpr-use-budget-btn" onclick="procUseBudgetBpr()">\u2713 Use BPR on file (Budget v' + budgetPdf.version + ((budgetPdf.pdfs || []).length > 1 ? ' \u00b7 ' + budgetPdf.pdfs.length + ' PDFs' : '') + ')</button>' +
+      '<div style="font-size:13px;color:#1E6B36;margin-bottom:10px">A BPR is already on file from <strong>Budget v' + budgetPdf.version + '</strong> — use it directly, no re-upload required.' +
+        (srcs.some(function(s){ return s.manual; }) ? ' Appended reports stay on the list.' : '') + '</div>' +
+      '<button class="btn btn-p" id="bpr-use-budget-btn" onclick="procUseBudgetBpr()">✓ Use BPR on file (Budget v' + budgetPdf.version + ((budgetPdf.pdfs || []).length > 1 ? ' · ' + budgetPdf.pdfs.length + ' PDFs' : '') + ')</button>' +
     '</div>' +
-    '<div style="text-align:center;font-size:11px;color:#aaa;margin:0 0 12px">\u2014 or upload manually \u2014</div>'
+    '<div style="text-align:center;font-size:11px;color:#aaa;margin:0 0 12px">— or upload manually —</div>'
+    : '';
+
+  function card(m, title, body) {
+    var on = mode === m;
+    return '<button type="button" onclick="bprSetUploadMode(\'' + m + '\')" style="text-align:left;font-family:inherit;color:#1a1a1a;cursor:pointer;border-radius:8px;padding:14px;background:' +
+      (on ? '#EEF0F8;border:1.5px solid #1E2448' : '#fff;border:1px solid #ddd') + '">' +
+      '<div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600"><span style="width:14px;height:14px;border-radius:50%;box-sizing:border-box;flex-shrink:0;border:' +
+        (on ? '4px solid #1E2448' : '1.5px solid #999') + '"></span>' + title + '</div>' +
+      '<div style="font-size:12px;color:#555;margin-top:6px;line-height:1.45">' + body + '</div></button>';
+  }
+  var listDesc = srcs.map(function(s){
+    return '<strong style="color:#1a1a1a">' + _procEsc(s.label || s.name || ('BPR ' + (s.idx + 1))) + '</strong>' +
+      ((s.label && s.name) ? ' (' + _procEsc(s.name) + ')' : '');
+  }).join(', ');
+  var choice = hasList ?
+    '<div style="font-size:13px;color:#666;margin-bottom:10px">This project already has a BPR list: ' + listDesc + '. Choose what the new PDF does.</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:12px">' +
+      card('replace', 'Replace — revised estimate', 'The new PDF takes the place of every report on the list. Links carry over where the classification + material code matches.') +
+      card('append', 'Append — added bid package / COR', 'Adds the PDF as its own report. Existing rows, estimate lines and procurement assignments are untouched.') +
+    '</div>' +
+    (mode === 'replace' ?
+      '<div class="sb3" style="background:#FFF8E1;color:#9A7A2E;font-size:12px;margin-bottom:12px"><strong>Heads up:</strong> Replace removes every report on the list' +
+        (srcs.length > 1 ? ', including appended ones' : '') +
+        '. Existing procurement-item assignments are carried forward where the new BPR has a matching classification + material code; assignments to materials that disappear become orphaned (visible but no longer reconciling). Estimate lines are kept.</div>' : '') +
+    (mode === '' ? '<div style="font-size:12px;color:#888;margin-bottom:12px">Pick Replace or Append to choose a file.</div>' : '')
     : '';
 
   showModal(
     '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
-    '<div class="mt">' + (reUpload ? 'Re-upload Bid Price Report' : 'Import Bid Price Report') + '</div>' +
+    '<div class="mt">' + (hasList ? 'Add or replace Bid Price Report' : 'Import Bid Price Report') + '</div>' +
     '<div class="msb">We\'ll parse Material Totals and the Other Cost Breakdown section to populate the procurement list. Scaffold, cleaning, air deduction, and patching are extracted but default to unchecked — opt in if you want them.</div>' +
-    (reUpload ?
-      '<div class="sb3" style="background:#FFF8E1;color:#9A7A2E;font-size:12px;margin-bottom:12px"><strong>Heads up:</strong> Re-importing replaces the stored BPR materials. Existing procurement-item assignments will be carried forward where the new BPR has a matching classification + material code; assignments to materials that disappear become orphaned (visible but no longer reconciling).</div>' :
-      ''
-    ) +
+    choice +
     useBudgetBlock +
     '<div class="fgr full"><label>BPR PDF</label>' +
-      '<input type="file" id="bpr-upload-input" accept=".pdf" onchange="procBprUploadChosen(event)">' +
+      '<input type="file" id="bpr-upload-input" accept=".pdf" onchange="procBprUploadChosen(event)"' + (mode === '' ? ' disabled style="opacity:.45"' : '') + '>' +
     '</div>' +
     '<div id="bpr-upload-status" style="font-size:12px;color:#666;margin-top:8px"></div>' +
     '<div class="mbtns">' +
       '<button class="btn" onclick="closeModal()">Cancel</button>' +
     '</div>'
   );
+}
+function bprSetUploadMode(m) {   // BPRAPPEND1
+  _bprUploadMode = (m === 'append') ? 'append' : 'replace';
+  procOpenBprUploadModal(_bprUploadReUpload, true);
 }
 
 async function procBprUploadChosen(evt) {
@@ -46306,6 +46657,12 @@ async function procBprUploadChosen(evt) {
     return;
   }
 
+  // BPRAPPEND1: Append adds the PDF as its own report after a label/confirm step.
+  var pA = getProj(_editProjectId);
+  if (_bprUploadMode === 'append' && pA && Array.isArray(pA.bprMaterials) && pA.bprMaterials.length) {
+    _bprShowAppendConfirm(pA, parsed, file.name);
+    return;
+  }
   _bprApplyParsed(parsed, statusEl);
 }
 
@@ -46381,8 +46738,8 @@ function _bprPickerHtml(p, groups, classOrder, assignedById) {
         (p.bprMaterials || []).length + ' materials' +
         (_bprPickerGroups.length ? ' · ' + _bprPickerGroups.length + ' group' + (_bprPickerGroups.length === 1 ? '' : 's') : '') +
       '</span>' +
-      '<button type="button" class="btn btn-sm" onclick="procOpenBprUploadModal(true)" title="Re-upload to replace stored BPR materials">Re-upload BPR</button>' +
-    '</div>';
+      '<button type="button" class="btn btn-sm" onclick="procOpenBprUploadModal(true)" title="Append another report or replace the list">+ Add / replace BPR</button>' +
+    '</div>' + _bprReportsBarHtml(p);   // BPRAPPEND1
 
   // Active groups summary
   if (_bprPickerGroups.length) {
@@ -47001,6 +47358,7 @@ function prodOpenBprPicker(preserveState){
   if (!preserveState){
     _prodBprSel = {}; _prodBprGroups = []; _prodBprGroupOf = {};
     _prodBprMdu = {}; _prodBprLink = {}; _prodBprCat = {}; _prodBprGroupMeta = {};
+    _prodBprSrcFilter = '';   // BPRAPPEND1
     bpr.forEach(function(b){
       var id = String(b.id);
       var laid = (b.layRate != null && Number(b.layRate) > 0);
@@ -47048,7 +47406,10 @@ function _prodBprPickerHtml(p, bpr, imported){
   function catOpts(cur){ return _prodCategoryOptions(cur); }
 
   var groups = {}, order = [];
-  bpr.forEach(function(b){ var k = b.classCode || 'UNC'; if (!groups[k]) { groups[k] = []; order.push(k); } groups[k].push(b); });
+  // BPRAPPEND1: "Show" filter by report.
+  var _prodSrcs = _bprSources(bpr);
+  if (_prodBprSrcFilter && !_prodSrcs.some(function(s){ return s.key === _prodBprSrcFilter; })) _prodBprSrcFilter = '';
+  bpr.forEach(function(b){ if (!_prodBprShown(b)) return; var k = b.classCode || 'UNC'; if (!groups[k]) { groups[k] = []; order.push(k); } groups[k].push(b); });
 
   var chk = [], unitset = {};
   bpr.forEach(function(b){
@@ -47070,8 +47431,13 @@ function _prodBprPickerHtml(p, bpr, imported){
         '\u2295 Group selected' + (canGroup ? (' (' + chk.length + ')') : '') + '</button>' +
       '<span style="margin-left:auto;font-size:11px;color:#888">' + laidCount + ' laid materials' +
         (_prodBprGroups.length ? (' \u00b7 ' + _prodBprGroups.length + ' group' + (_prodBprGroups.length === 1 ? '' : 's')) : '') + '</span>' +
-      '<button type="button" class="btn btn-sm" onclick="prodBprReupload()" title="Re-upload to replace stored BPR materials">Re-upload BPR</button>' +
-    '</div>';
+      (_prodSrcs.length > 1 ?
+        '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#666">Show <select class="fs" style="font-size:12px;padding:4px 8px" onchange="prodBprSetSrcFilter(this.value)">' +
+          '<option value="">All reports</option>' +
+          _prodSrcs.map(function(s, i){ return '<option value="' + i + '"' + (s.key === _prodBprSrcFilter ? ' selected' : '') + '>' + _prodEsc(_bprSourceLabelOf(s)) + '</option>'; }).join('') +
+        '</select></label>' : '') +
+      '<button type="button" class="btn btn-sm" onclick="prodBprReupload()" title="Append another report or replace the list">+ Add / replace BPR</button>' +
+    '</div>' + _bprReportsBarHtml(p);   // BPRAPPEND1
 
   if (_prodBprGroups.length){
     var bprById = {}; bpr.forEach(function(b){ bprById[String(b.id)] = b; });
@@ -47098,6 +47464,7 @@ function _prodBprPickerHtml(p, bpr, imported){
         '<span style="font-weight:600;color:#1E6B36">\u2295 ' + _prodEsc(grp.label) + '</span>' +
         '<span style="color:#666">' + _prodFmtQty(tq) + ' ' + _prodEsc(unit) + '</span>' +
         driverChip +
+        (_bprGroupSrcNote(mem) ? '<span style="color:#888">' + _prodEsc(_bprGroupSrcNote(mem)) + '</span>' : '') +
         '<select class="fs" style="min-width:130px;font-size:11px" onchange="prodBprSetGroupLink(\'' + grp.id + '\',this.value)">' + itemOpts(meta.link) + '</select>' +
         '<select class="fs" style="min-width:120px;font-size:11px" onchange="prodBprSetGroupCat(\'' + grp.id + '\',this.value)">' + catOpts(meta.cat) + '</select>' +
         '<span style="margin-left:auto;display:flex;gap:6px">' +
@@ -47190,11 +47557,17 @@ function prodBprSelAll(v){
   (est.lines || []).forEach(function(l){ if (Array.isArray(l.bprRef)) l.bprRef.forEach(function(id){ imported[String(id)] = true; }); });
   (p.bprMaterials || []).forEach(function(b){
     var id = String(b.id);
-    if (Number(b.layRate) > 0 && !_prodBprGroupOf[id] && !imported[id]) _prodBprSel[id] = v;
+    if (Number(b.layRate) > 0 && !_prodBprGroupOf[id] && !imported[id] && _prodBprShown(b)) _prodBprSel[id] = v;
   });
   prodOpenBprPicker(true);
 }
 function prodBprToggle(id, v){ _prodBprSel[String(id)] = v; prodOpenBprPicker(true); }
+function prodBprSetSrcFilter(v){   // BPRAPPEND1
+  var p = getProj(_editProjectId); if (!p) return;
+  var s = (v === '' || v == null) ? null : _bprSources(p.bprMaterials)[Number(v)];
+  _prodBprSrcFilter = s ? s.key : '';
+  prodOpenBprPicker(true);
+}
 function prodBprSetMdu(id, v){ var n = parseFloat(String(v).replace(/,/g, '')); _prodBprMdu[String(id)] = isFinite(n) ? n : ''; }
 function prodBprSetLink(id, v){ _prodBprLink[String(id)] = v || ''; prodOpenBprPicker(true); }
 function prodBprSetCat(id, v){ _prodBprCat[String(id)] = v || ''; }
@@ -47253,7 +47626,7 @@ function prodBprSavePicker(){
     var gItem = meta.link ? _prodItem(meta.link) : null;
     var gType = gItem ? (gItem.itemType || 'production') : 'production';
     var line = {
-      id: newLineId(), itemId: meta.link || null, itemName: (gItem ? gItem.name : grp.label), lineType: gType,
+      id: newLineId(), itemId: meta.link || null, itemName: _prodBprApplyPrefix(mem, (gItem ? gItem.name : grp.label)), lineType: gType,
       unitLabel: (gType === 'production') ? ((mem[0] && mem[0].unit) || '') : (gItem ? (gItem.unitLabel || '') : ''),
       estUnits: (gType === 'production') ? units : '',
       estMdu: (gType === 'production') ? _prodBprCombinedMdu(mem) : '',
@@ -47279,7 +47652,7 @@ function prodBprSavePicker(){
     var sType = sItem ? (sItem.itemType || 'production') : 'production';
     var line = {
       id: newLineId(), itemId: _prodBprLink[id] || null,
-      itemName: (sItem ? sItem.name : (b.description || b.materialCode || '(material)')), lineType: sType,
+      itemName: _prodBprApplyPrefix([b], (sItem ? sItem.name : (b.description || b.materialCode || '(material)'))), lineType: sType,
       unitLabel: (sType === 'production') ? (b.unit || '') : (sItem ? (sItem.unitLabel || '') : ''),
       estUnits: (sType === 'production') ? (Number(b.quantity) || 0) : '',
       estMdu: (sType === 'production') ? mdu : '',
@@ -66677,7 +67050,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-10-sdfile1';
+var KMI_BUILD = '2026-11-16-BPRAPPEND1';
 
 var _kmiSessionId = (function(){
   try {
