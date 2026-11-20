@@ -4385,7 +4385,8 @@ var DB_DEFAULTS = {
         {id:'lr1', classification:'Foreman',  stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0},
         {id:'lr2', classification:'Mason',    stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0},
         {id:'lr3', classification:'Laborer',  stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0},
-        {id:'lr4', classification:'Trucking', stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0}
+        {id:'lr4', classification:'Trucking', stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0},
+        {id:'lr5', classification:'PCC',      stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0}  // PCC1
       ]
     }
   ],
@@ -4399,9 +4400,9 @@ var DB_DEFAULTS = {
   // per project from that project's labor-rate snapshot (Mason/Laborer cost
   // column); the crew itself stores only the mason:laborer composition.
   crewTemplates: [
-    {id:'crew_1_1', name:'1:1', masons:1, laborers:1, sortOrder:1},
-    {id:'crew_2_1', name:'2:1', masons:2, laborers:1, sortOrder:2},
-    {id:'crew_3_2', name:'3:2', masons:3, laborers:2, sortOrder:3}
+    {id:'crew_1_1', name:'1:1', masons:1, laborers:1, pcc:0, sortOrder:1},  // PCC1: pcc = PCC workers
+    {id:'crew_2_1', name:'2:1', masons:2, laborers:1, pcc:0, sortOrder:2},
+    {id:'crew_3_2', name:'3:2', masons:3, laborers:2, pcc:0, sortOrder:3}
   ],
   // Productivity tracking (Phase 2) — global catalog of installation/labor
   // items. itemType: 'production' (units x MDU x crew), 'field_dollar'
@@ -57895,6 +57896,11 @@ function _normalizeLaborRate(r) {
 function _normalizeLaborRateSets() {
   (db.laborRateSets || []).forEach(function(set){
     (set.rates || []).forEach(_normalizeLaborRate);
+    // PCC1: every rate set carries a PCC classification (crews and production
+    // hours price off it). Added at $0; the rates are entered on this page.
+    set.rates = set.rates || [];
+    var hasPcc = set.rates.some(function(r){ return String(r.classification || '').trim().toLowerCase() === 'pcc'; });
+    if (!hasPcc) set.rates.push({ id:'lr_pcc_' + set.id, classification:'PCC', stdCostRate:0, stdCoRate:0, otCostRate:0, otCoRate:0, dtCostRate:0, dtCoRate:0 });
   });
 }
 
@@ -57927,16 +57933,23 @@ function _prodCostRate(p, classification) {
 function _prodCrew(crewId) {
   return (db.crewTemplates || []).find(function(c){ return String(c.id) === String(crewId); }) || null;
 }
-// Crew-day cost = (masons x masonRate x 8) + (laborers x laborerRate x 8).
+// PCC1: PCC workers (pointers/cleaners/caulkers) are a productive craft like
+// masons - each carries its own man-days. Laborers stay support (cost only).
+// Productive count = masons + PCC.
+function _prodCrewProd(crew) {
+  if (!crew) return 0;
+  return (Number(crew.masons) || 0) + (Number(crew.pcc) || 0);
+}
+// Crew-day cost = (masons x Mason + PCC x PCC + laborers x Laborer rate) x 8.
 function _prodCrewDayCost(p, crew) {
   if (!crew) return 0;
-  var m = Number(crew.masons) || 0, l = Number(crew.laborers) || 0;
-  return (m * _prodCostRate(p, 'Mason') * 8) + (l * _prodCostRate(p, 'Laborer') * 8);
+  var m = Number(crew.masons) || 0, l = Number(crew.laborers) || 0, pc = Number(crew.pcc) || 0;
+  return (m * _prodCostRate(p, 'Mason') * 8) + (pc * _prodCostRate(p, 'PCC') * 8) + (l * _prodCostRate(p, 'Laborer') * 8);
 }
-// Man-day cost = crew-day cost / mason count.
+// Man-day cost = crew-day cost / productive count (masons + PCC).
 function _prodManDayCost(p, crew) {
   if (!crew) return 0;
-  var m = Number(crew.masons) || 0;
+  var m = _prodCrewProd(crew);
   return m > 0 ? _prodCrewDayCost(p, crew) / m : 0;
 }
 
@@ -57947,12 +57960,12 @@ function renderCrews() {
   db.crewTemplates = db.crewTemplates || [];
   if (!db.crewTemplates.length) {
     el.innerHTML = '<div style="padding:12px;color:#aaa;font-size:12px;text-align:center">' +
-      'No crews yet \u2014 click + Add crew (e.g. 2:1 = 2 masons, 1 laborer)</div>';
+      'No crews yet \u2014 click + Add crew (e.g. 2:1 = 2 masons, 1 laborer; or 2 PCC)</div>';
     return;
   }
   var note = '<div style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5">' +
-    'A crew is a mason:laborer ratio. The dollar figures below are priced from the ' +
-    '<strong>active labor rate set</strong> (Mason &amp; Laborer cost columns); on a project they ' +
+    'A crew is its masons, PCC workers and laborers. Masons and PCC workers carry the man-days; laborers are support cost. The dollar figures below are priced from the ' +
+    '<strong>active labor rate set</strong> (Mason, PCC &amp; Laborer cost columns); on a project they ' +
     're-price from that project\'s applied rate snapshot.</div>';
   var rows = db.crewTemplates.slice().sort(function(a,b){
       return (Number(a.sortOrder)||0) - (Number(b.sortOrder)||0);
@@ -57961,6 +57974,7 @@ function renderCrews() {
       return '<tr>' +
         '<td>' + nm + '</td>' +
         '<td style="text-align:right">' + (Number(c.masons)||0) + '</td>' +
+        '<td style="text-align:right">' + (Number(c.pcc)||0) + '</td>' +
         '<td style="text-align:right">' + (Number(c.laborers)||0) + '</td>' +
         '<td style="text-align:right">' + fmtC(_prodCrewDayCost(null, c)) + '</td>' +
         '<td style="text-align:right">' + fmtC(_prodManDayCost(null, c)) + '</td>' +
@@ -57971,21 +57985,23 @@ function renderCrews() {
     }).join('');
   el.innerHTML = note +
     '<div style="overflow-x:auto"><table style="min-width:560px"><thead><tr>' +
-      '<th>Crew</th><th style="text-align:right">Masons</th><th style="text-align:right">Laborers</th>' +
+      '<th>Crew</th><th style="text-align:right">Masons</th><th style="text-align:right">PCC</th><th style="text-align:right">Laborers</th>' +
       '<th style="text-align:right">Crew-day $</th><th style="text-align:right">Man-day $</th><th></th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
-function showAddCrew() { _editCrewId = null; _crewModal({name:'', masons:2, laborers:1}); }
+function showAddCrew() { _editCrewId = null; _crewModal({name:'', masons:2, laborers:1, pcc:0}); }
 function showEditCrew(id) { var c = _prodCrew(id); if (!c) return; _editCrewId = id; _crewModal(c); }
 function _crewModal(c) {
   showModal('<button class="xbtn" onclick="closeModal();_editCrewId=null;">&#215;</button>' +
     '<div class="mt">' + (_editCrewId ? 'Edit crew' : 'Add crew') + '</div>' +
-    '<div class="msb">Name the crew (e.g. 2:1) and set how many masons and laborers it contains.</div>' +
+    '<div class="msb">Name the crew (e.g. 2:1) and set how many masons, PCC workers and laborers it contains. A crew needs at least 1 mason or PCC worker.</div>' +
     '<div class="fgr" style="margin:12px 0 8px"><label>Name</label>' +
       '<input id="cw-name" value="' + String(c.name||'').replace(/"/g,'&quot;') + '" placeholder="e.g. 2:1"></div>' +
     '<div style="display:flex;gap:12px">' +
       '<div class="fgr" style="flex:1"><label>Masons</label>' +
-        '<input id="cw-masons" type="number" min="1" step="1" value="' + (Number(c.masons)||1) + '"></div>' +
+        '<input id="cw-masons" type="number" min="0" step="1" value="' + (c.masons != null && c.masons !== '' ? (Number(c.masons)||0) : 1) + '"></div>' +
+      '<div class="fgr" style="flex:1"><label>PCC</label>' +
+        '<input id="cw-pcc" type="number" min="0" step="1" value="' + (Number(c.pcc)||0) + '"></div>' +
       '<div class="fgr" style="flex:1"><label>Laborers</label>' +
         '<input id="cw-laborers" type="number" min="0" step="1" value="' + (Number(c.laborers)||0) + '"></div>' +
     '</div>' +
@@ -57998,16 +58014,19 @@ function saveCrew() {
   var name = (g('cw-name').value || '').trim();
   var masons = parseInt(g('cw-masons').value, 10);
   var laborers = parseInt(g('cw-laborers').value, 10);
+  var pcc = parseInt(g('cw-pcc') ? g('cw-pcc').value : '0', 10);   // PCC1
   if (!name) { alert('Enter a crew name.'); return; }
-  if (!(masons >= 1)) { alert('A crew needs at least 1 mason.'); return; }
+  if (!(masons >= 0)) masons = 0;
+  if (!(pcc >= 0)) pcc = 0;
+  if (!(masons + pcc >= 1)) { alert('A crew needs at least 1 mason or PCC worker.'); return; }
   if (!(laborers >= 0)) laborers = 0;
   db.crewTemplates = db.crewTemplates || [];
   if (_editCrewId) {
     var c = _prodCrew(_editCrewId);
-    if (c) { c.name = name; c.masons = masons; c.laborers = laborers; }
+    if (c) { c.name = name; c.masons = masons; c.laborers = laborers; c.pcc = pcc; }
   } else {
     var maxSort = db.crewTemplates.reduce(function(m,x){ return Math.max(m, Number(x.sortOrder)||0); }, 0);
-    db.crewTemplates.push({ id: Date.now(), name: name, masons: masons, laborers: laborers, sortOrder: maxSort + 1 });
+    db.crewTemplates.push({ id: Date.now(), name: name, masons: masons, laborers: laborers, pcc: pcc, sortOrder: maxSort + 1 });
   }
   _editCrewId = null;
   saveDB();
@@ -58317,7 +58336,7 @@ function _prodCompute(p, est) {
     if (l.lineType === 'field_pct') return;
     var crew = _prodResolveCrew(est, l);
     var mdc = _prodManDayCost(p, crew);
-    var masons = crew ? (Number(crew.masons) || 1) : 1;
+    var masons = crew ? (_prodCrewProd(crew) || 1) : 1;   // PCC1: masons + PCC
     var md = 0, pre = 0;
     if (l.lineType === 'field_dollar') {
       pre = Number(l.amount) || 0;
@@ -58335,7 +58354,7 @@ function _prodCompute(p, est) {
     if (l.lineType !== 'field_pct') return;
     var crew = _prodResolveCrew(est, l);
     var mdc = _prodManDayCost(p, crew);
-    var masons = crew ? (Number(crew.masons) || 1) : 1;
+    var masons = crew ? (_prodCrewProd(crew) || 1) : 1;   // PCC1: masons + PCC
     var pre = base * ((Number(l.amount) || 0) / 100);
     var md = mdc > 0 ? pre / mdc : 0;
     var cd = masons > 0 ? md / masons : 0;
@@ -59055,7 +59074,7 @@ function renderProdEstimateView() {
   var metrics =
     '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">' +
       _prodMetric('prod-m-labor', 'Est. Labor $', 'incl. wage increase') +
-      _prodMetric('prod-m-md', 'Man-Days', 'mason-days') +
+      _prodMetric('prod-m-md', 'Man-Days', 'mason / PCC days') +
       _prodMetric('prod-m-cd', 'Crew-Days', 'by assigned crew') +
     '</div>';
 
@@ -59181,8 +59200,8 @@ function _prodPendingPanelHtml(p) {
   if (!pend.length) return '';
   var rows = pend.map(function(x){
     var c = x.item;
-    var hrs = (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.l)||0);
-    var meta = ((Number(c.u)||0) ? (Number(c.u).toLocaleString() + ' units \u00b7 ') : '') + hrs + ' hrs (F ' + (Number(c.f)||0) + ' / M ' + (Number(c.m)||0) + ' / L ' + (Number(c.l)||0) + ')';
+    var hrs = (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.p)||0)+(Number(c.l)||0);   // PCC1
+    var meta = ((Number(c.u)||0) ? (Number(c.u).toLocaleString() + ' units \u00b7 ') : '') + hrs + ' hrs (F ' + (Number(c.f)||0) + ' / M ' + (Number(c.m)||0) + ' / P ' + (Number(c.p)||0) + ' / L ' + (Number(c.l)||0) + ')';
     return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;border-top:.5px solid #f0e4be">' +
       '<div style="flex:1;min-width:200px"><div style="font-weight:600;font-size:13px">' + _prodEsc(c.name) + '</div>' +
         '<div style="font-size:11px;color:#8a7a40">Week ' + _prodEsc(x.weekEnding) + ' \u00b7 ' + meta + '</div></div>' +
@@ -59283,11 +59302,12 @@ function _prodResolveMerge(rowId, custId, lineId) {
   var r = _prodFindWeekRow(rowId); if (!r) return;
   var c = (r.custom || []).find(function(x){ return String(x.id) === String(custId); }); if (!c) return;
   r.entries = r.entries || {};
-  var e = r.entries[lineId] || (r.entries[lineId] = { u:'', f:'', m:'', l:'' });
+  var e = r.entries[lineId] || (r.entries[lineId] = { u:'', f:'', m:'', p:'', l:'' });
   e.u = (Number(e.u)||0) + (Number(c.u)||0);
   e.f = (Number(e.f)||0) + (Number(c.f)||0);
   e.m = (Number(e.m)||0) + (Number(c.m)||0);
   e.l = (Number(e.l)||0) + (Number(c.l)||0);
+  e.p = (Number(e.p)||0) + (Number(c.p)||0);   // PCC1
   c.status = 'resolved'; c.resolvedLineId = lineId; c.resolvedAt = new Date().toISOString();
   saveDB();
 }
@@ -59516,10 +59536,11 @@ function prodMergeSelected() {
       var row = (db.prodWeekly || []).find(function(r){ return String(r.id) === String(rec.rowId); });
       if (!row) return;
       row.entries = row.entries || {};
-      var t = row.entries[mergedId] || (row.entries[mergedId] = { u: 0, f: 0, m: 0, l: 0 });
+      var t = row.entries[mergedId] || (row.entries[mergedId] = { u: 0, f: 0, m: 0, p: 0, l: 0 });
       t.u = _prodNum(t.u) + _prodNum(rec.e.u);
       t.f = _prodNum(t.f) + _prodNum(rec.e.f);
       t.m = _prodNum(t.m) + _prodNum(rec.e.m);
+      t.p = _prodNum(t.p) + _prodNum(rec.e.p);   // PCC1
       t.l = _prodNum(t.l) + _prodNum(rec.e.l);
       delete row.entries[snap.id];
     });
@@ -59675,7 +59696,7 @@ function renderProdWeeklyView() {
       '<button class="btn btn-sm btn-p" id="prodwk-save-btn" onclick="prodWkSave()">Save day</button>')) +
     '</div></div>';
 
-  function sec(label){ return '<tr><td colspan="7" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">' + label + '</td></tr>'; }
+  function sec(label){ return '<tr><td colspan="8" style="background:#fafafa;font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px">' + label + '</td></tr>'; }
   var prodLines = lines.filter(function(l){ return l.lineType === 'production'; });
   var fieldLines = lines.filter(function(l){ return l.lineType !== 'production'; });
   var body = '';
@@ -59684,15 +59705,15 @@ function renderProdWeeklyView() {
 
   var head = '<thead><tr><th>Item</th>' +
     '<th style="text-align:right">Units installed</th>' +
-    '<th style="text-align:right">Foreman hrs</th><th style="text-align:right">Mason hrs</th><th style="text-align:right">Laborer hrs</th>' +
+    '<th style="text-align:right">Foreman hrs</th><th style="text-align:right">Mason hrs</th><th style="text-align:right">PCC hrs</th><th style="text-align:right">Laborer hrs</th>' +
     '<th style="text-align:right">Total hrs</th><th style="text-align:right">JTD units</th></tr></thead>';
   function _ftot(fid){ return '<td style="text-align:right;padding-top:9px"><span id="' + fid + '" style="display:inline-block;width:80px;box-sizing:border-box;padding:0 7px;border:1px solid transparent;text-align:right">\u2014</span></td>'; }
   var foot = '<tfoot><tr style="border-top:2px solid #eee;font-weight:600">' +
     '<td style="padding-top:9px">Week totals</td>' +
-    _ftot('prodwk-t-units') + _ftot('prodwk-t-f') + _ftot('prodwk-t-m') + _ftot('prodwk-t-l') +
+    _ftot('prodwk-t-units') + _ftot('prodwk-t-f') + _ftot('prodwk-t-m') + _ftot('prodwk-t-p') + _ftot('prodwk-t-l') +
     '<td style="text-align:right;padding-top:9px" id="prodwk-t-tot">\u2014</td><td></td></tr></tfoot>';
   var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this week</strong>. JTD units roll up across all weeks automatically. Field-labor items track hours only.</div>';
-  var table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:760px">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' + hint + '</div>';
+  var table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:860px">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' + hint + '</div>';
 
   host.innerHTML = lockBanner + bar + table;
   if (_wkReadOnly) {
@@ -59704,7 +59725,7 @@ function renderProdWeeklyView() {
 }
 function _prodWkRowHtml(l) {
   var id = l.id;
-  var e = (_prodWeekModel.entries[id]) || { u:'', f:'', m:'', l:'' };
+  var e = (_prodWeekModel.entries[id]) || { u:'', f:'', m:'', p:'', l:'' };
   var isProd = (l.lineType === 'production');
   function inp(field, step) {
     return '<input type="number" min="0" step="' + step + '" value="' + (e[field] != null ? e[field] : '') +
@@ -59716,6 +59737,7 @@ function _prodWkRowHtml(l) {
     unitsCell +
     '<td style="text-align:right">' + inp('f','0.5') + '</td>' +
     '<td style="text-align:right">' + inp('m','0.5') + '</td>' +
+    '<td style="text-align:right">' + inp('p','0.5') + '</td>' +
     '<td style="text-align:right">' + inp('l','0.5') + '</td>' +
     '<td style="text-align:right" id="prodwk-tot-' + id + '">\u2014</td>' +
     jtdCell + '</tr>';
@@ -59723,27 +59745,28 @@ function _prodWkRowHtml(l) {
 function prodWkRefresh() {
   var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
   var est = _prodEnsureEstimate(p);
-  var tu=0, tf=0, tm=0, tl=0, tt=0;
+  var tu=0, tf=0, tm=0, tp=0, tl=0, tt=0;
   (est.lines || []).forEach(function(l){
     var e = _prodWeekModel.entries[l.id] || {};
-    var u = Number(e.u)||0, f = Number(e.f)||0, m = Number(e.m)||0, la = Number(e.l)||0;
-    var tot = f + m + la;
+    var u = Number(e.u)||0, f = Number(e.f)||0, m = Number(e.m)||0, pp = Number(e.p)||0, la = Number(e.l)||0;
+    var tot = f + m + pp + la;   // PCC1
     _prodSetTxt('prodwk-tot-' + l.id, tot ? tot.toFixed(1) : '\u2014');
     if (l.lineType === 'production') {
       _prodSetTxt('prodwk-jtd-' + l.id, _prodJtdUnitsLive(p.id, l.id, _prodWeekModel.weekEnding, u).toLocaleString());
       tu += u;
     }
-    tf += f; tm += m; tl += la; tt += tot;
+    tf += f; tm += m; tp += pp; tl += la; tt += tot;
   });
   _prodSetTxt('prodwk-t-units', tu.toLocaleString());
   _prodSetTxt('prodwk-t-f', tf.toFixed(1));
   _prodSetTxt('prodwk-t-m', tm.toFixed(1));
+  _prodSetTxt('prodwk-t-p', tp.toFixed(1));
   _prodSetTxt('prodwk-t-l', tl.toFixed(1));
   _prodSetTxt('prodwk-t-tot', tt.toFixed(1));
 }
 function prodWkEdit(lineId, field, val) {
   if (!_prodWeekModel) return;
-  var e = _prodWeekModel.entries[lineId] || (_prodWeekModel.entries[lineId] = { u:'', f:'', m:'', l:'' });
+  var e = _prodWeekModel.entries[lineId] || (_prodWeekModel.entries[lineId] = { u:'', f:'', m:'', p:'', l:'' });
   if (val === '' || val == null) { e[field] = ''; }
   else { var n = parseFloat(val); e[field] = isNaN(n) ? '' : n; }
   prodWkRefresh();
@@ -59820,10 +59843,10 @@ function prodWkApplyExtracted(est, parsed) {
   items.forEach(function(it){
     var line = byName[String(it.name || '').trim().toLowerCase()];
     if (!line) { if (it.name) unmatched.push(it.name); return; }
-    var e = _prodWeekModel.entries[line.id] || (_prodWeekModel.entries[line.id] = { u:'', f:'', m:'', l:'' });
+    var e = _prodWeekModel.entries[line.id] || (_prodWeekModel.entries[line.id] = { u:'', f:'', m:'', p:'', l:'' });
     if (line.lineType === 'production') { var u = Number(it.units); e.u = isNaN(u) ? '' : u; }
-    var f = Number(it.foremanHrs), m = Number(it.masonHrs), la = Number(it.laborerHrs);
-    e.f = isNaN(f) ? 0 : f; e.m = isNaN(m) ? 0 : m; e.l = isNaN(la) ? 0 : la;
+    var f = Number(it.foremanHrs), m = Number(it.masonHrs), la = Number(it.laborerHrs), pp = Number(it.pccHrs);
+    e.f = isNaN(f) ? 0 : f; e.m = isNaN(m) ? 0 : m; e.l = isNaN(la) ? 0 : la; e.p = isNaN(pp) ? 0 : pp;   // PCC1
     n++;
   });
   return { n: n, unmatched: unmatched };
@@ -59853,8 +59876,8 @@ async function prodWkRunUpload() {
     var prompt =
       'You are reading a hand-filled daily field production sheet from a masonry construction project. For this one day, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
       'Match every row on the sheet to one of these estimate items, using these EXACT names. Items marked "units + hours" track an installed-unit count; "hours only" items do not:\n  [' + itemList + ']\n\n' +
-      'Schema:\n{\n  "items": [\n    {"name": "<exact item name from the list>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>}\n  ]\n}\n\n' +
-      'Rules:\n- Match each sheet row to one listed item name EXACTLY. If a row matches no listed item, omit it.\n- Hours are numbers (use 0 for blank, never null).\n- Include "units" only for "units + hours" items; use null otherwise.\n- Return the items array even if empty; never invent values.';
+      'Schema:\n{\n  "items": [\n    {"name": "<exact item name from the list>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "pccHrs": <number>, "laborerHrs": <number>}\n  ]\n}\n\n' +
+      'Rules:\n- Match each sheet row to one listed item name EXACTLY. If a row matches no listed item, omit it.\n- Hours are numbers (use 0 for blank, never null).\n- pccHrs is PCC (pointer / cleaner / caulker) hours; 0 if the sheet has no PCC column.\n- Include "units" only for "units + hours" items; use null otherwise.\n- Return the items array even if empty; never invent values.';
     var resp = await kmiAIFetch('prod-week-upload', {
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
@@ -59905,12 +59928,12 @@ async function prodWkRunUpload() {
 // asOf ('YYYY-MM-DD', optional) caps the rollup at that day inclusive.
 // Omitted, it behaves exactly as before: everything ever entered.
 function _prodJtdForLine(projectId, lineId, asOf) {
-  var o = { units:0, f:0, m:0, l:0 };
+  var o = { units:0, f:0, m:0, p:0, l:0 };   // PCC1
   (db.prodWeekly || []).forEach(function(r){
     if (String(r.projectId) !== String(projectId)) return;
     if (asOf && String(r.weekEnding || '') > asOf) return;
     var e = r.entries && r.entries[lineId]; if (!e) return;
-    o.units += Number(e.u)||0; o.f += Number(e.f)||0; o.m += Number(e.m)||0; o.l += Number(e.l)||0;
+    o.units += Number(e.u)||0; o.f += Number(e.f)||0; o.m += Number(e.m)||0; o.p += Number(e.p)||0; o.l += Number(e.l)||0;
   });
   return o;
 }
@@ -59983,10 +60006,10 @@ function _prodWeekCompute(p, weekStart) {
   var comp = _prodCompute(p, est);
   var defCrew = _prodCrew(est.defaultCrewId);
   var mdc = _prodManDayCost(p, defCrew);
-  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer');
+  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer'), pRate = _prodCostRate(p,'PCC');   // PCC1
   var weekEnd = _prodAddDays(weekStart, 6);
   var days = {}, notes = [], lines = [];
-  var tot = { f:0, m:0, l:0, hrs:0, act:0, earn:0 };
+  var tot = { f:0, m:0, p:0, l:0, hrs:0, act:0, earn:0 };
   (db.prodWeekly || []).forEach(function(r){
     if (String(r.projectId) !== String(p.id)) return;
     var dd = String(r.weekEnding || '');
@@ -59995,19 +60018,19 @@ function _prodWeekCompute(p, weekStart) {
   });
   notes.sort(function(a,b){ return a.day < b.day ? -1 : (a.day > b.day ? 1 : 0); });
   (est.lines || []).forEach(function(l){
-    var w = { units:0, f:0, m:0, l:0 };
+    var w = { units:0, f:0, m:0, p:0, l:0 };
     (db.prodWeekly || []).forEach(function(r){
       if (String(r.projectId) !== String(p.id)) return;
       var dd = String(r.weekEnding || '');
       if (dd < weekStart || dd > weekEnd) return;
       var e = r.entries && r.entries[l.id]; if (!e) return;
-      var u = Number(e.u)||0, ef = Number(e.f)||0, em = Number(e.m)||0, el = Number(e.l)||0;
-      if (u || ef || em || el) days[dd] = true;
-      w.units += u; w.f += ef; w.m += em; w.l += el;
+      var u = Number(e.u)||0, ef = Number(e.f)||0, em = Number(e.m)||0, ep = Number(e.p)||0, el = Number(e.l)||0;
+      if (u || ef || em || ep || el) days[dd] = true;
+      w.units += u; w.f += ef; w.m += em; w.p += ep; w.l += el;
     });
-    var hrs = w.f + w.m + w.l;
+    var hrs = w.f + w.m + w.p + w.l;   // PCC1
     if (!hrs && !w.units) return;               // no activity this week: drop the row
-    var act = w.f*fRate + w.m*mRate + w.l*lRate;
+    var act = w.f*fRate + w.m*mRate + w.p*pRate + w.l*lRate;
     var c = comp.perLine[l.id];
     var estD = (c ? c.pre : 0) * comp.wageMult;
     var isProd = (l.lineType === 'production');
@@ -60018,11 +60041,11 @@ function _prodWeekCompute(p, weekStart) {
     var dM = (actMdu != null && estMdu>0) ? (actMdu - estMdu) : null;
     lines.push({ name:l.itemName, isProd:isProd,
       units: isProd ? w.units : null, unitLabel: l.unitLabel || '',
-      f:w.f, m:w.m, l:w.l, hrs:hrs,
+      f:w.f, m:w.m, p:w.p, l:w.l, hrs:hrs,
       actMdu:actMdu, estMdu: estMdu>0 ? estMdu : null,
       dMdu:dM, dPct: (dM != null && estMdu>0) ? (dM/estMdu*100) : null,
       act:act, earn:earn });
-    tot.f+=w.f; tot.m+=w.m; tot.l+=w.l; tot.hrs+=hrs; tot.act+=act; tot.earn+=earn;
+    tot.f+=w.f; tot.m+=w.m; tot.p+=w.p; tot.l+=w.l; tot.hrs+=hrs; tot.act+=act; tot.earn+=earn;
   });
   var pctBefore = _prodTrackingCompute(p, _prodAddDays(weekStart,-1)).pctCompleteLabor;
   var pctAfter  = _prodTrackingCompute(p, weekEnd).pctCompleteLabor;
@@ -60087,7 +60110,7 @@ function _prodWeekBandHtml(p, weekStart) {
       pill +
     '</div>' +
     '<div style="display:flex;flex-wrap:wrap;margin-top:12px">' +
-      stat((Number(W.tot.hrs)||0).toLocaleString(), 'hours \u00b7 ' + W.tot.f + ' fmn / ' + W.tot.m + ' mason / ' + W.tot.l + ' lab', null, true) +
+      stat((Number(W.tot.hrs)||0).toLocaleString(), 'hours \u00b7 ' + W.tot.f + ' fmn / ' + W.tot.m + ' mason / ' + (W.tot.p ? (W.tot.p + ' PCC / ') : '') + W.tot.l + ' lab', null, true) +
       stat(money(W.tot.act), 'actual labor') +
       stat(money(W.tot.earn), 'earned on production') +
       stat((vr >= 0 ? '+' : '\u2212') + money(Math.abs(vr)).replace('-',''), 'production variance', vcol) +
@@ -60107,11 +60130,11 @@ function _prodTrackingCompute(p, asOf) {
   var comp = _prodCompute(p, est);
   var defCrew = _prodCrew(est.defaultCrewId);
   var mdc = _prodManDayCost(p, defCrew);
-  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer');
+  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer'), pRate = _prodCostRate(p,'PCC');   // PCC1
   function estLineDollars(l){ var c = comp.perLine[l.id]; return (c ? c.pre : 0) * comp.wageMult; }
   var prod = [], field = [];
   var s = { estU:0, jtdU:0, est:0, earn:0, act:0 };
-  var f = { fF:0, fM:0, fL:0, est:0, act:0 };
+  var f = { fF:0, fM:0, fP:0, fL:0, est:0, act:0 };
   var generalId = _prodGeneralCategoryId();
   var catMap = {};            // catId -> { direct, estU, jtdU }
   var generalLabor = 0;
@@ -60119,7 +60142,7 @@ function _prodTrackingCompute(p, asOf) {
   (est.lines || []).forEach(function(l){
     var jtd = _prodJtdForLine(p.id, l.id, asOf);
     var est$ = estLineDollars(l);
-    var act = jtd.f*fRate + jtd.m*mRate + jtd.l*lRate;
+    var act = jtd.f*fRate + jtd.m*mRate + jtd.p*pRate + jtd.l*lRate;   // PCC1
     var effCat = l.categoryId || generalId;
     var isGen = (generalId != null && String(effCat) === String(generalId));
     if (l.lineType === 'production') {
@@ -60134,8 +60157,8 @@ function _prodTrackingCompute(p, asOf) {
       s.estU+=estU; s.jtdU+=jtdU; s.est+=est$; s.earn+=earn$; s.act+=act;
       if (isGen) { generalLabor += est$; } else { var b = _catBucket(effCat); b.direct += est$; b.estU += estU; b.jtdU += jtdU; }
     } else {
-      field.push({ name:l.itemName, f:jtd.f, m:jtd.m, l:jtd.l, est:est$, act:act, catId:effCat, isGen:isGen, earn:0, varv:0 });
-      f.fF+=jtd.f; f.fM+=jtd.m; f.fL+=jtd.l; f.est+=est$; f.act+=act;
+      field.push({ name:l.itemName, f:jtd.f, m:jtd.m, p:jtd.p, l:jtd.l, est:est$, act:act, catId:effCat, isGen:isGen, earn:0, varv:0 });
+      f.fF+=jtd.f; f.fM+=jtd.m; f.fP+=jtd.p; f.fL+=jtd.l; f.est+=est$; f.act+=act;
       if (isGen) { generalLabor += est$; } else { _catBucket(effCat).direct += est$; }
     }
   });
@@ -61310,7 +61333,7 @@ function renderProdTrackingView() {
   var comp = _prodCompute(p, est);
   var defCrew = _prodCrew(est.defaultCrewId);
   var mdc = _prodManDayCost(p, defCrew);                 // "Default Project Crew Cost"
-  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer');
+  var fRate = _prodCostRate(p,'Foreman'), mRate = _prodCostRate(p,'Mason'), lRate = _prodCostRate(p,'Laborer'), pRate = _prodCostRate(p,'PCC');   // PCC1
   function n(v){ return (Number(v)||0).toLocaleString(); }
   // Local 2-decimal money formatter (production surfaces only; global fmtC unchanged).
   function fmtC(v){ return '$' + (Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
@@ -61329,7 +61352,7 @@ function renderProdTrackingView() {
     var estU = Number(l.estUnits)||0, estMdu = Number(l.estMdu)||0;
     var jtd = _prodJtdForLine(p.id, l.id), jtdU = jtd.units;
     var bal = estU - jtdU, pct = estU>0 ? jtdU/estU : 0;
-    var act = jtd.f*fRate + jtd.m*mRate + jtd.l*lRate;
+    var act = jtd.f*fRate + jtd.m*mRate + jtd.p*pRate + jtd.l*lRate;   // PCC1
     var perUnit = jtdU>0 ? act/jtdU : 0;
     var actMdu = (perUnit>0) ? (mdc / perUnit) : null;
     var est$ = estLineDollars(l), earn$ = est$ * pct, v = earn$ - act;
@@ -61348,10 +61371,10 @@ function renderProdTrackingView() {
   // ---- field rows ----
   var fieldBody = C.field.map(function(r){
     return '<tr><td>' + _prodEsc(r.name) + '</td>' +
-      td(n(r.f)) + td(n(r.m)) + td(n(r.l)) +
+      td(n(r.f)) + td(n(r.m)) + td(n(r.p)) + td(n(r.l)) +
       td(fmtC(r.est)) + td(fmtC(r.earn)) + td(fmtC(r.act)) + vtd(r.varv) + '</tr>';
   }).join('');
-  var fEst = C.fieldTot.est, fEarn = C.fieldTot.earn, fAct = C.fieldTot.act, fF = C.fieldTot.fF, fM = C.fieldTot.fM, fL = C.fieldTot.fL;
+  var fEst = C.fieldTot.est, fEarn = C.fieldTot.earn, fAct = C.fieldTot.act, fF = C.fieldTot.fF, fM = C.fieldTot.fM, fP = C.fieldTot.fP, fL = C.fieldTot.fL;
 
   // ---- headline ----
   var totEst = C.totEst, totAct = C.totAct, totEarned = C.totEarned, totVar = C.totVar;
@@ -61385,12 +61408,12 @@ function renderProdTrackingView() {
 
   // ---- field table ----
   var fieldTable = fieldLines.length ? ('<div class="card"><div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px">Field labor</div>' +
-    '<div style="overflow-x:auto"><table style="min-width:700px;font-variant-numeric:tabular-nums"><thead><tr>' +
-      '<th>Item</th><th style="text-align:right">JTD Fmn hrs</th><th style="text-align:right">JTD Mason hrs</th><th style="text-align:right">JTD Lab hrs</th>' +
+    '<div style="overflow-x:auto"><table style="min-width:780px;font-variant-numeric:tabular-nums"><thead><tr>' +
+      '<th>Item</th><th style="text-align:right">JTD Fmn hrs</th><th style="text-align:right">JTD Mason hrs</th><th style="text-align:right">JTD PCC hrs</th><th style="text-align:right">JTD Lab hrs</th>' +
       '<th style="text-align:right">Est $</th><th style="text-align:right">Earned $</th><th style="text-align:right">Actual $</th><th style="text-align:right">Var $</th>' +
     '</tr></thead><tbody>' + fieldBody + '</tbody>' +
     '<tfoot><tr style="border-top:2px solid #eee;font-weight:700"><td>Field subtotal</td>' +
-      td(n(fF)) + td(n(fM)) + td(n(fL)) + td(fmtC(fEst)) + td(fmtC(fEarn)) + td(fmtC(fAct)) + vtd(fEarn - fAct) + '</tr></tfoot></table></div></div>') : '';
+      td(n(fF)) + td(n(fM)) + td(n(fP)) + td(n(fL)) + td(fmtC(fEst)) + td(fmtC(fEarn)) + td(fmtC(fAct)) + vtd(fEarn - fAct) + '</tr></tfoot></table></div></div>') : '';
 
   var catTable = C.categories.length ? ('<div class="card"><div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px">Category completion</div>' +
     '<div style="overflow-x:auto"><table style="min-width:520px;font-variant-numeric:tabular-nums"><thead><tr>' +
@@ -61501,7 +61524,7 @@ function prodExportTrackingPdf(opts) {
     by += 15;
     var vr = Wk.tot.earn - Wk.tot.act;
     var cells = [
-      [ (Number(Wk.tot.hrs)||0).toLocaleString(), 'hours \u00b7 ' + Wk.tot.f + 'F / ' + Wk.tot.m + 'M / ' + Wk.tot.l + 'L', null ],
+      [ (Number(Wk.tot.hrs)||0).toLocaleString(), 'hours \u00b7 ' + Wk.tot.f + 'F / ' + Wk.tot.m + 'M / ' + (Wk.tot.p ? (Wk.tot.p + 'P / ') : '') + Wk.tot.l + 'L', null ],
       [ money(Wk.tot.act),  'actual labor', null ],
       [ money(Wk.tot.earn), 'earned on production', null ],
       [ (vr>=0?'+':'-') + money(Math.abs(vr)).replace('-',''), 'production variance', vr>=0?GOOD:BAD ],
@@ -61590,7 +61613,7 @@ function prodExportTrackingPdf(opts) {
   y += 24;
 
   if (C.field.length) {
-    var fcols = [{label:'Item',w:158,align:'left'},{label:'JTD Fmn hrs',w:66},{label:'JTD Mason hrs',w:72},{label:'JTD Lab hrs',w:66},{label:'Est $',w:74},{label:'Earned $',w:74},{label:'Actual $',w:74},{label:'Var $',w:74}];
+    var fcols = [{label:'Item',w:158,align:'left'},{label:'JTD Fmn hrs',w:66},{label:'JTD Mason hrs',w:72},{label:'JTD PCC hrs',w:62},{label:'JTD Lab hrs',w:66},{label:'Est $',w:74},{label:'Earned $',w:74},{label:'Actual $',w:74},{label:'Var $',w:74}];
     var fx = LM; fcols.forEach(function(c){ c.left = fx; c.right = fx + c.w; fx += c.w; });
     var fRight = fcols[fcols.length-1].right;
     // Draws the section heading and column strip, returning the new y.
@@ -61612,16 +61635,16 @@ function prodExportTrackingPdf(opts) {
       if (y + 16 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = fieldHead('Field labor (cont.)', 92); }
       var ty = y + 10; sf('normal',8,[0,0,0]); doc.text(one(r.name, fcols[0].w-3), fcols[0].left, ty);
       function fc(i,t,col){ sf('normal',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, ty, {align:'right'}); }
-      fc(1,num(r.f)); fc(2,num(r.m)); fc(3,num(r.l)); fc(4,money(r.est)); fc(5,money(r.earn)); fc(6,money(r.act));
-      fc(7, (r.varv>0?'+':'') + money(r.varv), r.varv>0 ? GOOD : (r.varv<0 ? BAD : [0,0,0]));
+      fc(1,num(r.f)); fc(2,num(r.m)); fc(3,num(r.p)); fc(4,num(r.l)); fc(5,money(r.est)); fc(6,money(r.earn)); fc(7,money(r.act));
+      fc(8, (r.varv>0?'+':'') + money(r.varv), r.varv>0 ? GOOD : (r.varv<0 ? BAD : [0,0,0]));
       y += 16; ln(LM, y, fRight, y, 0.25, [238,238,238]);
     });
     if (y + 26 > FOOTER_TOP) { doc.addPage(); letterhead(true); y = fieldHead('Field labor (cont.)', 92); }
     var ff = C.fieldTot; var fty = y + 11; ln(LM, y, fRight, y, 0.8, [170,170,170]);
     sf('bold',8,[0,0,0]); doc.text('Field subtotal', fcols[0].left, fty);
     function fst(i,t,col){ sf('bold',8,col||[0,0,0]); doc.text(String(t), fcols[i].right-3, fty, {align:'right'}); }
-    fst(1,num(ff.fF)); fst(2,num(ff.fM)); fst(3,num(ff.fL)); fst(4,money(ff.est)); fst(5,money(ff.earn)); fst(6,money(ff.act));
-    fst(7, ((ff.earn-ff.act)>0?'+':'') + money(ff.earn-ff.act), (ff.earn-ff.act)>0 ? GOOD : ((ff.earn-ff.act)<0 ? BAD : [0,0,0]));
+    fst(1,num(ff.fF)); fst(2,num(ff.fM)); fst(3,num(ff.fP)); fst(4,num(ff.fL)); fst(5,money(ff.est)); fst(6,money(ff.earn)); fst(7,money(ff.act));
+    fst(8, ((ff.earn-ff.act)>0?'+':'') + money(ff.earn-ff.act), (ff.earn-ff.act)>0 ? GOOD : ((ff.earn-ff.act)<0 ? BAD : [0,0,0]));
     y += 24;
   }
 
@@ -61754,17 +61777,17 @@ function _mobWkFld(onInputCall, label, value, gold, numericUnits) {
     ' style="width:100%;height:46px;border:1px solid ' + (gold ? 'var(--ac)' : '#dcdee6') + ';border-radius:9px;text-align:center;font-size:18px;font-family:inherit' + (gold ? ';background:#fffdf5' : '') + '"></div>';
 }
 function _mobWkCard(l) {
-  var id = l.id, e = _mobWeekModel.entries[id] || { u:'', f:'', m:'', l:'' };
+  var id = l.id, e = _mobWeekModel.entries[id] || { u:'', f:'', m:'', p:'', l:'' };
   var isProd = (l.lineType === 'production');
   var catName = _prodCategoryName(l.categoryId) || _prodCategoryName(_prodGeneralCategoryId()) || '';
   function inp(field, gold) {
     var oi = 'oninput="mobWkEdit(\'' + id + '\',\'' + field + '\',this.value)" onchange="mobWkPersist()"';
-    var lbl = field==='u' ? 'Units installed' : (field==='f'?(isProd?'Foreman hrs':'Foreman'):(field==='m'?(isProd?'Mason hrs':'Mason'):(isProd?'Laborer hrs':'Laborer')));
+    var lbl = field==='u' ? 'Units installed' : (field==='f'?(isProd?'Foreman hrs':'Foreman'):(field==='m'?(isProd?'Mason hrs':'Mason'):(field==='p'?(isProd?'PCC hrs':'PCC'):(isProd?'Laborer hrs':'Laborer'))));
     return _mobWkFld(oi, lbl, e[field], gold, field==='u');
   }
   var grid = isProd
-    ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">' + inp('u',true) + inp('f') + inp('m') + inp('l') + '</div>'
-    : '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px">' + inp('f') + inp('m') + inp('l') + '</div>';
+    ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">' + inp('u',true) + inp('f') + inp('m') + inp('p') + inp('l') + '</div>'
+    : '<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">' + inp('f') + inp('m') + inp('p') + inp('l') + '</div>';   // PCC1
   var foot = '<div style="display:flex;justify-content:space-between;margin-top:10px;font-size:12px;color:#888"><span>Total <b id="mwk-tot-' + id + '" style="color:#1a1a1a">0 hrs</b></span>' +
     (isProd ? '<span>JTD <b id="mwk-jtd-' + id + '" style="color:#1a1a1a">0 units</b></span>' : '<span>hours only</span>') + '</div>';
   return '<div style="background:#fff;border:.5px solid #e8e8e8;border-radius:11px;padding:13px;margin-bottom:10px">' +
@@ -61788,12 +61811,12 @@ function _mobWkCustomCard(c) {
       '<input type="text" value="' + _prodEsc(c.name||'') + '" placeholder="Item name" oninput="mobWkEditCustom(\'' + id + '\',\'name\',this.value)" onchange="mobWkPersist()" style="flex:1;font-size:15px;font-weight:600;border:none;border-bottom:1px solid #eee;padding:4px 0;font-family:inherit">' +
       '<button onclick="mobWkRemoveCustom(\'' + id + '\')" style="background:none;border:none;color:#bbb;font-size:16px;flex-shrink:0">\u2715</button>' +
     '</div>' + tag +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">' + inp('u',true,'Units') + inp('f',false,'Foreman') + inp('m',false,'Mason') + inp('l',false,'Laborer') + '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">' + inp('u',true,'Units') + inp('f',false,'Foreman') + inp('m',false,'Mason') + inp('p',false,'PCC') + inp('l',false,'Laborer') + '</div>' +
   '</div>';
 }
 function mobWkEdit(lineId, field, val) {
   if (!_mobWeekModel) return;
-  var e = _mobWeekModel.entries[lineId] || (_mobWeekModel.entries[lineId] = { u:'', f:'', m:'', l:'' });
+  var e = _mobWeekModel.entries[lineId] || (_mobWeekModel.entries[lineId] = { u:'', f:'', m:'', p:'', l:'' });
   if (val === '' || val == null) { e[field] = ''; } else { var nb = parseFloat(val); e[field] = isNaN(nb) ? '' : nb; }
   mobWkRefresh();
 }
@@ -61811,7 +61834,7 @@ function mobWkRefresh() {
   var thrs = 0, tunits = 0;
   (est.lines || []).forEach(function(l){
     var e = _mobWeekModel.entries[l.id] || {};
-    var f = Number(e.f)||0, m = Number(e.m)||0, la = Number(e.l)||0, u = Number(e.u)||0, tot = f+m+la;
+    var f = Number(e.f)||0, m = Number(e.m)||0, pp = Number(e.p)||0, la = Number(e.l)||0, u = Number(e.u)||0, tot = f+m+pp+la;   // PCC1
     var tEl = document.getElementById('mwk-tot-' + l.id); if (tEl) tEl.textContent = (tot ? tot.toFixed(1) : '0') + ' hrs';
     if (l.lineType === 'production') {
       var jEl = document.getElementById('mwk-jtd-' + l.id); if (jEl) jEl.textContent = _prodJtdUnitsLive(p.id, l.id, _mobWeekModel.weekEnding, u).toLocaleString() + ' units';
@@ -61819,7 +61842,7 @@ function mobWkRefresh() {
     }
     thrs += tot;
   });
-  (_mobWeekModel.custom || []).forEach(function(c){ if (c.status === 'resolved') return; thrs += (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.l)||0); tunits += (Number(c.u)||0); });
+  (_mobWeekModel.custom || []).forEach(function(c){ if (c.status === 'resolved') return; thrs += (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.p)||0)+(Number(c.l)||0); tunits += (Number(c.u)||0); });
   var h = document.getElementById('mwk-t-hrs'); if (h) h.textContent = thrs.toFixed(1);
   var uE = document.getElementById('mwk-t-units'); if (uE) uE.textContent = tunits.toLocaleString();
 }
@@ -61838,7 +61861,7 @@ function mobWkGo(weekEnding) { if (!weekEnding) return; mobWkPersist(); _mobWeek
 function mobWkAddCustom() {
   if (!_mobWeekModel) return;
   _mobWeekModel.custom = _mobWeekModel.custom || [];
-  _mobWeekModel.custom.push({ id: Date.now(), name:'', u:'', f:'', m:'', l:'', status:'pending', notified:false, createdBy:(_currentUser?_currentUser.id:null), createdAt:new Date().toISOString(), resolvedLineId:null });
+  _mobWeekModel.custom.push({ id: Date.now(), name:'', u:'', f:'', m:'', p:'', l:'', status:'pending', notified:false, createdBy:(_currentUser?_currentUser.id:null), createdAt:new Date().toISOString(), resolvedLineId:null });
   mobWkPersist();
   renderMobileWeekly();
 }
@@ -61851,7 +61874,7 @@ function mobWkRemoveCustom(cid) {
 async function mobWkSave() {
   var p = getProj(_mobileSelectedProjectId); if (!p || !_mobWeekModel) return;
   var nEl = document.getElementById('mwk-note'); if (nEl) _mobWeekModel.note = nEl.value;
-  _mobWeekModel.custom = (_mobWeekModel.custom || []).filter(function(c){ return (c.name && c.name.trim()) || c.u || c.f || c.m || c.l; });
+  _mobWeekModel.custom = (_mobWeekModel.custom || []).filter(function(c){ return (c.name && c.name.trim()) || c.u || c.f || c.m || c.p || c.l; });
   mobWkPersist();
   var btn = document.getElementById('mwk-save-btn'); if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
   var newCustom = (_mobWeekModel.custom || []).filter(function(c){ return c.status === 'pending' && !c.notified && c.name && c.name.trim(); });
@@ -61891,8 +61914,8 @@ async function _mobWkNotifyPM(project, items, weekEnding) {
   var fromEmail = (_currentUser && _currentUser.email) ? _currentUser.email : null;
   var foreman = fromName || 'A KMI field crew member';
   var itemLines = items.map(function(c){
-    var hrs = (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.l)||0);
-    return '  \u2022 ' + (c.name || '(unnamed)') + '  \u2014  ' + ((Number(c.u)||0) ? (c.u + ' units, ') : '') + hrs + ' hrs (F ' + (Number(c.f)||0) + ' / M ' + (Number(c.m)||0) + ' / L ' + (Number(c.l)||0) + ')';
+    var hrs = (Number(c.f)||0)+(Number(c.m)||0)+(Number(c.p)||0)+(Number(c.l)||0);   // PCC1
+    return '  \u2022 ' + (c.name || '(unnamed)') + '  \u2014  ' + ((Number(c.u)||0) ? (c.u + ' units, ') : '') + hrs + ' hrs (F ' + (Number(c.f)||0) + ' / M ' + (Number(c.m)||0) + ' / P ' + (Number(c.p)||0) + ' / L ' + (Number(c.l)||0) + ')';
   });
   var subject = 'Field crew added custom production item(s): ' + (project.number||'') + ' ' + (project.name||'');
   var lines = [
@@ -61941,8 +61964,8 @@ async function mobWkRunUpload() {
     var itemList = (est.lines || []).map(function(l){ return '"' + String(l.itemName).replace(/"/g,'') + '" (' + (l.lineType==='production'?'units + hours':'hours only') + ')'; }).join(', ');
     var prompt = 'You are reading a hand-filled daily field production sheet from a masonry construction project. For this one day, extract units installed and crew hours per work item. Return STRICT JSON only \u2014 no markdown, no commentary, no code fences.\n\n' +
       'Match every row to one of these estimate items using these EXACT names ("units + hours" items track units; "hours only" do not):\n  [' + itemList + ']\n\n' +
-      'Schema:\n{ "items": [ {"name":"<exact item name>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "laborerHrs": <number>} ] }\n\n' +
-      'Rules:\n- Match each row to one listed item EXACTLY; omit rows that match nothing.\n- Hours are numbers (0 for blank).\n- Include units only for "units + hours" items; null otherwise.\n- Return items even if empty; never invent values.';
+      'Schema:\n{ "items": [ {"name":"<exact item name>", "units": <number or null>, "foremanHrs": <number>, "masonHrs": <number>, "pccHrs": <number>, "laborerHrs": <number>} ] }\n\n' +
+      'Rules:\n- Match each row to one listed item EXACTLY; omit rows that match nothing.\n- Hours are numbers (0 for blank).\n- pccHrs is PCC (pointer / cleaner / caulker) hours; 0 if the sheet has none.\n- Include units only for "units + hours" items; null otherwise.\n- Return items even if empty; never invent values.';
     var resp = await kmiAIFetch('prod-week-upload-mobile', {
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{ role:'user', content:[
         isPdf ? { type:'document', source:{ type:'base64', media_type:apiMedia, data:b64 } } : { type:'image', source:{ type:'base64', media_type:apiMedia, data:b64 } },
@@ -61959,10 +61982,10 @@ async function mobWkRunUpload() {
     var n = 0;
     ((parsed && parsed.items) || []).forEach(function(it){
       var line = byName[String(it.name||'').trim().toLowerCase()]; if (!line) return;
-      var e = _mobWeekModel.entries[line.id] || (_mobWeekModel.entries[line.id] = { u:'', f:'', m:'', l:'' });
+      var e = _mobWeekModel.entries[line.id] || (_mobWeekModel.entries[line.id] = { u:'', f:'', m:'', p:'', l:'' });
       if (line.lineType === 'production') { var u = Number(it.units); e.u = isNaN(u) ? '' : u; }
-      var f = Number(it.foremanHrs), m = Number(it.masonHrs), la = Number(it.laborerHrs);
-      e.f = isNaN(f)?0:f; e.m = isNaN(m)?0:m; e.l = isNaN(la)?0:la; n++;
+      var f = Number(it.foremanHrs), m = Number(it.masonHrs), la = Number(it.laborerHrs), pp = Number(it.pccHrs);
+      e.f = isNaN(f)?0:f; e.m = isNaN(m)?0:m; e.l = isNaN(la)?0:la; e.p = isNaN(pp)?0:pp; n++;   // PCC1
     });
     mobWkPersist();
     closeModal();
@@ -62008,6 +62031,7 @@ function renderLaborRates() {
       '<button class="btn btn-sm" onclick="showRenameLaborSet(\'' + active.id + '\')">Rename</button>' +
       '<button class="btn btn-sm" onclick="duplicateLaborSet(\'' + active.id + '\')">Duplicate</button>' +
       '<button class="btn btn-sm" onclick="rmLaborSet(\'' + active.id + '\')" style="color:#A32D2D">Delete set</button>' +
+      '<button class="btn btn-sm" onclick="pushLaborClassesToProjects(\'' + active.id + '\')" title="Add classifications from this set that a project\'s rate snapshot is missing (e.g. PCC). Existing project rates are not changed.">Copy new classifications to projects</button>' +  // PCC1
       '<button class="btn btn-sm btn-p" onclick="showAddLaborRate()">+ Add classification</button>' +
     '</div>' +
   '</div>';
@@ -62257,6 +62281,48 @@ function rmLaborRate(id) {
   if (!confirm('Remove "' + l.classification + '" from "' + set.label + '"?')) return;
   set.rates = set.rates.filter(function(x){ return x.id !== id; });
   saveDB(); renderTemplates();
+}
+// PCC1: copy classifications this set has that a project's rate snapshot is
+// missing (e.g. PCC) onto every project with a snapshot. Rows already on a
+// project - and their rates - are never changed.
+function pushLaborClassesToProjects(setId) {
+  var set = (db.laborRateSets || []).find(function(s){ return String(s.id) === String(setId); });
+  if (!set || !(set.rates || []).length) return;
+  var plan = [];
+  (db.projects || []).forEach(function(p){
+    var lr = p && p.laborRates; if (!lr) return;
+    var arr = Array.isArray(lr) ? lr : (Array.isArray(lr.rates) ? lr.rates : null);
+    if (!arr) return;
+    var have = {};
+    arr.forEach(function(r){ have[String(r.classification || '').trim().toLowerCase()] = true; });
+    var add = set.rates.filter(function(r){
+      var k = String(r.classification || '').trim().toLowerCase();
+      return k && !have[k];
+    });
+    if (add.length) plan.push({ arr:arr, add:add });
+  });
+  if (!plan.length) { alert('Every project rate snapshot already has all of the "' + (set.label || '') + '" classifications.'); return; }
+  var names = {}, zero = {};
+  plan.forEach(function(x){ x.add.forEach(function(r){
+    names[r.classification] = true;
+    if (!(Number(r.stdCostRate) > 0)) zero[r.classification] = true;
+  }); });
+  var zeroList = Object.keys(zero);
+  var msg = 'Add ' + Object.keys(names).join(', ') + ' from "' + (set.label || '') + '" to ' + plan.length +
+    ' project rate snapshot' + (plan.length === 1 ? '' : 's') + '?\n\nRates already on those projects are not changed.';
+  if (zeroList.length) msg += '\n\nWARNING: ' + zeroList.join(', ') + ' has a $0 standard cost rate in this set. Enter the rate first, or projects will price it at $0.';
+  if (!confirm(msg)) return;
+  plan.forEach(function(x){ x.add.forEach(function(r){
+    x.arr.push({
+      id: r.id, classification: r.classification,
+      stdCostRate: Number(r.stdCostRate) || 0, stdCoRate: Number(r.stdCoRate) || 0,
+      otCostRate:  Number(r.otCostRate)  || 0, otCoRate:  Number(r.otCoRate)  || 0,
+      dtCostRate:  Number(r.dtCostRate)  || 0, dtCoRate:  Number(r.dtCoRate)  || 0
+    });
+  }); });
+  saveDB();
+  if (typeof showToast === 'function') showToast('Added to ' + plan.length + ' project' + (plan.length === 1 ? '' : 's') + '.', 'success');
+  else alert('Added to ' + plan.length + ' project(s).');
 }
 
 // ── PDF ─────────────────────────────────────────────────────────
@@ -65619,8 +65685,9 @@ function _crewFactor(t){
   var line = t.prodLineId ? est.lines.filter(function(l){ return String(l.id) === String(t.prodLineId); })[0] : null;
   var crewId = (line && line.crewId) || est.defaultCrewId;
   var crew = (typeof db !== 'undefined' && db.crewTemplates) ? db.crewTemplates.filter(function(c){ return String(c.id) === String(crewId); })[0] : null;
-  if (!crew || !Number(crew.masons)) return 1;
-  return (Number(crew.masons) + Number(crew.laborers || 0)) / Number(crew.masons);
+  var prodN = _prodCrewProd(crew);   // PCC1: masons + PCC
+  if (!crew || !prodN) return 1;
+  return (prodN + Number(crew.laborers || 0)) / prodN;
 }
 // Total crew/day: manual override wins; else planned (MD/dur) x crew factor.
 function _taskCrewPerDay(t){
@@ -67050,7 +67117,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-16-BPRAPPEND1';
+var KMI_BUILD = '2026-11-20-PCC1';
 
 var _kmiSessionId = (function(){
   try {
@@ -68174,7 +68241,7 @@ function fromSBMeetingItem(r) {
 
 // ── T&M Ticket mappers (Round 1) ───────────────────────────────────────
 // Productivity (Phase 1) — weekly data mappers. entries is keyed by estimate
-// line id: { lineId: { u:units, f:foremanHrs, m:masonHrs, l:laborerHrs } }.
+// line id: { lineId: { u:units, f:foremanHrs, m:masonHrs, p:pccHrs, l:laborerHrs } }.  (p: PCC1)
 // Portfolio grid row (B1). Read-only — there is deliberately no toSB*
 // counterpart, because kmi_project_overview is a view.
 //
