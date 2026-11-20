@@ -57913,13 +57913,32 @@ function _getActiveLaborSet() {
 }
 
 // ═══ PRODUCTIVITY (Phase 2) — crew cost helpers ══════════════════════
-// Resolve the classification rate list for a project: the project's applied
-// snapshot (p.laborRates) if present, else the active global rate set. Pass
-// p = null to price off the active global set (e.g. on the Templates page).
+// PRODRATES1: production prices off the project's OWN applied snapshot and
+// never the global set - a job keeps the rates it was awarded under for its
+// whole life. p.laborRates is {sourceSetId, sourceLabel, appliedAt, rates:[...]}
+// (older projects: a bare array). No snapshot -> [] -> $0 plus the "apply a
+// labor rate template" notice. Pass p = null to price off the active global
+// set (Templates page crew table only).
 function _prodRateList(p) {
-  if (p && Array.isArray(p.laborRates) && p.laborRates.length) return p.laborRates;
-  var active = _getActiveLaborSet();
-  return (active && Array.isArray(active.rates)) ? active.rates : [];
+  if (p === null) {
+    var active = _getActiveLaborSet();
+    return (active && Array.isArray(active.rates)) ? active.rates : [];
+  }
+  var lr = p && p.laborRates;
+  if (Array.isArray(lr)) return lr;
+  if (lr && Array.isArray(lr.rates)) return lr.rates;
+  return [];
+}
+// PRODRATES1: notice shown on production screens when the project has no
+// usable Mason cost rate in its own snapshot.
+function _prodRateHintHtml(p) {
+  if (_prodCostRate(p, 'Mason') > 0) return '';
+  var lr = p && p.laborRates;
+  var has = Array.isArray(lr) ? lr.length > 0 : !!(lr && Array.isArray(lr.rates) && lr.rates.length);
+  return '<div style="font-size:12px;color:#9A7A2E;background:#FFFCF3;border:1px solid var(--ac);border-radius:6px;padding:8px 12px;margin-bottom:12px">' +
+    (has ? 'This project\'s labor rate snapshot has no Mason cost rate, so dollars read $0. Fix the rates on the Project Details tab.'
+         : 'This project has no labor rate snapshot yet, so dollars read $0. Apply the labor rate template the job was awarded under (e.g. 25-26 Rates) on the Project Details tab.') +
+    '</div>';
 }
 // Standard cost rate ($/hr — the "cost column") for a classification name.
 function _prodCostRate(p, classification) {
@@ -59066,10 +59085,8 @@ function renderProdEstimateView() {
     return '<option value="' + c.id + '"' + sel + '>' + _prodEsc(c.name) + '</option>';
   }).join('');
 
-  // Rate hint if this project's Mason cost rate is unset
-  var rateHint = (_prodCostRate(p, 'Mason') > 0) ? '' :
-    '<div style="font-size:12px;color:#9A7A2E;background:#FFFCF3;border:1px solid var(--ac);border-radius:6px;padding:8px 12px;margin-bottom:12px">' +
-    'This project has no Mason/Laborer cost rates yet, so dollars read $0. Apply a labor rate template on the Project Details tab to price the estimate.</div>';
+  // Rate hint if this project's own snapshot has no Mason cost rate (PRODRATES1)
+  var rateHint = _prodRateHintHtml(p);
 
   var metrics =
     '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">' +
@@ -61435,7 +61452,7 @@ function renderProdTrackingView() {
   host.innerHTML =
     '<div style="display:flex;justify-content:flex-end;margin-bottom:14px">' +
       '<button class="btn btn-pdf btn-sm" onclick="prodExportTrackingPdf()">\u2913 Export PDF</button></div>' +
-    _prodWeekBandHtml(p) + metrics + prodTable + fieldTable + catTable + footnote;
+    _prodRateHintHtml(p) + _prodWeekBandHtml(p) + metrics + prodTable + fieldTable + catTable + footnote;   // PRODRATES1
 }
 
 // ── Tracking document PDF (Phase 3b) — landscape letter, jsPDF ──────────
@@ -62031,7 +62048,7 @@ function renderLaborRates() {
       '<button class="btn btn-sm" onclick="showRenameLaborSet(\'' + active.id + '\')">Rename</button>' +
       '<button class="btn btn-sm" onclick="duplicateLaborSet(\'' + active.id + '\')">Duplicate</button>' +
       '<button class="btn btn-sm" onclick="rmLaborSet(\'' + active.id + '\')" style="color:#A32D2D">Delete set</button>' +
-      '<button class="btn btn-sm" onclick="pushLaborClassesToProjects(\'' + active.id + '\')" title="Add classifications from this set that a project\'s rate snapshot is missing (e.g. PCC). Existing project rates are not changed.">Copy new classifications to projects</button>' +  // PCC1
+      '<button class="btn btn-sm" onclick="pushLaborClassesToProjects(\'' + active.id + '\')" title="Add classifications from this set (e.g. PCC) to projects whose rates were applied from this set. Existing project rates are not changed.">Copy new classifications to projects</button>' +  // PCC1
       '<button class="btn btn-sm btn-p" onclick="showAddLaborRate()">+ Add classification</button>' +
     '</div>' +
   '</div>';
@@ -62283,15 +62300,18 @@ function rmLaborRate(id) {
   saveDB(); renderTemplates();
 }
 // PCC1: copy classifications this set has that a project's rate snapshot is
-// missing (e.g. PCC) onto every project with a snapshot. Rows already on a
-// project - and their rates - are never changed.
+// missing (e.g. PCC). Rows already on a project - and their rates - are never
+// changed. PRODRATES1: only projects whose snapshot was applied FROM this set
+// (a 25-26 job gets the 25-26 rate); older bare-array snapshots are skipped.
 function pushLaborClassesToProjects(setId) {
   var set = (db.laborRateSets || []).find(function(s){ return String(s.id) === String(setId); });
   if (!set || !(set.rates || []).length) return;
-  var plan = [];
+  var plan = [], legacy = 0;
   (db.projects || []).forEach(function(p){
     var lr = p && p.laborRates; if (!lr) return;
-    var arr = Array.isArray(lr) ? lr : (Array.isArray(lr.rates) ? lr.rates : null);
+    if (Array.isArray(lr)) { if (lr.length) legacy++; return; }
+    if (String(lr.sourceSetId) !== String(set.id)) return;
+    var arr = Array.isArray(lr.rates) ? lr.rates : null;
     if (!arr) return;
     var have = {};
     arr.forEach(function(r){ have[String(r.classification || '').trim().toLowerCase()] = true; });
@@ -62301,7 +62321,8 @@ function pushLaborClassesToProjects(setId) {
     });
     if (add.length) plan.push({ arr:arr, add:add });
   });
-  if (!plan.length) { alert('Every project rate snapshot already has all of the "' + (set.label || '') + '" classifications.'); return; }
+  var skipNote = (legacy ? ('\n\n' + legacy + ' older project snapshot' + (legacy === 1 ? ' has' : 's have') + ' no source rate set and ' + (legacy === 1 ? 'was' : 'were') + ' skipped - re-apply the template on those projects to update them.') : '');
+  if (!plan.length) { alert('Every project using "' + (set.label || '') + '" already has all of its classifications.' + skipNote); return; }
   var names = {}, zero = {};
   plan.forEach(function(x){ x.add.forEach(function(r){
     names[r.classification] = true;
@@ -62309,7 +62330,7 @@ function pushLaborClassesToProjects(setId) {
   }); });
   var zeroList = Object.keys(zero);
   var msg = 'Add ' + Object.keys(names).join(', ') + ' from "' + (set.label || '') + '" to ' + plan.length +
-    ' project rate snapshot' + (plan.length === 1 ? '' : 's') + '?\n\nRates already on those projects are not changed.';
+    ' project' + (plan.length === 1 ? '' : 's') + ' that use this rate set?\n\nRates already on those projects are not changed. Projects on other rate sets are not touched - run this from each set.' + skipNote;
   if (zeroList.length) msg += '\n\nWARNING: ' + zeroList.join(', ') + ' has a $0 standard cost rate in this set. Enter the rate first, or projects will price it at $0.';
   if (!confirm(msg)) return;
   plan.forEach(function(x){ x.add.forEach(function(r){
@@ -67117,7 +67138,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-20-PCC1';
+var KMI_BUILD = '2026-11-20-PRODRATES1';
 
 var _kmiSessionId = (function(){
   try {
