@@ -59668,7 +59668,7 @@ function _prodJtdUnitsLive(projectId, lineId, exceptWeek, liveUnits) {
   var sum = 0;
   (db.prodWeekly || []).forEach(function(r){
     if (String(r.projectId) !== String(projectId)) return;
-    if (String(r.weekEnding) === String(exceptWeek)) return;
+    if (String(r.weekEnding || '') >= String(exceptWeek)) return;   // JTDTOT2: through selected day only
     var e = r.entries && r.entries[lineId];
     if (e) sum += (Number(e.u) || 0);
   });
@@ -59736,7 +59736,14 @@ function renderProdWeeklyView() {
   var foot = '<tfoot><tr style="border-top:2px solid #eee;font-weight:600">' +
     '<td style="padding-top:9px">Week totals</td>' +
     _ftot('prodwk-t-units') + _ftot('prodwk-t-f') + _ftot('prodwk-t-m') + _ftot('prodwk-t-p') + _ftot('prodwk-t-l') +
-    '<td style="text-align:right;padding-top:9px" id="prodwk-t-tot">\u2014</td><td></td></tr></tfoot>';
+    '<td style="text-align:right;padding-top:9px" id="prodwk-t-tot">\u2014</td><td></td></tr>' +
+    // JTDTOT1: job-to-date totals, all lines, then production lines only
+    '<tr style="font-weight:600;color:var(--kmi3)"><td style="padding-top:9px">JTD totals</td>' +
+    _ftot('prodwk-j-units') + _ftot('prodwk-j-f') + _ftot('prodwk-j-m') + _ftot('prodwk-j-p') + _ftot('prodwk-j-l') +
+    '<td style="text-align:right;padding-top:9px" id="prodwk-j-tot">\u2014</td><td></td></tr>' +
+    '<tr style="font-weight:600;color:var(--kmi3)"><td style="padding-top:9px" title="Hours on production lines only (Field Labor excluded)">JTD hours charged to production</td>' +
+    '<td></td>' + _ftot('prodwk-jp-f') + _ftot('prodwk-jp-m') + _ftot('prodwk-jp-p') + _ftot('prodwk-jp-l') +
+    '<td style="text-align:right;padding-top:9px" id="prodwk-jp-tot">\u2014</td><td></td></tr></tfoot>';
   var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this week</strong>. JTD units roll up across all weeks automatically. Field-labor items track hours only.</div>';
   var table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:860px">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' + hint + '</div>';
 
@@ -59767,10 +59774,25 @@ function _prodWkRowHtml(l) {
     '<td style="text-align:right" id="prodwk-tot-' + id + '">\u2014</td>' +
     jtdCell + '</tr>';
 }
+// JTDTOT1: JTD units + craft hours for one line through the selected day -
+// saved days before it, plus the live (unsaved) entry for the day itself.
+function _prodJtdLineLive(projectId, lineId, exceptDay, live) {
+  var o = { u:0, f:0, m:0, p:0, l:0 };
+  (db.prodWeekly || []).forEach(function(r){
+    if (String(r.projectId) !== String(projectId)) return;
+    if (String(r.weekEnding || '') >= String(exceptDay)) return;
+    var e = r.entries && r.entries[lineId]; if (!e) return;
+    o.u += Number(e.u)||0; o.f += Number(e.f)||0; o.m += Number(e.m)||0; o.p += Number(e.p)||0; o.l += Number(e.l)||0;
+  });
+  live = live || {};
+  o.u += Number(live.u)||0; o.f += Number(live.f)||0; o.m += Number(live.m)||0; o.p += Number(live.p)||0; o.l += Number(live.l)||0;
+  return o;
+}
 function prodWkRefresh() {
   var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
   var est = _prodEnsureEstimate(p);
   var tu=0, tf=0, tm=0, tp=0, tl=0, tt=0;
+  var ju=0, jf=0, jm=0, jp=0, jl=0, jpf=0, jpm=0, jpp=0, jpl=0;   // JTDTOT1
   (est.lines || []).forEach(function(l){
     var e = _prodWeekModel.entries[l.id] || {};
     var u = Number(e.u)||0, f = Number(e.f)||0, m = Number(e.m)||0, pp = Number(e.p)||0, la = Number(e.l)||0;
@@ -59781,7 +59803,21 @@ function prodWkRefresh() {
       tu += u;
     }
     tf += f; tm += m; tp += pp; tl += la; tt += tot;
+    var j = _prodJtdLineLive(p.id, l.id, _prodWeekModel.weekEnding, e);   // JTDTOT1
+    jf += j.f; jm += j.m; jp += j.p; jl += j.l;
+    if (l.lineType === 'production') { ju += j.u; jpf += j.f; jpm += j.m; jpp += j.p; jpl += j.l; }
   });
+  _prodSetTxt('prodwk-j-units', ju.toLocaleString());
+  _prodSetTxt('prodwk-j-f', jf.toFixed(1));
+  _prodSetTxt('prodwk-j-m', jm.toFixed(1));
+  _prodSetTxt('prodwk-j-p', jp.toFixed(1));
+  _prodSetTxt('prodwk-j-l', jl.toFixed(1));
+  _prodSetTxt('prodwk-j-tot', (jf + jm + jp + jl).toFixed(1));
+  _prodSetTxt('prodwk-jp-f', jpf.toFixed(1));
+  _prodSetTxt('prodwk-jp-m', jpm.toFixed(1));
+  _prodSetTxt('prodwk-jp-p', jpp.toFixed(1));
+  _prodSetTxt('prodwk-jp-l', jpl.toFixed(1));
+  _prodSetTxt('prodwk-jp-tot', (jpf + jpm + jpp + jpl).toFixed(1));
   _prodSetTxt('prodwk-t-units', tu.toLocaleString());
   _prodSetTxt('prodwk-t-f', tf.toFixed(1));
   _prodSetTxt('prodwk-t-m', tm.toFixed(1));
@@ -67150,7 +67186,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-25-PCTLW1';
+var KMI_BUILD = '2026-11-25-JTDTOT2';
 
 var _kmiSessionId = (function(){
   try {
