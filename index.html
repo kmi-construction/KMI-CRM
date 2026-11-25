@@ -46040,7 +46040,7 @@ function _bprRemap(p, map, commit) {
         var nid = map[String(id)];
         if (nid) { next.push(nid); r.estRemapped++; } else r.estDropped++;
       });
-      if (commit) l.bprRef = next;
+      if (commit) { l.bprRef = next; if (next.length) delete l.bprDropped; else l.bprDropped = true; }   // BPRSYNC1
     });
   }
   return r;
@@ -46453,6 +46453,7 @@ function _bprApplyParsed(parsed, statusEl) {
   if (!p) { if (statusEl) statusEl.innerHTML = '<span style="color:#A32D2D">Project not found.</span>'; return; }
 
   // BPRMULTI1: one remap for procurement assignments AND estimate bprRef.
+  var syncOld = _prodSyncOldTargets(p);   // BPRSYNC1: line values per the outgoing rows
   var map = _bprBuildIdMap(p.bprMaterials || [], parsed);
   var r = _bprRemap(p, map, true);
 
@@ -46473,7 +46474,9 @@ function _bprApplyParsed(parsed, statusEl) {
   // production-estimate picker, set by whichever flow initiated the import.
   setTimeout(function(){
     closeModal();
-    if (typeof _bprPickerDest !== 'undefined' && _bprPickerDest === 'prod') prodOpenBprPicker();
+    var dest = (typeof _bprPickerDest !== 'undefined' && _bprPickerDest === 'prod') ? 'prod' : 'proc';
+    if (prodSyncMaybeOpen(p, { oldTargets: syncOld, after: dest })) return;   // BPRSYNC1
+    if (dest === 'prod') prodOpenBprPicker();
     else procOpenBprPicker();
   }, 700);
 }
@@ -47319,6 +47322,352 @@ function _resolveBprProdItem(project, b){
   return res;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// BPRSYNC1 — sync estimate lines from the BPR (after Replace / on demand)
+// ═══════════════════════════════════════════════════════════════════
+// Replace / Refresh re-link estimate lines to the new BPR rows but never
+// touched quantities. This compares each linked line with what its BPR rows
+// say now and lets the user apply the differences.
+//   production   → estUnits = Σ qty; estMdu = layRate (one row) or the
+//                  units-weighted combined MDU (several rows)
+//   field_dollar → amount scaled by man-days (keeps the line's frozen $/man-day)
+//   field_pct    → not synced
+// Lines carry the BPR values they were built from (bprUnits / bprMdu /
+// bprAmount / bprManDays). A line that no longer matches its snapshot was
+// edited by hand and starts unchecked. Pre-BPRSYNC1 lines have no snapshot:
+// during a Replace the outgoing rows stand in, otherwise they show as
+// "not verified" and start unchecked. A difference left unchecked is kept in
+// bprSyncSkip and stops counting until the BPR target changes again.
+var _prodSyncState = null;   // { projectId, items, dropped, newRows, unchanged, sel, zero, after, openNext }
+
+function _prodSyncNear(a, b){ return Math.abs((Number(a) || 0) - (Number(b) || 0)) < 0.005; }
+function _prodSyncHasVal(v){ return v !== '' && v != null; }
+function _prodSyncRows(p, ids){
+  var byId = {}; (p.bprMaterials || []).forEach(function(b){ byId[String(b.id)] = b; });
+  return (ids || []).map(function(id){ return byId[String(id)]; }).filter(Boolean);
+}
+// What the BPR rows say a line should be. null = not syncable.
+function _prodSyncTarget(p, est, line, rows){
+  rows = (rows || []).filter(Boolean);
+  if (!rows.length) return null;
+  if (line.lineType === 'production') {
+    var u = rows.reduce(function(s, b){ return s + (Number(b.quantity) || 0); }, 0);
+    var m = rows.length === 1 ? (Number(rows[0].layRate) || 0) : _prodBprCombinedMdu(rows);
+    return { units: u, mdu: m };
+  }
+  if (line.lineType === 'field_dollar') {
+    var md = rows.length === 1 ? _prodBprManDaysSingle(rows[0]) : _prodBprManDaysGroup(rows);
+    var rate = (Number(line.bprManDays) > 0 && _prodSyncHasVal(line.bprAmount))
+      ? Number(line.bprAmount) / Number(line.bprManDays)
+      : _prodBprFieldDollarMdc(p, est);
+    return { manDays: md, amount: Math.round(md * rate * 100) / 100 };
+  }
+  return null;
+}
+function _prodSyncSig(line, t){
+  return line.lineType === 'production'
+    ? ('u' + (Number(t.units) || 0).toFixed(3) + '|m' + (Number(t.mdu) || 0).toFixed(3))
+    : ('a' + (Number(t.amount) || 0).toFixed(2));
+}
+function _prodSyncMatches(line, t){
+  if (!t) return true;
+  return line.lineType === 'production'
+    ? (_prodSyncNear(line.estUnits, t.units) && _prodSyncNear(line.estMdu, t.mdu))
+    : _prodSyncNear(line.amount, t.amount);
+}
+function _prodSyncHasSnap(l){
+  return l.lineType === 'production' ? _prodSyncHasVal(l.bprUnits) : (l.lineType === 'field_dollar' && _prodSyncHasVal(l.bprAmount));
+}
+// True when the line still holds exactly the BPR values it was built from.
+function _prodSyncLineClean(l){
+  if (!l || !_prodSyncHasSnap(l)) return false;
+  if (l.lineType === 'production') return _prodSyncNear(l.estUnits, l.bprUnits) && _prodSyncNear(l.estMdu, l.bprMdu);
+  return _prodSyncNear(l.amount, l.bprAmount);
+}
+// Record the BPR values a line was built from (picker import). mduUsed is the
+// picker MDU for a single field-$ row, so the snapshot matches its amount.
+function _prodSyncStamp(line, rows, mduUsed){
+  rows = (rows || []).filter(Boolean);
+  if (!rows.length) return;
+  if (line.lineType === 'production') {
+    line.bprUnits = rows.reduce(function(s, b){ return s + (Number(b.quantity) || 0); }, 0);
+    line.bprMdu = rows.length === 1 ? (Number(rows[0].layRate) || 0) : _prodBprCombinedMdu(rows);
+  } else if (line.lineType === 'field_dollar') {
+    line.bprAmount = Number(line.amount) || 0;
+    line.bprManDays = rows.length === 1 ? _prodBprManDaysSingle(rows[0], mduUsed) : _prodBprManDaysGroup(rows);
+  }
+}
+// Before a Replace: each linked line's values per the outgoing rows (stands in
+// for a snapshot on pre-BPRSYNC1 lines).
+function _prodSyncOldTargets(p){
+  var out = {}, est = p && p.prodEstimate;
+  if (!est || !Array.isArray(est.lines)) return out;
+  est.lines.forEach(function(l){
+    if (!Array.isArray(l.bprRef) || !l.bprRef.length) return;
+    var t = _prodSyncTarget(p, est, l, _prodSyncRows(p, l.bprRef));
+    if (t) out[String(l.id)] = t;
+  });
+  return out;
+}
+function _prodSyncCollect(p, oldTargets, withJtd){
+  var res = { items: [], dropped: [], newRows: [], unchanged: 0 };
+  var est = p && p.prodEstimate;
+  if (!est || !Array.isArray(est.lines) || !est.lines.length) return res;
+  var used = {};
+  est.lines.forEach(function(l){
+    (Array.isArray(l.bprRef) ? l.bprRef : []).forEach(function(id){ used[String(id)] = 1; });
+    if (l.lineType !== 'production' && l.lineType !== 'field_dollar') return;
+    var refs = Array.isArray(l.bprRef) ? l.bprRef : [];
+    var isProd = l.lineType === 'production';
+    if (!refs.length) {
+      var live = isProd ? (Number(l.estUnits) > 0) : (Number(l.amount) > 0);
+      if (l.bprDropped && live) res.dropped.push({ line: l, acked: !!l.bprDropAck,
+        jtd: (withJtd && isProd) ? _prodJtdForLine(p.id, l.id).units : null });
+      return;
+    }
+    var rows = _prodSyncRows(p, refs);
+    var t = _prodSyncTarget(p, est, l, rows);
+    if (!t) return;
+    if (_prodSyncMatches(l, t)) { res.unchanged++; return; }
+    var state;
+    if (_prodSyncHasSnap(l)) state = _prodSyncLineClean(l) ? 'clean' : 'edited';
+    else if (oldTargets && oldTargets[String(l.id)]) state = _prodSyncMatches(l, oldTargets[String(l.id)]) ? 'clean' : 'edited';
+    else state = 'unverified';
+    var sig = _prodSyncSig(l, t);
+    res.items.push({ line: l, target: t, state: state, rows: rows.length, sig: sig,
+      skipped: l.bprSyncSkip === sig,
+      jtd: (withJtd && isProd) ? _prodJtdForLine(p.id, l.id).units : null });
+  });
+  (p.bprMaterials || []).forEach(function(b){
+    if (Number(b.layRate) > 0 && !b.defaultSkip && !used[String(b.id)]) res.newRows.push(b);
+  });
+  return res;
+}
+function _prodSyncPendingCount(p){
+  if (!p || !Array.isArray(p.bprMaterials) || !p.bprMaterials.length) return 0;
+  var c = _prodSyncCollect(p, null, false);
+  return c.items.filter(function(i){ return !i.skipped; }).length +
+         c.dropped.filter(function(d){ return !d.acked; }).length;
+}
+function _prodSyncBtnHtml(p, n){
+  if (!p || !Array.isArray(p.bprMaterials) || !p.bprMaterials.length) return '';
+  var icon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-1px;margin-right:4px"><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"></path><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"></path><path d="M21 3v5h-5"></path><path d="M3 21v-5h5"></path></svg>';
+  return n
+    ? '<button class="btn btn-sm" style="background:#FFF8E1;border:1px solid #C9A64A;color:#6B4E0E;font-weight:600" onclick="prodOpenSyncFromToolbar()" title="Estimate lines that don’t match the current BPR">' + icon + 'Sync from BPR · ' + n + '</button>'
+    : '<button class="btn btn-sm" onclick="prodOpenSyncFromToolbar()" title="Compare estimate lines with the current BPR">' + icon + 'Sync from BPR</button>';
+}
+function _prodSyncBannerHtml(p, n){
+  if (!n) return '';
+  return '<div class="card" style="background:#FFF8E1;border:1px solid #EAD9A6;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;padding:10px 14px">' +
+    '<span style="font-size:12px;color:#6B4E0E"><strong>' + n + ' line' + (n === 1 ? '' : 's') + ' don’t match the current BPR.</strong> ' +
+      'Their quantities and MDUs are still from the report they were imported from.</span>' +
+    '<button class="btn btn-sm" style="white-space:nowrap" onclick="prodOpenSyncFromToolbar()">Review &amp; sync</button></div>';
+}
+
+// Called after a Replace / Refresh. Opens the preview when something differs.
+function prodSyncMaybeOpen(p, ctx){
+  if (!p) return false;
+  var c = _prodSyncCollect(p, ctx && ctx.oldTargets, true);
+  var pending = c.items.filter(function(i){ return !i.skipped; }).length + c.dropped.filter(function(d){ return !d.acked; }).length;
+  if (!pending) return false;
+  _prodSyncOpen(p, c, { after: (ctx && ctx.after) || 'prod', auto: true });
+  return true;
+}
+function prodOpenSyncFromToolbar(){
+  var p = _prodCurrentProject(); if (!p) return;
+  _bprPickerDest = 'prod';
+  var c = _prodSyncCollect(p, null, true);
+  if (!c.items.length && !c.dropped.length) {
+    if (typeof showToast === 'function') showToast('Every BPR-linked line already matches the BPR.' + (c.newRows.length ? ' ' + c.newRows.length + ' BPR row' + (c.newRows.length === 1 ? ' isn’t' : 's aren’t') + ' on the estimate yet — use + From BPR.' : ''), 'info');
+    return;
+  }
+  _prodSyncOpen(p, c, { after: 'prod', auto: false });
+}
+function _prodSyncOpen(p, c, opt){
+  var sel = {}, zero = {};
+  c.items.forEach(function(i){ sel[String(i.line.id)] = (i.state === 'clean' && !i.skipped); });
+  _prodSyncState = { projectId: String(p.id), items: c.items, dropped: c.dropped, newRows: c.newRows,
+    unchanged: c.unchanged, sel: sel, zero: zero, after: opt.after, auto: !!opt.auto,
+    openNext: opt.after === 'proc' ? true : (opt.auto || c.newRows.length > 0) };
+  _prodSyncRender(false);
+}
+function _prodSyncRender(keepScroll){
+  var st = _prodSyncState; if (!st) return;
+  var top = null;
+  if (keepScroll) { var sc = g('prod-sync-scroll'); if (sc) top = sc.scrollTop; }
+  showModal(_prodSyncHtml(st));
+  if (top != null) { var sc2 = g('prod-sync-scroll'); if (sc2) sc2.scrollTop = top; }
+}
+function _prodSyncFmtU(n){
+  var v = Number(n) || 0;
+  return Math.abs(v - Math.round(v)) < 0.005 ? Math.round(v).toLocaleString() : v.toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+function _prodSyncFmt$(n){ return '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function _prodSyncCount(st){
+  var n = 0;
+  st.items.forEach(function(i){ if (st.sel[String(i.line.id)]) n++; });
+  st.dropped.forEach(function(d){ if (st.zero[String(d.line.id)]) n++; });
+  return n;
+}
+function _prodSyncHtml(st){
+  var p = getProj(st.projectId);
+  function chip(txt, bg, fg){ return '<span style="font-size:12px;padding:4px 10px;border-radius:100px;background:' + bg + ';color:' + fg + ';font-weight:600">' + txt + '</span>'; }
+  function tag(txt, bg, fg, title){ return '<span' + (title ? ' title="' + _procEsc(title) + '"' : '') + ' style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;background:' + bg + ';color:' + fg + '">' + txt + '</span>'; }
+  var nSel = _prodSyncCount(st);
+  var nEdited = st.items.filter(function(i){ return i.state === 'edited'; }).length;
+  var nUnver = st.items.filter(function(i){ return i.state === 'unverified'; }).length;
+  var cols = 'display:grid;grid-template-columns:36px minmax(0,1fr) 150px 110px 100px;align-items:center';
+  var rowsHtml = st.items.map(function(i){
+    var l = i.line, id = String(l.id), on = !!st.sel[id], isProd = l.lineType === 'production';
+    var tags = '';
+    if (i.rows > 1) tags += tag('MERGED · ' + i.rows + ' ROWS', '#EEF0F3', '#444');
+    if (!isProd) tags += tag('FIELD $', '#EAF3DE', '#2F5A0D');
+    if (i.state === 'edited') tags += tag('EDITED BY HAND', '#FFF4D6', '#6B4E0E', 'The line no longer matches the BPR values it was built from');
+    if (i.state === 'unverified') tags += tag('NOT VERIFIED', '#F2F2EF', '#555', 'Imported before sync tracking — can’t tell whether it was edited by hand');
+    if (i.skipped) tags += tag('LEFT AS IS BEFORE', '#F2F2EF', '#555', 'You chose not to update this line last time');
+    var sub = (isProd ? 'Production' : 'Field $ · man-days × $/man-day') +
+      (typeof _prodCategoryName === 'function' && _prodCategoryName(l.categoryId) ? ' · ' + _prodEsc(_prodCategoryName(l.categoryId)) : '');
+    if (i.state === 'edited' && isProd && _prodSyncHasVal(l.bprUnits)) {
+      sub += '. Line shows ' + _prodSyncFmtU(l.estUnits) + ' ' + _prodEsc(l.unitLabel || '') + ' @ ' + _prodFmtMdu(l.estMdu) +
+        '; built from ' + _prodSyncFmtU(l.bprUnits) + ' @ ' + _prodFmtMdu(l.bprMdu);
+    }
+    var warn = '';
+    if (isProd && i.jtd != null && i.jtd > (Number(i.target.units) || 0) + 0.005) {
+      warn = '<span style="font-size:11px;color:#8A2323;font-weight:600">Logged (' + _prodSyncFmtU(i.jtd) + ') is more than the new quantity — % complete will show over 100%.</span>';
+    }
+    var unit = isProd ? (' ' + _prodEsc(l.unitLabel || '')) : '';
+    var qtyCell = isProd
+      ? '<span style="color:#777;text-decoration:line-through">' + _prodSyncFmtU(l.estUnits) + unit + '</span> → <strong>' + _prodSyncFmtU(i.target.units) + unit + '</strong>'
+      : '<span style="color:#777;text-decoration:line-through">' + _prodSyncFmt$(l.amount) + '</span> → <strong>' + _prodSyncFmt$(i.target.amount) + '</strong>';
+    var mduCell = isProd
+      ? '<span style="color:#777">' + _prodFmtMdu(l.estMdu) + '</span> → <strong>' + _prodFmtMdu(i.target.mdu) + '</strong>'
+      : '<span style="color:#999">–</span>';
+    var logged = isProd ? (_prodSyncFmtU(i.jtd || 0) + unit) : '–';
+    return '<div style="' + cols + ';border-top:1px solid #f0f0ec;padding:9px 0;font-size:13px;background:' + (on ? '#fff' : '#FBFBF9') + '">' +
+      '<span style="display:flex;justify-content:center"><input type="checkbox" aria-label="Update ' + _procEsc(l.itemName || 'line') + '"' + (on ? ' checked' : '') +
+        ' onchange="prodSyncToggle(\'' + _procEsc(id) + '\', this.checked)" style="width:16px;height:16px;margin:0;cursor:pointer"></span>' +
+      '<span style="display:flex;flex-direction:column;gap:3px;min-width:0">' +
+        '<span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><strong style="font-weight:600">' + _prodEsc(l.itemName || '(line)') + '</strong>' + tags + '</span>' +
+        '<span style="font-size:11px;color:#666">' + sub + '</span>' + warn +
+      '</span>' +
+      '<span style="text-align:right;padding-right:12px;font-family:ui-monospace,monospace;font-size:12px">' + qtyCell + '</span>' +
+      '<span style="text-align:right;padding-right:12px;font-family:ui-monospace,monospace;font-size:12px">' + mduCell + '</span>' +
+      '<span style="text-align:right;padding-right:14px;font-family:ui-monospace,monospace;font-size:12px;color:#444">' + logged + '</span>' +
+    '</div>';
+  }).join('');
+
+  var table = st.items.length ?
+    '<div style="border:0.5px solid #ddd;border-radius:8px;overflow:hidden">' +
+      '<div style="' + cols + ';background:#fafafa;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:#555;padding:8px 0">' +
+        '<span></span><span>Estimate line</span><span style="text-align:right;padding-right:12px">Est. qty</span><span style="text-align:right;padding-right:12px">MDU</span><span style="text-align:right;padding-right:14px">Logged to date</span></div>' +
+      '<div id="prod-sync-scroll" style="max-height:46vh;overflow-y:auto">' + rowsHtml + '</div>' +
+    '</div>' : '';
+
+  var dropped = st.dropped.length ?
+    '<div style="border:0.5px solid #E7C4C4;background:#FDF6F6;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:6px">' +
+      '<div style="font-size:12px;font-weight:600;color:#8A2323">Material no longer in the BPR</div>' +
+      st.dropped.map(function(d){
+        var l = d.line, id = String(l.id), isProd = l.lineType === 'production';
+        var what = isProd ? (_prodSyncFmtU(l.estUnits) + ' ' + _prodEsc(l.unitLabel || '') + ' · ' + _prodSyncFmtU(d.jtd || 0) + ' logged') : _prodSyncFmt$(l.amount);
+        return '<label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer">' +
+          '<input type="checkbox"' + (st.zero[id] ? ' checked' : '') + ' onchange="prodSyncToggleZero(\'' + _procEsc(id) + '\', this.checked)" style="width:16px;height:16px;margin:0">' +
+          '<span><strong>' + _prodEsc(l.itemName || '(line)') + '</strong> · ' + what + '. Set ' + (isProd ? 'quantity' : 'amount') + ' to 0 (line and its tracking history are kept)</span></label>';
+      }).join('') +
+    '</div>' : '';
+
+  var nNew = st.newRows.length;
+  var nextLbl = st.after === 'proc' ? 'Open procurement picker next' : 'Open picker next';
+  var newNames = st.newRows.slice(0, 3).map(function(b){ return _prodEsc(b.description || b.materialCode || ''); }).filter(Boolean).join(', ');
+  var nextBox = (st.after === 'proc' || st.auto || nNew) ?
+    '<div style="background:#EEF0F8;border-radius:8px;padding:10px 14px;font-size:12px;color:#2A3260;display:flex;justify-content:space-between;align-items:center;gap:12px">' +
+      '<span>' + (nNew
+        ? '<strong>' + nNew + ' row' + (nNew === 1 ? '' : 's') + ' in the BPR ' + (nNew === 1 ? 'isn’t' : 'aren’t') + ' on the estimate yet</strong>' + (newNames ? ' (' + newNames + (nNew > 3 ? ', …' : '') + ')' : '') + '. Add them from the picker after syncing.'
+        : 'Every laid BPR row is already on the estimate.') + '</span>' +
+      '<label style="display:flex;align-items:center;gap:6px;white-space:nowrap;cursor:pointer"><input type="checkbox"' + (st.openNext ? ' checked' : '') +
+        ' onchange="prodSyncToggleNext(this.checked)" style="width:15px;height:15px;margin:0">' + nextLbl + '</label>' +
+    '</div>' : '';
+
+  var applyLbl = (nSel ? ('Apply ' + nSel + ' change' + (nSel === 1 ? '' : 's')) : 'Done') + (st.openNext ? (st.after === 'proc' ? ' & open procurement picker' : ' & open picker') : '');
+  return '<button class="xbtn" onclick="prodSyncClose()">&#215;</button>' +
+    '<div class="mt">Sync estimate from BPR</div>' +
+    '<div class="msb" style="margin-bottom:12px">' + (p ? _prodEsc((p.number ? p.number + ' \u00b7 ' : '') + (p.name || '')) + '. ' : '') +
+      (st.auto ? 'The BPR list was replaced; ' : '') + st.items.length + ' estimate line' + (st.items.length === 1 ? '' : 's') + ' don’t match ' + (st.auto ? 'it' : 'the current BPR') + '. Nothing has changed yet.</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">' +
+      chip(nSel + ' selected to update', '#EEF0F8', '#1E2448') +
+      (nEdited ? chip(nEdited + ' edited by hand', '#FFF4D6', '#6B4E0E') : '') +
+      (nUnver ? chip(nUnver + ' not verified', '#F2F2EF', '#555') : '') +
+      (st.dropped.length ? chip(st.dropped.length + ' material' + (st.dropped.length === 1 ? '' : 's') + ' not in BPR', '#FCEBEB', '#8A2323') : '') +
+      chip(st.unchanged + ' line' + (st.unchanged === 1 ? '' : 's') + ' unchanged', '#F2F2EF', '#555') +
+      (st.items.length ? '<span style="margin-left:auto;display:flex;gap:6px"><button type="button" class="btn btn-sm" onclick="prodSyncAll(true)">Select all</button><button type="button" class="btn btn-sm" onclick="prodSyncAll(false)">Select none</button></span>' : '') +
+    '</div>' +
+    '<div style="display:flex;flex-direction:column;gap:12px">' + table + dropped + nextBox + '</div>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px">' +
+      '<span style="font-size:12px;color:#666">% complete recalculates against the new quantities. Weekly production already logged isn’t changed.</span>' +
+      '<span style="display:flex;gap:8px">' +
+        '<button class="btn" onclick="prodSyncSkip()">Skip for now</button>' +
+        '<button class="btn btn-p" onclick="prodSyncApply()">' + applyLbl + '</button>' +
+      '</span>' +
+    '</div>';
+}
+function _prodSyncLive(){
+  var st = _prodSyncState;
+  if (!st || String(st.projectId) !== String(_editProjectId)) { _prodSyncState = null; closeModal(); return null; }
+  return st;
+}
+function prodSyncToggle(id, v){ var st = _prodSyncLive(); if (!st) return; st.sel[String(id)] = !!v; _prodSyncRender(true); }
+function prodSyncToggleZero(id, v){ var st = _prodSyncLive(); if (!st) return; st.zero[String(id)] = !!v; _prodSyncRender(true); }
+function prodSyncToggleNext(v){ var st = _prodSyncLive(); if (!st) return; st.openNext = !!v; _prodSyncRender(true); }
+function prodSyncAll(v){ var st = _prodSyncLive(); if (!st) return; st.items.forEach(function(i){ st.sel[String(i.line.id)] = !!v; }); _prodSyncRender(true); }
+function prodSyncClose(){ _prodSyncState = null; closeModal(); }
+function _prodSyncNext(st, changed){
+  if (st.after !== 'proc' && changed && typeof renderProdEstimateView === 'function') renderProdEstimateView();
+  if (!st.openNext) return;
+  if (st.after === 'proc') procOpenBprPicker(); else prodOpenBprPicker();
+}
+function prodSyncSkip(){
+  var st = _prodSyncLive(); if (!st) return;
+  _prodSyncState = null; closeModal();
+  _prodSyncNext(st, false);
+}
+function prodSyncApply(){
+  var st = _prodSyncLive(); if (!st) return;
+  var p = getProj(st.projectId); if (!p) { prodSyncClose(); return; }
+  var updated = 0, zeroed = 0;
+  st.items.forEach(function(i){
+    var l = i.line;
+    if (st.sel[String(l.id)]) {
+      if (l.lineType === 'production') {
+        l.estUnits = i.target.units; l.estMdu = i.target.mdu;
+        l.bprUnits = i.target.units; l.bprMdu = i.target.mdu;
+      } else {
+        l.amount = i.target.amount;
+        l.bprAmount = i.target.amount; l.bprManDays = i.target.manDays;
+      }
+      delete l.bprSyncSkip;
+      updated++;
+    } else {
+      l.bprSyncSkip = i.sig;   // left as is: stop counting until the BPR changes again
+    }
+  });
+  st.dropped.forEach(function(d){
+    var l = d.line;
+    if (st.zero[String(l.id)]) {
+      if (l.lineType === 'production') l.estUnits = 0; else l.amount = 0;
+      zeroed++;
+    }
+    l.bprDropAck = true;
+  });
+  saveDB();
+  _prodSyncState = null; closeModal();
+  if (typeof showToast === 'function') {
+    var msg = (updated || zeroed)
+      ? ('Updated ' + updated + ' line' + (updated === 1 ? '' : 's') + ' from the BPR' + (zeroed ? (', set ' + zeroed + ' to 0') : '') + '.')
+      : 'No lines changed.';
+    showToast(msg, (updated || zeroed) ? 'success' : 'info');
+  }
+  _prodSyncNext(st, true);
+}
+
 // ── Entry: + From BPR on the estimate toolbar ───────────────────────
 function prodOpenBprFlow(){
   if (!_editProjectId) { alert('Save the project first, then build its production estimate.'); return; }
@@ -47647,6 +47996,7 @@ function prodBprSavePicker(){
     } else if (gType === 'field_pct') {
       line.amount = (gItem && gItem.defaultPct != null) ? gItem.defaultPct : '';
     }
+    _prodSyncStamp(line, mem);   // BPRSYNC1
     est.lines.push(line);
     added++; groupedAdded++;
   });
@@ -47673,6 +48023,7 @@ function prodBprSavePicker(){
     } else if (sType === 'field_pct') {
       line.amount = (sItem && sItem.defaultPct != null) ? sItem.defaultPct : '';
     }
+    _prodSyncStamp(line, [b], mdu);   // BPRSYNC1
     est.lines.push(line);
     added++;
   });
@@ -59095,6 +59446,7 @@ function renderProdEstimateView() {
 
   // Rate hint if this project's own snapshot has no Mason cost rate (PRODRATES1)
   var rateHint = _prodRateHintHtml(p);
+  var syncN = _prodSyncPendingCount(p);   // BPRSYNC1
 
   var metrics =
     '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">' +
@@ -59114,6 +59466,7 @@ function renderProdEstimateView() {
       '<div style="display:flex;gap:8px">' +
         '<button class="btn btn-sm btn-p" onclick="prodShowAddItems()">+ Add items</button>' +
         '<button class="btn btn-sm" onclick="prodOpenBprFlow()" title="' + ((p.bprMaterials && p.bprMaterials.length) ? 'Build estimate lines from the Bid Price Report' : 'Upload the Bid Price Report PDF to pull quantities and lay rates') + '">+ From BPR' + ((p.bprMaterials && p.bprMaterials.length) ? ' (' + p.bprMaterials.length + ')' : '') + '</button>' +
+        _prodSyncBtnHtml(p, syncN) +   // BPRSYNC1
         (function(){
           var byType = {};
           (est.lines || []).forEach(function(l){ byType[l.lineType] = (byType[l.lineType] || 0) + 1; });
@@ -59179,7 +59532,7 @@ function renderProdEstimateView() {
     table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:980px">' + head + '<tbody>' + body + '</tbody></table></div></div>';
   }
 
-  host.innerHTML = rateHint + _prodPendingPanelHtml(p) + metrics + params + mergeBar + table;
+  host.innerHTML = rateHint + _prodPendingPanelHtml(p) + _prodSyncBannerHtml(p, syncN) + metrics + params + mergeBar + table;   // BPRSYNC1
   prodRefresh();
 }
 function _prodMetric(id, label, sub) {
@@ -59554,6 +59907,14 @@ function prodMergeSelected() {
     var sum = 0; picked.forEach(function(l){ sum += _prodNum(l.amount); });
     merged.amount = sum;
   }
+  // BPRSYNC1: a merge of untouched BPR lines stays untouched.
+  if (picked.every(function(l){ return _prodSyncLineClean(l); })) {
+    if (mType === 'production') { merged.bprUnits = merged.estUnits; merged.bprMdu = merged.estMdu; }
+    else if (mType === 'field_dollar') {
+      merged.bprAmount = merged.amount;
+      merged.bprManDays = picked.reduce(function(s, l){ return s + (Number(l.bprManDays) || 0); }, 0);
+    }
+  }
 
   // Re-point weekly actuals from members onto the merged line (sum per week).
   members.forEach(function(snap){
@@ -59737,13 +60098,10 @@ function renderProdWeeklyView() {
     '<td style="padding-top:9px">Week totals</td>' +
     _ftot('prodwk-t-units') + _ftot('prodwk-t-f') + _ftot('prodwk-t-m') + _ftot('prodwk-t-p') + _ftot('prodwk-t-l') +
     '<td style="text-align:right;padding-top:9px" id="prodwk-t-tot">\u2014</td><td></td></tr>' +
-    // JTDTOT1: job-to-date totals, all lines, then production lines only
+    // JTDTOT1: job-to-date totals, all lines (JTDTOT3: production-only row removed)
     '<tr style="font-weight:600;color:var(--kmi3)"><td style="padding-top:9px">JTD totals</td>' +
     _ftot('prodwk-j-units') + _ftot('prodwk-j-f') + _ftot('prodwk-j-m') + _ftot('prodwk-j-p') + _ftot('prodwk-j-l') +
-    '<td style="text-align:right;padding-top:9px" id="prodwk-j-tot">\u2014</td><td></td></tr>' +
-    '<tr style="font-weight:600;color:var(--kmi3)"><td style="padding-top:9px" title="Hours on production lines only (Field Labor excluded)">JTD hours charged to production</td>' +
-    '<td></td>' + _ftot('prodwk-jp-f') + _ftot('prodwk-jp-m') + _ftot('prodwk-jp-p') + _ftot('prodwk-jp-l') +
-    '<td style="text-align:right;padding-top:9px" id="prodwk-jp-tot">\u2014</td><td></td></tr></tfoot>';
+    '<td style="text-align:right;padding-top:9px" id="prodwk-j-tot">\u2014</td><td></td></tr></tfoot>';
   var hint = '<div style="font-size:12px;color:#888;margin-top:12px;line-height:1.5">Enter units installed and hours by craft <strong>for this week</strong>. JTD units roll up across all weeks automatically. Field-labor items track hours only.</div>';
   var table = '<div class="card"><div style="overflow-x:auto"><table style="min-width:860px">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' + hint + '</div>';
 
@@ -59792,7 +60150,7 @@ function prodWkRefresh() {
   var p = _prodCurrentProject(); if (!p || !_prodWeekModel) return;
   var est = _prodEnsureEstimate(p);
   var tu=0, tf=0, tm=0, tp=0, tl=0, tt=0;
-  var ju=0, jf=0, jm=0, jp=0, jl=0, jpf=0, jpm=0, jpp=0, jpl=0;   // JTDTOT1
+  var ju=0, jf=0, jm=0, jp=0, jl=0;   // JTDTOT1
   (est.lines || []).forEach(function(l){
     var e = _prodWeekModel.entries[l.id] || {};
     var u = Number(e.u)||0, f = Number(e.f)||0, m = Number(e.m)||0, pp = Number(e.p)||0, la = Number(e.l)||0;
@@ -59805,7 +60163,7 @@ function prodWkRefresh() {
     tf += f; tm += m; tp += pp; tl += la; tt += tot;
     var j = _prodJtdLineLive(p.id, l.id, _prodWeekModel.weekEnding, e);   // JTDTOT1
     jf += j.f; jm += j.m; jp += j.p; jl += j.l;
-    if (l.lineType === 'production') { ju += j.u; jpf += j.f; jpm += j.m; jpp += j.p; jpl += j.l; }
+    if (l.lineType === 'production') ju += j.u;
   });
   _prodSetTxt('prodwk-j-units', ju.toLocaleString());
   _prodSetTxt('prodwk-j-f', jf.toFixed(1));
@@ -59813,11 +60171,6 @@ function prodWkRefresh() {
   _prodSetTxt('prodwk-j-p', jp.toFixed(1));
   _prodSetTxt('prodwk-j-l', jl.toFixed(1));
   _prodSetTxt('prodwk-j-tot', (jf + jm + jp + jl).toFixed(1));
-  _prodSetTxt('prodwk-jp-f', jpf.toFixed(1));
-  _prodSetTxt('prodwk-jp-m', jpm.toFixed(1));
-  _prodSetTxt('prodwk-jp-p', jpp.toFixed(1));
-  _prodSetTxt('prodwk-jp-l', jpl.toFixed(1));
-  _prodSetTxt('prodwk-jp-tot', (jpf + jpm + jpp + jpl).toFixed(1));
   _prodSetTxt('prodwk-t-units', tu.toLocaleString());
   _prodSetTxt('prodwk-t-f', tf.toFixed(1));
   _prodSetTxt('prodwk-t-m', tm.toFixed(1));
@@ -67186,7 +67539,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-25-JTDTOT2';
+var KMI_BUILD = '2026-11-25-BPRSYNC1';
 
 var _kmiSessionId = (function(){
   try {
