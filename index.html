@@ -60161,9 +60161,9 @@ function _prodTrackingCompute(p, asOf) {
   var s = { estU:0, jtdU:0, est:0, earn:0, act:0 };
   var f = { fF:0, fM:0, fP:0, fL:0, est:0, act:0 };
   var generalId = _prodGeneralCategoryId();
-  var catMap = {};            // catId -> { direct, estU, jtdU }
+  var catMap = {};            // catId -> { direct, estU, jtdU, prodDirect, prodEarn }  (PCTLW1)
   var generalLabor = 0;
-  function _catBucket(id){ return catMap[id] || (catMap[id] = { direct:0, estU:0, jtdU:0 }); }
+  function _catBucket(id){ return catMap[id] || (catMap[id] = { direct:0, estU:0, jtdU:0, prodDirect:0, prodEarn:0 }); }
   (est.lines || []).forEach(function(l){
     var jtd = _prodJtdForLine(p.id, l.id, asOf);
     var est$ = estLineDollars(l);
@@ -60180,7 +60180,7 @@ function _prodTrackingCompute(p, asOf) {
         recent:_prodRecentUnitsForLine(p.id, l.id), estMdu:estMdu, actMdu:actMdu,
         est:est$, earn:earn$, act:act, perUnit:perUnit, varv:earn$-act });
       s.estU+=estU; s.jtdU+=jtdU; s.est+=est$; s.earn+=earn$; s.act+=act;
-      if (isGen) { generalLabor += est$; } else { var b = _catBucket(effCat); b.direct += est$; b.estU += estU; b.jtdU += jtdU; }
+      if (isGen) { generalLabor += est$; } else { var b = _catBucket(effCat); b.direct += est$; b.estU += estU; b.jtdU += jtdU; b.prodDirect += est$; b.prodEarn += earn$; }
     } else {
       field.push({ name:l.itemName, f:jtd.f, m:jtd.m, p:jtd.p, l:jtd.l, est:est$, act:act, catId:effCat, isGen:isGen, earn:0, varv:0 });
       f.fF+=jtd.f; f.fM+=jtd.m; f.fP+=jtd.p; f.fL+=jtd.l; f.est+=est$; f.act+=act;
@@ -60189,7 +60189,8 @@ function _prodTrackingCompute(p, asOf) {
   });
   var totEst = s.est + f.est, totAct = s.act + f.act;
   // Category-based % complete (Phase 4b): General labor distributed across the
-  // real categories by direct-labor share; category % from its unit items; the
+  // real categories by direct-labor share; category % from its unit items,
+  // each weighted by its own est labor $ (PCTLW1, so mixed units don't skew it); the
   // overall figure is labor-weighted earned / labor.
   var nonGeneral = totEst - generalLabor;
   var factor = nonGeneral > 0 ? (totEst / nonGeneral) : 1;
@@ -60197,7 +60198,10 @@ function _prodTrackingCompute(p, asOf) {
   Object.keys(catMap).forEach(function(cid){
     var m = catMap[cid];
     var catLabor = m.direct * factor;
-    var unitsPct = m.estU > 0 ? m.jtdU/m.estU : 0;
+    // PCTLW1: earned $ / est labor $ over the category's production lines.
+    // Raw units ratio only when those lines carry no labor dollars.
+    var unitsPct = m.prodDirect > 0 ? m.prodEarn/m.prodDirect
+                 : (m.estU > 0 ? m.jtdU/m.estU : 0);
     var earned = catLabor * unitsPct;
     catLaborSum += catLabor; catEarnedSum += earned;
     var cobj = _prodCategory(cid);
@@ -67146,7 +67150,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-20-HUNZSCOPE1';
+var KMI_BUILD = '2026-11-25-PCTLW1';
 
 var _kmiSessionId = (function(){
   try {
