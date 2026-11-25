@@ -3546,6 +3546,7 @@ tr.gc-line:hover td{background:#fafafa}
     <button class="btn" onclick="showSignOnPhoneModal()" id="ntm-sign-now-btn" style="display:none;background:#3B6D11;color:#fff;border-color:#3B6D11">✎ Sign on this phone</button>
     <button class="btn" onclick="showUploadSignedPdfModal()" id="ntm-upload-signed-btn" style="display:none">↑ Upload signed PDF</button>
     <button class="btn" onclick="approveTmTicket()" id="ntm-approve-btn" style="display:none;background:#3B6D11;color:#fff;border-color:#3B6D11">Approve as PM</button>
+    <button class="btn" onclick="showVoidTmTicketModal()" id="ntm-void-btn" style="display:none;color:#7A2E2E;border-color:#E8B8B8">Void ticket</button><!-- TMVOID1 -->
     <!-- Smart Upload mode: replaces the normal save button while _smartUploadMode is true. -->
     <button class="btn btn-p" onclick="confirmSmartUploadTicket()" id="ntm-smart-up-save-btn" style="display:none;padding:10px 32px;font-size:14px;font-weight:700;background:#3B6D11;border-color:#3B6D11">&#10003; Confirm &amp; save</button>
     <button class="btn btn-p" onclick="saveTmTicket()" style="padding:10px 32px;font-size:14px;font-weight:700" id="ntm-save-btn">Create ticket</button>
@@ -4724,6 +4725,8 @@ var PERMISSIONS = {
   'create-tm-ticket': ['full','full','full','none','full','full','none'],
   'edit-tm-ticket': ['full','full','full','none','full','full','none'],
   'delete-tm-ticket': ['full','full','none','none','none','none','none'],
+  // TMVOID1: void keeps the ticket (gray, read-only) with reason + who/when.
+  'void-tm-ticket': ['full','full','none','none','none','none','none'],
   // Round 3: signing actions.
   // PERM-S1: Superintendent and Foreman are now full on send-tm-signature and
   // upload-signed-tm. Signing IS approval in this app, and the person standing
@@ -16993,6 +16996,7 @@ function tmCanEditTicket(t) {
   }
   // If COR-rolled, ticket is locked for editing regardless of role.
   if (t.corId) return false;
+  if ((t.status || '') === 'Voided') return false;   // TMVOID1
   return true;
 }
 function tmCanDeleteTicket(t) {
@@ -17458,8 +17462,15 @@ function _refreshTmActionButtons(t) {
   remindBtn.style.display = 'none';
   uploadBtn.style.display = 'none';
   if (approveBtn) approveBtn.style.display = 'none';
+  var voidBtn = g('ntm-void-btn');                       // TMVOID1
+  if (voidBtn) voidBtn.style.display = 'none';
 
   if (!t || !t.id) return; // unsaved new ticket
+  // TMVOID1: any saved ticket that isn't already Voided, Admin/PM only.
+  // Tickets on a COR still show the button; the click explains how to free them.
+  if (voidBtn && hasFull('void-tm-ticket') && (t.status || 'Draft') !== 'Voided') {
+    voidBtn.style.display = '';
+  }
 
   var s = t.status || 'Draft';
   if (s === 'Draft') {
@@ -17913,6 +17924,97 @@ function deleteTmTicket(id) {
   db.activity.unshift({text: 'T&M ticket ' + (t.ticketNumber || '') + ' deleted', type: 'lost', time: 'Just now'});
   saveDB();
   renderTmTickets();
+}
+
+// ── TMVOID1: Void ticket ───────────────────────────────────────────────
+// Keeps the ticket (gray "Voided", read-only, out of COR roll-up) with a
+// required reason and who/when. Kills any outstanding signature link.
+// Final: there is no un-void. Tickets on a COR must come off the COR first.
+function showVoidTmTicketModal() {
+  if (!_editTmTicketId) return;
+  var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(_editTmTicketId); });
+  if (!t) return;
+  if (!hasFull('void-tm-ticket')) { alert('Only Admins and PMs can void T&M tickets.'); return; }
+  if ((t.status || '') === 'Voided') { alert('This ticket is already voided.'); return; }
+  var claim = t.corId ? null : corTicketClaimedBy(t.id);
+  if (t.corId || claim) {
+    var corLbl = t.corNumber || (claim && claim.corNumber) || '';
+    var corSeq = corExtractKmiSeq(corLbl) || corLbl;
+    alert('Ticket ' + (t.ticketNumber || '') + ' is on COR ' + corSeq + '.\n\n' +
+          'Remove it from that COR (or void the COR) first, then void the ticket.');
+    return;
+  }
+  var wasSent = (t.status === 'Sent for Signature');
+  showModal(
+    '<button class="xbtn" onclick="closeModal()">&#215;</button>' +
+    '<div class="mt" style="color:#7A2E2E">Void T&amp;M ticket ' + tmEsc(t.ticketNumber || '') + '</div>' +
+    '<div class="msb">The ticket stays on record as Voided and can\'t be edited, re-opened, or rolled into a COR. A reason is required.' +
+      (wasSent ? ' The signature link sent to the customer will stop working.' : '') +
+    '</div>' +
+    '<div class="fg">' +
+      '<div class="fgr full"><label>Reason *</label>' +
+        '<textarea id="tm-void-reason" rows="3" placeholder="e.g. Duplicate of 26100-014; work was included in base contract; entered on wrong project."></textarea>' +
+      '</div>' +
+    '</div>' +
+    '<div id="tm-void-err" style="color:#A32D2D;font-size:12px;margin:6px 0;min-height:14px"></div>' +
+    '<div class="mbtns">' +
+      '<button class="btn" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-p" id="tm-void-go" onclick="confirmVoidTmTicket()" style="background:#7A2E2E;border-color:#7A2E2E">Void ticket</button>' +
+    '</div>'
+  );
+}
+
+async function confirmVoidTmTicket() {
+  var t = (db.tmTickets || []).find(function(x){ return String(x.id) === String(_editTmTicketId); });
+  if (!t) { closeModal(); return; }
+  var errEl = g('tm-void-err');
+  var btn = g('tm-void-go');
+  var reason = ((g('tm-void-reason') || {}).value || '').trim();
+  if (!reason) { if (errEl) errEl.textContent = 'A void reason is required.'; return; }
+  if (!supabaseClient) { if (errEl) errEl.textContent = 'Not connected to the database - try again when online.'; return; }
+  if (t.corId || corTicketClaimedBy(t.id)) { if (errEl) errEl.textContent = 'This ticket is on a COR. Remove it from the COR first.'; return; }
+
+  var keys = ['status','voidedAt','voidedByUserId','voidReason','voidedFromStatus',
+              'signToken','signTokenExpires','updatedAt','updatedByUserId'];
+  var prev = {};
+  keys.forEach(function(k){ prev[k] = t[k]; });
+
+  var nowIso = new Date().toISOString();
+  var uid = _currentUser ? _currentUser.id : null;
+  t.voidedFromStatus = t.status || 'Draft';
+  t.status = 'Voided';
+  t.voidedAt = nowIso;
+  t.voidedByUserId = uid;
+  t.voidReason = reason;
+  t.signToken = null;          // kills the hosted signing link
+  t.signTokenExpires = null;
+  t.updatedAt = nowIso;
+  t.updatedByUserId = uid;
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Voiding...'; }
+  var res;
+  try { res = await kmiVgUpsert('tmTickets', toSBTmTicket(t)); }
+  catch (e) { res = { error: { message: (e && e.message) || String(e) } }; }
+
+  if (res && res.error) {
+    keys.forEach(function(k){ t[k] = prev[k]; });   // roll back local copy
+    saveDB();
+    if (res.error.code === 'VG_CONFLICT') {
+      closeModal();
+      alert(res.error.message);
+      return;
+    }
+    if (errEl) errEl.textContent = 'Void failed: ' + res.error.message;
+    if (btn) { btn.disabled = false; btn.textContent = 'Void ticket'; }
+    return;
+  }
+
+  db.activity = db.activity || [];
+  db.activity.unshift({ text: 'T&M ticket ' + (t.ticketNumber || '') + ' voided', type: 'lost', time: 'Just now' });
+  saveDB();
+  closeModal();
+  showToast('T&M ticket ' + (t.ticketNumber || '') + ' voided.', 'info');
+  viewTmTicket(t.id);
 }
 
 // ── PDF generation ─────────────────────────────────────────────────────
@@ -19251,6 +19353,25 @@ function renderTmStatusCard(t) {
       '<div style="margin-bottom:10px">' +
         '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:#7A2E2E;margin-bottom:4px">Rejection reason</div>' +
         '<div style="font-size:13px;background:#FBE9E9;border:1px solid #E8B8B8;border-radius:6px;padding:10px 12px;white-space:pre-wrap;color:#7A2E2E">' + tmEsc(t.rejectedReason) + '</div>' +
+      '</div>'
+    );
+  }
+
+  // TMVOID1: void details
+  if (t.status === 'Voided') {
+    var _vu = t.voidedByUserId != null
+      ? (db.users || []).find(function(u){ return String(u.id) === String(t.voidedByUserId); })
+      : null;
+    var _vName = _vu ? ((((_vu.firstName || '') + ' ' + (_vu.lastName || '')).trim()) || _vu.email || '') : '';
+    blocks.push(
+      '<div style="margin-bottom:10px">' +
+        '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:#7A2E2E;margin-bottom:4px">Voided</div>' +
+        '<div style="font-size:12px;color:#666;margin-bottom:6px">' +
+          (_vName ? 'By ' + tmEsc(_vName) : 'By unknown user') +
+          (t.voidedAt ? ' \u00b7 ' + new Date(t.voidedAt).toLocaleString() : '') +
+          (t.voidedFromStatus ? ' \u00b7 was ' + tmEsc(t.voidedFromStatus) : '') +
+        '</div>' +
+        '<div style="font-size:13px;background:#FBE9E9;border:1px solid #E8B8B8;border-radius:6px;padding:10px 12px;white-space:pre-wrap;color:#7A2E2E">' + tmEsc(t.voidReason || '(no reason recorded)') + '</div>' +
       '</div>'
     );
   }
@@ -67617,7 +67738,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-25-PRODHDR1';
+var KMI_BUILD = '2026-11-25-TMVOID1';
 
 var _kmiSessionId = (function(){
   try {
@@ -68862,6 +68983,11 @@ function toSBTmTicket(r) {
     super_comments:            r.superComments           || null,
     signed_ip:                 r.signedIp                || null,
     sent_for_signature_at:     r.sentForSignatureAt      || null,
+    // TMVOID1
+    voided_at:                 r.voidedAt                || null,
+    voided_by_user_id:         r.voidedByUserId          || null,
+    void_reason:               r.voidReason              || null,
+    voided_from_status:        r.voidedFromStatus        || null,
     // Round 4 placeholders
     cor_id: r.corId || null,
     cor_number: r.corNumber || null
@@ -68902,6 +69028,10 @@ function fromSBTmTicket(r) {
     superComments:           r.super_comments            || '',
     signedIp:                r.signed_ip                 || '',
     sentForSignatureAt:      r.sent_for_signature_at     || null,
+    voidedAt:                r.voided_at                 || null,   // TMVOID1
+    voidedByUserId:          r.voided_by_user_id         || null,
+    voidReason:              r.void_reason               || '',
+    voidedFromStatus:        r.voided_from_status        || '',
     corId: r.cor_id || null,
     corNumber: r.cor_number || null,
     versionAt: r.version_at || null,   // VG1
@@ -70095,6 +70225,7 @@ var _VG = {
       work_description: 'Work description', cm_comments: 'CM comments',
       super_comments: 'Super comments', labor_rows: 'Labor', equipment_rows: 'Equipment',
       material_rows: 'Materials', status: 'Status', rejected_reason: 'Rejection reason',
+      void_reason: 'Void reason', voided_at: 'Voided',   // TMVOID1
       signature_recipient_email: 'Signer email', signature_recipient_name: 'Signer name',
       signature_recipient_title: 'Signer title', signed_by_name: 'Signed by',
       signed_by_title: 'Signed by title', signed_at: 'Signed', signature_image: 'Signature',
