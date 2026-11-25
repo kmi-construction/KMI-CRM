@@ -47410,7 +47410,7 @@ function _prodSyncOldTargets(p){
   return out;
 }
 function _prodSyncCollect(p, oldTargets, withJtd){
-  var res = { items: [], dropped: [], newRows: [], unchanged: 0 };
+  var res = { items: [], dropped: [], newRows: [], noBase: [], unchanged: 0 };   // BPRSYNC1b: noBase
   var est = p && p.prodEstimate;
   if (!est || !Array.isArray(est.lines) || !est.lines.length) return res;
   var used = {};
@@ -47421,16 +47421,31 @@ function _prodSyncCollect(p, oldTargets, withJtd){
     var isProd = l.lineType === 'production';
     if (!refs.length) {
       var live = isProd ? (Number(l.estUnits) > 0) : (Number(l.amount) > 0);
-      if (l.bprDropped && live) res.dropped.push({ line: l, acked: !!l.bprDropAck,
+      if (/* BPRSYNC1b */ _prodSyncWasLinked(l) && live) res.dropped.push({ line: l, acked: !!l.bprDropAck,
         jtd: (withJtd && isProd) ? _prodJtdForLine(p.id, l.id).units : null });
       return;
     }
     var rows = _prodSyncRows(p, refs);
     var t = _prodSyncTarget(p, est, l, rows);
     if (!t) return;
+    // BPRSYNC1b: a pre-sync field-$ line has no recorded $/man-day. Scale from the
+    // outgoing rows' man-days when a Replace supplies them; never re-price at
+    // today's crew rate.
+    var forceState = null;
+    if (!isProd && !_prodSyncHasSnap(l)) {
+      var o = oldTargets && oldTargets[String(l.id)];
+      if (o && Number(o.manDays) > 0) {
+        t = { manDays: t.manDays, amount: Math.round(t.manDays * (Number(l.amount) || 0) / Number(o.manDays) * 100) / 100 };
+        forceState = 'unverified';
+      } else {
+        if (Number(l.amount) > 0) res.noBase.push({ line: l, manDays: t.manDays });
+        return;
+      }
+    }
     if (_prodSyncMatches(l, t)) { res.unchanged++; return; }
     var state;
-    if (_prodSyncHasSnap(l)) state = _prodSyncLineClean(l) ? 'clean' : 'edited';
+    if (forceState) state = forceState;
+    else if (_prodSyncHasSnap(l)) state = _prodSyncLineClean(l) ? 'clean' : 'edited';
     else if (oldTargets && oldTargets[String(l.id)]) state = _prodSyncMatches(l, oldTargets[String(l.id)]) ? 'clean' : 'edited';
     else state = 'unverified';
     var sig = _prodSyncSig(l, t);
@@ -47442,6 +47457,16 @@ function _prodSyncCollect(p, oldTargets, withJtd){
     if (Number(b.layRate) > 0 && !b.defaultSkip && !used[String(b.id)]) res.newRows.push(b);
   });
   return res;
+}
+// BPRSYNC1b: lines that came from the BPR, including ones emptied by a Replace
+// before BPRSYNC1 set bprDropped.
+function _prodSyncWasLinked(l){
+  if (!l) return false;
+  if (l.bprDropped || l.source === 'bpr') return true;
+  if (l.source === 'merged' && Array.isArray(l.mergedFrom)) {
+    return l.mergedFrom.some(function(m){ return m && (m.source === 'bpr' || (Array.isArray(m.bprRef) && m.bprRef.length)); });
+  }
+  return false;
 }
 function _prodSyncPendingCount(p){
   if (!p || !Array.isArray(p.bprMaterials) || !p.bprMaterials.length) return 0;
@@ -47477,7 +47502,7 @@ function prodOpenSyncFromToolbar(){
   var p = _prodCurrentProject(); if (!p) return;
   _bprPickerDest = 'prod';
   var c = _prodSyncCollect(p, null, true);
-  if (!c.items.length && !c.dropped.length) {
+  if (!c.items.length && !c.dropped.length && !c.noBase.length) {   // BPRSYNC1b
     if (typeof showToast === 'function') showToast('Every BPR-linked line already matches the BPR.' + (c.newRows.length ? ' ' + c.newRows.length + ' BPR row' + (c.newRows.length === 1 ? ' isn’t' : 's aren’t') + ' on the estimate yet — use + From BPR.' : ''), 'info');
     return;
   }
@@ -47485,8 +47510,10 @@ function prodOpenSyncFromToolbar(){
 }
 function _prodSyncOpen(p, c, opt){
   var sel = {}, zero = {};
-  c.items.forEach(function(i){ sel[String(i.line.id)] = (i.state === 'clean' && !i.skipped); });
+  // BPRSYNC1b: only lines known to be edited by hand start unchecked.
+  c.items.forEach(function(i){ sel[String(i.line.id)] = (i.state !== 'edited' && !i.skipped); });
   _prodSyncState = { projectId: String(p.id), items: c.items, dropped: c.dropped, newRows: c.newRows,
+    noBase: c.noBase || [], stampNoBase: false,
     unchanged: c.unchanged, sel: sel, zero: zero, after: opt.after, auto: !!opt.auto,
     openNext: opt.after === 'proc' ? true : (opt.auto || c.newRows.length > 0) };
   _prodSyncRender(false);
@@ -47575,6 +47602,18 @@ function _prodSyncHtml(st){
       }).join('') +
     '</div>' : '';
 
+  // BPRSYNC1b: pre-sync field-$ lines that can't be recalculated.
+  var noBase = (st.noBase && st.noBase.length) ?
+    '<div style="border:0.5px solid #ddd;background:#fafafa;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:6px">' +
+      '<div style="font-size:12px;font-weight:600;color:#444">Field $ lines that can’t be recalculated</div>' +
+      '<div style="font-size:12px;color:#555">These were imported before sync tracking, so the $/man-day they were priced at isn’t recorded. Check them against the BPR and adjust the amount on the estimate if the scope changed.</div>' +
+      st.noBase.map(function(nb){
+        return '<div style="font-size:13px">· <strong>' + _prodEsc(nb.line.itemName || '(line)') + '</strong> · ' + _prodSyncFmt$(nb.line.amount) +
+          ' · BPR man-days now ' + (Number(nb.manDays) || 0).toLocaleString('en-US', { maximumFractionDigits: 2 }) + '</div>';
+      }).join('') +
+      '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#444;cursor:pointer;margin-top:4px"><input type="checkbox"' + (st.stampNoBase ? ' checked' : '') +
+        ' onchange="prodSyncToggleStamp(this.checked)" style="width:15px;height:15px;margin:0">Record these amounts as matching the current BPR, so future syncs scale them</label>' +
+    '</div>' : '';
   var nNew = st.newRows.length;
   var nextLbl = st.after === 'proc' ? 'Open procurement picker next' : 'Open picker next';
   var newNames = st.newRows.slice(0, 3).map(function(b){ return _prodEsc(b.description || b.materialCode || ''); }).filter(Boolean).join(', ');
@@ -47587,7 +47626,8 @@ function _prodSyncHtml(st){
         ' onchange="prodSyncToggleNext(this.checked)" style="width:15px;height:15px;margin:0">' + nextLbl + '</label>' +
     '</div>' : '';
 
-  var applyLbl = (nSel ? ('Apply ' + nSel + ' change' + (nSel === 1 ? '' : 's')) : 'Done') + (st.openNext ? (st.after === 'proc' ? ' & open procurement picker' : ' & open picker') : '');
+  if (st.stampNoBase && st.noBase) nSel += st.noBase.length;   // BPRSYNC1b
+  var applyLbl = (nSel ? ('Apply ' + nSel + ' change' + (nSel === 1 ? '' : 's')) : 'Leave as is') + (st.openNext ? (st.after === 'proc' ? ' & open procurement picker' : ' & open picker') : '');
   return '<button class="xbtn" onclick="prodSyncClose()">&#215;</button>' +
     '<div class="mt">Sync estimate from BPR</div>' +
     '<div class="msb" style="margin-bottom:12px">' + (p ? _prodEsc((p.number ? p.number + ' \u00b7 ' : '') + (p.name || '')) + '. ' : '') +
@@ -47600,7 +47640,7 @@ function _prodSyncHtml(st){
       chip(st.unchanged + ' line' + (st.unchanged === 1 ? '' : 's') + ' unchanged', '#F2F2EF', '#555') +
       (st.items.length ? '<span style="margin-left:auto;display:flex;gap:6px"><button type="button" class="btn btn-sm" onclick="prodSyncAll(true)">Select all</button><button type="button" class="btn btn-sm" onclick="prodSyncAll(false)">Select none</button></span>' : '') +
     '</div>' +
-    '<div style="display:flex;flex-direction:column;gap:12px">' + table + dropped + nextBox + '</div>' +
+    '<div style="display:flex;flex-direction:column;gap:12px">' + table + dropped + noBase + nextBox + '</div>' +   // BPRSYNC1b
     '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px">' +
       '<span style="font-size:12px;color:#666">% complete recalculates against the new quantities. Weekly production already logged isn’t changed.</span>' +
       '<span style="display:flex;gap:8px">' +
@@ -47618,6 +47658,7 @@ function prodSyncToggle(id, v){ var st = _prodSyncLive(); if (!st) return; st.se
 function prodSyncToggleZero(id, v){ var st = _prodSyncLive(); if (!st) return; st.zero[String(id)] = !!v; _prodSyncRender(true); }
 function prodSyncToggleNext(v){ var st = _prodSyncLive(); if (!st) return; st.openNext = !!v; _prodSyncRender(true); }
 function prodSyncAll(v){ var st = _prodSyncLive(); if (!st) return; st.items.forEach(function(i){ st.sel[String(i.line.id)] = !!v; }); _prodSyncRender(true); }
+function prodSyncToggleStamp(v){ var st = _prodSyncLive(); if (!st) return; st.stampNoBase = !!v; _prodSyncRender(true); }   // BPRSYNC1b
 function prodSyncClose(){ _prodSyncState = null; closeModal(); }
 function _prodSyncNext(st, changed){
   if (st.after !== 'proc' && changed && typeof renderProdEstimateView === 'function') renderProdEstimateView();
@@ -47648,6 +47689,9 @@ function prodSyncApply(){
     } else {
       l.bprSyncSkip = i.sig;   // left as is: stop counting until the BPR changes again
     }
+  });
+  if (st.stampNoBase) (st.noBase || []).forEach(function(nb){   // BPRSYNC1b
+    nb.line.bprAmount = Number(nb.line.amount) || 0; nb.line.bprManDays = nb.manDays; updated++;
   });
   st.dropped.forEach(function(d){
     var l = d.line;
@@ -60854,9 +60898,9 @@ function prodPacketCoverDoc(weekStart, rows) {
     { k:'pm',   label:'PM',       w:26,  align:'left' },
     { k:'num',  label:'JOB #',    w:42,  align:'left' },
     { k:'name', label:'JOB NAME', w:135, align:'left' },
-    { k:'fm',   label:'FOREMAN',  w:84,  align:'left' },
-    { k:'s',    label:'START',    w:44 },
-    { k:'e',    label:'END',      w:44 }
+    { k:'fm',   label:'FOREMAN',  w:66,  align:'left' },   // PRODHDR1: 84 -> 66
+    { k:'s',    label:'START',    w:40 },                  // PRODHDR1: 44 -> 40
+    { k:'e',    label:'END',      w:40 }
   ];
   var TAIL = [ { k:'hrs', label:'HRS', sub:'WK', w:38 },
                { k:'var', label:'VARIANCE', sub:'WK', w:54 },
@@ -60879,16 +60923,50 @@ function prodPacketCoverDoc(weekStart, rows) {
   ln(LM, 60, RM, 60, 1.5, NAVY);
 
   var y = 78;
+  // PRODHDR1: fit each header inside its own column. Wrap on spaces (max 2
+  // lines), step the font down to 4.6pt, and only then hyphenate one long word.
+  function hdrFit(label, maxW){
+    doc.setFont('helvetica','bold');
+    function wrap(fs){
+      doc.setFontSize(fs);
+      var lines = [], cur = '';
+      String(label || '').split(/\s+/).filter(Boolean).forEach(function(w){
+        var t = cur ? cur + ' ' + w : w;
+        if (!cur || doc.getTextWidth(t) <= maxW) cur = t; else { lines.push(cur); cur = w; }
+      });
+      if (cur) lines.push(cur);
+      return lines;
+    }
+    for (var fs = 5.6; fs >= 4.59; fs -= 0.2) {
+      var ls = wrap(fs);
+      if (ls.length <= 2 && ls.every(function(l){ return doc.getTextWidth(l) <= maxW; })) return { fs:fs, lines:ls };
+    }
+    var out = [];
+    wrap(4.6).forEach(function(l){
+      while (doc.getTextWidth(l) > maxW && l.length > 3) {
+        // split near the middle (TERRA-COTTA, RESTO-RATION), not greedily
+        var k = Math.ceil(l.length / 2);
+        while (k > 2 && doc.getTextWidth(l.slice(0, k) + '-') > maxW) k--;
+        out.push(l.slice(0, k) + '-'); l = l.slice(k);
+      }
+      out.push(l);
+    });
+    return { fs:4.6, lines:out.slice(0, 3) };
+  }
+  var HDR = all.map(function(c){ return hdrFit(c.label, Math.max(8, c.w - 4)); });
+  var HDR_N = HDR.reduce(function(m, h){ return Math.max(m, h.lines.length); }, 1);
   function header(yy){
-    sf('bold',5.6,[107,112,128]);
-    all.forEach(function(c){
+    var lh = 5.8, base = yy + (HDR_N - 1) * lh;
+    all.forEach(function(c, ci){
       var tx = (c.align === 'left') ? c.left : c.right - 3;
       var opt = (c.align === 'left') ? {} : { align:'right' };
-      doc.text(c.label, tx, yy, opt);
-      if (c.sub) { sf('bold',5.6,[164,169,182]); doc.text(c.sub, tx, yy + 6, opt); sf('bold',5.6,[107,112,128]); }
+      var h = HDR[ci], n = h.lines.length;
+      sf('bold', h.fs, [107,112,128]);
+      h.lines.forEach(function(t, li){ doc.text(t, tx, base - (n - 1 - li) * lh, opt); });
+      if (c.sub) { sf('bold',5.6,[164,169,182]); doc.text(c.sub, tx, base + 6, opt); }
     });
-    ln(LM, yy + 9, RM, yy + 9, 0.8, NAVY);
-    return yy + 19;
+    ln(LM, base + 9, RM, base + 9, 0.8, NAVY);
+    return base + 19;
   }
   y = header(y);
 
@@ -60904,9 +60982,9 @@ function prodPacketCoverDoc(weekStart, rows) {
     doc.text(one(r.pm, 24), FIX[0].left, y);
     doc.text(one(r.num, 40), FIX[1].left, y);
     sf('bold',6.6,[0,0,0]); doc.text(one(r.name, 132), FIX[2].left, y); sf('normal',6.6,[0,0,0]);
-    doc.text(one(r.foreman || '\u2014', 82), FIX[3].left, y);
-    doc.text(one(r.start, 42), FIX[4].right - 3, y, { align:'right' });
-    doc.text(one(r.end, 42),   FIX[5].right - 3, y, { align:'right' });
+    doc.text(one(r.foreman || '\u2014', 64), FIX[3].left, y);   // PRODHDR1
+    doc.text(one(r.start, 38), FIX[4].right - 3, y, { align:'right' });
+    doc.text(one(r.end, 38),   FIX[5].right - 3, y, { align:'right' });
 
     cols.forEach(function(c, ci){
       var cell = all[FIX.length + ci];
@@ -61340,7 +61418,7 @@ async function prodPacketPreview() {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'KMI Weekly Production - ' + _prodReviewWeek + '.pdf';
+    a.download = 'KMI Weekly Production - ' + _prodAddDays(_prodReviewWeek, 6) + '.pdf';   // PRODHDR1: week end
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
   } catch (e) {
@@ -61502,7 +61580,7 @@ async function prodPacketSend() {
   if (res.jobCost && res.jobCost.stale) {
     body += '\n\nFoundation data was out of date when this packet was built. Each job cost page notes when it was last synced.';
   }
-  var filename = 'KMI Weekly Production - ' + _prodReviewWeek + '.pdf';
+  var filename = 'KMI Weekly Production - ' + _prodAddDays(_prodReviewWeek, 6) + '.pdf';   // PRODHDR1: week end
 
   for (var i = 0; i < rcpts.length; i++) {
     try {
@@ -67539,7 +67617,7 @@ function _gcVarianceHtml() {
       'No tasks are linked to a GC activity yet.</td></tr>') + '</tbody></table></div>';
 }
 
-var KMI_BUILD = '2026-11-25-BPRSYNC1';
+var KMI_BUILD = '2026-11-25-PRODHDR1';
 
 var _kmiSessionId = (function(){
   try {
